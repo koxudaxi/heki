@@ -164,8 +164,10 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 ### The default target version
 
 Without `target-version`, heki reads `requires-python` from the `pyproject.toml` that holds the
-configuration, or from the one next to `heki.toml` or the `--config` file. It takes the oldest
-supported version that every clause admits:
+configuration, or, for `heki.toml` or a `--config` file that is not a `pyproject.toml`, from the
+`pyproject.toml` at the project root. The same applies to the project name, the declared
+dependencies, and the workspace tables: where the configuration file sits does not change them.
+It takes the oldest supported version that every clause admits:
 
 | `requires-python` | Target |
 | ----------------- | ------ |
@@ -413,6 +415,17 @@ shared by every call (`memo={}`). A call of a function every `return` of which r
 parameters (`def with_origin(field, kind): ...; return field`) gives the object it hands that
 parameter: a new one stays new, and the input stays the input.
 
+A store a function makes only where tests of its parameters pass (`if register:`,
+`if registry is not None:`, also inside `and`, `or`, and `not`) keeps nothing at a call whose
+arguments fail them: a constant, the literal default of a parameter the call leaves out, or a test
+the caller has already made of the same input. `copy_tree(node, register=False)` of
+`def copy_tree(node, *, register=True)` that calls `copied.register()` under `if register:` gives
+a new object, and `attach(copied, keep=False)` of a helper storing its parameter under `if keep:`
+leaves `copied` new; `copy_tree(node)` does not. A test of the caller's own parameter is decided at
+the calls of the caller. A function records at most four sets of at most four tests for each such
+store; past them it keeps the object whatever it is passed. A write a helper makes to its own
+parameter after such a store still counts the store.
+
 In an effect boundary, a write a reached function makes to the object one of its parameters
 holds constructs that object when every call reaching the function hands it a new object that
 nothing kept yet, as the same write in the caller would: `set_flag(copy.copy(node))` with
@@ -425,7 +438,8 @@ namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 class names the key, in this contract or in any other `write-owners` contract, so a new cache key
 needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
 `_cache`), and an entry target names its container. A key another contract names is that
-contract's to guard: its writes are judged by that contract's allowance alone. The contract's
+contract's to guard: its writes are judged by that contract's allowance alone. A contract with only
+`forbidden-writers` allows no writer, so it names no key. The contract's
 allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
 list, or set of string constants, or from a module's tuple of them, writes each of them, and so
 does the key of each pair a generator of them gives `update`. A key computed at run time has no
@@ -525,6 +539,7 @@ The call side of `write-owners`.
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
+| `targets-call-each-other` | `"allow"` | `"allow"` or `"report"`: whether a target may call the other targets of the contract. `"report"` judges each target like the one target of a contract with the same keys, so one contract listing independent targets reports what one contract per target reports for every call whose candidates all belong to one target. A call that may reach several targets (`obj.reset()` on `obj: Base` with `A.reset` and `B.reset` listed) is judged once for each target it may reach, with only that target guarded, and is reported when any of those judgements reports it; no contract of one target judges that call whole. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 | `protocol-subclasses` | `true` | As in `write-owners`. |
 
@@ -534,7 +549,11 @@ The call side of `write-owners`.
 - Bound-method aliases (`replace = dt.replace_reference`) and `getattr(dt, "replace_reference")`
   with a constant name are followed.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
-  it is made, so what the operation does inside is part of it.
+  it is made, so what the operation does inside is part of it. That suits a contract whose targets
+  make up one operation. For a contract listing independent targets, set `targets-call-each-other =
+  "report"`: a target is then allowed to call itself only, and every call of another target of the
+  contract is judged like a call of the one-target contract (a call of `pkg.core.a` by the target
+  `pkg.core.c` is reported unless `allowed-callers` names `c`).
 - With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
   `pkg.core.decide`"; a name an import or the module body binds, read in the scope binding it, at
   the statement handing it on; a name a class body, a function, a lambda, or a comprehension
@@ -928,10 +947,10 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `name` | `""` | The contract's name in reports. |
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
-| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. `"pkg.db:Session"` allows one name of a module: only `from pkg.db import Session` imports it (a glob may stand in either part), and another name of `pkg.db` is still reported. |
 | `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
 | `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](#relative-imports-only)). |
-| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
+| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`; `"pkg.cli -> pkg.db:Session"` accepts one name of the module, as in `allowed-imports`). With `reach`, an import accepted or allowed by a name is not followed. |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md). |
@@ -1142,8 +1161,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
 - A `Class.attr` entry needs a project class, and an attribute the class family has: a name its
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
-  writes or reads on an object typed with the class or a subclass, or one written on an object
-  heki cannot type. A key a loop takes from a tuple, list, or set of string constants
+  writes on an object typed with the class or a subclass (a `__dict__` key only read does not
+  exist, except for a `read-owners` target, which guards the reads), or one written on an object heki cannot type. A key a loop takes from a tuple, list, or set of string constants
   (`for key in ("_a", "_b")`), or from a module's tuple of them (`for key in RECORDS`), names
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module

@@ -221,8 +221,9 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 "EFF101" => boundary_tier(r),
                 _ => Certainty::Heuristic,
             };
-            // An exact report names, keys, and folds by the call it claims: the end of the chain
-            // every implementation runs, not of the shortest chain the heuristic tier found.
+            // An exact report names and folds by the call it claims: the end of the chain every
+            // implementation runs, not of the shortest chain the heuristic tier found. It keys by
+            // the shortest chain's call, as that tier does.
             let (message, chain, target) = match &r.must {
                 Some(must) if tier == Certainty::Exact => (
                     always_waits(&r.function.qualname, must),
@@ -257,6 +258,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 &chain,
             ) {
                 d.certainty = tier.at_most(d.certainty);
+                d.key_target = (d.target != r.root_cause).then_some(r.root_cause.clone());
                 d.fold_key = Some(fold_key);
                 d.open_records = open_premises.into_iter().map(OpenRecord::from).collect();
             }
@@ -526,11 +528,13 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         let verdicts = established_queries(cx, unit, &tcx, f, origins, &queries);
         for (q, verdict) in queries.iter().zip(verdicts) {
             let tier = premises::tier("EFF103", verdict.exact.is_some());
-            // An exact report names and keys the call it claims.
+            // An exact report names the call it claims, and keys by the shortest chain's call, as
+            // the heuristic tier does.
+            let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             let (target, message, chain) = match &verdict.exact {
                 Some(e) => (e.must.target(), e.message(), e.must.related()),
                 None => (
-                    q.chain.last().map(|h| h.callee.clone()).unwrap_or_default(),
+                    root.clone(),
                     format!(
                         "`{}` runs a database query{} {}",
                         q.chain[0].callee,
@@ -554,6 +558,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 )
                 .expect("the rule runs on the unit: it returned at its start otherwise");
             d.certainty = tier.at_most(d.certainty);
+            d.key_target = (d.target != root).then_some(root);
             debug_assert!(
                 !cx.open_premises || tier == Certainty::Exact || !verdict.open.is_empty(),
                 "a heuristic EFF103 report records why it is not exact"

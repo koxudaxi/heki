@@ -33,7 +33,7 @@ their modules):
 
 ```toml
 # heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).
-version = 2
+version = 3
 
 [[entries]]
 path = "app/api.py"
@@ -41,6 +41,14 @@ qualname = "get_user"
 rule_code = "EFF101"
 target = "requests.get"
 count = 1
+
+[[entries]]
+path = "app/jobs.py"
+qualname = "refresh"
+rule_code = "EFF101"
+target = "time.sleep"
+count = 2
+heuristic = 1
 ```
 
 The recorded set can only shrink:
@@ -49,18 +57,19 @@ The recorded set can only shrink:
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](configuration.md#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
-| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| An entry grew, a recorded heuristic report is exact now, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| A recorded exact report is heuristic now | a note that the entry can shrink | records it as heuristic |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2); a run over given files fails only on an error in one of them | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
 A run over part of the project (`heki check pkg_a --baseline heki-baseline.toml`) compares and
 updates only the entries of the files below its paths: the entries of the other files stay as
-they are, since the run did not analyze them. A baseline written before version 2 is updated
+they are, since the run did not analyze them. A baseline written before version 3 is updated
 whole first. `--update-baseline` takes directories: a file given to `heki check` selects what is
 shown, and a baseline records every report of what a run covers.
 
-### What an entry counts
+### What an entry allows
 
 Each entry counts violation sites, not reports (`sites` in JSON output):
 
@@ -70,14 +79,41 @@ Each entry counts violation sites, not reports (`sites` in JSON output):
 
 So a second violation behind a recorded report is a regression too.
 
-A baseline without `version = 2` was written before heki counted sites, and counts reports:
+`heuristic` says how many of the sites were [heuristic](precision.md) reports, and is left out
+when none were. A heuristic report states the weaker claim of the same premises as an exact one,
+so an entry allows the claims it recorded and no stronger one: a run regresses when it finds more
+sites than `count`, or more exact sites than `count` less `heuristic`. In the example, `refresh`
+may have two reports of `EFF101` at `time.sleep`, and one of them may be exact. A recorded
+heuristic report that heki proves after a change of the code, or after an upgrade in which heki
+proves more, is a regression once: fix it, or record the baseline anew. An exact report that turns
+heuristic passes, and `--update-baseline` records it as heuristic. A rule with two tiers keys both
+in the same entry: `EFF101` and `EFF103` key a report by the last call of the shortest call chain
+to the blocking call or the query, also where the exact report names the call every
+implementation runs (a file of version 2 keys it by the call the exact report names).
 
-- `heki check` says so in a note, and a second site behind a recorded report is no regression;
-- `--update-baseline` compares in the old unit first, so nothing that grew is taken in, then
-  rewrites the file with `version = 2`.
+Older files keep their meaning until `--update-baseline` rewrites them with `version = 3`, which
+heki 0.5.0 and earlier cannot read:
+
+- A baseline with `version = 2` does not record which sites were heuristic: any of them may be
+  exact, as before. `heki check` says so in a note.
+- A baseline without a `version` (or with `version = 1`) was written before heki counted sites,
+  and counts reports. `heki check` says so in a note, and a second site behind a recorded report
+  is no regression.
+- `--update-baseline` compares in the file's own terms first, so nothing that grew is taken in,
+  then rewrites the file.
 
 A version this heki does not know is an error, and so is a file listing one entry twice (a hand
 merge of two baselines).
+
+### Import names
+
+An [`IMP201`](rules/import-boundary-violation.md) report of `from m import n`, where `n` is a name
+of `m`, has the target `m.n`, and its entry holds the name, so another name of the same module is a
+new report. An entry of the module, as heki 0.5.0 and earlier wrote it, keeps covering the names of
+its module that have no entry of their own, with the same count, and `--update-baseline` rewrites
+it per name. Only a heki that keys these reports by name reads the rewritten entries: the file
+has `version = 3`, which heki 0.5.0 and earlier cannot read, so every heki that reads the
+baseline must be newer before a rewritten baseline is committed.
 
 ### Import cycle groups
 
@@ -113,23 +149,38 @@ the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
 
 ## pre-commit
 
-The hook passes the staged Python files to `heki check --touched`. heki follows calls across files,
-so it still analyzes the whole project, but it shows and fails on only the reports in those files
-and the reports whose call chain reaches one of them: after a change to `app/users.py`, the
-`EFF101` in `app/api.py` that reaches the change through two helpers is shown, and old findings in
-files the commit left alone are not. A project can run the hook from its first commit, without a
-baseline. A change can also make a report appear in a file the commit left alone without a call chain
-through the change, for example when a type annotation that another module relied on is removed;
-such a report is not shown here, so run the whole project in continuous integration. A local hook
-may also pass the files as paths (`entry: heki check`): a file given to `heki check` is checked in
-its project, as with `--touched`. With `--fix`, the hook rewrites only the staged files: the fix
-of a shown report in another file is left, and the run says how many were.
+The hook passes the staged Python files, and a staged `pyproject.toml`, `heki.toml`, or
+`.heki.toml` at the root, to `heki check --touched`. heki follows calls across files, so it still
+analyzes the whole project, but it shows and fails on only the reports in those files and the
+reports whose call chain reaches one of them: after a change to `app/users.py`, the `EFF101` in
+`app/api.py` that reaches the change through two helpers is shown, and old findings in files the
+commit left alone are not. A project can run the hook from its first commit, without a baseline.
+
+That is all a run over touched files can promise. A change can also make a report appear in a
+file the commit left alone without a call chain through the change: a module that re-exports
+another function, or a return annotation another module relied on. Whether a change added such a
+report cannot be told from the code after it, so:
+
+- Without a baseline, the run ends with a note counting the reports that would fail it and are
+  not shown, and when it passes, its last line says what it looked at (`No reports in or through
+  2 touched file(s) (40 file(s) analyzed).`), not that all checks passed.
+- With a baseline, every regression is shown and fails the run, wherever it is (see below).
+- A configuration file can change any report, so naming one (`pyproject.toml`, `heki.toml`,
+  `.heki.toml`, or `hatch.toml` at the root, the summary snapshot, the baseline) shows every
+  report, as a run without `--touched` does: a contract added to `heki.toml` is checked in the
+  whole project.
+
+Use `--touched` while editing and in the hook, and run the whole project, with the baseline, before
+finishing a change and in continuous integration. A local hook may also pass the files as paths
+(`entry: heki check`): a file given to `heki check` is checked in its project, as with `--touched`.
+With `--fix`, the hook rewrites only the staged Python files: the fix of a shown report in another
+file is left, and the run says how many were.
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.5.0
+    rev: v0.7.0
     hooks:
       - id: heki
 ```
@@ -156,7 +207,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: uvx heki check --touched
             language: system   # needs uv on PATH
-            types: [python]
+            types_or: [python, toml]
+            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -174,7 +226,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             entry: heki check --touched
             language: python
             additional_dependencies: [heki]
-            types: [python]
+            types_or: [python, toml]
+            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -189,9 +242,10 @@ The hook fails on exact errors and passes with warnings and heuristic reports, w
 make them fail it too, set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning`
 before `--touched`.
 With a baseline configured, the hook fails only on new findings. A baseline entry counts every
-report of its key, so a run with `--touched` compares all of them, and judges the entries of the
-touched files and of the reports it shows: a grown entry fails the run when one of its reports
-touches a staged file, and a stale entry elsewhere is left to a run over the whole project.
+report of its key, so a run with `--touched` compares all of them and shows every regression: a
+grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
+the commit added the report. It judges the stale entries of the touched files and of the reports
+that touch them only: a stale entry elsewhere is left to a run over the whole project.
 
 ## Continuous integration
 
@@ -232,7 +286,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' | xargs -0 -r uvx heki check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
@@ -254,6 +308,65 @@ With SARIF:
 
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](coding-agents.md#after-an-edit-heki-check).
+
+### Auditing inline suppressions
+
+A baseline, `report-unused-suppressions`, and `require-suppression-codes` do not stop a new
+`# heki: ignore[EFF101]`, `# noqa: EFF101`, or bare `# noqa` from hiding a report, and the run
+still exits 0. `--report-suppressed <PATH>` writes the reports that inline suppressions hid to a
+JSON file, next to any `--output-format`:
+
+```json
+{
+  "schema_version": 1,
+  "suppressed": [
+    {
+      "code": "EFF101",
+      "file": "app/handlers.py",
+      "function": "fetch",
+      "target": "time.sleep",
+      "line": 12,
+      "column": 5,
+      "directive": {"kind": "heki-ignore", "file": "app/handlers.py", "line": 12, "column": 20}
+    }
+  ]
+}
+```
+
+- `file`, `function`, `code`, and `target` are the key of the report in a
+  [baseline](#ratchet-baselines), so a change of line numbers does not change what a CI job
+  compares. Compare the entries as a multiset of those four fields: one removed entry does not
+  offset an added one.
+- `directive.kind` is `heki-ignore`, `heki-ignore-bare`, `noqa-code`, or `noqa-bare`. When several
+  suppressions on a line hide the same report, the first one in the source is named.
+- Only reports that a suppression hid are listed. A `# noqa: F401` that Ruff reads hides no heki
+  report, and a suppression that hid nothing is not listed (`report-unused-suppressions`
+  reports it).
+- The file covers what the run shows: with `--touched` or a file in PATHS, the reports of those
+  files, and a baseline changes nothing in it. It is the same bytes on every run of the same
+  code, and the command exits with 2 when the file cannot be written.
+
+A CI job can run the check on the base branch and on the change, and fail on an entry the change
+adds. Check the base out from its protected ref, so that the change cannot alter the comparison:
+
+```yaml
+- run: |
+    keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+    uvx heki check --report-suppressed head.json || test "$?" -eq 1
+    git worktree add ../base "origin/$BASE"
+    (cd ../base && uvx heki check --report-suppressed "$GITHUB_WORKSPACE/base.json" || test "$?" -eq 1)
+    # Sorted lines keep a repeated key apart, so one removed entry offsets no added one.
+    new=$(diff <(keys base.json) <(keys head.json) | grep '^>' || true)
+    test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+  shell: bash
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+The configuration, the baseline, and the CI files that decide this (`pyproject.toml` or
+`heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
+the audit file shows what suppressions hide, and a weakened configuration or baseline is the
+code owners' to review.
 
 ## Rolling out rules
 
@@ -309,6 +422,18 @@ or where the code is named. The old codes and names are not kept.
   as regressions. Change the code to `"EFF101"` or `"EFF103"` (adding up the counts of two entries
   that then have the same file, function, and target), or record the baseline anew.
 
+### From heki 0.5 and earlier
+
+- `--update-baseline` writes `version = 3`, which heki 0.5.0 and earlier refuse: update heki
+  everywhere the baseline is read (the pre-commit `rev`, CI) before committing a rewritten
+  baseline. A file of version 2 is read as before, with a note ([What an entry
+  allows](#what-an-entry-allows)).
+- Once rewritten, an entry recorded for a heuristic report no longer allows an exact one: a
+  report that heki proves is a regression once.
+- An exact `EFF101` or `EFF103` report is keyed by the last call of the shortest call chain, as a
+  heuristic one is, in a file of version 3. A file of version 2 keeps the call the report names,
+  so its entries still match, and `--update-baseline` rewrites them with the new key.
+
 ## Effect snapshots (`MUT103`)
 
 For a library, a change in what a public function *does* is worth reviewing even when no rule
@@ -327,3 +452,24 @@ $ heki check --extend-select MUT103            # reports functions that gained e
 A run that cannot analyze every file (a syntax error, an unreadable file) does not write the
 snapshot: it reports the errors and exits with code 2, so the entries of those files are not
 lost.
+
+### Comparing with the protected base
+
+Instead of committing the snapshot, a pull request can be compared with a snapshot of
+its protected base branch. Generate `base.json` on the base with the same heki version, the same
+knowledge bases, the same `--target-version`, and the same configuration as the check on the
+pull request, then check the whole project against it:
+
+```console
+$ git switch --detach origin/main
+$ heki snapshot > ../base.json
+$ git switch --detach "$PR_HEAD"
+$ heki check --select MUT103 --fail-on warning --snapshot ../base.json
+```
+
+`--snapshot PATH` replaces `.heki-summary-snapshot.json` at the project root. A path that does
+not exist, a file that is not a snapshot, a snapshot of an unsupported version, and a run in
+which `MUT103` is not enabled all exit with code 2: the check never passes without having
+compared. A snapshot at the root is ignored while `--snapshot` is given. Run the whole project,
+not `--touched` on the files of the pull request: a public function gains an effect through a
+private helper in another module, and the report is on the public function.

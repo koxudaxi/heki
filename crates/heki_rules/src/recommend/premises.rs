@@ -449,6 +449,8 @@ mod tests {
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
+            key_target: None,
+            key_module: None,
         }
     }
 

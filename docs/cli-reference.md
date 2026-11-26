@@ -94,7 +94,7 @@ Options:
           Preview fixes as a unified diff without writing files
 
       --touched <FILE>...
-          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
+          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, the baseline) shows every diagnostic. Another path that is not an analyzed file is named in a warning
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -120,6 +120,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
           
@@ -144,6 +147,9 @@ Options:
 
       --generate-prompt [<QUESTION>]
           Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
+
+      --report-suppressed <PATH>
+          Write the reports that inline suppressions hid (`# heki: ignore[...]`, `# noqa`) to this JSON file, next to any `--output-format`, so CI can compare it with the file of the protected base branch and find the suppressions a change adds. It lists the reports of the files the run shows (`--touched`, PATHS that are files); a baseline changes nothing in it. Each entry names the report (`code`, `file`, `function`, `target` as its baseline key, `line`, `column`) and the `directive` that hid it (`kind`, `file`, `line`, `column`); the entries are sorted, and the same project gives the same bytes. Exits with 2 when the file cannot be written
 
       --output-format-json-schema <TARGET>
           Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json`
@@ -432,6 +438,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -513,6 +522,9 @@ Options:
 
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
 
   -h, --help
           Print help (see a summary with '-h')

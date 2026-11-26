@@ -122,6 +122,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("call-owners.allowed-callers", r#"["pkg.db.*"]"#),
     ("call-owners.forbidden-callers", r#"["pkg.views.*"]"#),
     ("call-owners.subclasses", "false"),
+    ("call-owners.targets-call-each-other", r#""report""#),
     ("effect-boundaries.scopes", r#"["*.render"]"#),
     (
         "effect-boundaries.forbid",
@@ -476,7 +477,8 @@ mod tests {
                     "lint" | "imports" => format!("[{}]\n{line}\n", t.path),
                     contract => format!("[[{contract}]]\n{line}\n"),
                 };
-                let parsed = ConfigLayout::TopLevel.parse(Path::new("heki.toml"), &text);
+                let parsed =
+                    ConfigLayout::TopLevel.parse(Path::new("heki.toml"), &text, Path::new(""));
                 assert!(parsed.is_ok(), "{text}: {parsed:?}");
             }
         }

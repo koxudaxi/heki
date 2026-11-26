@@ -508,7 +508,8 @@ jobs:
 
   pre-commit-hook:
     # `.pre-commit-hooks.yaml` as a project's configuration uses it: pre-commit builds heki from
-    # this checkout and runs the hook on a project with one report.
+    # this checkout and runs the hook on a project with one report, then on its configuration
+    # file alone.
     name: pre-commit hook
     needs: changes
     if: *full-run
@@ -536,7 +537,7 @@ jobs:
           HEKI_OUTPUT_FORMAT: full
         run: |
           hook() {
-            uv run --project "$GITHUB_WORKSPACE" --only-group hooks --isolated pre-commit try-repo "$HOOK_REPOSITORY" heki --all-files | tee output.txt
+            uv run --project "$GITHUB_WORKSPACE" --only-group hooks --isolated pre-commit try-repo "$HOOK_REPOSITORY" heki "$@" | tee output.txt
           }
           mkdir -p project/app
           cd project
@@ -546,13 +547,20 @@ jobs:
           git add .
           # A warning does not fail the hook, and the hook sets `verbose: true`, so a passing run
           # still prints it.
-          hook
+          hook --all-files
           grep -qF "app/slow.py:4:9: OPT101 (list-quadratic-concat) [warning]" output.txt
           # An exact error fails it.
           printf 'import time\n\n\nasync def handler() -> None:\n    time.sleep(1)\n' > app/handler.py
           git add .
-          if hook; then
+          if hook --all-files; then
             echo "the hook passed on an exact EFF101 error" >&2
+            exit 1
+          fi
+          grep -qF "app/handler.py:5:5: EFF101 (async-blocking-call) [error]" output.txt
+          # The hook runs on the configuration file, which can change any report: every report
+          # is shown.
+          if hook --files pyproject.toml; then
+            echo "the hook passed on pyproject.toml with an exact EFF101 error in the project" >&2
             exit 1
           fi
           grep -qF "app/handler.py:5:5: EFF101 (async-blocking-call) [error]" output.txt

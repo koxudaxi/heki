@@ -121,7 +121,7 @@ fn a_file_is_checked_in_its_project() {
     assert_eq!((code, sites), (0, vec![]), "{stderr}");
     assert!(stderr.contains("PATHS name 2 file(s)"), "{stderr}");
     assert!(
-        stderr.contains("All checks passed for 0 touched file(s) (5 file(s) analyzed)."),
+        stderr.contains("No reports in or through 0 touched file(s) (5 file(s) analyzed)."),
         "{stderr}"
     );
 }
@@ -330,6 +330,34 @@ fn a_run_over_part_of_the_project_keeps_the_entries_of_the_other_files() {
     assert_eq!(code, 0, "{stderr}");
     assert!(
         p.read("b.toml").starts_with("# heki Ratchet baseline"),
+        "{}",
+        p.read("b.toml")
+    );
+
+    // So is a version 2 file: some exact reports have other keys in version 3, and the kept
+    // entries of the files the run does not cover could not be keyed again.
+    p.write(
+        "b.toml",
+        "version = 2\n\n[[entries]]\npath = \"pkg_a/api.py\"\nqualname = \"handler\"\nrule_code = \"EFF101\"\ntarget = \"time.sleep\"\ncount = 1\n\n[[entries]]\npath = \"pkg_b/api.py\"\nqualname = \"handler\"\nrule_code = \"EFF101\"\ntarget = \"time.sleep\"\ncount = 1\n",
+    );
+    let legacy = p.read("b.toml");
+    let (code, _, stderr) = p.heki(&[
+        "check",
+        "--baseline",
+        "b.toml",
+        "--update-baseline",
+        "pkg_a",
+    ]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("baseline `b.toml` not updated: it was written before version 3, which keys some reports by another call, and this run covers part of the project"),
+        "{stderr}"
+    );
+    assert_eq!(p.read("b.toml"), legacy);
+    let (code, _, stderr) = p.heki(&["check", "--baseline", "b.toml", "--update-baseline"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        p.read("b.toml").contains("version = 3"),
         "{}",
         p.read("b.toml")
     );

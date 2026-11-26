@@ -1272,7 +1272,7 @@ fn names(patterns: &[DottedPattern], key: &FuncKey) -> bool {
 /// component; an entry with a dot or a glob is a pattern like `allowed-*`). `forbidden-*`
 /// patterns (matched like `allowed-*`) narrow where the contract applies: when set, only
 /// accesses by them are reported, and the allowed functions stay exceptions inside them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Allowance {
     allowed: Vec<DottedPattern>,
     exempt_names: FxHashSet<String>,
@@ -1281,7 +1281,7 @@ pub(crate) struct Allowance {
     forbidden: Vec<DottedPattern>,
     /// Functions the contract guards (`call-owners` targets): they are part of the guarded
     /// operation, whose calls are checked where they are made, so they may use each other.
-    targets: Option<std::sync::Arc<FunctionMatchers>>,
+    targets: Option<GuardedTargets>,
     /// Which function these patterns are matched against for an access.
     attribution: Attribution,
     /// `own-receiver = "allow"`: an access through the receiver of the method judging it is
@@ -1294,6 +1294,26 @@ pub(crate) struct Allowance {
     /// ([`CheckContext::escaping_functions`]), which have callers heki does not see. Each judges
     /// its accesses itself, as if it had no callers ([`delegated_reports`]).
     escaping: Option<std::sync::Arc<FxHashSet<FuncKey>>>,
+}
+
+/// The functions a `call-owners` contract guards, and which of its targets (indices into the
+/// matchers) the allowance treats as guarded: all of them, or the group a call of the contract
+/// is judged for (`targets-call-each-other = "report"`).
+#[derive(Debug, Clone)]
+struct GuardedTargets {
+    matchers: std::sync::Arc<FunctionMatchers>,
+    only: Option<Vec<usize>>,
+}
+
+impl GuardedTargets {
+    fn any(&self, key: &FuncKey) -> bool {
+        match &self.only {
+            None => self.matchers.any(key),
+            Some(only) => {
+                (self.matchers.matching(key).iter()).any(|i| only.binary_search(i).is_ok())
+            }
+        }
+    }
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -1516,6 +1536,17 @@ impl Allowance {
             || self.targets.as_ref().is_some_and(|t| t.any(key))
     }
 
+    /// Whether the contract only narrows where it applies (`forbidden-*` without any `allowed-*`
+    /// or `exempt-methods`): it allows no function, so it judges no write outside the
+    /// forbidden ones.
+    pub(crate) fn only_forbids(&self) -> bool {
+        !self.forbidden.is_empty()
+            && self.allowed.is_empty()
+            && self.exempt_names.is_empty()
+            && self.exempt_patterns.is_empty()
+            && self.targets.is_none()
+    }
+
     /// Whether `exempt-methods` names `key`.
     pub(crate) fn exempts(&self, key: &FuncKey) -> bool {
         let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
@@ -1538,8 +1569,24 @@ impl Allowance {
     /// The same allowance, with the guarded functions `targets` allowed too.
     pub(crate) fn with_targets(self, targets: std::sync::Arc<FunctionMatchers>) -> Self {
         Self {
-            targets: Some(targets),
+            targets: Some(GuardedTargets {
+                matchers: targets,
+                only: None,
+            }),
             ..self
+        }
+    }
+
+    /// The same allowance, with only the guarded functions `group` (indices into the targets,
+    /// ascending) allowed: a call of one of them is judged like a call of a contract naming
+    /// just those.
+    pub(crate) fn guarding_only(&self, group: &[usize]) -> Self {
+        Self {
+            targets: self.targets.clone().map(|t| GuardedTargets {
+                only: Some(group.to_vec()),
+                ..t
+            }),
+            ..self.clone()
         }
     }
 
@@ -2723,6 +2770,27 @@ pub(crate) fn named_protocols(
     Ok(out)
 }
 
+/// `targets-call-each-other` values; the first is the default.
+const TARGETS_CALL_EACH_OTHER: &[&str] = &["allow", "report"];
+
+/// Whether the targets of a `call-owners` contract may call each other
+/// (`targets-call-each-other = "allow"`, the default): or each is judged like the one target of
+/// its own contract (`"report"`).
+pub(crate) fn targets_call_each_other(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        TARGETS_CALL_EACH_OTHER,
+        "`allow` or `report`",
+        section,
+        contract,
+        "targets-call-each-other",
+    )? == "allow")
+}
+
 /// `own-receiver` values; the first is the default.
 const OWN_RECEIVER: &[&str] = &["report", "allow"];
 
@@ -2862,7 +2930,9 @@ impl OwnerRule<'_> {
 /// The `__dict__` keys the `write-owners` contracts name, by class (`unlisted-dict-keys`): a
 /// target names the keys its attribute pattern matches (an entry target its container) on every
 /// class of its family, whichever contract declares it. A key one contract guards is a listed
-/// key of the class for every other contract, whose own allowance does not cover it.
+/// key of the class for every other contract, whose own allowance does not cover it. A contract
+/// that only forbids writers (`forbidden-writers` without `allowed-writers`) judges no other
+/// writer, so it names no key.
 struct NamedDictKeys<'r> {
     /// The targets covering each class (fqn); empty when no contract reports unlisted keys.
     by_class: FxHashMap<&'r str, Vec<&'r ContractTarget>>,
@@ -2872,7 +2942,8 @@ impl<'r> NamedDictKeys<'r> {
     fn new(rules: &'r [OwnerRule<'_>]) -> Self {
         let mut by_class: FxHashMap<&str, Vec<&ContractTarget>> = FxHashMap::default();
         if rules.iter().any(|r| r.report_unlisted_keys) {
-            for target in rules.iter().flat_map(|r| &r.targets) {
+            let listing = rules.iter().filter(|r| !r.allowance.only_forbids());
+            for target in listing.flat_map(|r| &r.targets) {
                 for class in &target.classes {
                     by_class.entry(class).or_default().push(target);
                 }

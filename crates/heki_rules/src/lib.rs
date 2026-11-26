@@ -1018,6 +1018,14 @@ pub enum RuleConfigError {
         expected: &'static str,
         values: &'static [&'static str],
     },
+    /// A `module:name` in an import contract list that takes none, or with an empty part.
+    #[error(
+        "invalid name `{pattern}` in {context} (a module and a name of it, `module:name`, only in `allowed-imports` and the imported side of `ignored-imports`)"
+    )]
+    ImportName {
+        pattern: String,
+        context: &'static str,
+    },
     /// An `ignored-imports` entry that is not `importer -> imported`.
     #[error("invalid pair `{pattern}` in {context} (expected `\"importer -> imported\"`)")]
     ImportPair {
@@ -1125,6 +1133,10 @@ impl Explain for RuleConfigError {
             ),
             Self::RelativeGroup { pattern, context } => (
                 problem.help("name the modules of the package: `\"pkg._runtime\"`, `\"pkg._runtime.*\"`"),
+                Setting::of_context(context, Some(pattern)),
+            ),
+            Self::ImportName { pattern, context } => (
+                problem.help("write the module, one colon, and the name: `\"pkg.db:Session\"` in `allowed-imports`"),
                 Setting::of_context(context, Some(pattern)),
             ),
             Self::ImportPair { pattern, context } => (
@@ -1716,6 +1728,8 @@ impl<'a> CheckContext<'a> {
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
             group: reports_groups(meta.code),
+            key_target: None,
+            key_module: None,
         });
         out.last_mut()
     }

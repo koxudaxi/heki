@@ -5,7 +5,62 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
-## [0.6.0] - Unreleased
+## [0.7.0] - 2026-11-26
+
+### Breaking changes
+
+- A Ratchet baseline entry records how many of its sites were heuristic (`heuristic`, left out when none were), and allows the claims it recorded and no stronger one: a run regresses when it finds more sites than `count`, or more exact sites than `count` less `heuristic`. A recorded heuristic report that is exact now (after a change of the code, or after an upgrade in which heki proves it) is a regression once; an exact report that turns heuristic passes, and `--update-baseline` shrinks the entry to it. `--update-baseline` writes `version = 3`, which heki 0.5.0 and earlier refuse instead of ignoring the field: update heki everywhere the baseline is read before committing a rewritten one. A baseline of version 2 is compared as before, with a note, until `--update-baseline` rewrites it: run it once on the whole project, since a run over part of the project refuses to rewrite the file. (#437)
+- An exact `EFF101` or `EFF103` report is keyed in a baseline by the last call of the shortest call chain, as its heuristic report is, so that adding or removing a branch on the way keeps its entry. Its message and its JSON `target` still name the call every implementation runs. A baseline of version 2 keeps the call the report names, so its entries still match until `--update-baseline` rewrites them with the new key. (#437)
+- A path made from a `pathlib.Path` is a `Path` to heki, so a file system call on it is followed. This covers the methods `joinpath`, `with_name`, `with_stem`, `with_suffix`, `relative_to`, `resolve`, `absolute`, and `expanduser`, the operators `/` and `/=` (`path / "a"`, `"a" / path`), the property `parent`, `Path.cwd()` and `Path.home()`, and the items of `iterdir`, `glob`, `rglob`, and `parents`. Before, `output.joinpath("a.py").open(...)`, `(output / "a.py").open(...)`, and `path.parent.exists()` were not reported by a `blocking-fs` boundary or by `EFF101`. Reports that follow from these calls now appear, so a boundary that was silent on code of this shape may report. (#435)
+- A function without a return annotation (or annotated `Any` or `object`) whose every `return` is a call giving an instance of one class, or awaits one, gives its callers an instance of that class, as `-> Class` would: `return Path(name)`, `return Store()` with `Store` of the same module or imported from another, `return models.Store()`, and a local bound to such a call. Before, `make(name).exists()` and `store().save()` on such a factory were calls of unknown type, so a `blocking-fs` boundary, `EFF101`, and the other rules did not follow them. Returns of different classes, `None` on some path, a parameter, an attribute, or a display still give no class, and neither does a class name another module rebinds. Reports that follow from these calls now appear: for example `EFF101` on `make().execute(...)` where `make()` returns `sqlite3.connect("app.db")`, `EFF109` on a lock a factory returns, and `MUT201` / `MUT203` on an instance a factory constructs. Methods (#486) and a function returning what such a function returns (#487) are not covered yet. (#436)
+- An `IMP201` report of `from m import n`, where `n` is a name of `m` and not a submodule, names `m.n` as its target (#457), so a Ratchet baseline entry holds the name: swapping an allowed name for another of the same module is a new report. An entry of the module, as earlier baselines wrote it, keeps covering the names of its module that have no entry of their own, until `--update-baseline` rewrites it per name. `allowed-imports` and the imported side of an `ignored-imports` pair take `module:name` for a boundary that allows exactly one name across it (`"app.model.field_name:PydanticFieldNameResolver"`).
+- A `heki.toml`, a `.heki.toml`, or a `--config` file that is not a `pyproject.toml` now takes the project metadata (`requires-python`, the project name, the declared dependencies, and the workspace tables) from the `pyproject.toml` at the project root, not from the one in its own directory. The same file gives the same reports wherever it sits. A configuration file kept in a subdirectory such as `scripts/` used to run without that metadata; it now sees it, so its reports can change. (#463)
+- `heki check --touched` (and files given as paths) states what it looked at. With a baseline it shows every Ratchet regression and fails on it, wherever it is, since an entry counts every report of its key; it still judges only the stale entries of the touched files and of the reports that touch them. Without one, it ends with a note counting the reports that would fail the run and are not shown (on stderr in every output format, JSON included), and a run that passes ends with `No reports in or through N touched file(s) (M file(s) analyzed).` or, with a baseline, `No Ratchet regressions in M file(s).` instead of `All checks passed`. A change can add a report in a file it left alone without a call chain through it (a re-export, an annotation another module relied on), which no run over touched files can tell. (#442)
+- Naming a configuration file in `--touched` or PATHS (`pyproject.toml`, `heki.toml`, `.heki.toml`, or `hatch.toml` at the project root, `--config`, the summary snapshot, or the baseline) shows every report, as a run without `--touched` does; `--fix` still rewrites only the named Python files. The pre-commit hook of this repository also runs on a staged `pyproject.toml`, `heki.toml`, or `.heki.toml` at the root. (#442)
+- `unlisted-dict-keys = "report"` no longer treats the keys a forbid-only contract matches as
+  named by it (#462). A `write-owners` contract with `forbidden-writers` and no `allowed-writers`
+  or `exempt-methods` allows no writer, so a write of `_new` that its glob target (`Field._[!_]*`)
+  matches is reported by the contract that lists keys, as it is without the forbid-only contract.
+  A contract with allowed writers still names the keys its targets match.
+- A `write-owners` or `effect-boundaries` target that is a `__dict__` key of a class is matched
+  by a write of the key, not by a read through the namespace (`field.__dict__.get(KEY)`): a key
+  nothing writes never exists, so the entry is reported by `unmatched-contract-entries` (#468). A
+  `read-owners` target is still matched by such a read.
+
+### Added
+
+- `EFF117` (`unlocked-write-of-guarded-state`, heuristic): shared state that one function
+  changes holding a thread lock (`threading.Lock`, `RLock`, `Condition`, `Semaphore`) and
+  another changes where heki finds no lock held, when a thread heki resolves runs one of the
+  writes (a `threading.Thread` or `Timer` target, `asyncio.to_thread`, `loop.run_in_executor`,
+  a thread pool's `submit` or `map`, the `run` of a `threading.Thread` subclass, and the
+  functions they reach). The state is an attribute of the method's instance, a module global, or
+  an attribute of a class or module, assigned, or a builtin container it holds changed in place.
+  A lock taken through a helper that returns holding it, a lock the code gives back later with
+  `release()`, and a lock every caller holds (up to two calls above, generator expressions and
+  lambdas under it included) count as held; writes while an object is built, in an after-fork
+  handler, in test code, and of `threading.local` attributes are left out. It runs with
+  `--heuristic` (`lint.heuristic = true`) or when selected by name. (#476)
+- `call-owners` takes `targets-call-each-other = "allow" | "report"`. `"allow"` (default, as before)
+  lets the targets of a contract call each other, which suits a contract whose targets make up one
+  operation. With `"report"`, each target is judged like the one target of a contract with the
+  same keys: a call of one target by another is reported unless `allowed-callers` names the
+  caller, so one contract listing independent targets reports what one contract per target
+  reports. It also applies to calls of a method named like a target on an object of unknown class
+  (`MUT207`). (#484)
+
+### Changed
+
+- The ecosystem catalog can say that an operator, a property, or a result holds paths of the receiver's class: a `return-type` of `"Self"` also types the operator methods (`__truediv__`) a binary operator runs, an `attribute-type` of `"Self"` types a property, and `"C[Self]"` (`typing.Iterator[Self]`) types a container whose items are of the receiver's class.
+- The Agent Skill has a step of its own to run `heki check` on the whole project before finishing, and `docs/adoption.md` says to use `--touched` while editing and the whole project, with the baseline, before finishing and in CI. (#442)
+- `MUT101` and `MUT111` (opt-in) establish what iterating, measuring, testing, indexing, or calling a method of a value annotated `Sequence`, `Mapping`, `Set`, or their mutable ABCs runs: it is one of the family's builtins, or another class outside the project taken to run what they run, or a project class implementing the ABC (deriving, through project classes, from the ABC, from `list`, `dict`, `set`, `tuple`, `UserDict`, `UserList`, `ChainMap`, `deque`, a named tuple, or another standard-library class of the family, or registered with one by `ABC.register(C)` or `@ABC.register`). Reports that rested only on such a value become exact; a `register` call heki cannot resolve or a `__subclasshook__` of such a class leaves the family open, and `Iterable`, `Collection`, and other structural ABCs stay open. A `dict`, `list`, or `set` value may also be an instance of a project subclass of a standard-library class deriving from it (`traceback.StackSummary`, `http.cookies.SimpleCookie`), which can only make a report heuristic. A sentinel checks the family table against CPython 3.11 to 3.15. (#480)
+- `heki recommend` (experimental) reads "The builtin's own reads" for the type it suggests: a `Mapping`, `Sequence`, or `AbstractSet` parameter may be an instance of any project class of the family, so a project subclass of `UserDict`, `UserList`, or `ChainMap`, a class deriving from the ABC, or a registered one leaves out the reads it may run, and a `register` heki cannot resolve or a `__subclasshook__` leaves out every parameter of the family. Groups whose functions iterate, measure, or hand on a parameter the trial used to withhold are now listed. (#480)
+
+### Fixed
+
+- `fresh-objects = "allow"`: a store a function makes only where tests of its parameters pass (`if register:`, `if registry is not None:`) keeps nothing at a call whose arguments fail them: a constant, the literal default of a parameter the call leaves out, or a test the caller has already made of the same input. `copy_tree(node, register=False)` of a copy helper registering the copy under `if register:` gives a new object, and a helper storing its parameter under `if keep:` leaves a new object new at `attach(copied, keep=False)`; a test of the caller's own parameter is decided at the caller's calls. `EFF201` and `MUT201` no longer report the writes of such objects. A function records at most four sets of at most four tests per store (as for the chains of tests of `EFF` must-facts); past them it keeps the object whatever it is passed. (#458)
+
+## [0.6.0] - 2026-11-26
 
 ### Breaking changes
 
@@ -2418,7 +2473,8 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
-[0.6.0]: https://github.com/koxudaxi/heki/compare/v0.5.0...HEAD
+[0.7.0]: https://github.com/koxudaxi/heki/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/koxudaxi/heki/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/koxudaxi/heki/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/koxudaxi/heki/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/koxudaxi/heki/compare/v0.2.7...v0.3.0

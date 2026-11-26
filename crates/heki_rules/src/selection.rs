@@ -394,12 +394,16 @@ impl RuleSelection {
 
     /// [`Self::withhold_heuristic`], returning the reports it removed.
     pub fn take_heuristic(&self, diags: &mut Vec<Diagnostic>) -> Vec<Diagnostic> {
-        let (withheld, shown) = std::mem::take(diags).into_iter().partition(|d| {
-            d.certainty != Certainty::Exact
-                && self.exact_reports_only.contains(d.rule_code.as_str())
-        });
+        let (withheld, shown) = std::mem::take(diags)
+            .into_iter()
+            .partition(|d| self.withholds(d));
         *diags = shown;
         withheld
+    }
+
+    /// Whether the selection withholds the report `d`: a heuristic report of an exact rule.
+    pub fn withholds(&self, d: &Diagnostic) -> bool {
+        d.certainty != Certainty::Exact && self.exact_reports_only.contains(d.rule_code.as_str())
     }
 }
 
@@ -559,6 +563,8 @@ mod tests {
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
+            key_target: None,
+            key_module: None,
         };
         let selection = RuleSelection {
             enabled: BTreeSet::from(["OPT110", "OPT111"]),

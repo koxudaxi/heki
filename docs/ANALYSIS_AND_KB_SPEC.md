@@ -764,7 +764,17 @@ no class (none, `Any`, `object`, `Callable`) returns the named object every retu
 or one of them (`Ty::OneOf`): a `def` or `lambda` it makes (`make_requirer()` returning the
 `requirer` it defines, whose cells a call away from it binds to nothing), or a function or class
 a name binds; a `return` of anything else, `None` included, gives no fact. Only the functions
-every value of which a definition, a module-level name, or a cell gives are inferred for it. A module constant the module
+every value of which a definition, a module-level name, or a cell gives are inferred for it.
+Where the annotation names no class and every returned value is what a call gives, or awaits
+one (`Path(name)`, `Store()`, `Other()` imported from another module, `sqlite3.connect(...)`),
+the function returns the instance of one class those calls give, when they agree: returns of
+two classes, `None` on a path, or a parameter, an attribute, or a display give no fact (an
+instance's attribute holds what the whole project stores there, which pass 1 does not see). A
+class of another module is the name an annotation would name, so `declared_ty` drops it when
+the project binds that name to no class, and the fact says nothing once another module rebinds
+a global the function reads (`ReturnFact::ty_globals`: the class's name). A method call reads
+only the annotation of the definition the receiver's MRO finds, so this types calls of
+functions. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
@@ -813,7 +823,13 @@ outside the project but builtin types may, allocate an instance of `C` without r
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`); `"Self"` types
 a builder's result as its receiver (`client.with_options(...)`, an instance of a project subclass
-included). A call that cannot be resolved is not followed (`unknown_calls`); an external function
+included), and `"C[Self]"` types a result `C` whose items are instances of the receiver's class
+(`Path.iterdir()`, `Path.glob()`). The operators run the special methods the same rows type:
+`path / "a"` is `path.__truediv__("a")`, and `"a" / path`, a `str` having no `__truediv__`, is
+`path.__rtruediv__("a")`. `path / x` is typed only when `x` is a `str` or has the same catalogued
+reflected method (`NotImplemented` hands the operation to `x.__rtruediv__`), and `path /= x` only
+when no project class binds `__itruediv__`; a method a project class defines, and an operand of no
+known class, leave the result untyped. A call that cannot be resolved is not followed (`unknown_calls`); an external function
 that Layer 2 does not list has no effect.
 
 Reading an attribute on an instance whose MRO declares no type for it takes the class an
@@ -905,6 +921,8 @@ EffectSummary(f) = {
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
+    retains_given:            Option<Map<u8, MayGiven>>,   // those kept only where tests of the inputs pass
+                                                           // (`if keep:`), with the tests (MayGiven)
     only_read_params:         Bitset,                      // OptInFacts::only_read (heki inspect, the language
                                                            // server): no value that may be parameter i's object,
                                                            // or a view of it, is stored, captured, yielded,
@@ -927,7 +945,9 @@ EffectSummary(f) = {
                                                            // without elements (None, a number, ""); a call
                                                            // of a function returning its parameter
                                                            // (FunctionDecl::returns_param) gives the
-                                                           // object it hands it
+                                                           // object it hands it; kept: the tests of the
+                                                           // inputs under which the function may store
+                                                           // the result first (MayGiven)
     return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
                                                            // returned object may be, path by path (new, held
                                                            // state, parameter i, or an element of parameter i;
@@ -3000,8 +3020,10 @@ attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat
 release its distribution's verified range admits, the value read has the catalogued members of
 that class; it says nothing of its identity or of what the read runs, so a plain attribute, a
 property, and a cached property are alike to it. It is a table of its own because an attribute is
-no method a class takes from its base (`external_defines`). A row of the standard library
-(`typing.NamedTuple._fields`, `contextvars.Token.var`) holds on every interpreter heki supports,
+no method a class takes from its base (`external_defines`). A row's `type` may be `"Self"`, the
+class of the receiver (`pathlib.Path.parent`), or `"C[Self]"`, a `C` of instances of the
+receiver's class (`pathlib.Path.parents`). A row of the standard library
+(`typing.NamedTuple._fields`, `contextvars.Token.var`, `pathlib.Path.parent`) holds on every interpreter heki supports,
 which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
 the standard library that type a value (a method's `return_type`, a copy of its receiver,
 `returns_held`) on instances of each class it builds. The synchronous and asynchronous
@@ -3097,12 +3119,18 @@ Lookups are exact, without inheritance or aliases (an entry names the class that
 an annotation, or a constructor call produces), and the `heki_kb` unit tests pin every entry.
 
 ### 4.3 Line-number-independent Ratchet baseline (`heki_diagnostics`)
-- **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`.
-  Without line numbers, unrelated edits and reformatting do not break the baseline.
+- **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`
+  sites, `heuristic` of them heuristic (`Tally`). Without line numbers, unrelated edits and
+  reformatting do not break the baseline. Both tiers of a rule key a report alike.
 - **Rules (shrink only)**:
-  - a key whose current count **exceeds** the baseline **fails** (a new violation);
-  - a key whose current count is **below** the baseline (or has disappeared) prints a note asking
-    to shrink the file with `heki check --update-baseline`.
+  - a key whose current count **exceeds** the baseline, or whose exact sites exceed `count` less
+    `heuristic` (a recorded heuristic report that is exact now), **fails** (a new violation);
+  - a key whose current count is **below** the baseline (or has disappeared), or that has fewer
+    exact sites (an exact report that turned heuristic), prints a note asking to shrink the file
+    with `heki check --update-baseline`.
+- **Versions**: 3 records `heuristic`; 2 does not, and any of its sites may be exact; 1 (or no
+  `version`) counts diagnostics instead of sites. An older file keeps its meaning until
+  `--update-baseline` rewrites it as version 3.
 
 ---
 

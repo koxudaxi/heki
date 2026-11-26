@@ -146,7 +146,7 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build"]
 write-universe = ["Ticket.flag"]
 "#;
 
@@ -327,6 +327,10 @@ const FIELD_READER: &str = "from pkg.field_keys import FieldKeys\nfrom pkg.model
 const KEY_OTHER_FIRST: &str = "from typing import ClassVar\n\nfrom pkg.key_class import Keys\n\n\nclass OtherKey:\n    KEY: ClassVar[str] = \"other\"\n\n\nclass OtherFirstKeys(OtherKey, Keys):\n    pass\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
+// A maker storing what it makes, and a helper storing what it is handed, only when a flag their
+// callers in another module leave false is true.
+const GUARDED_KEEPS: &str = "import copy\n\nfrom pkg.copy_ops import Ticket\n\nKEPT = []\n\n\ndef make(t: Ticket, keep=False) -> Ticket:\n    c = copy.copy(t)\n    if keep:\n        KEPT.append(c)\n    return c\n\n\ndef hold(t: Ticket, keep=False):\n    if keep:\n        KEPT.append(t)\n";
+const GUARDED_BUILD: &str = "import copy\n\nfrom pkg.copy_ops import Ticket, mark\nfrom pkg.guarded_keeps import hold, make\n\n\ndef build_made(t: Ticket):\n    c = make(t)\n    mark(c)\n    return c\n\n\ndef build_held(t: Ticket):\n    c = copy.copy(t)\n    hold(c)\n    mark(c)\n    return c\n";
 // A copy helper returning an element of an optional table or a copy, a public helper marking
 // its parameter, and one returning its parameter, in another module than the boundary's scope
 // using them on copies.
@@ -735,6 +739,22 @@ const FACTORY_DB: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = 
 const FACTORY_DB_MEMORY: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = Path(__file__).parent / \"app.db\"\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(\":memory:\")\n";
 const FACTORY_DB_UNKNOWN_PATH: &str = "import os\nimport sqlite3\n\nDB_PATH = os.environ[\"DB\"]\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(DB_PATH)\n";
 const FACTORY_USE: &str = "from pkg.factory_db import connect\n\n\nasync def serve():\n    return connect().execute(\"SELECT 1\")\n";
+// A factory without a return annotation constructing a class of a third module
+// (`ReturnFact::ty`): its callers get an instance of the class while it is one.
+const MADE_MODELS: &str = "import time\n\n\nclass Waiter:\n    def wait(self) -> None:\n        time.sleep(1)\n\n\nclass Quiet:\n    def wait(self) -> None:\n        pass\n";
+const MADE_MODELS_FUNCTION: &str =
+    "def Waiter():\n    return None\n\n\nclass Quiet:\n    def wait(self) -> None:\n        pass\n";
+const MADE_FACTORY: &str =
+    "from pkg.made_models import Waiter\n\n\ndef make():\n    return Waiter()\n";
+const MADE_FACTORY_EITHER: &str = "from pkg.made_models import Quiet, Waiter\n\n\ndef make(flag=False):\n    if flag:\n        return Quiet()\n    return Waiter()\n";
+const MADE_USE: &str =
+    "from pkg.made_factory import make\n\n\nasync def serve() -> None:\n    make().wait()\n";
+// The same factory constructing the class by a member of its module (`made_models.Waiter()`):
+// another file rebinding that member drops the class.
+const MADE_MEMBER_FACTORY: &str =
+    "from pkg import made_models\n\n\ndef make_member():\n    return made_models.Waiter()\n";
+const MADE_MEMBER_USE: &str = "from pkg.made_member import make_member\n\n\nasync def serve_member() -> None:\n    make_member().wait()\n";
+const MADE_MEMBER_REBINDING: &str = "from pkg import made_models\n\n\ndef swap() -> None:\n    made_models.Waiter = made_models.Quiet\n";
 // Functions values hold, defined in one module and called in others: the closure a factory
 // returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
 // `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
@@ -1224,6 +1244,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/lost_loop_rebuild.py", LOST_LOOP_REBUILD),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
+        ("pkg/guarded_keeps.py", GUARDED_KEEPS),
+        ("pkg/guarded_build.py", GUARDED_BUILD),
         ("pkg/copy_ops.py", COPY_OPS),
         ("pkg/copy_pass.py", COPY_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -1251,6 +1273,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rows_use.py", ROWS_USE),
         ("pkg/factory_db.py", FACTORY_DB),
         ("pkg/factory_use.py", FACTORY_USE),
+        ("pkg/made_models.py", MADE_MODELS),
+        ("pkg/made_factory.py", MADE_FACTORY),
+        ("pkg/made_use.py", MADE_USE),
         ("pkg/held_defs.py", HELD_DEFS),
         ("pkg/held_factory.py", HELD_FACTORY),
         ("pkg/held_field.py", HELD_FIELD),
@@ -1628,8 +1653,12 @@ fn steps_exact_effects() -> Vec<Step> {
 
 /// A call of a factory in another file gives what every return of the factory gives
 /// (`ReturnFact::ty`): a connection on the file a module constant names, one in memory, or, on a
-/// path heki cannot decide, a connection in an unknown state.
+/// path heki cannot decide, a connection in an unknown state; and, for a factory without a
+/// return annotation, an instance of the class of a third module that every return constructs,
+/// while every return constructs that one and it is a class.
 fn steps_returned_types() -> Vec<Step> {
+    const MADE: &[(&str, &str)] = &[("pkg/made_use.py", "EFF101")];
+    const MEMBER: &[(&str, &str)] = &[("pkg/made_member_use.py", "EFF101")];
     const EXACT: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101")];
     const HEURISTIC: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101 [heuristic]")];
     const NEITHER: &[(&str, &str)] = &[
@@ -1654,6 +1683,56 @@ fn steps_returned_types() -> Vec<Step> {
         )
         .present(EXACT)
         .absent(HEURISTIC),
+        Step::new(
+            "a comment above the unannotated factory",
+            vec![save(
+                "pkg/made_factory.py",
+                &format!("# factories\n{MADE_FACTORY}"),
+            )],
+        )
+        .present(MADE)
+        .cutoff(),
+        Step::new(
+            "the unannotated factory returns one of two classes",
+            vec![save("pkg/made_factory.py", MADE_FACTORY_EITHER)],
+        )
+        .absent(MADE),
+        Step::new(
+            "it constructs the waiting class on every path again",
+            vec![save("pkg/made_factory.py", MADE_FACTORY)],
+        )
+        .present(MADE),
+        Step::new(
+            "the class it constructs becomes a function",
+            vec![save("pkg/made_models.py", MADE_MODELS_FUNCTION)],
+        )
+        .absent(MADE),
+        Step::new(
+            "the class is defined again",
+            vec![save("pkg/made_models.py", MADE_MODELS)],
+        )
+        .present(MADE),
+        Step::new(
+            "a factory constructs the class by a member of its module",
+            vec![
+                Action::Create("pkg/made_member.py", MADE_MEMBER_FACTORY.to_owned()),
+                Action::Create("pkg/made_member_use.py", MADE_MEMBER_USE.to_owned()),
+            ],
+        )
+        .present(MEMBER),
+        Step::new(
+            "another file rebinds that member",
+            vec![Action::Create(
+                "pkg/made_member_rebinding.py",
+                MADE_MEMBER_REBINDING.to_owned(),
+            )],
+        )
+        .absent(MEMBER),
+        Step::new(
+            "the rebinding is removed",
+            vec![Action::Delete("pkg/made_member_rebinding.py")],
+        )
+        .present(MEMBER),
     ]
 }
 
@@ -3153,7 +3232,8 @@ fn steps_small_displays() -> Vec<Step> {
 /// module defines the name again or lists a base defining it first, or code rebinds it on the
 /// class or a subclass, and a `Final` one when a decorator in another module building its class
 /// becomes a `dataclass_transform` (a project-wide fact); whether a helper keeps the object its caller hands it is a summary fact
-/// of the helper, and so is whether a copy helper returns an element of an optional table only
+/// of the helper, and so are the tests of its parameters under which a helper keeps that object
+/// or the one it returns, and whether a copy helper returns an element of an optional table only
 /// where the table defaults to a value without elements; whether a helper returns its parameter
 /// is a declaration of its module; whether a parameter is typed, and with which class, is a fact of
 /// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
@@ -3548,6 +3628,27 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![save("pkg/copy_ops.py", COPY_OPS)],
         )
         .absent(&[("pkg/copy_pass.py", "EFF201")]),
+        Step::new(
+            "the maker and the holder of another module store only when the flag is false",
+            vec![Action::Save(
+                "pkg/guarded_keeps.py",
+                GUARDED_KEEPS.replace("if keep:", "if not keep:"),
+            )],
+        )
+        .present(&[("pkg/guarded_build.py", "EFF201")]),
+        Step::new(
+            "the maker stores whatever it is passed, the holder only when the flag is true",
+            vec![Action::Save(
+                "pkg/guarded_keeps.py",
+                GUARDED_KEEPS.replacen("    if keep:\n        KEPT", "    KEPT", 1),
+            )],
+        )
+        .present(&[("pkg/guarded_build.py", "EFF201")]),
+        Step::new(
+            "both store only when the flag is true again",
+            vec![save("pkg/guarded_keeps.py", GUARDED_KEEPS)],
+        )
+        .absent(&[("pkg/guarded_build.py", "EFF201")]),
     ]
 }
 

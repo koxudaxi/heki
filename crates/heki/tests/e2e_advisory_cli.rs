@@ -96,24 +96,59 @@ fn target_version_defaults_to_the_lower_bound_of_requires_python() {
     assert!(!as_py311(&[]));
     pyproject(">=3.12", "");
     assert!(as_py311(&["--target-version", "py311"]));
-    // A `heki.toml` (found or explicit) takes the bound from the `pyproject.toml` next to it.
+    // A `heki.toml` (found or explicit) takes the bound from the project's `pyproject.toml`,
+    // wherever the file sits.
     pyproject(">=3.11", "");
     p.write("heki.toml", "[lint]\nignore = [\"EFF102\"]\n");
     assert!(as_py311(&[]));
     std::fs::remove_file(p.dir.join("heki.toml")).unwrap();
     p.write("cfg/custom.toml", "[lint]\nignore = [\"EFF102\"]\n");
-    assert!(!as_py311(&["--config", "cfg/custom.toml"]));
+    assert!(as_py311(&["--config", "cfg/custom.toml"]));
+    // A `pyproject.toml` given to `--config` holds its own bound.
     p.write(
         "cfg/pyproject.toml",
-        "[project]\nrequires-python = \">=3.11\"\n",
+        "[project]\nrequires-python = \">=3.12\"\n",
     );
+    assert!(!as_py311(&["--config", "cfg/pyproject.toml"]));
     assert!(as_py311(&["--config", "cfg/custom.toml"]));
-    assert!(as_py311(&["--config", "cfg/pyproject.toml"]));
-    // A malformed `requires-python` (or neighbouring `pyproject.toml`) only loses the bound.
+    // A malformed `requires-python` (or project `pyproject.toml`) only loses the bound.
     p.write("cfg/pyproject.toml", "[project]\nrequires-python = 311\n");
     assert!(!as_py311(&["--config", "cfg/pyproject.toml"]));
-    p.write("cfg/pyproject.toml", "[project\n");
+    pyproject("[project\n", "");
     assert!(!as_py311(&["--config", "cfg/custom.toml"]));
+}
+
+#[test]
+fn a_configuration_file_gives_the_same_reports_wherever_it_sits() {
+    let p = Project::new("cfg_location");
+    p.write(
+        "comps.py",
+        "import requests\n\n\nasync def fetch_all(urls):\n    return [requests.get(u) for u in urls]\n",
+    )
+    .write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n",
+    );
+    let settings = "[lint]\nignore = [\"EFF102\"]\n";
+    p.write("heki-root-copy.toml", settings)
+        .write("scripts/heki.toml", settings)
+        .write("a/b/c/heki.toml", settings);
+    let reports = |config: &str| {
+        let (code, stdout, stderr) = p.check(&[
+            "--output-format",
+            "json",
+            "--select",
+            "EFF101",
+            "--config",
+            config,
+        ]);
+        assert_eq!(code, 1, "{config}: {stdout}{stderr}");
+        stdout
+    };
+    let at_root = reports("heki-root-copy.toml");
+    assert!(at_root.contains("<listcomp>"), "{at_root}");
+    assert_eq!(reports("scripts/heki.toml"), at_root);
+    assert_eq!(reports("a/b/c/heki.toml"), at_root);
 }
 
 #[test]

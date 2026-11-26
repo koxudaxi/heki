@@ -1314,8 +1314,10 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 ### The default target version
 
 Without `target-version`, heki reads `requires-python` from the `pyproject.toml` that holds the
-configuration, or from the one next to `heki.toml` or the `--config` file. It takes the oldest
-supported version that every clause admits:
+configuration, or, for `heki.toml` or a `--config` file that is not a `pyproject.toml`, from the
+`pyproject.toml` at the project root. The same applies to the project name, the declared
+dependencies, and the workspace tables: where the configuration file sits does not change them.
+It takes the oldest supported version that every clause admits:
 
 | `requires-python` | Target |
 | ----------------- | ------ |
@@ -1563,6 +1565,17 @@ shared by every call (`memo={}`). A call of a function every `return` of which r
 parameters (`def with_origin(field, kind): ...; return field`) gives the object it hands that
 parameter: a new one stays new, and the input stays the input.
 
+A store a function makes only where tests of its parameters pass (`if register:`,
+`if registry is not None:`, also inside `and`, `or`, and `not`) keeps nothing at a call whose
+arguments fail them: a constant, the literal default of a parameter the call leaves out, or a test
+the caller has already made of the same input. `copy_tree(node, register=False)` of
+`def copy_tree(node, *, register=True)` that calls `copied.register()` under `if register:` gives
+a new object, and `attach(copied, keep=False)` of a helper storing its parameter under `if keep:`
+leaves `copied` new; `copy_tree(node)` does not. A test of the caller's own parameter is decided at
+the calls of the caller. A function records at most four sets of at most four tests for each such
+store; past them it keeps the object whatever it is passed. A write a helper makes to its own
+parameter after such a store still counts the store.
+
 In an effect boundary, a write a reached function makes to the object one of its parameters
 holds constructs that object when every call reaching the function hands it a new object that
 nothing kept yet, as the same write in the caller would: `set_flag(copy.copy(node))` with
@@ -1575,7 +1588,8 @@ namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 class names the key, in this contract or in any other `write-owners` contract, so a new cache key
 needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
 `_cache`), and an entry target names its container. A key another contract names is that
-contract's to guard: its writes are judged by that contract's allowance alone. The contract's
+contract's to guard: its writes are judged by that contract's allowance alone. A contract with only
+`forbidden-writers` allows no writer, so it names no key. The contract's
 allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
 list, or set of string constants, or from a module's tuple of them, writes each of them, and so
 does the key of each pair a generator of them gives `update`. A key computed at run time has no
@@ -1675,6 +1689,7 @@ The call side of `write-owners`.
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
+| `targets-call-each-other` | `"allow"` | `"allow"` or `"report"`: whether a target may call the other targets of the contract. `"report"` judges each target like the one target of a contract with the same keys, so one contract listing independent targets reports what one contract per target reports for every call whose candidates all belong to one target. A call that may reach several targets (`obj.reset()` on `obj: Base` with `A.reset` and `B.reset` listed) is judged once for each target it may reach, with only that target guarded, and is reported when any of those judgements reports it; no contract of one target judges that call whole. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 | `protocol-subclasses` | `true` | As in `write-owners`. |
 
@@ -1684,7 +1699,11 @@ The call side of `write-owners`.
 - Bound-method aliases (`replace = dt.replace_reference`) and `getattr(dt, "replace_reference")`
   with a constant name are followed.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
-  it is made, so what the operation does inside is part of it.
+  it is made, so what the operation does inside is part of it. That suits a contract whose targets
+  make up one operation. For a contract listing independent targets, set `targets-call-each-other =
+  "report"`: a target is then allowed to call itself only, and every call of another target of the
+  contract is judged like a call of the one-target contract (a call of `pkg.core.a` by the target
+  `pkg.core.c` is reported unless `allowed-callers` names `c`).
 - With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
   `pkg.core.decide`"; a name an import or the module body binds, read in the scope binding it, at
   the statement handing it on; a name a class body, a function, a lambda, or a comprehension
@@ -2078,10 +2097,10 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `name` | `""` | The contract's name in reports. |
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
-| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. `"pkg.db:Session"` allows one name of a module: only `from pkg.db import Session` imports it (a glob may stand in either part), and another name of `pkg.db` is still reported. |
 | `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
 | `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](https://heki.koxudaxi.dev/configuration/#relative-imports-only)). |
-| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
+| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`; `"pkg.cli -> pkg.db:Session"` accepts one name of the module, as in `allowed-imports`). With `reach`, an import accepted or allowed by a name is not followed. |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/). |
@@ -2292,8 +2311,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
 - A `Class.attr` entry needs a project class, and an attribute the class family has: a name its
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
-  writes or reads on an object typed with the class or a subclass, or one written on an object
-  heki cannot type. A key a loop takes from a tuple, list, or set of string constants
+  writes on an object typed with the class or a subclass (a `__dict__` key only read does not
+  exist, except for a `read-owners` target, which guards the reads), or one written on an object heki cannot type. A key a loop takes from a tuple, list, or set of string constants
   (`for key in ("_a", "_b")`), or from a module's tuple of them (`for key in RECORDS`), names
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module
@@ -2714,7 +2733,7 @@ their modules):
 
 ```toml
 # heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).
-version = 2
+version = 3
 
 [[entries]]
 path = "app/api.py"
@@ -2722,6 +2741,14 @@ qualname = "get_user"
 rule_code = "EFF101"
 target = "requests.get"
 count = 1
+
+[[entries]]
+path = "app/jobs.py"
+qualname = "refresh"
+rule_code = "EFF101"
+target = "time.sleep"
+count = 2
+heuristic = 1
 ```
 
 The recorded set can only shrink:
@@ -2730,18 +2757,19 @@ The recorded set can only shrink:
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
-| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| An entry grew, a recorded heuristic report is exact now, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| A recorded exact report is heuristic now | a note that the entry can shrink | records it as heuristic |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2); a run over given files fails only on an error in one of them | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
 A run over part of the project (`heki check pkg_a --baseline heki-baseline.toml`) compares and
 updates only the entries of the files below its paths: the entries of the other files stay as
-they are, since the run did not analyze them. A baseline written before version 2 is updated
+they are, since the run did not analyze them. A baseline written before version 3 is updated
 whole first. `--update-baseline` takes directories: a file given to `heki check` selects what is
 shown, and a baseline records every report of what a run covers.
 
-### What an entry counts
+### What an entry allows
 
 Each entry counts violation sites, not reports (`sites` in JSON output):
 
@@ -2751,14 +2779,41 @@ Each entry counts violation sites, not reports (`sites` in JSON output):
 
 So a second violation behind a recorded report is a regression too.
 
-A baseline without `version = 2` was written before heki counted sites, and counts reports:
+`heuristic` says how many of the sites were [heuristic](https://heki.koxudaxi.dev/precision/) reports, and is left out
+when none were. A heuristic report states the weaker claim of the same premises as an exact one,
+so an entry allows the claims it recorded and no stronger one: a run regresses when it finds more
+sites than `count`, or more exact sites than `count` less `heuristic`. In the example, `refresh`
+may have two reports of `EFF101` at `time.sleep`, and one of them may be exact. A recorded
+heuristic report that heki proves after a change of the code, or after an upgrade in which heki
+proves more, is a regression once: fix it, or record the baseline anew. An exact report that turns
+heuristic passes, and `--update-baseline` records it as heuristic. A rule with two tiers keys both
+in the same entry: `EFF101` and `EFF103` key a report by the last call of the shortest call chain
+to the blocking call or the query, also where the exact report names the call every
+implementation runs (a file of version 2 keys it by the call the exact report names).
 
-- `heki check` says so in a note, and a second site behind a recorded report is no regression;
-- `--update-baseline` compares in the old unit first, so nothing that grew is taken in, then
-  rewrites the file with `version = 2`.
+Older files keep their meaning until `--update-baseline` rewrites them with `version = 3`, which
+heki 0.5.0 and earlier cannot read:
+
+- A baseline with `version = 2` does not record which sites were heuristic: any of them may be
+  exact, as before. `heki check` says so in a note.
+- A baseline without a `version` (or with `version = 1`) was written before heki counted sites,
+  and counts reports. `heki check` says so in a note, and a second site behind a recorded report
+  is no regression.
+- `--update-baseline` compares in the file's own terms first, so nothing that grew is taken in,
+  then rewrites the file.
 
 A version this heki does not know is an error, and so is a file listing one entry twice (a hand
 merge of two baselines).
+
+### Import names
+
+An [`IMP201`](https://heki.koxudaxi.dev/rules/import-boundary-violation/) report of `from m import n`, where `n` is a name
+of `m`, has the target `m.n`, and its entry holds the name, so another name of the same module is a
+new report. An entry of the module, as heki 0.5.0 and earlier wrote it, keeps covering the names of
+its module that have no entry of their own, with the same count, and `--update-baseline` rewrites
+it per name. Only a heki that keys these reports by name reads the rewritten entries: the file
+has `version = 3`, which heki 0.5.0 and earlier cannot read, so every heki that reads the
+baseline must be newer before a rewritten baseline is committed.
 
 ### Import cycle groups
 
@@ -2794,23 +2849,38 @@ the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
 
 ## pre-commit
 
-The hook passes the staged Python files to `heki check --touched`. heki follows calls across files,
-so it still analyzes the whole project, but it shows and fails on only the reports in those files
-and the reports whose call chain reaches one of them: after a change to `app/users.py`, the
-`EFF101` in `app/api.py` that reaches the change through two helpers is shown, and old findings in
-files the commit left alone are not. A project can run the hook from its first commit, without a
-baseline. A change can also make a report appear in a file the commit left alone without a call chain
-through the change, for example when a type annotation that another module relied on is removed;
-such a report is not shown here, so run the whole project in continuous integration. A local hook
-may also pass the files as paths (`entry: heki check`): a file given to `heki check` is checked in
-its project, as with `--touched`. With `--fix`, the hook rewrites only the staged files: the fix
-of a shown report in another file is left, and the run says how many were.
+The hook passes the staged Python files, and a staged `pyproject.toml`, `heki.toml`, or
+`.heki.toml` at the root, to `heki check --touched`. heki follows calls across files, so it still
+analyzes the whole project, but it shows and fails on only the reports in those files and the
+reports whose call chain reaches one of them: after a change to `app/users.py`, the `EFF101` in
+`app/api.py` that reaches the change through two helpers is shown, and old findings in files the
+commit left alone are not. A project can run the hook from its first commit, without a baseline.
+
+That is all a run over touched files can promise. A change can also make a report appear in a
+file the commit left alone without a call chain through the change: a module that re-exports
+another function, or a return annotation another module relied on. Whether a change added such a
+report cannot be told from the code after it, so:
+
+- Without a baseline, the run ends with a note counting the reports that would fail it and are
+  not shown, and when it passes, its last line says what it looked at (`No reports in or through
+  2 touched file(s) (40 file(s) analyzed).`), not that all checks passed.
+- With a baseline, every regression is shown and fails the run, wherever it is (see below).
+- A configuration file can change any report, so naming one (`pyproject.toml`, `heki.toml`,
+  `.heki.toml`, or `hatch.toml` at the root, the summary snapshot, the baseline) shows every
+  report, as a run without `--touched` does: a contract added to `heki.toml` is checked in the
+  whole project.
+
+Use `--touched` while editing and in the hook, and run the whole project, with the baseline, before
+finishing a change and in continuous integration. A local hook may also pass the files as paths
+(`entry: heki check`): a file given to `heki check` is checked in its project, as with `--touched`.
+With `--fix`, the hook rewrites only the staged Python files: the fix of a shown report in another
+file is left, and the run says how many were.
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.5.0
+    rev: v0.7.0
     hooks:
       - id: heki
 ```
@@ -2837,7 +2907,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: uvx heki check --touched
             language: system   # needs uv on PATH
-            types: [python]
+            types_or: [python, toml]
+            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -2855,7 +2926,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             entry: heki check --touched
             language: python
             additional_dependencies: [heki]
-            types: [python]
+            types_or: [python, toml]
+            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -2870,9 +2942,10 @@ The hook fails on exact errors and passes with warnings and heuristic reports, w
 make them fail it too, set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning`
 before `--touched`.
 With a baseline configured, the hook fails only on new findings. A baseline entry counts every
-report of its key, so a run with `--touched` compares all of them, and judges the entries of the
-touched files and of the reports it shows: a grown entry fails the run when one of its reports
-touches a staged file, and a stale entry elsewhere is left to a run over the whole project.
+report of its key, so a run with `--touched` compares all of them and shows every regression: a
+grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
+the commit added the report. It judges the stale entries of the touched files and of the reports
+that touch them only: a stale entry elsewhere is left to a run over the whole project.
 
 ## Continuous integration
 
@@ -2913,7 +2986,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' | xargs -0 -r uvx heki check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
@@ -2935,6 +3008,65 @@ With SARIF:
 
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](https://heki.koxudaxi.dev/coding-agents/#after-an-edit-heki-check).
+
+### Auditing inline suppressions
+
+A baseline, `report-unused-suppressions`, and `require-suppression-codes` do not stop a new
+`# heki: ignore[EFF101]`, `# noqa: EFF101`, or bare `# noqa` from hiding a report, and the run
+still exits 0. `--report-suppressed <PATH>` writes the reports that inline suppressions hid to a
+JSON file, next to any `--output-format`:
+
+```json
+{
+  "schema_version": 1,
+  "suppressed": [
+    {
+      "code": "EFF101",
+      "file": "app/handlers.py",
+      "function": "fetch",
+      "target": "time.sleep",
+      "line": 12,
+      "column": 5,
+      "directive": {"kind": "heki-ignore", "file": "app/handlers.py", "line": 12, "column": 20}
+    }
+  ]
+}
+```
+
+- `file`, `function`, `code`, and `target` are the key of the report in a
+  [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), so a change of line numbers does not change what a CI job
+  compares. Compare the entries as a multiset of those four fields: one removed entry does not
+  offset an added one.
+- `directive.kind` is `heki-ignore`, `heki-ignore-bare`, `noqa-code`, or `noqa-bare`. When several
+  suppressions on a line hide the same report, the first one in the source is named.
+- Only reports that a suppression hid are listed. A `# noqa: F401` that Ruff reads hides no heki
+  report, and a suppression that hid nothing is not listed (`report-unused-suppressions`
+  reports it).
+- The file covers what the run shows: with `--touched` or a file in PATHS, the reports of those
+  files, and a baseline changes nothing in it. It is the same bytes on every run of the same
+  code, and the command exits with 2 when the file cannot be written.
+
+A CI job can run the check on the base branch and on the change, and fail on an entry the change
+adds. Check the base out from its protected ref, so that the change cannot alter the comparison:
+
+```yaml
+- run: |
+    keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+    uvx heki check --report-suppressed head.json || test "$?" -eq 1
+    git worktree add ../base "origin/$BASE"
+    (cd ../base && uvx heki check --report-suppressed "$GITHUB_WORKSPACE/base.json" || test "$?" -eq 1)
+    # Sorted lines keep a repeated key apart, so one removed entry offsets no added one.
+    new=$(diff <(keys base.json) <(keys head.json) | grep '^>' || true)
+    test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+  shell: bash
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+The configuration, the baseline, and the CI files that decide this (`pyproject.toml` or
+`heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
+the audit file shows what suppressions hide, and a weakened configuration or baseline is the
+code owners' to review.
 
 ## Rolling out rules
 
@@ -2990,6 +3122,18 @@ or where the code is named. The old codes and names are not kept.
   as regressions. Change the code to `"EFF101"` or `"EFF103"` (adding up the counts of two entries
   that then have the same file, function, and target), or record the baseline anew.
 
+### From heki 0.5 and earlier
+
+- `--update-baseline` writes `version = 3`, which heki 0.5.0 and earlier refuse: update heki
+  everywhere the baseline is read (the pre-commit `rev`, CI) before committing a rewritten
+  baseline. A file of version 2 is read as before, with a note ([What an entry
+  allows](https://heki.koxudaxi.dev/adoption/#what-an-entry-allows)).
+- Once rewritten, an entry recorded for a heuristic report no longer allows an exact one: a
+  report that heki proves is a regression once.
+- An exact `EFF101` or `EFF103` report is keyed by the last call of the shortest call chain, as a
+  heuristic one is, in a file of version 3. A file of version 2 keeps the call the report names,
+  so its entries still match, and `--update-baseline` rewrites them with the new key.
+
 ## Effect snapshots (`MUT103`)
 
 For a library, a change in what a public function *does* is worth reviewing even when no rule
@@ -3008,6 +3152,27 @@ $ heki check --extend-select MUT103            # reports functions that gained e
 A run that cannot analyze every file (a syntax error, an unreadable file) does not write the
 snapshot: it reports the errors and exits with code 2, so the entries of those files are not
 lost.
+
+### Comparing with the protected base
+
+Instead of committing the snapshot, a pull request can be compared with a snapshot of
+its protected base branch. Generate `base.json` on the base with the same heki version, the same
+knowledge bases, the same `--target-version`, and the same configuration as the check on the
+pull request, then check the whole project against it:
+
+```console
+$ git switch --detach origin/main
+$ heki snapshot > ../base.json
+$ git switch --detach "$PR_HEAD"
+$ heki check --select MUT103 --fail-on warning --snapshot ../base.json
+```
+
+`--snapshot PATH` replaces `.heki-summary-snapshot.json` at the project root. A path that does
+not exist, a file that is not a snapshot, a snapshot of an unsupported version, and a run in
+which `MUT103` is not enabled all exit with code 2: the check never passes without having
+compared. A snapshot at the root is ignored while `--snapshot` is given. Run the whole project,
+not `--touched` on the files of the pull request: a public function gains an effect through a
+private helper in another module, and the report is on the public function.
 
 
 ---
@@ -3587,7 +3752,7 @@ Options:
           Preview fixes as a unified diff without writing files
 
       --touched <FILE>...
-          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
+          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, the baseline) shows every diagnostic. Another path that is not an analyzed file is named in a warning
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -3613,6 +3778,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
           
@@ -3637,6 +3805,9 @@ Options:
 
       --generate-prompt [<QUESTION>]
           Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
+
+      --report-suppressed <PATH>
+          Write the reports that inline suppressions hid (`# heki: ignore[...]`, `# noqa`) to this JSON file, next to any `--output-format`, so CI can compare it with the file of the protected base branch and find the suppressions a change adds. It lists the reports of the files the run shows (`--touched`, PATHS that are files); a baseline changes nothing in it. Each entry names the report (`code`, `file`, `function`, `target` as its baseline key, `line`, `column`) and the `directive` that hid it (`kind`, `file`, `line`, `column`); the entries are sorted, and the same project gives the same bytes. Exits with 2 when the file cannot be written
 
       --output-format-json-schema <TARGET>
           Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json`
@@ -3925,6 +4096,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -4006,6 +4180,9 @@ Options:
 
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
 
   -h, --help
           Print help (see a summary with '-h')
@@ -4947,7 +5124,11 @@ reaches it through two helpers. To see the diagnostics an edit can have caused, 
 files to `--touched`, or name them as paths: heki still analyzes the project, and shows only the
 diagnostics whose `path` or any `related[].path` is one of them, so the report in `app/api.py`
 stays while `app/users.py` is the only edited file. The summary, the exit code, and every output
-format follow the diagnostics shown.
+format follow the diagnostics shown. A change can also add a report in a file it left alone
+without a call chain through it (a re-export, an annotation another module relied on): such a run
+ends with a note on stderr counting the reports that would fail it and are not shown, also with
+`--output-format json`, and with a baseline it shows every regression. Run the whole project
+before finishing.
 
 ```console
 $ heki check --touched app/users.py --output-format json
@@ -7046,7 +7227,9 @@ coroutine's where it is awaited. Not reported either:
   `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
-  guarded operation is checked where it is called, so what it does inside is part of it.
+  guarded operation is checked where it is called, so what it does inside is part of it. With
+  `targets-call-each-other = "report"` a target is allowed to call itself only, and a call of
+  another target is judged as a one-target contract would judge it.
 
 With `attribution = "lexical"`, a call is judged in the function whose code holds it instead: a
 private helper reports its calls itself, and a function that only runs inside allowed callers
@@ -7199,6 +7382,13 @@ No automatic fix.
     each call is judged in the function holding it.
   - `own-receiver`: `"report"` (default) or `"allow"`: whether a call through the receiver of the
     method it is judged in (`self`, `cls`, `super()`) is allowed.
+  - `targets-call-each-other`: `"allow"` (default) or `"report"`: whether a target may call the
+    other targets of the contract. With `"report"`, each target is judged like the one target of a
+    contract with the same keys, so a contract listing independent targets reports what one
+    contract per target reports for every call whose candidates all belong to one target. A call
+    that may reach several targets (`obj.reset()` on `obj: Base` with `A.reset` and `B.reset`
+    listed) is judged once for each target it may reach, with only that target guarded, and is
+    reported when any of those judgements reports it.
   - `allowed-protocols`: project protocols (class patterns, their subclasses included): a call
     through a value typed with one that declares the method, itself or through its protocol
     bases, is allowed, also through a class object typed `type[P]` of one (`MUT207`).
@@ -8640,7 +8830,9 @@ What an import loads is decided as Python decides it:
 - `import a.b.c` imports `a.b.c`. It loads `a` and `a.b` first, but it is no import of them.
 - `from a.b import c` imports the submodule `a.b.c` when the package `a.b` has it and binds no
   name `c` before importing it, and `a.b` otherwise: `from pkg import parse` imports the
-  function when `pkg/__init__.py` re-exports it (`from .parse import parse`).
+  function when `pkg/__init__.py` re-exports it (`from .parse import parse`). A report of the
+  import of a name names it, `a.b.c`: a baseline entry holds the name, so another name of `a.b`
+  is a new report.
 - Relative imports are made absolute from the importing module.
 - `importlib.import_module("pkg.db")` and `__import__("pkg.db")` with a constant name, or a name
   heki establishes, import that module. With several possible names, the call is reported only
@@ -8650,6 +8842,11 @@ What an import loads is decided as Python decides it:
 A module pattern is a whole module name or a glob whose `*` spans dots (`pkg.backend.*` names
 every module below `pkg.backend`, not `pkg.backend` itself), or a group: `<stdlib>`,
 `<project>`, `<third-party>`.
+
+`allowed-imports` and the imported side of an `ignored-imports` pair also take one name of a
+module, `module:name` (`"pkg.model.names:Resolver"`; a glob may stand in either part). Only
+`from pkg.model.names import Resolver` is that import; another name of the module is reported as
+before. With `reach`, an import allowed or accepted by a name is not followed.
 
 A module of `relative-imports` is allowed when the import names it relative to the importer
 (`from . import b`, `from .b import f`, `importlib.import_module(".b", __package__)`), and
@@ -12057,6 +12254,9 @@ No automatic fix.
 ## Options
 - `lint.extend-select = ["MUT103"]` enables the rule.
 - The snapshot lives at `.heki-summary-snapshot.json`; `heki snapshot` prints it without writing.
+- `heki check --snapshot PATH` compares with the snapshot at `PATH` instead, for example one
+  generated on the protected base branch. The file must exist and be a snapshot of the supported
+  version, and the rule must be enabled, or the run exits with 2.
 
 
 ---
@@ -12803,8 +13003,9 @@ object of a class a target covers (`field.__dict__["_cache"] = v`, `vars(field).
 contract or in any other `write-owners` contract (`writes `pkg.model.Field._cache` (as a `__dict__` item), a
 `__dict__` key no target names`), so a new key needs a target first. A target names the keys its
 attribute pattern matches, and an entry target names its container; a key another contract names is
-judged by that contract alone, and a contract allowing every writer (`allowed-writers = ["*"]`)
-lists keys any function may write. A computed key, a plain attribute store (`field._cache = v`,
+judged by that contract alone, a contract with only `forbidden-writers` allows no writer and names
+no key, and a contract allowing every writer (`allowed-writers = ["*"]`) lists keys any function
+may write. A computed key, a plain attribute store (`field._cache = v`,
 `setattr`), and a write in a helper that does not see the object's class are not such writes. A
 target can also name one entry of the container an attribute holds, `Class.attr["key"]`: it matches
 the writes of that key (`field.extras["init"] = v`, `field.extras[INIT]` with a string constant,
@@ -12916,7 +13117,9 @@ default without elements, such as `None`, the paths returning an element of it r
 nothing) or returns the one it is handed, and nothing else can hold it yet: no store into
 another object, a container, a global, or a closure, no `yield`, and no call that may keep it
 ran before the write. A project function keeps an object it stores, yields, or hands to code
-heki does not follow or to a function that keeps it; reading or writing it keeps nothing. Writes
+heki does not follow or to a function that keeps it; reading or writing it keeps nothing. A
+store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a
+call whose arguments fail them (`register=False`, or a default the call leaves). Writes
 that a helper makes to a new object its caller hands it count as well. A shallow copy shares its
 containers with the original, so only rebinding its attributes constructs it
 (`copied.data_types = [...]`); `copied.data_types.append(x)` changes the original's list and is
