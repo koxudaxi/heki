@@ -225,7 +225,8 @@ printf '%s\n' "$report" >&2
 exit 2
 ```
 
-Register it in `.claude/settings.json`:
+Save it as `.claude/hooks/heki-stop.sh`, make it executable with `chmod +x .claude/hooks/heki-stop.sh`, and
+register it in `.claude/settings.json`:
 
 ```json
 {
@@ -243,7 +244,10 @@ Run on a project with findings that are already known, it would block every turn
 One pull request adds the walls, and every later pull request, from a person or an agent, runs
 against them. Replace `app` with your package.
 
-1. Put the walls in a `heki.toml` of their own, with `fail-on = "warning"` and the baseline path:
+1. Put the walls in a `heki.toml` of their own, with `fail-on = "warning"` and the baseline path.
+   heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds and does not
+   merge them: a project that already has `[tool.heki]` in `pyproject.toml` must move every
+   setting into `heki.toml` (without the `tool.heki` prefix), or they stop applying:
 
     ```toml
     # heki.toml
@@ -274,8 +278,11 @@ against them. Replace `app` with your package.
     /heki.toml           @your-org/maintainers
     /heki-baseline.toml  @your-org/maintainers
     /.github/workflows/  @your-org/maintainers
+    /.github/CODEOWNERS  @your-org/maintainers
     /.claude/            @your-org/maintainers
     /.agents/            @your-org/maintainers
+    /AGENTS.md           @your-org/maintainers
+    /CLAUDE.md           @your-org/maintainers
     ```
 
 4. Run the checks on every pull request. The first step runs the walls with the baseline. The
@@ -297,13 +304,14 @@ against them. Replace `app` with your package.
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0   # the base branch is compared below
-          - uses: astral-sh/setup-uv@v10
+          - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
           - name: Walls
             run: uvx heki check
           - name: Compare with the base branch
             shell: bash
             env:
               BASE: ${{ github.base_ref }}
+              TARGET: py312   # your project's target version
             run: |
               git worktree add ../base "origin/$BASE"
               keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
@@ -311,15 +319,19 @@ against them. Replace `app` with your package.
               (cd ../base && uvx heki check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
               new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
               test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
-              (cd ../base && uvx heki snapshot > "$RUNNER_TEMP/base-summary.json")
-              uvx heki check --select MUT103 --fail-on warning --snapshot "$RUNNER_TEMP/base-summary.json" \
+              (cd ../base && uvx heki snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
+              uvx heki check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
                 --report-suppressed "$RUNNER_TEMP/mut103.json"
               hidden=$(keys "$RUNNER_TEMP/mut103.json")
               test -z "$hidden" || { echo "Effect changes hidden by inline suppressions:"; echo "$hidden"; exit 1; }
     ```
 
-    The base branch runs its own `heki.toml` and baseline, so the pull request cannot change what
-    it is compared with. `MUT103` is opt-in, so the first audit does not see a
+    The suppression audit runs the base branch with its own `heki.toml` and baseline, so the pull
+    request cannot change what it is compared with. The `MUT103` comparison needs the same
+    settings on both sides: the base snapshot is made with the pull request's `heki.toml`
+    (`--config`) and the same `--target-version` as the check, so a pull request that changes
+    the settings does not make unchanged code look different. The settings change itself is a
+    change to a protected file. `MUT103` is opt-in, so the first audit does not see a
     `# heki: ignore[MUT103]`; the last run writes its own audit file, and any entry in it fails the
     step, since the base compared with its own snapshot has no `MUT103` report to hide. `--report-suppressed` and `--snapshot` came after heki 0.7.0, so a pinned
     `uvx heki==<version>` here needs a later release. The base checkout sits next to the project
@@ -342,7 +354,7 @@ against them. Replace `app` with your package.
 What each layer catches: the hook gives the agent the report at once, the first CI step fails a
 pull request that crosses a wall or adds a finding, and the comparison step fails one that hides
 a report instead of fixing it or gives a public function a new effect. A change to the walls, the
-baseline, the workflow, or the hook is a change to a protected file, so a maintainer reads it.
+baseline, the workflow, the hook, or the agent instructions is a change to a protected file, so a maintainer reads it.
 
 ## What a function does: `heki inspect` (experimental)
 

@@ -117,6 +117,7 @@ forbidden-imports = ["app.web", "app.web.*"]
 # .github/CODEOWNERS
 /heki.toml           @your-org/maintainers
 /heki-baseline.toml  @your-org/maintainers
+/.github/CODEOWNERS  @your-org/maintainers
 ```
 
 - heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds at the
