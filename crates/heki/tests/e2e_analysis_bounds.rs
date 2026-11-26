@@ -6154,6 +6154,49 @@ fn objects_handed_to_many_helpers_pass_the_construction_budget() {
     assert_eq!(writes(&found), 1);
 }
 
+/// A function linking two new objects into each other, writing one, then keeping thousands of
+/// values read out of them, each a phi of the one before and an attribute of it: the values a
+/// kept value may have been read out of are walked once per value, so the walk grows with the
+/// function; the write before the keeps constructs its object and is allowed, the one after them
+/// is reported.
+#[test]
+fn values_read_out_of_linked_objects_are_walked_once() {
+    let shape = |reads: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.attr = 0".to_owned(),
+            "        self.peer = None".to_owned(),
+            "KEPT = []".to_owned(),
+            "def build(flags):".to_owned(),
+            "    m, other = Model(), Model()".to_owned(),
+            "    m.peer = other".to_owned(),
+            "    other.peer = m".to_owned(),
+            "    m.attr = 1".to_owned(),
+            "    x = m".to_owned(),
+        ];
+        for i in 0..reads {
+            lines.push(format!("    if flags[{i}]:"));
+            lines.push("        x = x.peer".to_owned());
+            lines.push("    KEPT.append(x)".to_owned());
+        }
+        lines.push("    m.attr = 2".to_owned());
+        lines.push("    return m".to_owned());
+        let p = Project::new(&format!("bounds_construction_links_{reads}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 1);
+    assert_eq!(writes(&check_linear(2_048, shape)), 1);
+}
+
 /// A function of thousands of parameters a nested function captures: the walk to the values
 /// that may be grown starts from each captured variable, and past its budget anything may be
 /// grown, so the module list the function reads is no constant, and another function's query

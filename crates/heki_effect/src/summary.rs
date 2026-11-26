@@ -630,12 +630,14 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
                 cond: c,
                 elements_of: x,
                 kept: mut k,
+                linked: i,
             },
             ReturnsNew::New {
                 kind: b,
                 cond: d,
                 elements_of: y,
                 kept: l,
+                linked: j,
             },
         ) => ReturnsNew::New {
             kind: a.min(b),
@@ -645,6 +647,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
                 k.join(&l);
                 k
             },
+            linked: i || j,
         },
         _ => ReturnsNew::No,
     };
@@ -1005,6 +1008,11 @@ struct Extractor<'a> {
     /// allocations `Recorder` learns while visiting), through copies and phis: only they and the
     /// parameters are asked about.
     maybe_new: FxHashSet<VarId>,
+    /// The items of the tuple and list displays an assignment only unpacks (`a, b = X(), Y()`),
+    /// each with the element of the display it is, and those displays: what binds the targets
+    /// is the elements, the display is never seen ([`Self::build_unpacked_displays`]).
+    unpacked: FxHashMap<VarId, VarId>,
+    unpacked_displays: FxHashSet<VarId>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
     /// The opt-in facts the enabled rules read.
@@ -1403,6 +1411,8 @@ impl<'a> Extractor<'a> {
             pending_unresolved: Vec::new(),
             track: false,
             maybe_new: FxHashSet::default(),
+            unpacked: FxHashMap::default(),
+            unpacked_displays: FxHashSet::default(),
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
@@ -1636,8 +1646,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// [`Self::may_params`]: a monotone fixpoint over copies, in-place container operators
-    /// ([`Self::same_object`]), and phis, from the parameters and the reads of the enclosing
-    /// functions' parameters ([`Self::captured_bit`]).
+    /// ([`Self::same_object`]), the items of displays an assignment only unpacks, each its
+    /// element ([`Self::unpacked`]), and phis, from the parameters and the reads of the
+    /// enclosing functions' parameters ([`Self::captured_bit`]).
     fn build_may_params(&mut self) {
         for (i, p) in self.f.params.iter().enumerate().take(64) {
             *self.may_params.entry(p.var).or_default() |= 1u64 << i;
@@ -1661,7 +1672,9 @@ impl<'a> Extractor<'a> {
                 }
                 self.pos = (bb.id, 0);
                 for inst in &bb.insts {
-                    if let Some((dst, src)) = self.same_object(&inst.kind) {
+                    let unpacked = |dst| self.unpacked.get(&dst).map(|elem| (dst, *elem));
+                    let same = self.same_object(&inst.kind);
+                    if let Some((dst, src)) = same.or_else(|| inst.kind.dst().and_then(unpacked)) {
                         let bits = self.may_params.get(&src).copied().unwrap_or(0);
                         changed |= or_bits(&mut self.may_params, dst, bits);
                     }
@@ -4852,7 +4865,10 @@ impl<'a> Extractor<'a> {
     /// construction of its typed writes, `ArgOrigin::new_object` of its call arguments, and
     /// `EffectSummary::returns_new`.
     fn resolve_construction(&mut self) {
-        let rec = std::mem::take(&mut self.rec);
+        let mut rec = std::mem::take(&mut self.rec);
+        for (item, elem) in &self.unpacked {
+            rec.handed_back(*item, *elem);
+        }
         let param_alias = &self.param_alias;
         let param_of = |v: VarId| match param_alias.get(&v) {
             Some((i, None)) => Some(*i),
@@ -4869,11 +4885,25 @@ impl<'a> Extractor<'a> {
             (bc.callee.clone(), CallTests::of_call(&bc.params, known))
         };
         let element_of = |v: VarId| self.element_of_params(v);
+        let shape = self.shape;
+        let unpacked = &self.unpacked;
+        // An unpacked item is its element (`Recorder::handed_back`), no part of the display.
+        let reads_of = |v: VarId, out: &mut Vec<VarId>| {
+            if let Some(inst) = shape.inst(v)
+                && !unpacked.contains_key(&v)
+                && !self.holds_no_operand_part(v)
+            {
+                match self.read_out_of(&inst.kind) {
+                    Some(read) => out.push(read),
+                    None => out.extend(inst.kind.operands()),
+                }
+            }
+        };
         let (answers, returned) = rec.resolve(
             self.shape,
             &self.may_params,
             &param_of,
-            &element_of,
+            (&element_of, &reads_of),
             &handed_to,
             returns,
         );
@@ -4931,12 +4961,13 @@ impl<'a> Extractor<'a> {
     }
 
     /// Record an escape of `var`'s object at the current instruction; a definite escape of a
-    /// parameter keeps it (`EffectSummary::retains_params`). Only reached when an ownership
-    /// contract is declared ([`Self::store_escapes`], [`Self::call_escapes`]).
+    /// parameter, or its store in another object, keeps it (`EffectSummary::retains_params`).
+    /// Only reached when an ownership contract is declared ([`Self::store_escapes`],
+    /// [`Self::call_escapes`]).
     fn escape(&mut self, var: VarId, how: Escape) {
         let params = self.may_params.get(&var).copied().unwrap_or(0);
-        let recorded = self.track && (params != 0 || self.may_be_new(var));
-        let keeps_params = how == Escape::Definite && params != 0;
+        let recorded = self.track && (params != 0 || self.may_hold_or_read_new(var));
+        let keeps_params = matches!(how, Escape::Definite | Escape::Into(_)) && params != 0;
         if !recorded && !keeps_params {
             return;
         }
@@ -4950,8 +4981,65 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// [`Self::unpacked`]: a tuple or list display without `*` whose every use is a read of one
+    /// of its items by a target unpacking ([`crate::consumption::is_unpacking`]).
+    fn build_unpacked_displays(&mut self) {
+        let shape = self.shape;
+        let mut reads: FxHashMap<VarId, Vec<(i64, VarId)>> = FxHashMap::default();
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::SubscriptLoad {
+                dst,
+                obj,
+                index,
+                is_slice: false,
+                ..
+            } = &inst.kind
+                && crate::consumption::is_unpacking(shape, *index, inst.span)
+                && let Some(InstKind::Const {
+                    literal: ConstLiteral::Int(i),
+                    ..
+                }) = shape.inst(*index).map(|i| &i.kind)
+            {
+                reads.entry(*obj).or_default().push((*i, *dst));
+            }
+        }
+        if reads.is_empty() {
+            return;
+        }
+        let in_phi: FxHashSet<VarId> = (self.f.blocks.iter().flat_map(|b| &b.phis))
+            .flat_map(|p| p.incoming.iter().map(|(_, v)| *v))
+            .collect();
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            let InstKind::AllocBuiltin {
+                dst,
+                kind: BuiltinKind::Tuple | BuiltinKind::List,
+                elems,
+            } = &inst.kind
+            else {
+                continue;
+            };
+            let Some(items) = reads.get(dst) else {
+                continue;
+            };
+            // A starred element (`*xs, Node()`) adds as many items as `xs` holds, so a target's
+            // position is no element's.
+            if in_phi.contains(dst)
+                || shape.first_starred(*dst).is_some()
+                || self.uses.get(dst).map_or(0, Vec::len) != items.len()
+            {
+                continue;
+            }
+            // An item past the display's end raises before any target is bound.
+            let element = |i: i64| usize::try_from(i).ok().and_then(|i| elems.get(i));
+            self.unpacked_displays.insert(*dst);
+            self.unpacked
+                .extend((items.iter()).filter_map(|(i, item)| Some((*item, *element(*i)?))));
+        }
+    }
+
     /// [`Self::track`], and [`Self::maybe_new`] when it is set.
     fn may_construct(&mut self) -> bool {
+        self.build_unpacked_displays();
         let mut seeds: FxHashSet<VarId> = FxHashSet::default();
         for i in self.f.blocks.iter().flat_map(|b| &b.insts) {
             // Any instance result (a superset: the recorder learns the allocations).
@@ -5039,6 +5127,10 @@ impl<'a> Extractor<'a> {
     fn may_be_new(&self, var: VarId) -> bool {
         let mut cur = var;
         for _ in 0..16 {
+            if let Some(elem) = self.unpacked.get(&cur) {
+                cur = *elem;
+                continue;
+            }
             match self.defs.get(&cur).map(|i| &i.kind) {
                 Some(InstKind::Copy { src, .. }) => cur = *src,
                 Some(_) => return self.maybe_new.contains(&cur),
@@ -5046,6 +5138,87 @@ impl<'a> Extractor<'a> {
             }
         }
         false
+    }
+
+    /// Whether the value `v` holds no part of the operands of its definition: it is established
+    /// to be a builtin value of its exact class that holds only such values ([`Built::Atomic`]),
+    /// such as a constant, the `bool` of `not`, `is`, or `in`, an f-string's new `str`, or an
+    /// operator or a conversion whose operands' classes run only `object`'s or a builtin type's
+    /// special methods for it. A project class's operator may return anything, an object read
+    /// out of its operand too (`__neg__` returning `self.parent`).
+    fn holds_no_operand_part(&self, v: VarId) -> bool {
+        self.built(v) == Built::Atomic
+    }
+
+    /// The one operand the result of `kind` is read out of when no other operand can be part of
+    /// it: the object of an attribute read, the iterable or the iterator of an iteration step,
+    /// and the object of an item looked up by a builtin type's own lookup, which gives an item
+    /// the object holds and never the key: every class the object may be (R2) runs `object`'s
+    /// or a builtin type's `__getitem__` and `__missing__` ([`invokes::interpreter_own`]). A
+    /// project class's `__getitem__` may return its key.
+    fn read_out_of(&self, kind: &InstKind) -> Option<VarId> {
+        match kind {
+            InstKind::AttrLoad { obj, .. }
+            | InstKind::MakeIter { iterable: obj, .. }
+            | InstKind::IterNext { iter: obj, .. } => Some(*obj),
+            InstKind::SubscriptLoad { obj, .. } => invokes::interpreter_own(
+                self.cx.project,
+                self.types.get(obj),
+                &["__getitem__", "__missing__"],
+                false,
+            )
+            .then_some(*obj),
+            _ => None,
+        }
+    }
+
+    /// Whether `var` may hold what a call in [`Self::maybe_new`] returned, or a part of it:
+    /// through copies and the value an attribute read, an item, or an iteration step reads its
+    /// result out of ([`Self::read_out_of`]); anything else past the first step, a phi, or a
+    /// definition with operands may. The resolution leaves out the operands of a value that
+    /// holds no part of them ([`Self::holds_no_operand_part`]), which is asked only after the
+    /// visit: it reads the callees the visit records.
+    fn may_hold_or_read_new(&self, var: VarId) -> bool {
+        if self.maybe_new.is_empty() {
+            return false;
+        }
+        let mut cur = var;
+        for _ in 0..16 {
+            if let Some(elem) = self.unpacked.get(&cur) {
+                cur = *elem;
+                continue;
+            }
+            match self.defs.get(&cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => cur = *src,
+                Some(kind) => match self.read_out_of(kind) {
+                    Some(next) => cur = next,
+                    None => return self.maybe_new.contains(&cur) || !kind.operands().is_empty(),
+                },
+                None => return true,
+            }
+        }
+        true
+    }
+
+    /// The holder of an attribute store of `attr` into the object `obj` holds, when that store
+    /// may link a new object into another one ([`Escape::Into`]): `obj` may be new and is an
+    /// instance of a project class whose write of `attr` stores the value itself and runs no
+    /// code (`ProjectDecls::attr_write_stores_value`).
+    fn link_holder(&self, obj: VarId, attr: &str) -> Option<VarId> {
+        let Some(Val::Inst(class)) = self.types.get(&obj) else {
+            return None;
+        };
+        let kb = self.cx.kb;
+        let catalog_stores = |base: &str| {
+            kb.lookup(&format!("{base}.__setattr__"))
+                .is_some_and(|e| e.stores_on_instance)
+        };
+        (self.may_be_new(obj)
+            && self
+                .cx
+                .project
+                .attr_write_stores_value(class, attr, catalog_stores))
+        .then_some(obj)
     }
 
     /// Whether a query about `var` can be answered with anything but "no".
@@ -5059,8 +5232,13 @@ impl<'a> Extractor<'a> {
             return;
         }
         match kind {
-            InstKind::AttrStore { value, .. }
-            | InstKind::StoreGlobal { value, .. }
+            InstKind::AttrStore { obj, attr, value } => {
+                let how = self
+                    .link_holder(*obj, attr)
+                    .map_or(Escape::Definite, Escape::Into);
+                self.escape(*value, how);
+            }
+            InstKind::StoreGlobal { value, .. }
             | InstKind::StoreDeref { value, .. }
             | InstKind::YieldFrom { value, .. }
             | InstKind::Await { value, .. }
@@ -5072,6 +5250,8 @@ impl<'a> Extractor<'a> {
                 self.escape(*index, Escape::Definite);
                 self.escape(*value, Escape::Definite);
             }
+            // The targets an unpacking binds hold the elements; the display is never seen.
+            InstKind::AllocBuiltin { dst, .. } if self.unpacked_displays.contains(dst) => {}
             InstKind::MakeClosure { captured, .. }
             | InstKind::AllocBuiltin {
                 elems: captured, ..

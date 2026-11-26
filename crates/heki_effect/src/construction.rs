@@ -16,13 +16,23 @@
 //! answer carries ([`Keep`]) and propagation turns into a fact of the function that each of its
 //! calls decides (`MayGiven`).
 //!
+//! An attribute store of a new object into another new object, of a class whose attribute write
+//! runs no code, links the two instead of keeping the value ([`Escape::Into`]): objects the
+//! function made and stored in one another stay new until one of them is kept. Keeping an object
+//! keeps every object it holds through such links, and keeping a value read out of an object
+//! (an attribute, an item, an iteration step, what a call over it returns) keeps what that
+//! object holds, which may be the objects holding it ([`Links`]). The result of a project
+//! function holding itself that way is `ReturnsNew::New::linked`: a value read out of it at a
+//! call may be the result.
+//!
 //! A returned value may also be an element of a parameter (an item, `get`, an iteration step of
 //! it) on some paths: the function returns a new object at the calls binding such a parameter to
 //! a value with no elements, where those paths raise or never reach their `return`
 //! (`elements_of` of [`ReturnsNew::New`]).
 
 use crate::{
-    CallTests, FuncKey, InputGuard, Keep, MayGiven, NewArg, NewCond, NewFrom, NewKind, ReturnsNew,
+    CallTests, FuncKey, InputGuard, Keep, KeptBy, MayGiven, NewArg, NewCond, NewFrom, NewKind,
+    ReturnsNew,
 };
 use heki_ir::walk::{Answer, Budget, Closure, Def, Facts, FnShape, Join, Or, Sparse, fixpoint};
 use heki_ir::{InstKind, VarId};
@@ -39,6 +49,9 @@ pub(crate) enum Escape {
     /// Handed to a project callee's parameter (the call site and callee indexes of the
     /// function, the parameter): kept only if the callee keeps it.
     Handed(u32, u16, u8),
+    /// Stored as an attribute of the object this variable holds, by a write that runs no code: a
+    /// link when that object is one the function made on every path, kept by what keeps it.
+    Into(VarId),
 }
 
 /// One allocation: a variable defined by a constructor call, a copy, or a project call
@@ -55,7 +68,8 @@ struct Alloc {
 pub(crate) struct Recorder {
     allocs: Vec<Alloc>,
     /// The results of calls that hand back the object they are handed (a project function
-    /// returning its parameter), by the argument's variable: the same object.
+    /// returning its parameter), and the targets an unpacking of a display binds
+    /// (`a, b = X(), Y()`), by the variable of the object they hold: the same object.
     handed_back: FxHashMap<VarId, VarId>,
     /// Each escape with the tests of the function's inputs that hold where it runs.
     escapes: Vec<(Pos, VarId, Escape, Vec<InputGuard>)>,
@@ -73,6 +87,9 @@ struct State {
     /// parameters).
     handed: Vec<(u64, u64)>,
 }
+
+/// The operands of a value's definition it may hold a part of, pushed to the list given.
+pub(crate) type ReadsOf<'a> = dyn Fn(VarId, &mut Vec<VarId>) + 'a;
 
 /// What the call of a hand-over (site, callee index, tests known) tells: the callee and the
 /// call's tests.
@@ -126,8 +143,94 @@ impl Roots<'_> {
 /// An action of the data flow at one position, applied in this order: queries, escapes, kills.
 enum Action {
     Query(usize),
-    Escape(VarId, Option<usize>),
+    Escape(Kept),
+    /// A link of a value into the objects of the roots `holder`: what keeps one of them keeps
+    /// the value from then on, as the escapes `value` would.
+    Link {
+        holder: u64,
+        value: Vec<Kept>,
+    },
     Kill(u64),
+}
+
+/// Allocation roots and parameters an escape may keep, by the id of the store that may keep them
+/// (`None`: kept).
+#[derive(Clone, Copy)]
+struct Kept {
+    allocs: u64,
+    params: u64,
+    by: Option<usize>,
+}
+
+/// The objects of the function's allocation roots that hold one another through links
+/// ([`Escape::Into`]), and what each value asked about may have been read out of.
+struct Links {
+    /// By root, the roots its objects may hold through any number of links.
+    held: Vec<u64>,
+    /// By value, the roots it may hold or have been read out of, through copies, phis, and the
+    /// operands of its definition ([`Recorder::resolve`]'s `reads_of`). Absent: only `may`.
+    read: FxHashMap<VarId, u64>,
+    /// Roots every value may hold or have been read out of (all of them past the budget).
+    everything: u64,
+}
+
+impl Links {
+    /// What every value may hold of `roots` roots, each holding every one: past the budget.
+    fn everything(roots: usize) -> Self {
+        let all = u64::MAX.checked_shr(64 - roots as u32).unwrap_or(0);
+        Self {
+            held: vec![all; roots],
+            read: FxHashMap::default(),
+            everything: all,
+        }
+    }
+
+    /// The roots the objects of `roots` may hold.
+    fn held_by(&self, roots: u64) -> u64 {
+        roots_in(roots).fold(0, |mask, r| mask | self.held[r])
+    }
+
+    /// The roots `var` may hold or have been read out of.
+    fn read(&self, var: VarId, may: u64) -> u64 {
+        self.read.get(&var).copied().unwrap_or(may) | self.everything
+    }
+}
+
+/// The indexes of the bits set in `mask`.
+fn roots_in(mask: u64) -> impl Iterator<Item = usize> {
+    (0..64).filter(move |r| mask & (1u64 << r) != 0)
+}
+
+/// The stores that may keep what they are handed ([`Keep`]), each with its id.
+#[derive(Default)]
+struct Keeps {
+    ids: FxHashMap<Keep, usize>,
+    keys: Vec<Keep>,
+}
+
+impl Keeps {
+    fn id(&mut self, key: Keep) -> usize {
+        let next = self.keys.len();
+        let id = *self.ids.entry(key.clone()).or_insert(next);
+        if id == next {
+            self.keys.push(key);
+        }
+        id
+    }
+
+    /// The id of a store that keeps what it is handed where the tests `known` hold (`None`:
+    /// whatever the function is passed).
+    fn store(&mut self, known: &[InputGuard]) -> Option<usize> {
+        (!known.is_empty()).then(|| {
+            self.id(Keep {
+                by: KeptBy::Store,
+                at: CallTests {
+                    args: Vec::new(),
+                    known: known.to_vec(),
+                },
+            })
+        })
+    }
 }
 
 impl Recorder {
@@ -142,7 +245,8 @@ impl Recorder {
         }
     }
 
-    /// `dst` holds the object `arg` holds: the result of a call returning its argument.
+    /// `dst` holds the object `arg` holds: the result of a call returning its argument, or the
+    /// target an unpacking binds to an element of a display.
     pub(crate) fn handed_back(&mut self, dst: VarId, arg: VarId) {
         self.handed_back.insert(dst, arg);
     }
@@ -160,14 +264,16 @@ impl Recorder {
 
     /// Answer every query, and the returns of the function of `shape` (`returns`: whether the
     /// function's result is a new object at every `return` with a value). `element_of` gives the
-    /// parameters a value is an element of by its definition (`0`: none); `handed_to` the
-    /// callee of a hand-over and what its call tells, where the tests given hold.
+    /// parameters a value is an element of by its definition (`0`: none); `reads_of` the
+    /// operands of a value's definition it may hold a part of (the object of an attribute read,
+    /// what a call is handed); `handed_to` the callee of a hand-over and what its call tells,
+    /// where the tests given hold.
     pub(crate) fn resolve(
         self,
         shape: &FnShape<'_>,
         may_params: &FxHashMap<VarId, u64>,
         param_of: &dyn Fn(VarId) -> Option<u8>,
-        element_of: &dyn Fn(VarId) -> u64,
+        (element_of, reads_of): (&dyn Fn(VarId) -> u64, &ReadsOf<'_>),
         handed_to: &HandedTo<'_>,
         returns: bool,
     ) -> (Vec<NewArg>, ReturnsNew) {
@@ -190,9 +296,14 @@ impl Recorder {
         } else {
             Vec::new()
         };
+        let holders = self.escapes.iter().filter_map(|(_, _, how, _)| match how {
+            Escape::Into(holder) => Some(*holder),
+            _ => None,
+        });
         let asked = (self.queries.iter().map(|(_, v)| *v))
             .chain(returned.iter().map(|(_, v)| *v))
-            .chain(self.escapes.iter().map(|(_, v, _, _)| *v));
+            .chain(self.escapes.iter().map(|(_, v, _, _)| *v))
+            .chain(holders);
         let budget = Budget::of_function("construction::Recorder", f);
         let returned_vars: Vec<VarId> = returned.iter().map(|(_, v)| *v).collect();
         let found = self.roots(
@@ -213,55 +324,124 @@ impl Recorder {
         if !self.queries.iter().any(|(_, v)| trackable(*v)) && !any_return_new {
             return (vec![NewArg::Old; self.queries.len()], ReturnsNew::No);
         }
+        // A link's holder: an object the function made on every path, no parameter.
+        let holds = |h: VarId| {
+            let (a, p) = roots.masks(h);
+            a != 0 && p == 0 && roots.all.get(&h).copied().unwrap_or(false)
+        };
+        // Past the budget, every value may hold or have been read out of every root.
+        let links = (self.links(shape, &budget, &roots, &holds, reads_of))
+            .open_means(Links::everything(self.allocs.len()));
         // The ids of the stores that may keep what they are handed: a hand-over, one per callee,
-        // parameter, and what its call tells, and a definite store under tests of the
-        // function's inputs, one per tests. The answers name only those, so the calls of one
-        // helper binding alike share a hand-over.
-        let mut handed_ids: FxHashMap<Keep, usize> = FxHashMap::default();
-        let mut handed_keys: Vec<Keep> = Vec::new();
-        let mut escape_ids: Vec<Option<usize>> = Vec::with_capacity(self.escapes.len());
-        for (_, _, how, known) in &self.escapes {
-            let key = match how {
-                Escape::Definite if known.is_empty() => {
-                    escape_ids.push(None);
-                    continue;
-                }
-                Escape::Definite => Keep {
-                    by: None,
-                    at: CallTests {
-                        args: Vec::new(),
-                        known: known.clone(),
-                    },
-                },
-                Escape::Handed(s, c, p) => {
-                    let (callee, at) = handed_to(*s, *c, known);
-                    Keep {
-                        by: Some((callee, *p)),
-                        at,
-                    }
-                }
-            };
-            let next = handed_keys.len();
-            let id = *handed_ids.entry(key.clone()).or_insert(next);
-            if id == next {
-                handed_keys.push(key);
+        // parameter, and what its call tells; a definite store under tests of the function's
+        // inputs, one per tests; and a store of a value read out of a project function's result,
+        // one per function and tests. The answers name only those, so the calls of one helper
+        // binding alike share a hand-over.
+        let mut keeps = Keeps::default();
+        let factories = (self.allocs.iter().enumerate())
+            .filter(|(_, a)| !a.returns.is_empty())
+            .fold(0u64, |mask, (r, _)| mask | (1u64 << r));
+        // What storing `var` where the tests `known` hold keeps: the objects it may be, those
+        // they hold, and those a value read out of them may be; read out of a project
+        // function's result, the result itself when that function links it to itself
+        // (`KeptBy::ReadBack`).
+        let stored = |keeps: &mut Keeps, var: VarId, known: &[InputGuard], out: &mut Vec<Kept>| {
+            let (a, params) = roots.masks(var);
+            let read = links.read(var, a);
+            let allocs = a | links.held_by(read);
+            if allocs | params != 0 {
+                out.push(Kept {
+                    allocs,
+                    params,
+                    by: keeps.store(known),
+                });
             }
-            escape_ids.push(Some(id));
-        }
-        // Every action in position order (queries, escapes, kills at one position), and the
-        // range of each block's actions.
-        let n = f.blocks.len();
+            self.read_backs(keeps, &links, read & factories & !allocs, known, out);
+        };
         let mut actions: Vec<(Pos, u8, Action)> = Vec::with_capacity(
             self.queries.len() + returned.len() + self.escapes.len() + self.allocs.len(),
         );
+        for (pos, var, how, known) in &self.escapes {
+            let mut out = Vec::new();
+            match how {
+                Escape::Into(holder) if holds(*holder) => {
+                    // A parameter stored in a new object stays kept (`keep_params`).
+                    let params = roots.masks(*var).1;
+                    if params != 0 {
+                        let by = keeps.store(known);
+                        out.push(Kept {
+                            allocs: 0,
+                            params,
+                            by,
+                        });
+                    }
+                    let mut value = Vec::new();
+                    stored(&mut keeps, *var, known, &mut value);
+                    let holder = roots.masks(*holder).0;
+                    // A holder a project call returned is new only where that call returns a
+                    // new object: elsewhere the value is as public as the holder.
+                    let allocs = value.iter().fold(0, |mask, k| mask | k.allocs);
+                    for r in roots_in(holder).filter(|_| allocs != 0) {
+                        for from in &self.allocs[r].returns {
+                            let by = Some(keeps.id(Keep {
+                                by: KeptBy::Holder(from.clone()),
+                                at: CallTests {
+                                    args: Vec::new(),
+                                    known: known.clone(),
+                                },
+                            }));
+                            out.push(Kept {
+                                allocs,
+                                params: 0,
+                                by,
+                            });
+                        }
+                    }
+                    actions.push((*pos, 1, Action::Link { holder, value }));
+                }
+                Escape::Definite | Escape::Into(_) => stored(&mut keeps, *var, known, &mut out),
+                Escape::Handed(s, c, p) => {
+                    let (allocs, params) = roots.masks(*var);
+                    if allocs | params != 0 {
+                        let (callee, at) = handed_to(*s, *c, known);
+                        let by = Some(keeps.id(Keep {
+                            by: KeptBy::Callee(callee, *p),
+                            at,
+                        }));
+                        out.push(Kept { allocs, params, by });
+                    }
+                    // The callee may store anything it reads out of the object, which its
+                    // summary does not tell.
+                    let read = links.read(*var, allocs);
+                    let parts = links.held_by(read);
+                    if parts != 0 {
+                        let by = keeps.store(known);
+                        out.push(Kept {
+                            allocs: parts,
+                            params: 0,
+                            by,
+                        });
+                    }
+                    self.read_backs(
+                        &mut keeps,
+                        &links,
+                        read & factories & !parts,
+                        known,
+                        &mut out,
+                    );
+                }
+            }
+            actions.extend(out.into_iter().map(|k| (*pos, 1, Action::Escape(k))));
+        }
+        let handed_keys = keeps.keys;
+        // Every action in position order (queries, escapes, kills at one position), and the
+        // range of each block's actions.
+        let n = f.blocks.len();
         for (i, (pos, _)) in self.queries.iter().enumerate() {
             actions.push((*pos, 0, Action::Query(i)));
         }
         for (i, (pos, _)) in returned.iter().enumerate() {
             actions.push((*pos, 0, Action::Query(self.queries.len() + i)));
-        }
-        for ((pos, var, _, _), id) in self.escapes.iter().zip(escape_ids) {
-            actions.push((*pos, 1, Action::Escape(*var, id)));
         }
         for (r, a) in self.allocs.iter().enumerate() {
             actions.push((a.pos, 2, Action::Kill(1u64 << r)));
@@ -283,17 +463,30 @@ impl Recorder {
             handed: vec![(0, 0); handed_keys.len()],
             ..State::default()
         };
+        let keep = |state: &mut State, k: &Kept| match k.by {
+            None => {
+                state.allocs |= k.allocs;
+                state.params |= k.params;
+            }
+            Some(id) => {
+                state.handed[id].0 |= k.allocs;
+                state.handed[id].1 |= k.params;
+            }
+        };
         let apply = |state: &mut State, action: &Action| match action {
-            Action::Escape(var, id) => {
-                let (a, p) = roots.masks(*var);
-                match id {
-                    None => {
-                        state.allocs |= a;
-                        state.params |= p;
+            Action::Escape(k) => keep(state, k),
+            Action::Link { holder, value } => {
+                // Kept with its holder: by every store that may keep one of the holder's
+                // objects.
+                let allocs = value.iter().fold(0, |mask, k| mask | k.allocs);
+                for h in &mut state.handed {
+                    if h.0 & holder != 0 {
+                        h.0 |= allocs;
                     }
-                    Some(id) => {
-                        state.handed[*id].0 |= a;
-                        state.handed[*id].1 |= p;
+                }
+                if state.allocs & holder != 0 {
+                    for k in value {
+                        keep(state, k);
                     }
                 }
             }
@@ -383,6 +576,7 @@ impl Recorder {
             let mut kind = NewKind::Own;
             let mut cond = NewCond::default();
             let mut any = false;
+            let mut linked = false;
             for (v, a) in returned_vars.iter().zip(tail) {
                 // Only elements of parameters: nothing is returned there at such a call.
                 if !roots.may.contains_key(v) && roots.elements_of.contains_key(v) {
@@ -394,6 +588,7 @@ impl Recorder {
                 kind = kind.min(k);
                 cond = cond.and(&c);
                 any = true;
+                linked |= roots_in(roots.masks(*v).0).any(|r| links.held[r] & (1u64 << r) != 0);
             }
             let elements_of = (returned_vars.iter())
                 .filter_map(|v| roots.elements_of.get(v))
@@ -406,9 +601,116 @@ impl Recorder {
                 cond,
                 elements_of,
                 kept: MayGiven::default(),
+                linked,
             }
         };
         (answers, returns_new())
+    }
+
+    /// The allocation roots each allocating variable defines.
+    fn own_roots(&self) -> FxHashMap<VarId, u64> {
+        let mut own: FxHashMap<VarId, u64> = FxHashMap::default();
+        for (r, a) in self.allocs.iter().enumerate() {
+            *own.entry(a.dst).or_default() |= 1u64 << r;
+        }
+        own
+    }
+
+    /// The links between the allocation roots ([`Links`]): each [`Escape::Into`] whose holder
+    /// `holds` links into the holder's roots the roots its value may hold or have been read out
+    /// of (a value read out of an object may be one it holds), closed under links. Without a
+    /// link or a root from a project call, nothing is read out of a root that the escapes do not
+    /// keep already. Open past the budget.
+    fn links(
+        &self,
+        shape: &FnShape<'_>,
+        budget: &Budget,
+        roots: &Roots<'_>,
+        holds: &dyn Fn(VarId) -> bool,
+        reads_of: &ReadsOf<'_>,
+    ) -> Answer<Links> {
+        let mut links = Links {
+            held: vec![0; self.allocs.len()],
+            read: FxHashMap::default(),
+            everything: 0,
+        };
+        let linking = |how: &Escape| matches!(how, Escape::Into(h) if holds(*h));
+        let any_link = self.escapes.iter().any(|(_, _, how, _)| linking(how));
+        if !any_link && self.allocs.iter().all(|a| a.returns.is_empty()) {
+            return Answer::Known(links);
+        }
+        let own = self.own_roots();
+        let f = shape.f;
+        // What `may` walks, and the operands of a definition the value may hold a part of.
+        let from = |v: VarId, out: &mut Vec<VarId>| {
+            match shape.def(v) {
+                Def::Inst(..) => reads_of(v, out),
+                Def::Phi(b, i) => out.extend(
+                    (f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x))
+                        .filter(|x| *x != v),
+                ),
+                Def::Param | Def::None => {}
+            }
+            out.extend(self.handed_back.get(&v));
+        };
+        let read: Closure<VarId, Or> = Closure::new();
+        let own = |u: VarId| Or(own.get(&u).copied().unwrap_or(0));
+        let found: Answer<Vec<u64>> = (self.escapes.iter())
+            .map(|(_, var, _, _)| read.ask(budget, *var, own, from).map(|b| b.0))
+            .collect();
+        found.map(|found| {
+            for ((_, var, how, _), found) in self.escapes.iter().zip(found) {
+                let read = found | roots.masks(*var).0;
+                links.read.insert(*var, read);
+                if let Escape::Into(holder) = how
+                    && holds(*holder)
+                {
+                    for r in roots_in(roots.masks(*holder).0) {
+                        links.held[r] |= read;
+                    }
+                }
+            }
+            // Closed under links: what an object holds holds (Warshall's closure).
+            for k in 0..links.held.len() {
+                let through = links.held[k];
+                for held in &mut links.held {
+                    if *held & (1u64 << k) != 0 {
+                        *held |= through;
+                    }
+                }
+            }
+            links
+        })
+    }
+
+    /// The escapes of a store, where the tests `known` hold, of a value read out of the roots
+    /// `mask` from project calls: each keeps its root's objects when a function of the call
+    /// links its result to itself (`KeptBy::ReadBack`).
+    fn read_backs(
+        &self,
+        keeps: &mut Keeps,
+        links: &Links,
+        mask: u64,
+        known: &[InputGuard],
+        out: &mut Vec<Kept>,
+    ) {
+        for r in roots_in(mask) {
+            let allocs = (1u64 << r) | links.held[r];
+            for from in &self.allocs[r].returns {
+                let by = Some(keeps.id(Keep {
+                    by: KeptBy::ReadBack(from.callee.clone()),
+                    at: CallTests {
+                        args: Vec::new(),
+                        known: known.to_vec(),
+                    },
+                }));
+                out.push(Kept {
+                    allocs,
+                    params: 0,
+                    by,
+                });
+            }
+        }
     }
 
     /// The allocation roots each of `asked` may hold, through copies and phis: `may`, the roots
@@ -431,10 +733,7 @@ impl Recorder {
             may_params,
             param_of,
         };
-        let mut own: FxHashMap<VarId, u64> = FxHashMap::default();
-        for (r, a) in self.allocs.iter().enumerate() {
-            *own.entry(a.dst).or_default() |= 1u64 << r;
-        }
+        let own = self.own_roots();
         if own.is_empty() {
             return Answer::Known(roots);
         }

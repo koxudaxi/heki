@@ -511,6 +511,13 @@ pub struct AttrRead {
 }
 
 impl ClassDecl {
+    /// Whether the body binds `model_config` or `Config`: a model's configuration, which may ask
+    /// it to validate its fields' defaults (`validate_default`) or the values written to them
+    /// (`validate_assignment`).
+    fn configures_model(&self) -> bool {
+        self.members.contains("model_config") || self.members.contains("Config")
+    }
+
     /// What the class's methods store in `attr` (`ClassDecl::attr_stores`).
     pub fn stored(&self, attr: &str) -> Option<&AttrStore> {
         let i = self
@@ -725,12 +732,18 @@ pub struct ClassDecl {
     /// The resolved `metaclass=` of the class statement.
     pub metaclass: Option<String>,
     /// The class statement names a metaclass other than `type` and `abc.ABCMeta`, also one heki
-    /// cannot resolve, or has a base heki names no class for ([`is_unknown_base`]), whose
-    /// metaclass is unknown ([`ProjectDecls::has_custom_metaclass`]).
+    /// cannot resolve, or has a base heki names no class for ([`is_unknown_base`]) or unpacks
+    /// a mapping of keywords whose keys heki does not know (`**options`), whose metaclass is
+    /// unknown ([`ProjectDecls::has_custom_metaclass`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom_metaclass: bool,
     /// The `frozen=` keyword of the class statement (`class C(Base, frozen=False)`).
     pub frozen_keyword: Option<bool>,
+    /// The class statement passes a keyword other than `metaclass=`, or unpacks a mapping of
+    /// them (`class M(BaseModel, validate_assignment=True)`): a configuration of what a base or
+    /// the metaclass makes of the class ([`ProjectDecls::attr_write_stores_value`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub passes_keywords: bool,
     /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
     /// builds): `Some(frozen_default)`.
     pub transform: Option<bool>,
@@ -4502,6 +4515,34 @@ impl ProjectDecls {
             })
     }
 
+    /// Whether storing `attr` on a value of the project class `class` binds the instance's own
+    /// attribute to the value itself and runs no code of the project, on every class it may be
+    /// under R2: as [`Self::attr_write_runs_no_code`], and when one of those classes derives
+    /// from a base the catalog says stores on the instance (`catalog_stores`), none of them
+    /// configures it: binds a model configuration ([`ClassDecl::configures_model`]) or passes
+    /// class keywords (`ClassDecl::passes_keywords`). With `validate_assignment`,
+    /// `pydantic.BaseModel` stores a validated conversion and runs the project's validators,
+    /// which may keep the value.
+    pub(crate) fn attr_write_stores_value(
+        &self,
+        class: &str,
+        attr: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> bool {
+        if !self.attr_write_runs_no_code(class, attr, &catalog_stores) {
+            return false;
+        }
+        let classes = self.value_classes(class);
+        let decls = || classes.iter().filter_map(|c| self.class(c));
+        let catalog_base = |d: &ClassDecl| {
+            d.bases.iter().any(|b| {
+                let base = self.canonical(b);
+                !self.is_project_class(&base) && catalog_stores(&base)
+            })
+        };
+        !decls().any(catalog_base) || decls().all(|d| !d.passes_keywords && !d.configures_model())
+    }
+
     /// Whether reading `attr` on a value of the class `class` finds the value an instance
     /// stores there, as [`Self::plain_attr`] decides for project classes, with the classes
     /// outside the project along the MROs of every class the value may be (R2) plain bases or
@@ -4912,14 +4953,11 @@ impl ProjectDecls {
         out
     }
 
-    /// Whether a project class along the MRO of `class` binds `model_config` or `Config` in its
-    /// body: a model's configuration may ask it to validate its fields' defaults
-    /// (`validate_default`), and a field doing so holds what the validation returns.
+    /// Whether a project class along the MRO of `class` configures the model
+    /// ([`ClassDecl::configures_model`]): a field validating its default holds what the
+    /// validation returns.
     fn may_validate_defaults(&self, class: &str) -> bool {
-        self.mro(class).iter().any(|c| {
-            self.class(c)
-                .is_some_and(|d| d.members.contains("model_config") || d.members.contains("Config"))
-        })
+        (self.mro(class).iter()).any(|c| self.class(c).is_some_and(ClassDecl::configures_model))
     }
 
     /// Whether a base of the project class `class` outside the project is one the catalog
@@ -6809,7 +6847,9 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         let metaclass_text = keyword("metaclass");
         let metaclass = metaclass_text.and_then(|m| decls.resolve_dotted(m, false));
         // `type` is no name the module binds: it stays the builtin unless the module rebinds it.
+        // A mapping of keywords heki does not read (`**options`) may pass `metaclass`.
         let custom_metaclass = unknown_base
+            || keyword("**").is_some()
             || metaclass_text.is_some_and(|text| {
                 !matches!(
                     metaclass.as_deref().unwrap_or(text),
@@ -6817,6 +6857,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
                 )
             });
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
+        let passes_keywords = class.keywords.iter().any(|(k, _)| k != "metaclass");
         let is_protocol = bases
             .iter()
             .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
@@ -6842,6 +6883,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             c.metaclass = metaclass;
             c.custom_metaclass = custom_metaclass;
             c.frozen_keyword = frozen_keyword;
+            c.passes_keywords = passes_keywords;
             c.is_protocol = is_protocol;
             c.members = members;
         }
