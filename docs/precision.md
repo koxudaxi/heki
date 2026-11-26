@@ -99,6 +99,11 @@ Exact claims hold in every run consistent with seven assumptions
 - **R1**: the functions and classes on a call chain are not replaced at run time.
 - **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
   goes through a method call holds only when every implementation in such a subclass has it.
+  A value annotated with a nominal container ABC (`Sequence`, `Mapping`, `Set`, and their mutable
+  ABCs) is one of its family's builtins or another library class implementing it, taken to run
+  what the builtin runs, or a project class implementing it (deriving from it or from a class of
+  its family, or registered with it); a `register` heki cannot resolve or a `__subclasshook__`
+  leaves such values open, as are those of a structural ABC (`Iterable`) or a protocol.
   Rewrites never rely on annotations.
 - **R3**: the ecosystem catalog describes the library, an effect with its condition.
 - **R4**: imports resolve as configured.
