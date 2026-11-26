@@ -6745,7 +6745,7 @@ impl<'a> Extractor<'a> {
         let sites_before = self.sites.len();
         let made = self.call(bb, &callee, call);
         if self.sites.len() > sites_before {
-            let member = self.module_member(call, name);
+            let member = self.module_member(&self.sites[sites_before], call, name);
             for site in &mut self.sites[sites_before..] {
                 site.module_member.clone_from(&member);
             }
@@ -6782,9 +6782,8 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// [`CallSite::module_member`] of the site of a call of method `name` on `call`'s receiver.
-    fn module_member(&self, call: &Call<'_>, name: &str) -> Option<Box<FuncKey>> {
-        let site = self.sites.last()?;
+    /// [`CallSite::module_member`] of `site`, of a call of method `name` on `call`'s receiver.
+    fn module_member(&self, site: &CallSite, call: &Call<'_>, name: &str) -> Option<Box<FuncKey>> {
         let target = site.constructs.clone().or_else(|| {
             let callees = site.project_callees();
             (callees.len() == 1).then(|| callees[0].callee.fqn())
