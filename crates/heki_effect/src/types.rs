@@ -76,6 +76,9 @@ pub enum Args {
     /// it bound them to (`resolver::fields`). A field not listed holds a value of its declared
     /// type.
     Fields(Box<[(Box<str>, Elem)]>),
+    /// What calling the value gives (`Callable[..., T]`): an instance of one class or one class
+    /// object ([`Args::returns`]).
+    Returns(Box<Ty>),
 }
 
 /// The type of the items in one slot of a container.
@@ -102,6 +105,9 @@ pub(crate) enum Generic {
     Tuple,
     /// `C[T]`: the object holds one value of `T` ([`Args::Result`]).
     Held,
+    /// `Callable[[A, B], T]` / `Callable[..., T]`: calling the value gives `T`
+    /// ([`Args::Returns`]).
+    Returns,
 }
 
 /// Generic containers and holders by the fqn an annotation resolves to (`typing.List` and the
@@ -157,6 +163,8 @@ const GENERICS: &[(&str, Generic)] = &[
     ("collections.abc.Mapping", Generic::Map),
     ("collections.abc.MutableMapping", Generic::Map),
     ("contextvars.ContextVar", Generic::Held),
+    ("typing.Callable", Generic::Returns),
+    ("collections.abc.Callable", Generic::Returns),
 ];
 
 /// The generic container or holder `class` is, if any.
@@ -251,6 +259,15 @@ impl Ty {
             | Ty::Coroutine(_)
             | Ty::Union(_)
             | Ty::OneOf(_) => None,
+        }
+    }
+
+    /// What calling the value gives when it is a `Callable[..., T]` of one class `T`
+    /// ([`Args::Returns`]).
+    pub(crate) fn returned(&self) -> Option<&Ty> {
+        match &self.obj()?.args {
+            Args::Returns(result) => Some(result),
+            _ => None,
         }
     }
 
@@ -452,6 +469,17 @@ impl Args {
         }
     }
 
+    /// `Returns(result)` when calling the value gives an instance of one class or one class
+    /// object: a union, `Any`, `object`, and an unknown result say nothing of the class (the
+    /// annotation leaves a result that may be `None` unknown, `resolver::ModuleDecls::admits_none`).
+    pub(crate) fn returns(result: Option<Ty>) -> Self {
+        match result {
+            Some(Ty::Inst(o)) if crate::resolver::of_any_class(&o.class) => Args::None,
+            Some(t @ (Ty::Inst(_) | Ty::Class(_) | Ty::SelfType)) => Args::Returns(Box::new(t)),
+            _ => Args::None,
+        }
+    }
+
     /// `Fields(fields)`, without tracking an instance whose fields all hold values of their
     /// declared types.
     pub(crate) fn fields(fields: Box<[(Box<str>, Elem)]>) -> Self {
@@ -487,6 +515,7 @@ impl Args {
             Args::Fields(fs) => {
                 Args::Fields(fs.iter().map(|(n, e)| (n.clone(), elem(e))).collect())
             }
+            Args::Returns(t) => Args::returns(f(t)),
         }
     }
 
@@ -494,7 +523,7 @@ impl Args {
     /// which yields itself while it waits).
     pub(crate) fn item(&self) -> Elem {
         match self {
-            Args::None | Args::Result(_) | Args::Fields(_) => Elem::Unknown,
+            Args::None | Args::Result(_) | Args::Fields(_) | Args::Returns(_) => Elem::Unknown,
             Args::Items(e) | Args::Map(e, _) => (**e).clone(),
             Args::Tuple(es) => es.iter().fold(Elem::Empty, |acc, e| acc.join(e)),
         }
@@ -512,6 +541,7 @@ impl Args {
                 Args::items(self.item().join(&other.item()))
             }
             (Args::Result(a), Args::Result(b)) => Args::result(a.join(b)),
+            (Args::Returns(a), Args::Returns(b)) => Args::returns(a.join(b)),
             // A field one of them leaves to its declared type is the declared type's.
             (Args::Fields(a), Args::Fields(b)) => {
                 let joined: Box<[(Box<str>, Elem)]> = a
@@ -534,6 +564,7 @@ impl Args {
             Args::Map(k, v) => k.depth().max(v.depth()),
             Args::Tuple(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
             Args::Fields(fs) => fs.iter().map(|(_, e)| e.depth()).max().unwrap_or(0),
+            Args::Returns(t) => t.depth(),
         }
     }
 

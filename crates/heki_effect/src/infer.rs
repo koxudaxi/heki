@@ -1922,11 +1922,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             return Ok(None);
         };
         let item = match (&o.args, is_slice) {
-            (Args::None | Args::Result(_) | Args::Fields(_), false) => {
+            (Args::None | Args::Result(_) | Args::Fields(_) | Args::Returns(_), false) => {
                 return Ok(self.dunder(o, "__getitem__"));
             }
             // A slice of a builtin sequence is one of its class, whatever its items.
-            (Args::None | Args::Result(_) | Args::Fields(_), true) => {
+            (Args::None | Args::Result(_) | Args::Fields(_) | Args::Returns(_), true) => {
                 return Ok(SLICED_SEQUENCES
                     .contains(&o.class.as_str())
                     .then(|| Ty::inst(o.class.as_str())));
@@ -2622,6 +2622,19 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| t.bind_self(Some(&self_ty)))
                 .map(|t| decl.call_type(t));
         }
+        // An attribute of an instance that no class of its MRO defines a method of holds a value
+        // of its declared type: a `Callable[..., T]` gives the `T` it names.
+        if matches!(recv, Ty::Inst(_) | Ty::Super(_))
+            && cx.project.is_project_class(class)
+            && let Some(result) = self
+                .member(recv, method)
+                .ok()
+                .flatten()
+                .as_ref()
+                .and_then(Ty::returned)
+        {
+            return Some(result.clone());
+        }
         let callee = cx.project.method_targets(class, method, skip_self, cx.kb);
         let entry = match &callee {
             Callee::External(symbol) => cx.catalog(symbol),
@@ -2645,9 +2658,13 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// What calling a value of type `callee` returns: a partial object calls what it wraps, an
-    /// instance its `__call__`.
+    /// What calling a value of type `callee` returns: a partial object calls what it wraps, a
+    /// `Callable[..., T]` gives the `T` it names ([`Args::Returns`]), any other instance calls
+    /// its `__call__`.
     fn called(&self, callee: &Ty, call: Passed<'_>) -> Option<Ty> {
+        if let Some(result) = callee.returned() {
+            return Some(result.clone());
+        }
         match callee {
             Ty::Ref(fqn) | Ty::Class(fqn) => {
                 self.cx.call_result(fqn, |i, k| self.passed(call, i, k))

@@ -379,6 +379,14 @@ A module global the module body binds to a value of known type, and an instance 
 the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`,
 `resolver::stores`).
 
+A call of a value annotated `Callable[..., T]` or `Callable[[...], T]` (a parameter, a local,
+a return annotation, an attribute, a property, a global) gives a `T` when `T` is one class or one
+class object (`types::Args::Returns`, Priority 2). A `T` that may be `None` (`T | None`,
+`Optional[T]`, `Union[T, None]`, an alias or a bound type variable of such a type,
+`ModuleDecls::nullable_type_names`), a union of classes, an unbound type variable, `Any`, and
+`object` give no class, nor does a bare `Callable`. The call itself stays unresolved: the
+annotation does not say which function the value holds.
+
 Some receivers have the class the language or the standard library gives them. An instance's
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
