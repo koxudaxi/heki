@@ -70,7 +70,7 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - `heki check --snapshot PATH` makes `MUT103` compare with the summary snapshot at `PATH` instead of `.heki-summary-snapshot.json` at the project root, so CI can compare a pull request with a snapshot generated on its protected base branch without committing snapshot JSON. A path that is missing or unreadable, a file that is not valid JSON or not a snapshot, a snapshot of an unsupported version, and a run in which `MUT103` is not enabled exit with code 2. `--snapshot` cannot be combined with `--watch`. Without the option, the file at the project root is read as before. (#507)
 - The Agent Skill has a reference, `references/contracts.md`, for drafting and changing
   contracts: keep walls thin, start from `heki recommend` and `heki inspect`, declare the wall the
-  team wants with `fail-on = "warning"` and an actionable `message`, record the code that already
+  team wants with `fail = true` on the table and an actionable `message`, record the code that already
   crosses it in a Ratchet baseline rather than in `allowed-*`, and never weaken a wall without the
   maintainer's approval. `heki skill install` installs it.
 - `heki check --generate-prompt` tells the model never to make a run pass by widening a contract,
