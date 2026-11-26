@@ -162,6 +162,32 @@ pub fn render_text(r: &InspectReport) -> String {
         };
         let _ = writeln!(out, "only reads {only}");
     }
+    for c in &r.registered {
+        let cond = &c.condition;
+        let others = if cond.others_open {
+            ", other names not followed"
+        } else {
+            ""
+        };
+        let at = &c.registration;
+        let _ = writeln!(
+            out,
+            "registered {} as {} by {} ({}:{}), when {} == {:?}{others}",
+            c.param,
+            c.class,
+            at.function,
+            file_name(&at.path),
+            at.line,
+            cond.selector,
+            cond.equals,
+        );
+        for p in &c.changes {
+            let path = |w: &String| format!("{}.{w}", p.param).trim_end_matches('.').to_owned();
+            let what: Vec<String> = p.what.iter().map(path).collect();
+            let how = inline_chain(&p.chain, p.at.as_ref());
+            let _ = writeln!(out, "  then changes {}: {how}", what.join(", "));
+        }
+    }
     let ret = &r.returns;
     let origins = match &ret.origins {
         None => "a constant or a value of unknown origin".to_owned(),

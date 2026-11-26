@@ -9180,7 +9180,13 @@ pub struct TypeCtx<'a> {
     /// What reading the module's globals and its classes' attributes gives while
     /// [`stores::record`] decides their types.
     store_reads: Option<&'a dyn stores::StoreReads>,
+    /// Parameter types a registration context assumes (`heki inspect` only): the type of an
+    /// unannotated parameter of one function, by qualname and position.
+    seeded: Option<&'a SeededParams>,
 }
+
+/// The parameter types one registration context assumes, by function qualname and position.
+pub type SeededParams = FxHashMap<(String, usize), Ty>;
 
 /// Declarations used when a module is missing from `ProjectDecls`.
 /// Where the value of a module global a function reads is decided ([`TypeCtx::global_read`]).
@@ -9280,10 +9286,21 @@ impl<'a> TypeCtx<'a> {
             bindings: std::cell::OnceCell::new(),
             taken: RefCell::default(),
             store_reads: None,
+            seeded: None,
         }
     }
 
     /// The context reading `layer1` for the library calls that only read an argument.
+    /// The context with the parameter types of `seeded`.
+    pub(crate) fn with_seeded(self, seeded: Option<&'a SeededParams>) -> Self {
+        Self { seeded, ..self }
+    }
+
+    /// The type a registration context gives parameter `i` of `f`.
+    pub(crate) fn seeded_param(&self, f: &IrFunction, i: usize) -> Option<Ty> {
+        self.seeded?.get(&(f.qualname.clone(), i)).cloned()
+    }
+
     pub fn with_layer1(self, layer1: Option<&'a EffectiveSoundnessKb>) -> Self {
         Self { layer1, ..self }
     }

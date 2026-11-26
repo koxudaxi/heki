@@ -1099,7 +1099,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                         ),
                         t => t,
                     }),
-                    None => Fact::Unknown,
+                    None => cx.seeded_param(f, i).map_or(Fact::Unknown, Fact::Known),
                 },
             };
             self.facts[p.var.0 as usize] = fact;
