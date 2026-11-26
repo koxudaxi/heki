@@ -971,6 +971,14 @@ EffectSummary(f) = {
                                                            // "[]": an object it holds as an item or an element
                                                            // (p["k"].append(x), for x in p: x.clear()), also
                                                            // through a shallow copy of it (ELEMENTS_PATH)
+    entry_change_params:      Bitset,                      // the "[]" changes that change an entry as part of
+                                                           // the container: in place, or an attribute heki ties
+                                                           // to no project class (an attribute of an entry of a
+                                                           // project class is that class's write, also of one
+                                                           // an isinstance check gives it, in the blocks the
+                                                           // check guards); with ArgOrigin::param_entries,
+                                                           // which argument is such an entry; contract-only
+                                                           // (IndirectItemMut)
     changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes (and "[]") whose objects change (in place
                                                            // or deeper), not just rebound: what a shallow copy
                                                            // shares (MUT202)
@@ -1175,7 +1183,8 @@ declaring the name `global`), and all of them when a star import, `exec`, or `gl
 rebind its names. `TypeCtx::global_literal` and `TypeCtx::global_str` read through it, and so do
 re-exports (`ProjectDecls::canonical_value`, which `literal_constant`, `str_constant`, and
 `small_global` follow). Contract-only facts
-(container entries, `WriteKind::ItemMut`, and a helper's `WriteKind::IndirectItemMut`, construction through `ArgOrigin::new_object` and
+(container entries, `WriteKind::ItemMut`, and a helper's `WriteKind::IndirectItemMut` from
+`EffectSummary::entry_change_params` and `ArgOrigin::param_entries`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.

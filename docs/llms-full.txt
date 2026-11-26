@@ -3342,7 +3342,11 @@ A write into the entries of a target's container (`model.meta["kw"][name] = v`) 
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
 after an augmented assignment that changes the container in place and so keeps it
 (`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
-(`count += 1`) binds a new object.
+(`count += 1`) binds a new object. An attribute write on an entry of a project class
+(`model.fields[0].name = v` with `fields: list[Field]`) is a write of that class's attribute
+(`Field.name`), judged by its own contracts, also in a helper handed the container
+(`rename_all(model.fields)`); on an entry heki ties to no project class, a helper handed the
+container writes the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -14289,7 +14293,15 @@ allowed writers:
   reported once at the outermost call site; a helper changing an entry of the container it is
   handed (`box["k"].add(v)`, also through a local alias of the entry) writes it too, an
   `indirect_item_mut` write, and so does a method of the container changing an entry of its
-  own `self`, called on the attribute's value (an `item_mut` write at the call). A helper that
+  own `self`, called on the attribute's value (an `item_mut` write at the call). An attribute
+  write on an entry is such a change only when heki ties the entry to no project class
+  (`for field in fields: field.name = v` with `fields: list`, also in a function the entry is
+  handed to that does not type it either): on an entry of a project class
+  (`fields: list[Field]`), it is that
+  class's write (`Field.name`), judged by the contracts of `Field.name` as the same write made
+  directly (`for field in model.fields: field.name = v`) is, also when the helper hands the
+  entry to a function typing it (`rename(field, v)`) or writes below one of its attributes
+  (`field.tags.append(v)`). A helper that
   sees the object's class (an annotated parameter, `self` of a method) reports its own write
   instead, so a write it routes through the allowed writers stays allowed for its callers; a helper handed the value of an attribute
   (`helper(field.data_type)`) writes that attribute only when it changes the value in place,

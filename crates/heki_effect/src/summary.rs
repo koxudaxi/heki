@@ -48,7 +48,7 @@ use crate::{
     UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Join, KeySet, Or, Use};
 use heki_ir::{
     BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
     FunctionId, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode,
@@ -573,6 +573,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
     into.iterates_params |= other.iterates_params;
     // A must-fact: propagate only through parameters both definitions forward unconditionally.
     into.unconditional_forwards &= other.unconditional_forwards;
+    into.entry_change_params |= other.entry_change_params;
     for (i, paths) in other.mutated_param_paths {
         let memos = other.memo_param_paths.as_deref().and_then(|m| m.get(&i));
         for path in paths {
@@ -977,8 +978,8 @@ struct Extractor<'a> {
     /// ([`Self::mapping`]).
     mappings: RefCell<FxHashMap<VarId, keywords::Ways>>,
     /// The budget of the walks over the function's values ([`Self::global_roots`],
-    /// [`Self::mapping`], [`Self::element_paths`]) and of the mapping entries calls bind
-    /// ([`Self::keyword_ways`]).
+    /// [`Self::mapping`], [`Self::element_paths`], [`Self::entry_params`]) and of the mapping
+    /// entries calls bind ([`Self::keyword_ways`]).
     walk_budget: Budget,
     /// What the function may rebind (set by `build_aliases`).
     rebound: OnceCell<Rebound<'a>>,
@@ -987,7 +988,10 @@ struct Extractor<'a> {
     items_changed: OnceCell<FxHashSet<(u8, Option<String>)>>,
     /// The parameters whose items or elements each value may be, or be below
     /// ([`Self::element_paths`]), on the function's tables and budget.
-    elements: Closure<(VarId, ItemStep), KeySet<(u8, String)>>,
+    elements: ElementWalks<KeySet<(u8, String)>>,
+    /// The parameters whose entries each value may be as part of the container
+    /// ([`Self::entry_params`]), on the function's tables and budget.
+    entries: ElementWalks<Or>,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -1348,6 +1352,7 @@ impl<'a> Extractor<'a> {
             ..EffectSummary::default()
         };
         let live = ownership::Live::of(f, &defs);
+        let scopes = narrowed.scopes();
         let mut ex = Self {
             f,
             shape,
@@ -1408,7 +1413,8 @@ impl<'a> Extractor<'a> {
             walk_budget: Budget::of_function("summary::walks", f),
             rebound: OnceCell::new(),
             items_changed: OnceCell::new(),
-            elements: Closure::new(),
+            elements: ElementWalks::new(scopes),
+            entries: ElementWalks::new(scopes),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -2058,19 +2064,8 @@ impl<'a> Extractor<'a> {
         if self.param_alias.is_empty() {
             return Vec::new();
         }
-        let (f, shape) = (self.f, self.shape);
-        let container = |v: &VarId| {
-            self.param_alias
-                .get(v)
-                .or_else(|| self.param_copy_alias.get(v))
-        };
         let own = |(v, step): (VarId, ItemStep)| {
-            let ItemStep::Items(index) = step else {
-                return KeySet::new();
-            };
-            let key = index.and_then(|i| shape.str_const(i));
-            container(&v)
-                .filter(|alias| self.keeps_items(alias, key))
+            self.items_of_container(v, step)
                 .map(|(i, path)| {
                     let path = path.clone();
                     (*i, path.unwrap_or_else(|| crate::ELEMENTS_PATH.to_owned()))
@@ -2078,49 +2073,120 @@ impl<'a> Extractor<'a> {
                 .into_iter()
                 .collect()
         };
-        let next = |(v, step): (VarId, ItemStep), out: &mut Vec<(VarId, ItemStep)>| {
-            let below = (v, ItemStep::Below);
-            match shape.def(v) {
-                Def::Phi(b, i) => out
-                    .extend((f.block(b).phis[i as usize].incoming.iter()).map(|(_, w)| (*w, step))),
-                Def::Inst(b, i) => match (&f.block(b).insts[i as usize].kind, step) {
-                    (InstKind::Copy { src, .. }, _) => out.push((*src, step)),
-                    // The items of a parameter or of its copy are its own (`own`); those of any
-                    // other value are below it.
-                    (_, ItemStep::Items(_)) if container(&v).is_none() => out.push(below),
-                    (_, ItemStep::Items(_)) => {}
-                    (
-                        InstKind::SubscriptLoad {
-                            obj,
-                            index,
-                            is_slice: false,
-                            ..
-                        },
-                        ItemStep::Below,
-                    ) => out.push((*obj, ItemStep::Items(Some(*index)))),
-                    (InstKind::IterNext { iter, .. }, ItemStep::Below) => {
-                        if let Some(InstKind::MakeIter { iterable, .. }) =
-                            shape.inst(*iter).map(|i| &i.kind)
-                        {
-                            out.push((*iterable, ItemStep::Items(None)));
-                        }
-                    }
-                    (kind, ItemStep::Below) => match self.attr_load(kind) {
-                        // An attribute of a parameter or of its copy is `param_alias`'s.
-                        Some((_, obj, _)) if container(&obj).is_none() => out.push((obj, step)),
-                        Some(_) => {}
-                        None => out.extend(self.element_view(kind)),
-                    },
-                },
-                Def::Param | Def::None => {}
-            }
-        };
-        match self
-            .elements
-            .ask(&self.walk_budget, (var, ItemStep::Below), own, next)
-        {
+        let next = |at, out: &mut Vec<_>| self.element_steps(at, out, |_| true);
+        match self.elements.of(self.narrowing_scope()).ask(
+            &self.walk_budget,
+            (var, ItemStep::Below),
+            own,
+            next,
+        ) {
             Answer::Known(paths) => paths.iter().cloned().collect(),
             Answer::Open => Vec::new(),
+        }
+    }
+
+    /// The parameters (bit `i`) whose entries the object `var` holds may be as part of the
+    /// container ([`crate::EffectSummary::entry_change_params`]): the [`Self::element_paths`] at
+    /// [`crate::ELEMENTS_PATH`] that no attribute of an object of a project class leads to (the
+    /// object `field.tags` holds is the field's, not an entry of the container holding the
+    /// field), asked only when `elements`, the element paths of `var`, hold one. Only with an
+    /// ownership contract; none past the function's budget.
+    fn entry_params(&self, var: VarId, elements: &[(u8, String)]) -> u64 {
+        if !self.ownership
+            || elements
+                .iter()
+                .all(|(_, path)| path != crate::ELEMENTS_PATH)
+        {
+            return 0;
+        }
+        let own = |(v, step): (VarId, ItemStep)| {
+            Or(match self.items_of_container(v, step) {
+                Some((i, None)) => 1u64.checked_shl(u32::from(*i)).unwrap_or(0),
+                _ => 0,
+            })
+        };
+        let next = |at, out: &mut Vec<_>| {
+            self.element_steps(at, out, |obj| self.project_classes(obj).is_empty());
+        };
+        self.entries
+            .of(self.narrowing_scope())
+            .ask(&self.walk_budget, (var, ItemStep::Below), own, next)
+            .map(|mask| mask.0)
+            .open_means(0)
+    }
+
+    /// The narrowing scope of the block being read ([`crate::infer::NarrowedVals::scope`]).
+    fn narrowing_scope(&self) -> usize {
+        self.narrowed.scope(self.pos.0)
+    }
+
+    /// The parameter or the shallow copy of one (`param_alias`, `param_copy_alias`) whose items
+    /// the step `(v, step)` of [`Self::element_steps`] takes, while the function leaves them as
+    /// the original's ([`Rebound::keeps_items`]).
+    fn items_of_container(&self, v: VarId, step: ItemStep) -> Option<&(u8, Option<String>)> {
+        let ItemStep::Items(index) = step else {
+            return None;
+        };
+        let key = index.and_then(|i| self.shape.str_const(i));
+        self.param_alias
+            .get(&v)
+            .or_else(|| self.param_copy_alias.get(&v))
+            .filter(|alias| self.keeps_items(alias, key))
+    }
+
+    /// The values one step on from `(v, step)` in [`Self::element_paths`]: those whose items
+    /// `v`'s object may be, or whose objects it may be below, through copies, phis, items,
+    /// iteration, the elements and views methods outside the project hand out, and the
+    /// attributes of the objects `through_attr_of` accepts.
+    fn element_steps(
+        &self,
+        (v, step): (VarId, ItemStep),
+        out: &mut Vec<(VarId, ItemStep)>,
+        through_attr_of: impl Fn(VarId) -> bool,
+    ) {
+        let (f, shape) = (self.f, self.shape);
+        let container = |v: &VarId| {
+            self.param_alias
+                .get(v)
+                .or_else(|| self.param_copy_alias.get(v))
+        };
+        let below = (v, ItemStep::Below);
+        match shape.def(v) {
+            Def::Phi(b, i) => {
+                out.extend((f.block(b).phis[i as usize].incoming.iter()).map(|(_, w)| (*w, step)))
+            }
+            Def::Inst(b, i) => match (&f.block(b).insts[i as usize].kind, step) {
+                (InstKind::Copy { src, .. }, _) => out.push((*src, step)),
+                // The items of a parameter or of its copy are its own (`items_of_container`);
+                // those of any other value are below it.
+                (_, ItemStep::Items(_)) if container(&v).is_none() => out.push(below),
+                (_, ItemStep::Items(_)) => {}
+                (
+                    InstKind::SubscriptLoad {
+                        obj,
+                        index,
+                        is_slice: false,
+                        ..
+                    },
+                    ItemStep::Below,
+                ) => out.push((*obj, ItemStep::Items(Some(*index)))),
+                (InstKind::IterNext { iter, .. }, ItemStep::Below) => {
+                    if let Some(InstKind::MakeIter { iterable, .. }) =
+                        shape.inst(*iter).map(|i| &i.kind)
+                    {
+                        out.push((*iterable, ItemStep::Items(None)));
+                    }
+                }
+                (kind, ItemStep::Below) => match self.attr_load(kind) {
+                    // An attribute of a parameter or of its copy is `param_alias`'s.
+                    Some((_, obj, _)) if container(&obj).is_none() && through_attr_of(obj) => {
+                        out.push((obj, step));
+                    }
+                    Some(_) => {}
+                    None => out.extend(self.element_view(kind)),
+                },
+            },
+            Def::Param | Def::None => {}
         }
     }
 
@@ -2853,10 +2919,13 @@ impl<'a> Extractor<'a> {
                 Some(classes) => Implementers::Listed(classes.to_vec()),
                 None => Implementers::Unlisted,
             });
+        let param_elements = self.element_paths(var);
+        let param_entries = self.entry_params(var, &param_elements);
         let mut origin = ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
-            param_elements: self.element_paths(var),
+            param_elements,
+            param_entries,
             param_copy: self.param_copy_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
             targets: None,
@@ -6133,9 +6202,15 @@ impl<'a> Extractor<'a> {
     }
 
     /// A change of the object `var` holds, when it may be one a parameter holds as an item or
-    /// an element, or one below it ([`Self::element_paths`]).
-    fn change_param_element(&mut self, var: Option<VarId>, span: Span) {
-        for (i, path) in var.map(|v| self.element_paths(v)).unwrap_or_default() {
+    /// an element, or one below it ([`Self::element_paths`]); `of_entry`: a change of an entry
+    /// as part of the container too, when it is one ([`Self::entry_params`]).
+    fn change_param_element(&mut self, var: Option<VarId>, of_entry: bool, span: Span) {
+        let Some(var) = var else { return };
+        let paths = self.element_paths(var);
+        if of_entry {
+            self.summary.entry_change_params |= self.entry_params(var, &paths);
+        }
+        for (i, path) in paths {
             self.change_below_param_attr(i, path, span);
         }
     }
@@ -6276,7 +6351,12 @@ impl<'a> Extractor<'a> {
         match owner.param {
             Some((i, None)) => self.mutate_param(i, attr.to_owned(), span),
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
-            None => self.change_param_element(owner.var, span),
+            // An attribute of an entry of a project class is that class's write
+            // (`typed_site`), not one of the container holding the entry.
+            None => {
+                let untied = owner.typed_classes.is_empty();
+                self.change_param_element(owner.var, untied, span);
+            }
         }
         for class in owner.typed_classes {
             self.typed_site(class, attr, (None, EntryKey::Written), kind, span, written);
@@ -6836,7 +6916,7 @@ impl<'a> Extractor<'a> {
                 self.mutate_param(i, String::new(), span);
             }
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
-            None => self.change_param_element(Some(var), span),
+            None => self.change_param_element(Some(var), true, span),
         }
         if let Some((i, slot)) = self.param_slot_alias.get(&var).cloned() {
             self.summary
@@ -9550,6 +9630,23 @@ fn construction_of(answer: &NewArg, rebinds: bool) -> Construction {
 enum ItemStep {
     Below,
     Items(Option<VarId>),
+}
+
+/// The walks of [`Extractor::element_paths`] or [`Extractor::entry_params`], one per narrowing
+/// scope ([`crate::infer::NarrowedVals::scope`]): their steps read the values of the block being
+/// read (the classes of an attribute's object, the views of a receiver's methods), so an answer
+/// holds only in the blocks where the checks give every value the same types.
+struct ElementWalks<S>(Vec<Closure<(VarId, ItemStep), S>>);
+
+impl<S: Join + Default> ElementWalks<S> {
+    fn new(scopes: usize) -> Self {
+        Self((0..scopes).map(|_| Closure::new()).collect())
+    }
+
+    /// The walk of the narrowing scope `scope`.
+    fn of(&self, scope: usize) -> &Closure<(VarId, ItemStep), S> {
+        &self.0[scope]
+    }
 }
 
 /// What a function may rebind on some object: the attribute names it stores or deletes (also

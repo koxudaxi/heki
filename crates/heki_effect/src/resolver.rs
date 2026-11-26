@@ -9716,7 +9716,7 @@ fn set_flags<'i>(
 }
 
 /// Inferred value of an SSA variable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Val {
     /// A named object: module, class, function, or external symbol (by fqn).
     Ref(String),

@@ -11,11 +11,11 @@ use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AccessKind, AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget,
-    Callee, Construction, ContractClass, ContractSharing, Delivery, ELEMENTS_PATH, EffectSummary,
-    Facts, FuncKey, ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole,
-    TypeCtx, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, Val, WriteKind, attr_writes,
-    container_mutator, initializes_own_self, is_initializer, self_attr_writes,
+    AccessKind, ArgOrigin, AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite,
+    CallTarget, Callee, Construction, ContractClass, ContractSharing, Delivery, ELEMENTS_PATH,
+    EffectSummary, Facts, FuncKey, ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared,
+    SiteRole, TypeCtx, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, Val, WriteKind,
+    attr_writes, container_mutator, initializes_own_self, is_initializer, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -2146,15 +2146,17 @@ fn indirect_write_outside(
 }
 
 /// What change of a parameter counts: an in-place change of the value itself (what a handed
-/// field's `IndirectHelper` write is), of an entry it holds or one below it (an
-/// `IndirectItemMut` write), any in-place change of it or below it, or a change of its
-/// attribute (rebinding it, or changing its value in place).
+/// field's `IndirectHelper` write is), of an entry it holds as part of it
+/// (`EffectSummary::entry_change_params`, an `IndirectItemMut` write), any in-place change of it
+/// or below it, a change of its attribute (rebinding it, or changing its value in place), or of
+/// any of its attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ParamChange<'a> {
     Itself,
     Entries,
     Any,
     Attr(&'a str),
+    Attrs,
 }
 
 /// Whether `func` changes its parameter `k` as `want` says, in its own body or through the
@@ -2183,52 +2185,36 @@ fn changes_param<'s>(
             .and_then(|k| local?.mutated_param_paths.get(&k));
         let changed_here = match want {
             ParamChange::Itself => paths.is_some_and(|p| p.contains("")),
-            ParamChange::Entries => paths.is_some_and(|p| p.contains(ELEMENTS_PATH)),
+            ParamChange::Entries => {
+                k < 64 && local.is_some_and(|s| s.entry_change_params & (1u64 << k) != 0)
+            }
             ParamChange::Any => {
                 k < 64 && local.is_some_and(|s| s.mutates_params & (1u64 << k) != 0)
             }
             ParamChange::Attr(attr) => paths.is_some_and(|p| p.contains(attr)),
+            ParamChange::Attrs => paths.is_some_and(|p| {
+                p.iter()
+                    .any(|path| !path.is_empty() && path != ELEMENTS_PATH)
+            }),
         };
         if changed_here {
             return true;
         }
         for (_, site) in sites.get(&func).into_iter().flatten() {
             for callee in site.project_callees() {
+                let typed = cx
+                    .index
+                    .summary(&callee.callee)
+                    .map_or(0, |s| s.typed_params);
                 let handed: Vec<(usize, ParamChange<'_>)> = callee
                     .params
                     .iter()
                     .enumerate()
-                    .filter_map(|(j, o)| match (&o.param, want) {
-                        (Some((p, None)), _) if usize::from(*p) == k => Some((j, want)),
-                        // An entry of the parameter, or a shallow copy holding its entries.
-                        (None, ParamChange::Entries) => {
-                            if o.param_copy
-                                .as_ref()
-                                .is_some_and(|(p, a)| usize::from(*p) == k && a.is_none())
-                            {
-                                Some((j, want))
-                            } else if o
-                                .param_elements
-                                .iter()
-                                .any(|(p, path)| usize::from(*p) == k && path == ELEMENTS_PATH)
-                            {
-                                Some((j, ParamChange::Any))
-                            } else {
-                                None
-                            }
-                        }
-                        // The callee is handed a part of the parameter: a change there is below
-                        // the value, or of another attribute.
-                        (Some((_, Some(_))), ParamChange::Itself | ParamChange::Entries) => None,
-                        (Some((p, Some(attr))), ParamChange::Attr(a))
-                            if usize::from(*p) == k && a != attr =>
-                        {
-                            None
-                        }
-                        (Some((p, Some(_))), _) if usize::from(*p) == k => {
-                            Some((j, ParamChange::Any))
-                        }
-                        _ => None,
+                    .flat_map(|(j, o)| {
+                        let typed = j < 64 && typed >> j & 1 != 0;
+                        handed_changes(o, k, want, typed)
+                            .into_iter()
+                            .map(move |next| (j, next))
                     })
                     .collect();
                 if handed.is_empty() {
@@ -2261,6 +2247,46 @@ fn changes_param<'s>(
         }
     }
     false
+}
+
+/// The changes of a callee's parameter, bound to the argument `o`, that change the caller's
+/// parameter `k` as `want` says; `typed`: the callee types its parameter with a project class.
+/// For an entry, they mirror `heki_effect`'s propagation of `entry_change_params`.
+fn handed_changes<'a>(
+    o: &ArgOrigin,
+    k: usize,
+    want: ParamChange<'a>,
+    typed: bool,
+) -> Vec<ParamChange<'a>> {
+    let is_k = |p: &u8| usize::from(*p) == k;
+    match (&o.param, want) {
+        (Some((p, None)), _) if is_k(p) => vec![want],
+        // A shallow copy holding the parameter's entries, or an entry of it: changed in place,
+        // its own entries so changed, or an attribute of it written that neither the callee nor
+        // the caller ties to a project class.
+        (None, ParamChange::Entries) => {
+            if o.param_copy
+                .as_ref()
+                .is_some_and(|(p, a)| is_k(p) && a.is_none())
+            {
+                vec![want]
+            } else if k < 64 && o.param_entries & (1u64 << k) != 0 {
+                let mut wants = vec![ParamChange::Itself, ParamChange::Entries];
+                if !typed && o.instance_classes().next().is_none() {
+                    wants.push(ParamChange::Attrs);
+                }
+                wants
+            } else {
+                Vec::new()
+            }
+        }
+        // The callee is handed a part of the parameter: a change there is below the value, or
+        // of another attribute.
+        (Some((_, Some(_))), ParamChange::Itself | ParamChange::Entries) => Vec::new(),
+        (Some((p, Some(attr))), ParamChange::Attr(a)) if is_k(p) && a != attr => Vec::new(),
+        (Some((p, Some(_))), _) if is_k(p) => vec![ParamChange::Any],
+        _ => Vec::new(),
+    }
 }
 
 /// One call instruction: what it calls (a value, or a method of its receiver) and its arguments.
