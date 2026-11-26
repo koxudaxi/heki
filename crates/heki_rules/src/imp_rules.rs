@@ -854,8 +854,14 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 None => Verdict::Fine,
             },
             Target::PackageOrSubmodule { package, submodule } => {
+                // The name the import takes may be the submodule, which a forbidden name does not
+                // name: that break alone is open, not exact.
+                let mut whys = Vec::new();
                 if let Some(why) = one(*package, 0, !walked) {
-                    return Verdict::Breaks(vec![(graph.name(*package).to_owned(), why)]);
+                    if judge(Imported::of(graph, *package), 0, !walked).is_some() {
+                        return Verdict::Breaks(vec![(graph.name(*package).to_owned(), why)]);
+                    }
+                    whys.push(why);
                 }
                 let imported = Imported {
                     name: submodule,
@@ -866,16 +872,21 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 if contracts.names_taken(c, importer, Imported::of(graph, *package).at(site)) {
                     return Verdict::Fine;
                 }
-                match judge(imported, 0, true) {
-                    Some(why) => Verdict::Open(
-                        OpenImport::Submodule {
-                            package: graph.name(*package).to_owned(),
-                            submodule: submodule.clone(),
-                        },
-                        vec![why],
-                    ),
-                    None => Verdict::Fine,
+                if let Some(why) = judge(imported, 0, true)
+                    && !whys.contains(&why)
+                {
+                    whys.push(why);
                 }
+                if whys.is_empty() {
+                    return Verdict::Fine;
+                }
+                Verdict::Open(
+                    OpenImport::Submodule {
+                        package: graph.name(*package).to_owned(),
+                        submodule: submodule.clone(),
+                    },
+                    whys,
+                )
             }
             Target::AnyOf(targets) => {
                 let parts: Vec<Part> = (targets.iter().enumerate())
@@ -940,9 +951,14 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 }
                 Verdict::Open(OpenImport::Under(head.clone()), whys)
             }
-            // A by-name import takes no name of a module.
+            // A by-name import takes no name, so a forbidden name never breaks; the rest of the
+            // contract (a module of `relative-imports` written in full) may.
             Target::Open if site.form.is_by_name() && contract.forbidden.only_names() => {
-                Verdict::Fine
+                let whys = contracts.may_break_under(c, "", absolute(0));
+                if whys.is_empty() {
+                    return Verdict::Fine;
+                }
+                Verdict::Open(OpenImport::Unknown, whys)
             }
             Target::Open if site.form == ImportForm::MaybeByName => {
                 Verdict::Open(OpenImport::MaybeByName, vec![contract.open_why()])

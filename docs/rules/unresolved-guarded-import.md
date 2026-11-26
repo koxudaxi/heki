@@ -38,6 +38,10 @@ the module they load, when that module may be one the contract does not allow:
   import takes the submodule instead of while the package is still loading, or one that binds no
   `c` while the project has no module `a.c`, which Python then looks for outside the project's
   files (a compiled extension module). The package `a` loads either way, and `IMP201` judges it.
+  A forbidden name (`forbidden-imports = ["xml:etree"]`) is exact only where heki knows `c` is
+  not a submodule; otherwise `from xml import etree` is reported here, as it may be the submodule.
+  A by-name import takes no forbidden name, but it is still reported for the rest of the contract
+  (`relative-imports`).
 
 With `reach`, the sites of the modules a walk reaches are judged too, and reported at the import
 of the importer that starts the chain to them.

@@ -1366,6 +1366,66 @@ fn a_forbidden_name_is_carved_out_like_a_forbidden_module() {
     }
 }
 
+/// `from package import name` may import the submodule `package.name`, which a forbidden name
+/// does not name: exact only where heki knows the name is not a submodule, otherwise `IMP202`
+/// under `unresolved = "report"`, and nothing without it.
+#[test]
+fn a_forbidden_name_that_may_be_a_submodule_is_not_exact() {
+    let contract = |forbidden: &str, unresolved: &str| {
+        format!(
+            "[[tool.heki.import-boundaries]]\nname = \"private\"\nimporters = [\"pkg.use\"]\nforbidden-imports = [\"{forbidden}\"]\nunresolved = \"{unresolved}\"\n"
+        )
+    };
+    let p = project(
+        "imp_forbidden_name_external",
+        &contract("xml:etree", "report"),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/use.py", "from xml import etree\n");
+    assert_eq!(reports(&p), ["pkg/use.py:1 IMP202 <module> xml.etree"]);
+    let p = project(
+        "imp_forbidden_name_external_ignored",
+        &contract("xml:etree", "ignore"),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/use.py", "from xml import etree\n");
+    assert_eq!(reports(&p), Vec::<String>::new());
+
+    // A project package: a module file is the submodule, a plain function is the name.
+    let p = project(
+        "imp_forbidden_name_project",
+        &contract("pkg.parser:_*", "report"),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/parser/__init__.py", "def _helper():\n    return 1\n");
+    p.write("pkg/parser/_private.py", "X = 1\n");
+    p.write(
+        "pkg/use.py",
+        "from pkg.parser import _private\nfrom pkg.parser import _helper\n",
+    );
+    assert_eq!(
+        reports(&p),
+        ["pkg/use.py:2 IMP201 <module> pkg.parser._helper"]
+    );
+}
+
+/// A by-name import takes no name, so a forbidden name never breaks it; the other restrictions
+/// of the contract (`relative-imports`) still may, so the call is `IMP202`.
+#[test]
+fn a_by_name_import_is_judged_by_the_other_restrictions_of_a_forbidden_name_contract() {
+    let p = project(
+        "imp_forbidden_name_by_name_relative",
+        "[[tool.heki.import-boundaries]]\nname = \"private\"\nimporters = [\"pkg.use\"]\nforbidden-imports = [\"pkg.api:_*\"]\nrelative-imports = [\"pkg.runtime\"]\nunresolved = \"report\"\n",
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/runtime.py", "");
+    p.write(
+        "pkg/use.py",
+        "import importlib\n\n\ndef f(name):\n    return importlib.import_module(name)\n",
+    );
+    assert_eq!(reports(&p), ["pkg/use.py:5 IMP202 f *"]);
+}
+
 /// With `reach`, a forbidden name is judged where the chain imports it, and a module reached
 /// by another import is not a reason.
 #[test]
