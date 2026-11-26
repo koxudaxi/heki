@@ -755,7 +755,9 @@ whose callable is one or several named objects and which holds no positions, is 
 objects with the call's arguments as written (`Extractor::typed_partial`): their targets, the
 class it constructs, whether they are every implementation it can run, and what each returns,
 a new object only when every one returns one. The keywords the object holds are values the call
-does not show (`Call::unseen_keywords`). A named object joins a partial object into a partial
+does not show (`Call::unseen_keywords`); when the callable is a library function and the
+object holds keywords, the call stays unresolved, since the catalog selects its case from the
+arguments the call shows. A named object joins a partial object into a partial
 object of one of them (`{"a": f, "b": partial(g)}`), holding what the partial object holds. A
 partial object holding positions, and a table one value of which heki does not know, or that
 something changes in place or binds again with values heki does not know, leave the call

@@ -2098,3 +2098,47 @@ fn a_field_the_request_builds_through_a_table_value_is_new() {
     p.write("pkg/passes.py", REQUEST_FIELD_PASSES);
     assert_eq!(reported(&p), Vec::<(String, u64)>::new());
 }
+
+const LIBRARY_PARTIAL_TABLES: &str = r#"import socket
+from functools import partial
+
+KEYWORD = {"lookup": partial(socket.getaddrinfo, flags=socket.AI_NUMERICHOST)}
+BARE = {"lookup": partial(socket.getaddrinfo)}
+"#;
+
+const LIBRARY_PARTIAL_CALLS: &str = r#"from pkg.tables import BARE, KEYWORD
+
+
+async def keyword_decides_the_case() -> None:
+    KEYWORD["lookup"]("example.com", 80)
+
+
+async def nothing_held() -> None:
+    BARE["lookup"]("example.com", 80)
+"#;
+
+/// `(line, rule)` of every `EFF101` report of `pkg/calls.py`.
+fn blocking_lines(p: &Project) -> Vec<u64> {
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut lines: Vec<u64> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
+#[test]
+fn a_library_partial_holding_keywords_is_not_resolved_by_the_visible_arguments() {
+    let p = Project::new("dispatch_library_partial_tables");
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n");
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/tables.py", LIBRARY_PARTIAL_TABLES);
+    p.write("pkg/calls.py", LIBRARY_PARTIAL_CALLS);
+    // Only the object holding nothing is the library call it wraps: `AI_NUMERICHOST` held by
+    // the other decides the case, and the call shows no flag.
+    assert_eq!(blocking_lines(&p), vec![9]);
+}

@@ -5393,7 +5393,18 @@ impl<'a> Extractor<'a> {
                 };
                 let callable = callee_val.or(partial.as_ref().map(|(c, _)| c));
                 let target = match callee_var {
-                    Some(_) => self.cx.resolve_call(callable),
+                    Some(_) => match self.cx.resolve_call(callable) {
+                        // The keywords the object holds may decide what a library call does,
+                        // which the catalog reads from the arguments the call shows.
+                        Callee::External(_)
+                            if partial
+                                .as_ref()
+                                .is_some_and(|(_, held)| *held == Held::Keywords) =>
+                        {
+                            Callee::Unresolved
+                        }
+                        target => target,
+                    },
                     // Non-inlined comprehension (Python 3.11, `__comp_<function id>`) runs
                     // immediately.
                     None => callee
