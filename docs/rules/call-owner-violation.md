@@ -293,7 +293,11 @@ No automatic fix.
     subclasses; a class target covers constructing the class and its subclasses; a target
     naming no class (`reset`) covers every project function and method of that name. A target
     may end in an argument list of `parameter=value` entries (`DataType(is_dict=True)`), each
-    value `True`, `False`, `None`, an integer, or a quoted string. A target can also name
+    value `True`, `False`, `None`, an integer, or a quoted string (a glob when it holds `*`, `?`,
+    `[`, or `{`: `module="pkg.backend.*"`). `*` with an argument list names every call passing
+    its constants, whatever it calls (`*(module="pkg.backend.*")`). A target with a module part
+    (`pkg:Kind`, `pkg:*`) also names the names the module imports, read or called through the
+    module object (`pkg.Kind.A`), judged at the access. A target can also name
     functions and classes outside the project by their full name (`sys._getframe`, `os._*`), or
     `<external>.<name>` for the members of every module and class outside the project.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
