@@ -443,9 +443,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         ));
     }
     if section.has_candidates() {
-        notes.push(candidates_note(
-            fail_on == Severity::Error && !says_fail_on(&reports_now, fail_on),
-        ));
+        notes.push(candidates_note(fail_on == Severity::Error));
     }
     let mut report = RecommendReport {
         schema: SCHEMA_URL.to_owned(),
@@ -649,18 +647,17 @@ fn says_fail_on(now: &ReportsNow, fail_on: Severity) -> bool {
     fail_on == Severity::Error && judged(now).0 > now.failing
 }
 
-/// What the contract candidates are, and how to adopt them. `set_fail_on` is false when
-/// `fail-on = "warning"` is set, or another note already says that it makes contract reports fail
-/// the run.
-fn candidates_note(set_fail_on: bool) -> String {
-    let fail_on = if set_fail_on {
-        ", and set `fail-on = \"warning\"` so that contract reports fail `heki check`"
+/// What the contract candidates are, and how to adopt them. `ask_fail` is false when
+/// `fail-on = "warning"` is set, which already makes every report fail the run.
+fn candidates_note(ask_fail: bool) -> String {
+    let fail = if ask_fail {
+        ", and set `fail = true` on each kept table so that its reports fail `heki check`"
     } else {
         ""
     };
     format!(
         "the contract candidates are invariants the code keeps today, not architectural intent: \
-         adopt only the boundaries you intend to keep, give each an actionable `message`{fail_on}; \
+         adopt only the boundaries you intend to keep, give each an actionable `message`{fail}; \
          consider a CODEOWNERS-protected heki.toml, and put the legacy violations of a stricter \
          wall in a Ratchet baseline, not in an `allowed-*` list."
     )

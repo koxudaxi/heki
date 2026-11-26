@@ -64,7 +64,7 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   heuristic reports, which count as warnings), which `fail-on = "warning"` would make fail it.
   When contract candidates are listed, a note says that they are invariants the code keeps today,
   not architectural intent: adopt only the boundaries you intend to keep, give each an actionable
-  `message`, set `fail-on = "warning"` (unless it is set, or the note above says so), and consider
+  `message`, set `fail = true` on each kept table (unless `fail-on = "warning"` is set), and consider
   a `CODEOWNERS`-protected `heki.toml`, with the legacy violations of a stricter wall in a Ratchet
   baseline, not in an `allowed-*` list.
   When the paths given leave out Python files below the project root, the note names them: heki
@@ -366,7 +366,7 @@ Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
   - heki check fails on 1 report(s) shown now (exit code 1): a Ratchet baseline records them, so that it fails only on new ones (`heki check --baseline heki-baseline.toml --update-baseline`, then `baseline = "heki-baseline.toml"` in the configuration).
   - "if it waits" and "if it sends a query" come from a trial run that gives each library name tried a catalog entry with `effects = ["blocking_net", "db_query"]`: what `heki check` would print if the call waited on the network or sent a database query. heki cannot see what these calls do, so no entry for them is in the block; add one in `[[tool.heki.ecosystem]]` if you know.
-  - the contract candidates are invariants the code keeps today, not architectural intent: adopt only the boundaries you intend to keep, give each an actionable `message`, and set `fail-on = "warning"` so that contract reports fail `heki check`; consider a CODEOWNERS-protected heki.toml, and put the legacy violations of a stricter wall in a Ratchet baseline, not in an `allowed-*` list.
+  - the contract candidates are invariants the code keeps today, not architectural intent: adopt only the boundaries you intend to keep, give each an actionable `message`, and set `fail = true` on each kept table so that its reports fail `heki check`; consider a CODEOWNERS-protected heki.toml, and put the legacy violations of a stricter wall in a Ratchet baseline, not in an `allowed-*` list.
 
 pyproject.toml: keys to add or change
   [tool.heki.lint]

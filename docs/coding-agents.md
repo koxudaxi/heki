@@ -127,9 +127,9 @@ Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. De
 > asks.
 
 The `message` of a contract is what the agent reads as the fix, so write it as an instruction.
-Contract reports are heuristic, and a heuristic report fails a run only with
-`fail-on = "warning"`: set `fail = true` on each contract table instead, so that `heki check`
-exits with 1 on a crossed wall and every other warning stays advisory.
+Contract reports are heuristic, so a run does not fail on them by default. Set `fail = true` on
+each contract table, so that `heki check` exits with 1 on a crossed wall and every other warning
+stays advisory.
 
 ```toml
 # heki.toml
@@ -176,7 +176,7 @@ so that the old violations can only shrink and a new one fails at once.
 
 1. The agent inspects the code with `heki recommend`, `heki inspect`, and `heki inspect
    --imports`.
-2. It proposes a thin ideal wall in `heki.toml`, with `fail-on = "warning"` and a `message` that
+2. It proposes a thin ideal wall in `heki.toml`, with `fail = true` on each table and a `message` that
    says what to write instead. The old and undesired writers, readers, callers, and imports stay
    out of `allowed-*`.
 3. The maintainer approves the change to `heki.toml`, which is protected by `CODEOWNERS`.
@@ -242,7 +242,7 @@ Run on a project with findings that are already known, it would block every turn
 One pull request adds the walls, and every later pull request, from a person or an agent, runs
 against them. Replace `app` with your package.
 
-1. Put the walls in a `heki.toml` of their own, with `fail-on = "warning"` and the baseline path.
+1. Put the walls in a `heki.toml` of their own, with `fail = true` on each wall and the baseline path.
    heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds and does not
    merge them: a project that already has `[tool.heki]` in `pyproject.toml` must move every
    setting into `heki.toml` (without the `tool.heki` prefix), or they stop applying:
@@ -251,14 +251,12 @@ against them. Replace `app` with your package.
     # heki.toml
     baseline = "heki-baseline.toml"
 
-    [lint]
-    fail-on = "warning"   # contract reports are heuristic: let them fail the run
-
     [[write-owners]]
     name = "order-store"
     targets = ["app.models.Order.items"]
     allowed-writers = ["app.store.*"]
     message = "change Order.items through app.store"
+    fail = true   # contract reports are heuristic: this lets them fail the run
     ```
 
 2. Record today's findings, the old crossings of the walls among them, so that only new ones

@@ -65,7 +65,7 @@ const GUIDANCE: &[&str] = &[
      `readonly-returns`, `invalidation`, `import-boundaries`), whose names are dotted patterns or \
      globs. See https://heki.koxudaxi.dev/configuration/#contracts.",
     "When you draft a contract, write the thin wall the maintainers intend in `heki.toml`, with \
-     `fail-on = \"warning\"` and a `message` that says what to do instead. Do not copy the \
+     `fail = true` on each table and a `message` that says what to do instead. Do not copy the \
      coupling the code has today into an `allowed-*` list: record the violations that already \
      exist in a baseline (`heki check --baseline <file> --update-baseline`), so that only new ones \
      fail.",

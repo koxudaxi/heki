@@ -234,7 +234,7 @@ targets = ["app.store.Store.items"]
         "write a contract",
         "https://heki.koxudaxi.dev/configuration/#contracts",
         "write the thin wall the maintainers intend in `heki.toml`",
-        "`fail-on = \"warning\"` and a `message`",
+        "`fail = true` on each table and a `message`",
         "Do not copy the coupling the code has today into an `allowed-*` list",
         "`heki check --baseline <file> --update-baseline`",
     ] {
