@@ -17,6 +17,15 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - A `heki.toml`, a `.heki.toml`, or a `--config` file that is not a `pyproject.toml` now takes the project metadata (`requires-python`, the project name, the declared dependencies, and the workspace tables) from the `pyproject.toml` at the project root, not from the one in its own directory. The same file gives the same reports wherever it sits. A configuration file kept in a subdirectory such as `scripts/` used to run without that metadata; it now sees it, so its reports can change. (#463)
 - `heki check --touched` (and files given as paths) states what it looked at. With a baseline it shows every Ratchet regression and fails on it, wherever it is, since an entry counts every report of its key; it still judges only the stale entries of the touched files and of the reports that touch them. Without one, it ends with a note counting the reports that would fail the run and are not shown (on stderr in every output format, JSON included), and a run that passes ends with `No reports in or through N touched file(s) (M file(s) analyzed).` or, with a baseline, `No Ratchet regressions in M file(s).` instead of `All checks passed`. A change can add a report in a file it left alone without a call chain through it (a re-export, an annotation another module relied on), which no run over touched files can tell. (#442)
 - Naming a configuration file in `--touched` or PATHS (`pyproject.toml`, `heki.toml`, `.heki.toml`, or `hatch.toml` at the project root, `--config`, the summary snapshot, or the baseline) shows every report, as a run without `--touched` does; `--fix` still rewrites only the named Python files. The pre-commit hook of this repository also runs on a staged `pyproject.toml`, `heki.toml`, or `.heki.toml` at the root. (#442)
+- `unlisted-dict-keys = "report"` no longer treats the keys a forbid-only contract matches as
+  named by it (#462). A `write-owners` contract with `forbidden-writers` and no `allowed-writers`
+  or `exempt-methods` allows no writer, so a write of `_new` that its glob target (`Field._[!_]*`)
+  matches is reported by the contract that lists keys, as it is without the forbid-only contract.
+  A contract with allowed writers still names the keys its targets match.
+- A `write-owners` or `effect-boundaries` target that is a `__dict__` key of a class is matched
+  by a write of the key, not by a read through the namespace (`field.__dict__.get(KEY)`): a key
+  nothing writes never exists, so the entry is reported by `unmatched-contract-entries` (#468). A
+  `read-owners` target is still matched by such a read.
 
 ### Added
 
@@ -50,15 +59,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
 ### Fixed
 
 - `fresh-objects = "allow"`: a store a function makes only where tests of its parameters pass (`if register:`, `if registry is not None:`) keeps nothing at a call whose arguments fail them: a constant, the literal default of a parameter the call leaves out, or a test the caller has already made of the same input. `copy_tree(node, register=False)` of a copy helper registering the copy under `if register:` gives a new object, and a helper storing its parameter under `if keep:` leaves a new object new at `attach(copied, keep=False)`; a test of the caller's own parameter is decided at the caller's calls. `EFF201` and `MUT201` no longer report the writes of such objects. A function records at most four sets of at most four tests per store (as for the chains of tests of `EFF` must-facts); past them it keeps the object whatever it is passed. (#458)
-- `unlisted-dict-keys = "report"` no longer treats the keys a forbid-only contract matches as
-  named by it (#462). A `write-owners` contract with `forbidden-writers` and no `allowed-writers`
-  or `exempt-methods` allows no writer, so a write of `_new` that its glob target (`Field._[!_]*`)
-  matches is reported by the contract that lists keys, as it is without the forbid-only contract.
-  A contract with allowed writers still names the keys its targets match.
-- A `write-owners`, `read-owners`, or `effect-boundaries` target that is a `__dict__` key of a
-  class is matched by a write of the key, not by a read through the namespace
-  (`field.__dict__.get(KEY)`): a key nothing writes never exists, so the entry is reported by
-  `unmatched-contract-entries` (#468).
 
 ## [0.6.0] - 2026-11-26
 
