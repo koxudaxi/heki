@@ -1,11 +1,13 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the closure cells child scopes read, the iterables child scopes receive from the functions
-//! creating them, the fixpoint joining the stores of attributes, the names its functions store
-//! and read, the stores through namespaces and `setattr`, the classes whose code may store into
-//! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
-//! task factory, the walk to the callable a builtin calls once per item, contracts with many call
-//! targets and argument lists, the names offered for contract entries that match nothing, the
+//! the closure cells child scopes read, the stores of the cells a comprehension's assignment
+//! expressions bind and the reads seeing them, the iterables child scopes receive from the
+//! functions creating them, the fixpoint joining the stores of attributes, the names its
+//! functions store and read, the stores through namespaces and `setattr`, the classes whose code
+//! may store into an instance, the size of the Soundness lane's proof state, the values `EFF107`
+//! follows from a task factory, the walk to the callable a builtin calls once per item, contracts
+//! with many call targets and argument lists, the names offered for contract entries that match
+//! nothing, the
 //! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
 //! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the values class
 //! statements pass as bases, the bindings the deque
@@ -778,6 +780,56 @@ fn scopes_reading_a_cell_bound_many_times_read_its_joined_fact() {
             names
         );
     }
+}
+
+/// A list comprehension that stores `names` variables with assignment expressions, one per
+/// condition, and reads them all in its element; the function then reads each one. Before
+/// Python 3.12 the comprehension has a scope of its own, so each variable is a closure cell that
+/// scope alone stores.
+fn walrus_stores_in_one_comprehension(names: usize) -> String {
+    let stores: Vec<String> = (0..names).map(|k| format!("if (v{k} := make())")).collect();
+    let reads: Vec<String> = (0..names).map(|k| format!("v{k}._given")).collect();
+    let lines = [
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def make() -> Model:".to_owned(),
+        "    return Model()".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs):".to_owned(),
+        format!(
+            "    out = [({},) for _ in xs {}]",
+            reads.join(", "),
+            stores.join(" ")
+        ),
+        format!("    return out, {}", reads.join(", ")),
+    ];
+    lines.join("\n") + "\n"
+}
+
+/// The store of its own each read of such a cell sees is found with a fact per block and cell,
+/// within the budget of the comprehension: past it a read sees every value the cell may hold,
+/// here still a `Model`. Each read in the function is of `Model._given`, and so are those of the
+/// element, reported once at the comprehension.
+#[test]
+fn reads_of_cells_a_comprehension_stores_stay_within_its_budget() {
+    let config = "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n\
+                  [tool.heki.lint]\nselect = [\"MUT203\"]\n\n[[tool.heki.read-owners]]\n\
+                  name = \"given\"\ntargets = [\"m.Model._given\"]\nforbidden-readers = [\"m:*\"]\n";
+    let names = 256;
+    let found = check_past_budgets(names, &["cell stores"], |names| {
+        let p = Project::new(&format!("bounds_walrus_stores_{names}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &walrus_stores_in_one_comprehension(names));
+        p
+    });
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+        names + 1
+    );
 }
 
 /// A nested function an initializer calls writes a name chosen at run time on the last of a long

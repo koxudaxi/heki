@@ -10134,7 +10134,7 @@ impl<'a> TypeCtx<'a> {
         f: &IrFunction,
     ) -> (
         FxHashMap<VarId, Val>,
-        FxHashMap<(BlockId, VarId), Val>,
+        crate::infer::NarrowedVals,
         FxHashMap<VarId, Vec<String>>,
         std::rc::Rc<crate::infer::Inferred>,
     ) {

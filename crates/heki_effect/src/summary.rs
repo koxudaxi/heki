@@ -858,7 +858,7 @@ struct Extractor<'a> {
     /// The types of the function's values with their arguments (`list[Model]`, `set[str]`).
     inferred: std::rc::Rc<crate::infer::Inferred>,
     /// The values `isinstance` checks give variables in the blocks they guard.
-    narrowed: FxHashMap<(BlockId, VarId), Val>,
+    narrowed: crate::infer::NarrowedVals,
     /// The classes each `isinstance` check names, by its second argument.
     isinstance_classes: FxHashMap<VarId, Vec<String>>,
     /// Defining instruction of each variable.
@@ -1824,9 +1824,7 @@ impl<'a> Extractor<'a> {
 
     /// [`Self::val`] in block `bb`.
     fn val_in(&self, bb: BlockId, var: VarId) -> Option<&Val> {
-        self.narrowed
-            .get(&(bb, var))
-            .or_else(|| self.types.get(&var))
+        self.narrowed.get(bb, var).or_else(|| self.types.get(&var))
     }
 
     /// The class of `var` when it is an instance of one class.
