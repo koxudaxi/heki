@@ -3121,17 +3121,18 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .map(|t| decl.call_type(t));
         }
         // An attribute of an instance that no class of its MRO defines a method of holds a value
-        // of its declared type: a `Callable[..., T]` gives the `T` it names.
+        // of its declared type, and the call calls that value as a call of a parameter declared
+        // alike does: a `Callable[..., T]` gives the `T` it names, a `type[C]` an instance of `C`
+        // (`TypeCtx::called_member` gives the call's targets).
         if matches!(recv, Ty::Inst(_) | Ty::Super(_))
             && cx.project.is_project_class(class)
             && let Some(result) = self
                 .member(recv, method)
                 .ok()
                 .flatten()
-                .as_ref()
-                .and_then(Ty::returned)
+                .and_then(|value| self.called(&value, call))
         {
-            return Some(result.clone());
+            return Some(result);
         }
         let callee = cx.project.method_targets(class, method, skip_self, cx.kb);
         let entry = match &callee {

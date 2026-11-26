@@ -1,8 +1,9 @@
 //! Where an annotation gives a receiver its class, end to end through the real binary, judged by
 //! `MUT205` (a write on an object of unknown class under a write owner that reports them): in the
 //! `finally` body of a `try` whose paths leave without running it again, for the builtin
-//! exception classes, for the standard library calls the catalog types, and for an annotation
-//! naming an import of the function itself.
+//! exception classes, for the standard library calls the catalog types, for an annotation
+//! naming an import of the function itself, and for a call of a class object an attribute
+//! declares (`self.kind: type[C]`).
 //!
 //! Every line that must be reported ends in `# unresolved` (`MUT205`) or `# write` (`MUT201`, a
 //! write of a guarded attribute on a class heki knows); every other line must not be.
@@ -158,9 +159,11 @@ def project_class(error: ValueError) -> None:
     error.__dict__["_cache"] = 1  # write
 "#;
 
-/// `importlib.util.module_from_spec` gives no class (a custom loader's `create_module` may give
-/// any object), an annotation of the result does, and an annotation of a local names the imports
-/// of its own function, which shadow the module's.
+/// `importlib.util.module_from_spec` gives the `types.ModuleType` it declares, however the
+/// function names it (a custom loader's `create_module` may give another object, but the
+/// declaration wins), a call heki does not know gives no class, an annotation of the result
+/// does, and an annotation of a local names the imports of its own function, which shadow the
+/// module's.
 const STDLIB: &str = r#"import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -177,14 +180,37 @@ def made() -> None:
 
 def from_spec(spec: importlib.machinery.ModuleSpec) -> None:
     module = importlib.util.module_from_spec(spec)
-    module.__dict__["__builtins__"] = {}  # unresolved
+    module.__dict__["__builtins__"] = {}
 
 
 def from_spec_through_a_module_alias(spec: importlib.machinery.ModuleSpec) -> None:
     from importlib import util
 
     module = util.module_from_spec(spec)
+    module.__dict__["__builtins__"] = {}
+
+
+def from_spec_through_a_local_import(spec: importlib.machinery.ModuleSpec) -> None:
+    import importlib.util as local_util
+
+    module = local_util.module_from_spec(spec)
+    module.__dict__["__builtins__"] = {}
+
+
+def from_spec_imported_by_name(spec: importlib.machinery.ModuleSpec) -> None:
+    from importlib.util import module_from_spec as make_module
+
+    module = make_module(spec)
+    module.__dict__["__builtins__"] = {}
+
+
+def from_a_project_function_of_the_name(spec: importlib.machinery.ModuleSpec) -> None:
+    module = module_from_spec(spec)
     module.__dict__["__builtins__"] = {}  # unresolved
+
+
+def module_from_spec(spec):
+    return vendor.load(spec)
 
 
 def from_spec_annotated(spec: importlib.machinery.ModuleSpec) -> None:
@@ -207,7 +233,12 @@ class ProjectLoader(importlib.abc.Loader):
 def from_a_custom_loader() -> None:
     spec = importlib.util.spec_from_loader("made", ProjectLoader())
     module = importlib.util.module_from_spec(spec)
-    module.__dict__["__builtins__"] = {}  # unresolved
+    module.__dict__["__builtins__"] = {}
+
+
+def from_the_loader_itself(spec: importlib.machinery.ModuleSpec) -> None:
+    module = ProjectLoader().create_module(spec)
+    module.__dict__["__builtins__"] = {}
 
 
 def from_unknown_call() -> None:
@@ -250,6 +281,104 @@ def imports_in_another_function() -> None:
     import types as other_types
 
     other_types.ModuleType("x")
+"#;
+
+/// A call of a value declared `type[C]` constructs a `C` whatever holds the value: a parameter,
+/// an attribute annotated in `__init__` or in the class body, read on `self` in the class or in
+/// a subclass or on another instance, one the class stores from such a parameter, also through a
+/// local or with `**` unpacking. The call constructs the object, so with `fresh-objects =
+/// "allow"` a write of a guarded attribute on it is allowed until something keeps it. A value
+/// some store binds to an object of unknown class stays unknown.
+const TYPE_ATTRIBUTES: &str = r#"from typing import Type
+
+import vendor
+from pkg.model import Node
+
+
+class Field:
+    pass
+
+
+def parameter(field_type: type[Field]) -> None:
+    made = field_type()
+    made.__dict__["_mark"] = 1
+
+
+class Parser:
+    body_type: type[Field]
+
+    def __init__(self, field_type: type[Field], node_type: type[Node]) -> None:
+        self.field_type: type[Field] = field_type
+        self.node_type: type[Node] = node_type
+        self.typing_type: Type[Field] = field_type
+        self.stored = field_type
+        self.kept = None
+
+    def attribute(self) -> None:
+        made = self.field_type()
+        made.__dict__["_mark"] = 1
+
+    def attribute_unpacked(self, field: Field) -> None:
+        made = self.field_type(**{**field.__dict__})
+        made.__dict__["_mark"] = 1
+
+    def through_a_local(self) -> None:
+        factory = self.field_type
+        made = factory()
+        made.__dict__["_mark"] = 1
+
+    def class_body_annotation(self) -> None:
+        made = self.body_type()
+        made.__dict__["_mark"] = 1
+
+    def typing_type_attribute(self) -> None:
+        made = self.typing_type()
+        made.__dict__["_mark"] = 1
+
+    def stored_attribute(self) -> None:
+        made = self.stored()
+        made.__dict__["_mark"] = 1
+
+    def fresh(self) -> None:
+        made = self.node_type()
+        made._cache = 1
+
+    def kept_first(self) -> None:
+        made = self.node_type()
+        self.kept = made
+        made._cache = 1  # write
+
+
+class OpenAPIParser(Parser):
+    def inherited_attribute(self) -> None:
+        made = self.field_type()
+        made.__dict__["_mark"] = 1
+
+
+def on_another_instance(parser: Parser) -> None:
+    made = parser.field_type()
+    made.__dict__["_mark"] = 1
+
+
+class Rebound:
+    def __init__(self, field_type: type[Field]) -> None:
+        self.kind = field_type
+
+    def reset(self) -> None:
+        self.kind = vendor.make()
+
+    def call(self) -> None:
+        made = self.kind()
+        made.__dict__["_mark"] = 1  # unresolved
+
+
+class Unannotated:
+    def __init__(self, kind) -> None:
+        self.kind = kind
+
+    def call(self) -> None:
+        made = self.kind()
+        made.__dict__["_mark"] = 1  # unresolved
 "#;
 
 /// `(path, line, kind)` of every `MUT201` (`write`) and `MUT205` (`unresolved`) report.
@@ -331,6 +460,121 @@ fn builtin_exception_classes_are_known_classes() {
 #[test]
 fn standard_library_results_and_function_local_imports_type_a_receiver() {
     check_marks("stdlib", &[("pkg/stdlib.py", STDLIB)]);
+}
+
+#[test]
+fn a_call_of_a_declared_class_object_constructs_it_whatever_holds_it() {
+    check_marks(
+        "type_attributes",
+        &[("pkg/type_attributes.py", TYPE_ATTRIBUTES)],
+    );
+}
+
+/// A call of a class object an attribute declares runs the class's constructor, as a call of a
+/// parameter declared alike does: an effect boundary sees the blocking `__init__` through both.
+#[test]
+fn a_call_of_a_declared_class_object_runs_its_constructor() {
+    let p = Project::new("type_attribute_targets");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[[tool.heki.effect-boundaries]]
+name = "quiet"
+scopes = ["pkg.calls"]
+forbid = ["sleep"]
+"#,
+    );
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/worker.py",
+        "import time\n\n\nclass Worker:\n    def __init__(self) -> None:\n        time.sleep(1)\n",
+    );
+    p.write(
+        "pkg/calls.py",
+        r#"from pkg.worker import Worker
+
+
+def parameter(kind: type[Worker]) -> None:
+    kind()
+
+
+class Holder:
+    def __init__(self, kind: type[Worker]) -> None:
+        self.kind: type[Worker] = kind
+
+    def attribute(self) -> None:
+        self.kind()
+"#,
+    );
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF201"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut lines: Vec<u64> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(lines, vec![5, 13], "{stdout}");
+}
+
+/// What a call of a class object an attribute declares constructs is judged as for a parameter
+/// declared alike: a blocking method called on it is an exact `EFF101` report, and the blocking
+/// constructor the call runs is a heuristic one, since a subclass may run another `__init__`.
+#[test]
+fn a_call_of_a_declared_class_object_reports_as_for_a_parameter() {
+    let p = Project::new("type_attribute_exact");
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n");
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/worker.py",
+        "import time\n\n\nclass Worker:\n    def __init__(self) -> None:\n        time.sleep(1)\n\n    def work(self) -> None:\n        time.sleep(1)\n",
+    );
+    p.write(
+        "pkg/calls.py",
+        r#"from pkg.worker import Worker
+
+
+async def parameter(kind: type[Worker]) -> None:
+    made = kind()
+    made.work()
+
+
+class Holder:
+    def __init__(self, kind: type[Worker]) -> None:
+        self.kind: type[Worker] = kind
+
+    async def attribute(self) -> None:
+        made = self.kind()
+        made.work()
+"#,
+    );
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut lines: Vec<(u64, &str)> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            (5, "heuristic"),
+            (6, "exact"),
+            (14, "heuristic"),
+            (15, "exact")
+        ],
+        "{stdout}"
+    );
 }
 
 const BLOCKING_WORKER: &str =

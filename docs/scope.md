@@ -298,14 +298,18 @@ Missed findings close as heki learns more:
   class. A read is not.
 - Typed: builtin classes, the builtin exception and warning classes among them
   (`error: ValueError`; not `IOError` or `EnvironmentError`, and not a name the module or the
-  function binds itself), what a standard library call the catalog types gives, an annotation
-  of a local that names an import of its own function (not a name the function binds more than
-  once or otherwise), and, in a `finally` body, what the annotations say before the `try`.
+  function binds itself), what a standard library call the catalog types gives, by its declared
+  return type (`importlib.util.module_from_spec(spec)` is a `types.ModuleType`, though a custom
+  loader's `create_module` may return another object), an annotation of a local that names an
+  import of its own function (not a name the function binds more than once or otherwise), a
+  call of a value declared `type[C]` wherever the value is held (a parameter, a local, or an
+  attribute annotated in `__init__` or the class body, read in a subclass too), and, in a
+  `finally` body, what the annotations say before the `try`.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
   unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
   module binds to a type expression more than once or with type parameters (a type alias bound
   once names its value), calls of a subscripted class other than a builtin or `collections`
-  container (`Box[int]()`), and calls of `type[C]` attributes.
+  container (`Box[int]()`), and calls of a `type[A | B]`.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.

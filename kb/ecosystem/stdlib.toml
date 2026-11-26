@@ -2310,6 +2310,13 @@ symbol = "importlib.util.find_spec"
 environment = "import"
 opaque_to_layer3 = true
 
+# Its declared return type. A custom loader's `create_module` may return another object; the
+# declaration wins in the Advisory lane, as an annotation does.
+[[entries]]
+symbol = "importlib.util.module_from_spec"
+return_type = "types.ModuleType"
+opaque_to_layer3 = true
+
 [[entries]]
 symbol = "importlib.import_module"
 environment = "import"
