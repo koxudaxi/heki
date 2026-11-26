@@ -372,9 +372,14 @@ impl Ty {
         matches!(self, Ty::Inst(o) if o.args == Args::None && Container::of_class(&o.class).is_some())
     }
 
-    /// Whether the type is an instance of the class of `declared`.
-    pub(crate) fn keeps_class_of(&self, declared: &Ty) -> bool {
-        matches!((self, declared), (Ty::Inst(a), Ty::Inst(b)) if a.class == b.class)
+    /// What an attribute annotated with the bare container class `self` (`list`) holds when its
+    /// stores give `stored`: that type when it is an instance of the class (`list[Handler]`),
+    /// the annotation otherwise.
+    pub(crate) fn holding_stored(&self, stored: Option<Ty>) -> Ty {
+        match (stored, self) {
+            (Some(Ty::Inst(t)), Ty::Inst(declared)) if t.class == declared.class => Ty::Inst(t),
+            _ => self.clone(),
+        }
     }
 
     /// The type with the items of every instance unknown: what a container holds once code

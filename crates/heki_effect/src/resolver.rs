@@ -521,7 +521,7 @@ impl ClassDecl {
     }
 
     /// The Priority 3 attribute types, sorted by attribute: the declared ones and those
-    /// `__init__` or `__post_init__` establishes.
+    /// `__init__` or `__post_init__` establishes (both for a bare container annotation).
     pub fn typed_attrs(&self) -> Vec<(&str, &Ty)> {
         let established = self.attr_stores.iter().filter_map(|(a, s)| match s {
             AttrStore::Established(t) => Some((&**a, t)),
@@ -659,7 +659,9 @@ pub struct ClassDecl {
     /// left out.
     pub bases: Vec<String>,
     /// The declared instance attribute types, `attr -> type`: annotations in the class body or
-    /// on `self` in a method, which type every store of the attribute.
+    /// on `self` in a method, which type every store of the attribute. A bare container
+    /// annotation (`list`, `dict`) types only the class: the stores give the items
+    /// ([`Self::attr_stores`], [`ProjectDecls::member_type`]).
     pub attr_types: BTreeMap<String, Ty>,
     /// The attributes annotated with one of the class's type parameters (`obj: T` in `class
     /// Site(Generic[T])` or `class Site[T]:`), sorted, each with the parameter's position: an
@@ -668,7 +670,8 @@ pub struct ClassDecl {
     #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
     pub param_attrs: Box<[(Box<str>, u8)]>,
     /// What the module's code stores in the attributes of the class's instances it does not
-    /// annotate, through `self` or another receiver of the class, sorted by attribute
+    /// annotate or annotates with a bare container class (`list`), through `self` or another
+    /// receiver of the class, sorted by attribute
     /// (`stores::record`). A slice rather than a map: most classes store a few, and a map's
     /// first node would hold room for eleven.
     #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
@@ -5414,8 +5417,10 @@ impl ProjectDecls {
     /// name some project property has gives none), or the Priority 3 attribute type. Overriding
     /// subclasses do not count for an annotation, as for a type checker; an inferred type joins
     /// what the project's code stores into the instances of every class whose code may store
-    /// into the instance ([`Self::stored_attr_type`]). The getter's module is a declaration read
-    /// like any other (`DeclKeys::modules`).
+    /// into the instance ([`Self::stored_attr_type`]). A bare container annotation (`list`)
+    /// gives its class only: with the items of that join where `__init__` or `__post_init__`
+    /// establishes the attribute and the join is an instance of the class. The getter's module
+    /// is a declaration read like any other (`DeclKeys::modules`).
     pub(crate) fn member_type(&self, class: &str, attr: &str, skip_self: bool) -> Option<Ty> {
         self.read(|k| note(&mut k.property_names, attr));
         let property = self.property_names.contains(attr);
@@ -5426,10 +5431,20 @@ impl ProjectDecls {
             let Some(decl) = self.class(c) else {
                 continue;
             };
+            let established = || {
+                matches!(
+                    self.attr_store(c, decl, attr),
+                    Some(AttrStore::Established(_))
+                )
+            };
             if let Some(t) = decl.attr_types.get(attr) {
-                return Some(t.clone());
+                if !t.is_bare_container() {
+                    return Some(t.clone());
+                }
+                let stored = established().then(|| self.stored_attr_type(class, attr));
+                return Some(t.holding_stored(stored.flatten()));
             }
-            if let Some(AttrStore::Established(_)) = self.attr_store(c, decl, attr) {
+            if established() {
                 return self.stored_attr_type(class, attr);
             }
         }
@@ -9173,18 +9188,47 @@ pub(crate) fn passed_var(
     args: &[VarId],
     kwargs: &[(Option<String>, VarId)],
     star_from: Option<u8>,
-    (index, keyword): (Option<u8>, Option<&str>),
+    at: (Option<u8>, Option<&str>),
 ) -> Option<VarId> {
+    match bound_arg(args, kwargs, star_from, at) {
+        BoundArg::Var(v) => Some(v),
+        BoundArg::Unbound | BoundArg::Unpacked => None,
+    }
+}
+
+/// What a call binds to a parameter of the callable ([`bound_arg`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoundArg {
+    Var(VarId),
+    /// No argument: the parameter keeps its default.
+    Unbound,
+    /// `*` or `**` unpacking may pass the argument.
+    Unpacked,
+}
+
+/// What a call binds to the parameter at position `index` that the keyword `keyword` also
+/// names (`None`: a parameter taken by position only, which a `**` mapping does not bind, as
+/// for `list(iterable)`).
+pub(crate) fn bound_arg(
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
+    (index, keyword): (Option<u8>, Option<&str>),
+) -> BoundArg {
     if let Some(k) = keyword
         && let Some((_, v)) = kwargs.iter().find(|(name, _)| name.as_deref() == Some(k))
     {
-        return Some(*v);
+        return BoundArg::Var(*v);
     }
-    let i = index?;
-    if star_from.is_some_and(|s| i >= s) {
-        return None;
+    let position = index.map(|i| (i, args.get(usize::from(i))));
+    match position {
+        Some((i, _)) if star_from.is_some_and(|s| i >= s) => BoundArg::Unpacked,
+        Some((_, Some(v))) => BoundArg::Var(*v),
+        _ if keyword.is_some() && kwargs.iter().any(|(name, _)| name.is_none()) => {
+            BoundArg::Unpacked
+        }
+        _ => BoundArg::Unbound,
     }
-    args.get(usize::from(i)).copied()
 }
 
 /// The constant `var` holds (through copies), with `def` giving each variable's definition: a
