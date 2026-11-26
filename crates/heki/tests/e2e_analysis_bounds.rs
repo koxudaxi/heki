@@ -10,7 +10,7 @@
 //! calls once per item, contracts with many call targets and argument lists, the names offered for
 //! contract entries that match nothing, the mappings a call unpacks, the walk to the uses handing a
 //! reference to a call target on, the locks `EFF109` follows, the thread locks and guarded writes
-//! `EFF117` follows, the values class statements pass as bases, the bindings the deque rewrite's
+//! `EFF117` follows, the shields and re-delivered cancellations `EFF118` follows, the values class statements pass as bases, the bindings the deque rewrite's
 //! candidates check, the star imports a name is bound through, many or nested deep, the sizes of a
 //! thousand lists each extending the next or of one list extending many deep chains, the walks over
 //! the import graph (`heki inspect --imports`), the ends of the handler bodies around imports, the
@@ -4997,6 +4997,85 @@ fn guarded_writes_in_one_released_region_take_linear_steps() {
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["C.reset"; n]);
+}
+
+/// A `finally` body of `n` awaits: each helper sleeps, one in two inside a shielded scope of its
+/// own, one in two followed by the re-delivery checkpoint, and the body ends with one.
+fn shielded_cleanups(n: usize) -> Project {
+    let mut lines = vec!["import anyio".to_owned(), String::new()];
+    for i in 0..n {
+        lines.extend([
+            String::new(),
+            format!("async def stop{i}() -> None:"),
+            "    await anyio.sleep(0)".to_owned(),
+        ]);
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "async def close() -> None:",
+            "    try:",
+            "        pass",
+            "    finally:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..n {
+        if i % 2 == 0 {
+            lines.push("        with anyio.CancelScope(shield=True):".to_owned());
+            lines.push(format!("            await stop{i}()"));
+        } else {
+            lines.push(format!("        await stop{i}()"));
+            lines.push("        await anyio.lowlevel.checkpoint()".to_owned());
+        }
+    }
+    lines.push("        await anyio.lowlevel.checkpoint()".to_owned());
+    let p = Project::new(&format!("bounds_shielded_cleanups_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of awaits in one `finally` body, half of them in shielded scopes and half followed
+/// by a re-delivered cancellation: the shields are one dataflow with a bit per scope, and each
+/// re-delivery's walk to the end of the function stops at the first call after it.
+#[test]
+fn shielded_cleanups_take_linear_steps() {
+    let n = 2_000;
+    let found = check_linear(n, shielded_cleanups);
+    let reported = found.iter().filter(|d| d["rule_code"] == "EFF118").count();
+    // Each unshielded helper and each re-delivery something runs after, once per position (the
+    // body is built once per way out); not the last re-delivery.
+    assert_eq!(reported, n);
+}
+
+/// A shielded cancel scope bound once and copied through a chain of `n` names, entered once per
+/// name in a `finally` body.
+fn aliased_cancel_scope_entries(n: usize) -> Project {
+    let mut lines = vec![
+        "import anyio".to_owned(),
+        String::new(),
+        String::new(),
+        "async def close() -> None:".to_owned(),
+        "    scope0 = anyio.CancelScope(shield=True)".to_owned(),
+    ];
+    lines.extend((1..n).map(|i| format!("    scope{i} = scope{}", i - 1)));
+    lines.extend(["    try:", "        pass", "    finally:"].map(str::to_owned));
+    for i in 0..n {
+        lines.push(format!("        with scope{i}:"));
+        lines.push("            await anyio.sleep(0)".to_owned());
+    }
+    let p = Project::new(&format!("bounds_aliased_cancel_scope_entries_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of entries of one cancel scope, each through the next of a chain of as many names:
+/// the copy root of each name is read from the function's shared table, not walked per entry.
+#[test]
+fn aliased_cancel_scope_entries_take_linear_steps() {
+    let found = check_linear(2_000, aliased_cancel_scope_entries);
+    assert!(found.iter().all(|d| d["rule_code"] != "EFF118"));
 }
 
 /// `n` attributes a thread writes holding a lock, each through the next of a chain of `n` names

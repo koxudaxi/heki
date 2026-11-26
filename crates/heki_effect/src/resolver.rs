@@ -10328,7 +10328,12 @@ impl<'a> TypeCtx<'a> {
         }
         let last = fqn.rsplit('.').next().unwrap_or(fqn);
         if last.chars().next().is_some_and(char::is_uppercase) {
-            return Some(Ty::inst(fqn));
+            // A class whose instances behave differently for an argument is typed as the
+            // catalog's class of that case (`anyio.Lock(fast_acquire=True)`).
+            let case = self.catalog(fqn).and_then(|e| e.case_for(arg));
+            return Some(Ty::inst(
+                case.and_then(|c| c.return_type.as_deref()).unwrap_or(fqn),
+            ));
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
         let entry = self.catalog(fqn)?;

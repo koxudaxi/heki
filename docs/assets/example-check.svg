@@ -37,7 +37,7 @@ text{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono
 <text y="509" xml:space="preserve"><tspan x="18" textLength="864">heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports, which can be</tspan></text>
 <text y="530" xml:space="preserve"><tspan x="18" textLength="873">wrong about the code and count as warnings; `fail-on = "warning"` in the lint settings makes them</tspan></text>
 <text y="551" xml:space="preserve"><tspan x="18" textLength="72">fail it.</tspan></text>
-<text y="572" xml:space="preserve"><tspan x="18" textLength="828">note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`</tspan></text>
+<text y="572" xml:space="preserve"><tspan x="18" textLength="828">note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`</tspan></text>
 <text y="593" xml:space="preserve"><tspan x="18" textLength="441">EFF101 (async-blocking-call): `heki rule EFF101`,</tspan></text>
 <text y="614" xml:space="preserve"><tspan x="18" textLength="468">https://heki.koxudaxi.dev/rules/async-blocking-call/</tspan></text>
 <text y="635" xml:space="preserve"><tspan x="18" textLength="810">EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/</tspan></text>

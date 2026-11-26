@@ -1452,7 +1452,7 @@ excluded = true               # never reported
 | Key | Meaning |
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
-| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
+| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`, `checkpoint` (an await where a cancelled AnyIO or Trio scope raises, `EFF118`). |
 | `async-safe` | Safe to call from `async def`: it never blocks the event loop, so the blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread (the receiver is not counted). |
 | `excluded` | Never reported (logging and similar). |
