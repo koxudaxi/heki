@@ -341,6 +341,17 @@ Actions, the reports show up as annotations.
 [Adopting heki](https://heki.koxudaxi.dev/adoption/#continuous-integration) has the SARIF run for
 code-scanning alerts, a local hook, and how to check only the files a pull request changes.
 
+## 🛡️ Stability
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that
+run by default, the format of the Ratchet baseline, the contract tables `write-owners`,
+`read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with
+`fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A
+change to one of them is listed under "Breaking changes" in the release notes. The experimental
+features can change in any release: `heki recommend`, `heki inspect`, `heki skill`,
+`--generate-prompt`, and the rules marked experimental
+([the list](https://heki.koxudaxi.dev/experimental/)).
+
 ## 🎯 Scope
 
 When heki isn't sure, it doesn't report. It works from its own analysis, a catalog of library

@@ -555,6 +555,17 @@ The configuration, the baseline, and the CI files that decide this (`pyproject.t
 the audit file shows what suppressions hide, and a weakened configuration or baseline is the
 code owners' to review.
 
+## Stability on the way to 1.0
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that
+run by default, the format of the Ratchet baseline, the contract tables `write-owners`,
+`read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with
+`fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A
+change to one of them is listed under "Breaking changes" in the release notes. The experimental
+features can change in any release: `heki recommend`, `heki inspect`, `heki skill`,
+`--generate-prompt`, and the rules marked experimental
+([Experimental Features](experimental.md) has the list).
+
 ## Rolling out rules
 
 1. Run [`heki recommend`](recommend.md) (experimental): it says which rules would report on

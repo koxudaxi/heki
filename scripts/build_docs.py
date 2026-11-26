@@ -298,6 +298,13 @@ def experimental_page(registry: dict, rules: list[dict]) -> str:
         "`extend-select` names its code or name, and `heki check` then reports it like any "
         "other rule. `heki rule <CODE>` and the rule's page say that it is experimental.",
         "",
+        "On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the "
+        "exact rules that run by default, the format of the Ratchet baseline, the contract tables "
+        "`write-owners`, `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and "
+        "`effect-boundaries` with `fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, "
+        "and `github` output formats. A change to one of them is listed under \"Breaking changes\" "
+        "in the release notes. See [Adopting heki](adoption.md#stability-on-the-way-to-10).",
+        "",
         "| ID | Kind | Target | Since | Tracking |",
         "| -- | ---- | ------ | ----- | -------- |",
     ]
