@@ -178,7 +178,9 @@ mod tests {
 
     #[test]
     fn unbalanced_patterns_are_left_to_the_glob_parser() {
-        for pattern in ["a{,b", "a},b", "a{,b}}", "}a{,b}", "a[{,b", "a{b[,c}", "a{,\\"] {
+        for pattern in [
+            "a{,b", "a},b", "a{,b}}", "}a{,b}", "a[{,b", "a{b[,c}", "a{,\\",
+        ] {
             assert_eq!(expand(pattern), vec![pattern], "{pattern}");
         }
     }
