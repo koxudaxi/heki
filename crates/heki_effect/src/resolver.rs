@@ -9068,6 +9068,13 @@ impl Val {
         }
     }
 
+    /// Whether the value is an instance of one of the classes of `other`, which is an instance
+    /// too: `other` covers it.
+    pub(crate) fn within(&self, other: &Val) -> bool {
+        let (own, all) = (Val::instance_classes(self), Val::instance_classes(other));
+        !own.is_empty() && own.iter().all(|c| all.contains(c))
+    }
+
     /// The project class the value is the class object of: a class named exactly, or one that
     /// may be a subclass (`cls`). Calling it constructs that class.
     pub(crate) fn class_object<'v>(&'v self, project: &ProjectDecls) -> Option<&'v str> {
@@ -10189,7 +10196,7 @@ impl<'a> TypeCtx<'a> {
         f: &IrFunction,
     ) -> (
         FxHashMap<VarId, Val>,
-        FxHashMap<(BlockId, VarId), Val>,
+        crate::infer::NarrowedVals,
         FxHashMap<VarId, Vec<String>>,
         std::rc::Rc<crate::infer::Inferred>,
     ) {

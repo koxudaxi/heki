@@ -35,7 +35,7 @@ use crate::resolver::stores::Read;
 use crate::resolver::{self, Callee, CopyMade, ProjectDecls, TypeCtx, Val};
 use crate::types::{Added, Args, Change, Container, Elem, Obj, Operands, Ty};
 use heki_ast::Span;
-use heki_ir::walk::FnShape;
+use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, Sparse, fixpoint};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
     InstKind, IrFunction, ModuleIr, PhiNode, Terminator, UnaryOpKind, VarId,
@@ -128,9 +128,11 @@ pub(crate) struct Inferred {
     nested_read: bool,
     /// The closure cells the function binds, by name: every value bound to each.
     cells: FxHashMap<String, Fact>,
-    /// The types `isinstance` checks give variables in the blocks they guard, where they differ
-    /// from the variable's own.
+    /// The types `isinstance` checks give values in the blocks they guard, where they differ
+    /// from the value's own, by the variable naming the value ([`values_named`]).
     narrowed: FxHashMap<(BlockId, VarId), Ty>,
+    /// [`Narrowing::value_of`].
+    value_of: FxHashMap<VarId, VarId>,
 }
 
 /// A value no path binds (`None`) adds no item type.
@@ -169,11 +171,18 @@ impl Inferred {
     }
 
     /// The values consumers see of the variables `isinstance` checks narrow, by block.
-    pub(crate) fn narrowed_vals(&self) -> FxHashMap<(BlockId, VarId), Val> {
-        self.narrowed
+    pub(crate) fn narrowed_vals(&self) -> NarrowedVals {
+        let by_value: FxHashMap<_, _> = self
+            .narrowed
             .iter()
             .filter_map(|(k, t)| Some((*k, t.val()?)))
-            .collect()
+            .collect();
+        let value_of = if by_value.is_empty() {
+            FxHashMap::default()
+        } else {
+            self.value_of.clone()
+        };
+        NarrowedVals { by_value, value_of }
     }
 
     /// The classes the second argument of each `isinstance(x, C)` call of `f` names, by that
@@ -214,6 +223,23 @@ impl Inferred {
     }
 }
 
+/// What `isinstance` checks give variables in the blocks they guard, as consumers see it.
+pub(crate) struct NarrowedVals {
+    /// By block and the variable naming the value ([`values_named`]).
+    by_value: FxHashMap<(BlockId, VarId), Val>,
+    /// [`Narrowing::value_of`].
+    value_of: FxHashMap<VarId, VarId>,
+}
+
+impl NarrowedVals {
+    /// What the checks guarding block `bb` give `var`: a check narrows a value, so it narrows
+    /// every copy of it as well.
+    pub(crate) fn get(&self, bb: BlockId, var: VarId) -> Option<&Val> {
+        let value = self.value_of.get(&var).copied().unwrap_or(var);
+        self.by_value.get(&(bb, value))
+    }
+}
+
 /// Inference state shared by the functions of one module: a scope nested in a function needs
 /// the types of the functions enclosing it (the value a comprehension or generator expression
 /// iterates, and the closure cells it reads).
@@ -223,7 +249,7 @@ pub(crate) struct Scopes {
     /// The types of functions whose types nested scopes read.
     enclosing: RefCell<FxHashMap<FunctionId, Rc<Inferred>>>,
     /// What a child scope produces in each run.
-    outputs: RefCell<FxHashMap<ChildRun, Elem>>,
+    outputs: RefCell<FxHashMap<ChildRun, ChildOut>>,
 }
 
 impl Scopes {
@@ -237,6 +263,17 @@ impl Scopes {
 /// A run of a child scope: the scope, the type of the value it iterates, and the facts of the
 /// cells it reads.
 type ChildRun = (FunctionId, Option<Ty>, CellFacts);
+
+/// What a run of a child scope gives the function running it.
+#[derive(Clone)]
+struct ChildOut {
+    /// The items a generator expression yields, the container a comprehension returns, or the
+    /// value of a lambda's body.
+    produced: Elem,
+    /// What it stores in the cells of that function that only the scopes the function creates
+    /// store ([`Nesting::stored_by_children`]), by their names there.
+    stored: Rc<[(String, Fact)]>,
+}
 
 /// The closure cell of a function, by the function and the cell's name there.
 pub(crate) type CellKey = (FunctionId, String);
@@ -259,6 +296,13 @@ struct Nesting {
     /// comprehension scope before 3.12): they hold more than what the function binding them
     /// binds.
     rebound: FxHashSet<CellKey>,
+    /// The rebound cells that one comprehension or generator expression scope alone stores (its
+    /// assignment expressions bind the enclosing function's variable, PEP 572), and that scope:
+    /// such a cell holds what its function binds and what that scope stores.
+    stored_by_one: FxHashMap<CellKey, FunctionId>,
+    /// The rebound cells that only the comprehension and generator expression scopes their
+    /// function creates store: the function reads in the variable what those scopes store.
+    stored_by_children: FxHashSet<CellKey>,
     /// The cells their function binds only as one of its parameters (`i < 64`), and that
     /// parameter ([`cell_bindings`]).
     param_cells: FxHashMap<CellKey, u8>,
@@ -278,6 +322,8 @@ impl Nesting {
             visible: FxHashMap::default(),
             reads: FxHashMap::default(),
             rebound: FxHashSet::default(),
+            stored_by_one: FxHashMap::default(),
+            stored_by_children: FxHashSet::default(),
             param_cells: FxHashMap::default(),
         };
         // No function keeps a cell: no scope reads or rebinds one.
@@ -329,6 +375,10 @@ impl Nesting {
             }
         }
         let none = Rc::new(Cells::new());
+        // The comprehension and generator expression scopes storing each rebound cell, and the
+        // cells another scope or an unmodeled body may store.
+        let mut storers: FxHashMap<CellKey, Vec<&IrFunction>> = FxHashMap::default();
+        let mut stored_elsewhere: FxHashSet<CellKey> = FxHashSet::default();
         // The cells the scopes each function creates outside its inlined comprehensions can
         // read, shared by them.
         let mut for_nested: FxHashMap<FunctionId, Rc<Cells>> = FxHashMap::default();
@@ -350,7 +400,10 @@ impl Nesting {
             // come from its creator, so their stores are tied to no cell below: any cell they can
             // see may be rebound.
             if f.is_unmodeled() {
-                out.rebound.extend(nested_in(f, &cells).values().cloned());
+                for cell in nested_in(f, &cells).values() {
+                    out.rebound.insert(cell.clone());
+                    stored_elsewhere.insert(cell.clone());
+                }
             }
             for inst in f.blocks.iter().flat_map(|b| &b.insts) {
                 match &inst.kind {
@@ -361,6 +414,13 @@ impl Nesting {
                     InstKind::StoreDeref { name, .. } => {
                         if let Some(cell) = cells.get(name) {
                             out.rebound.insert(cell.clone());
+                            if f.passed_from.is_none() {
+                                stored_elsewhere.insert(cell.clone());
+                            }
+                            let scopes = storers.entry(cell.clone()).or_default();
+                            if scopes.last().is_none_or(|g| g.id != f.id) {
+                                scopes.push(f);
+                            }
                         }
                     }
                     _ => {}
@@ -376,6 +436,20 @@ impl Nesting {
                     let i = u8::try_from(i).expect("at most 64 parameters");
                     out.param_cells.insert((f.id, name.to_owned()), i);
                 }
+            }
+        }
+        for (cell, scopes) in storers {
+            if stored_elsewhere.contains(&cell) {
+                continue;
+            }
+            if scopes
+                .iter()
+                .all(|g| g.passed_from.map(|(c, _)| c) == Some(cell.0))
+            {
+                out.stored_by_children.insert(cell.clone());
+            }
+            if let [one] = scopes[..] {
+                out.stored_by_one.insert(cell, one.id);
             }
         }
         // The child scopes a function runs come after it.
@@ -412,6 +486,38 @@ impl Nesting {
     /// `cell`, when its values are those the function binding it binds.
     fn bound_only<'c>(&self, cell: &'c CellKey) -> Option<&'c CellKey> {
         (!self.rebound.contains(cell)).then_some(cell)
+    }
+
+    /// [`Self::bound_only`] as scope `reader` reads `cell`: its values are those the function
+    /// binding it binds, and those `reader` stores itself ([`Self::stored_by_one`]).
+    fn bound_besides<'c>(&self, cell: &'c CellKey, reader: FunctionId) -> Option<&'c CellKey> {
+        (!self.rebound.contains(cell) || self.stored_by_one.get(cell) == Some(&reader))
+            .then_some(cell)
+    }
+
+    /// The cells of an enclosing function that `f` alone stores, by the name `f` stores each
+    /// with.
+    fn stored_by(&self, f: FunctionId) -> impl Iterator<Item = (&String, &CellKey)> {
+        self.visible_cells(f)
+            .filter(move |(_, cell)| self.stored_by_one.get(*cell) == Some(&f))
+    }
+
+    /// The cells of the function creating `f` (`creator`) that only the scopes it creates store
+    /// ([`Self::stored_by_children`]), by the name `f` reads each with.
+    fn stored_for(
+        &self,
+        f: FunctionId,
+        creator: FunctionId,
+    ) -> impl Iterator<Item = (&String, &CellKey)> {
+        self.visible_cells(f)
+            .filter(move |(_, cell)| cell.0 == creator && self.stored_by_children.contains(*cell))
+    }
+
+    fn visible_cells(&self, f: FunctionId) -> impl Iterator<Item = (&String, &CellKey)> {
+        self.visible
+            .get(&f)
+            .into_iter()
+            .flat_map(|cells| cells.iter())
     }
 
     /// The function enclosing `f` that binds the variable `name` `f` reads from it, and its
@@ -534,6 +640,159 @@ fn with_comprehension_cells(
 /// binds to it, when that is one class ([`TypeCtx::captured`]).
 type Captured = (String, Option<String>);
 
+/// The value each variable of `shape`'s function names where that is another variable's: the end
+/// of its chain of copies ([`FnShape::copy_root`]), and for a read of a cell, the value of the
+/// store it sees (`store_read`, [`own_store_reads`]). In reverse postorder that store comes
+/// before the read.
+fn values_named(
+    shape: &FnShape<'_>,
+    store_read: &FxHashMap<VarId, VarId>,
+) -> FxHashMap<VarId, VarId> {
+    let mut named = FxHashMap::default();
+    for &bb in shape.rpo() {
+        for inst in &shape.f.block(bb).insts {
+            let Some(dst) = inst.kind.dst() else {
+                continue;
+            };
+            let root = shape.copy_root(dst);
+            let value = match store_read.get(&root) {
+                Some(stored) => {
+                    let stored = shape.copy_root(*stored);
+                    named.get(&stored).copied().unwrap_or(stored)
+                }
+                None => named.get(&root).copied().unwrap_or(root),
+            };
+            if value != dst {
+                named.insert(dst, value);
+            }
+        }
+    }
+    named
+}
+
+/// Which store of its own a read of a cell sees ([`own_store_reads`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// No path reaches the point yet.
+    Unreached,
+    /// Every path reaching it passes this store last, the variable it binds.
+    Store(VarId),
+    /// Paths pass different stores, or none: the cell may hold what it held before.
+    Other,
+}
+
+/// [`Reach`] of each tracked cell at a block's entry.
+#[derive(Clone, PartialEq)]
+struct Reaching(Vec<Reach>);
+
+/// A cell moves up from `Unreached` through `Store` to `Other`, never back.
+impl Join for Reaching {
+    fn join(&mut self, other: &Self) -> bool {
+        let mut grew = false;
+        for (a, b) in self.0.iter_mut().zip(&other.0) {
+            let joined = match (*a, *b) {
+                (Reach::Unreached, r) | (r, Reach::Unreached) => r,
+                (x, y) if x == y => x,
+                _ => Reach::Other,
+            };
+            grew |= joined != *a;
+            *a = joined;
+        }
+        grew
+    }
+
+    fn weight(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// The variable a read of one of the cells `names` (that the scope alone stores) sees, by the
+/// read: the one store of the scope that every path reaching the read passes last. A path from
+/// the scope's entry, or through a suspension or a `yield`, where the enclosing function may run
+/// and bind the variable, sees what the cell held before. The scope is a comprehension's or a
+/// generator expression's, whose blocks have no exception edges (it holds no statement).
+fn own_store_reads(
+    shape: &FnShape<'_>,
+    names: &FxHashSet<&str>,
+    budget: &Budget,
+) -> FxHashMap<VarId, VarId> {
+    let f = shape.f;
+    let slots: FxHashMap<&str, usize> = names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
+    let rpo = shape.rpo();
+    let node = |b: BlockId| shape.rpo_index(b).map(|i| i as usize);
+    let transfer = |i: usize, facts: &Facts<Reaching>| {
+        let start = if i == 0 {
+            Reach::Other
+        } else {
+            Reach::Unreached
+        };
+        let mut entry = Reaching(vec![start; slots.len()]);
+        for &p in shape.preds(rpo[i]) {
+            let Some(at) = node(p).and_then(|pi| facts.get(pi)) else {
+                continue;
+            };
+            let mut exit = at.clone();
+            through(f.block(p), &slots, &mut exit.0, |_, _| {});
+            entry.join(&exit);
+        }
+        Some(entry)
+    };
+    let readers = |i: usize, out: &mut Vec<usize>| {
+        out.extend(shape.succs(rpo[i]).filter_map(node));
+    };
+    // A block is visited once, then once per step a predecessor's cell takes.
+    let most_preds = (rpo.iter().map(|b| shape.preds(*b).len()).max()).unwrap_or(0);
+    let spec = Sparse {
+        nodes: rpo.len(),
+        readers: &readers,
+        max_visits: u32::try_from(1 + most_preds * (1 + 2 * slots.len())).unwrap_or(u32::MAX),
+    };
+    let mut reads = FxHashMap::default();
+    // Past the budget no read is tied to a store: each sees every value the cell may hold.
+    if let Answer::Known(entries) = fixpoint(budget, spec, transfer) {
+        let blocks = (rpo.iter().enumerate()).filter_map(|(i, b)| Some((*b, entries.get(i)?)));
+        for (b, entry) in blocks {
+            let mut state = entry.0.clone();
+            through(f.block(b), &slots, &mut state, |read, stored| {
+                reads.insert(read, stored);
+            });
+        }
+    }
+    reads
+}
+
+/// [`own_store_reads`] through the instructions of `block`, from `state`: each read of a cell
+/// one store reaches, with the variable it stores.
+fn through(
+    block: &heki_ir::BasicBlock,
+    slots: &FxHashMap<&str, usize>,
+    state: &mut [Reach],
+    mut read: impl FnMut(VarId, VarId),
+) {
+    for inst in &block.insts {
+        match &inst.kind {
+            InstKind::StoreDeref { name, value } => {
+                if let Some(&i) = slots.get(name.as_str()) {
+                    state[i] = Reach::Store(*value);
+                }
+            }
+            InstKind::LoadDeref { dst, name } => {
+                if let Some(&i) = slots.get(name.as_str())
+                    && let Reach::Store(stored) = state[i]
+                {
+                    read(*dst, stored);
+                }
+            }
+            k if k.suspends()
+                || matches!(k, InstKind::Yield { .. } | InstKind::YieldFrom { .. }) =>
+            {
+                state.fill(Reach::Other);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The variables binding each closure cell of `f`, by the cell's name. A cell holds every value
 /// the function binds to it: its parameter's, and those of the instructions naming it (an
 /// unassigned read, `LoadName`, binds none). A read of the cell in a nested scope is a phi of
@@ -632,12 +891,13 @@ impl<'a> TypeCtx<'a> {
         let cells = nesting
             .read_by(f.id)
             .map(|(name, captured)| {
-                let fact = nesting
-                    .bound_only(captured)
-                    .map_or(Fact::Unknown, |(owner, bound)| {
+                let fact = nesting.bound_besides(captured, f.id).map_or(
+                    Fact::Unknown,
+                    |(owner, bound)| {
                         self.infer_types(self.ir().function(*owner))
                             .cell_fact(bound)
-                    });
+                    },
+                );
                 (name.clone(), fact)
             })
             .collect();
@@ -687,7 +947,7 @@ impl<'a> TypeCtx<'a> {
     /// comprehension or generator expression, iterates a value of type `seed`): the items a
     /// generator expression yields, the container a comprehension returns, or the value of a
     /// lambda's body.
-    fn child_output(&self, id: FunctionId, seed: Option<Ty>, cells: CellFacts) -> Elem {
+    fn child_output(&self, id: FunctionId, seed: Option<Ty>, cells: CellFacts) -> ChildOut {
         let key = (id, seed, cells);
         if let Some(done) = self.scopes.outputs.borrow().get(&key) {
             return done.clone();
@@ -718,9 +978,58 @@ impl<'a> TypeCtx<'a> {
             });
             returns.fold(Elem::Empty, |acc, e| acc.join(&e))
         };
+        let creator = child.passed_from.map(|(creator, _)| creator);
+        let wanted: Vec<_> = (creator.into_iter())
+            .flat_map(|creator| self.nesting().stored_for(id, creator))
+            .collect();
+        let found = child_cell_stores(child, &inferred.facts, &wanted);
+        let stored = (wanted.iter())
+            .map(|(name, (_, there))| {
+                let fact = (found.as_ref())
+                    .map(|found| found.get(name.as_str()).cloned().unwrap_or(Fact::Unset))
+                    .open_means(Fact::Unknown);
+                ((*there).clone(), fact)
+            })
+            .filter(|(_, fact)| *fact != Fact::Unset)
+            .collect();
+        let out = ChildOut {
+            produced: out,
+            stored,
+        };
         self.scopes.outputs.borrow_mut().insert(key, out.clone());
         out
     }
+}
+
+/// What scope `child` stores in the cells `wanted` (by the name `child` reads each with), joined
+/// per cell, from the facts of its variables: one pass over its instructions, charged to the
+/// budget of the "cell stores" owner. Open past the budget.
+fn child_cell_stores<'a>(
+    child: &'a IrFunction,
+    facts: &[Fact],
+    wanted: &[(&String, &CellKey)],
+) -> Answer<FxHashMap<&'a str, Fact>> {
+    if wanted.is_empty() {
+        return Answer::Known(FxHashMap::default());
+    }
+    let names: FxHashSet<&str> = wanted.iter().map(|(name, _)| name.as_str()).collect();
+    let stores = || child.blocks.iter().flat_map(|b| &b.insts);
+    let pass = || {
+        let mut joined: FxHashMap<&str, Fact> = FxHashMap::default();
+        for inst in stores() {
+            if let InstKind::StoreDeref { name, value } = &inst.kind
+                && names.contains(name.as_str())
+            {
+                let slot = joined.entry(name.as_str()).or_insert(Fact::Unset);
+                *slot = slot.join(&facts[value.0 as usize]);
+            }
+        }
+        joined
+    };
+    Budget::of_function("cell stores", child)
+        .take(stores().count())
+        .then(pass)
+        .map_or(Answer::Open, Answer::Known)
 }
 
 /// The builtin sequences a slice of which is a new sequence of their class.
@@ -794,7 +1103,8 @@ fn pair(a: Elem, b: Elem) -> Elem {
     Elem::Of(Ty::container("builtins.tuple", Args::Tuple(vec![a, b])))
 }
 
-/// The types `isinstance` checks give variables.
+/// The types `isinstance` checks give values, by the variable naming each value
+/// ([`values_named`]).
 type Narrowed = FxHashMap<VarId, Ty>;
 
 /// The catalog APIs handing back what a callable returns (`asyncio.to_thread(f, x)`) that one
@@ -941,6 +1251,17 @@ struct Engine<'e, 'a> {
     /// The lambdas a call's transfer called before the pass typed their bodies: the variable
     /// holding each, and its scope.
     lambdas_called: RefCell<Vec<(VarId, FunctionId)>>,
+    /// The variables the scope stores in each cell of an enclosing function that it alone stores
+    /// ([`Nesting::stored_by_one`]), by the name it stores it with.
+    own_stores: StoreCells,
+    /// The variable of the store of one of those cells that each read of it sees
+    /// ([`own_store_reads`]).
+    store_read: FxHashMap<VarId, VarId>,
+    /// What the child scopes the function runs store in its cells, by name
+    /// ([`ChildOut::stored`]).
+    child_stored: RefCell<FxHashMap<String, Fact>>,
+    /// A pass added a value to `child_stored`.
+    child_stored_grew: Cell<bool>,
 }
 
 /// A closure cell the function binds.
@@ -998,13 +1319,76 @@ impl BoundFacts {
     }
 }
 
+/// The cells of enclosing functions that a scope stores in, by name: the join of what the scope
+/// stores in each, kept as [`BoundFacts`] so that reads of a cell no single store reaches take it
+/// from one joined fact, however many stores and reads there are.
+#[derive(Default)]
+struct StoreCells {
+    cells: FxHashMap<String, BoundFacts>,
+    /// The cell and the position among its stores of each variable stored.
+    at: FxHashMap<VarId, Vec<(String, usize)>>,
+}
+
+impl StoreCells {
+    /// The cells joining the stores `vars` (by cell name), from the facts `fact` gives their
+    /// variables now. Joining takes a step per store of the budget.
+    fn new(
+        vars: FxHashMap<&str, Vec<VarId>>,
+        budget: &Budget,
+        fact: impl Fn(VarId) -> Fact,
+    ) -> Self {
+        // Past the budget the joined fact is what a read sees without a store of its own too.
+        budget.take(vars.values().map(Vec::len).sum());
+        let mut out = Self::default();
+        for (name, vars) in vars {
+            for (i, v) in vars.iter().enumerate() {
+                out.at.entry(*v).or_default().push((name.to_owned(), i));
+            }
+            let facts = vars.iter().map(|v| fact(*v)).collect();
+            out.cells.insert(name.to_owned(), BoundFacts::new(facts));
+        }
+        out
+    }
+
+    /// What the scope stores in cell `name`, joined: `Unset` when it stores nothing there.
+    fn joined(&self, name: &str) -> Fact {
+        self.cells
+            .get(name)
+            .map_or(Fact::Unset, |c| c.joined().clone())
+    }
+
+    fn binds(&self, var: VarId) -> bool {
+        self.at.contains_key(&var)
+    }
+
+    /// Hands the new fact of `var` to the cells it is stored in.
+    fn set_stored(&mut self, var: VarId, fact: &Fact) {
+        for (name, i) in self.at.get(&var).into_iter().flatten() {
+            if let Some(cell) = self.cells.get_mut(name) {
+                cell.set(*i, fact.clone());
+            }
+        }
+    }
+}
+
 /// The CFG facts `isinstance` narrowing needs, and the narrowed types at each block's entry
 /// (`None` until a pass reaches the block).
 struct Narrowing<'e> {
     defs: FxHashMap<VarId, &'e InstKind>,
+    /// The value each variable names where it is another's ([`values_named`]): a copy names
+    /// the value its source holds, so a check of one narrows them all (`isinstance(v := x.f,
+    /// C)` tests the value the walrus copies into `v`).
+    value_of: FxHashMap<VarId, VarId>,
     /// Each phi with its block.
     phis: FxHashMap<VarId, (BlockId, &'e PhiNode)>,
     entry: Vec<Option<FxHashMap<VarId, Ty>>>,
+}
+
+impl Narrowing<'_> {
+    /// The variable naming the value `var` names ([`Self::value_of`]).
+    fn value(&self, var: VarId) -> VarId {
+        self.value_of.get(&var).copied().unwrap_or(var)
+    }
 }
 
 /// An operand not typed yet adds nothing yet.
@@ -1052,6 +1436,10 @@ impl<'e, 'a> Engine<'e, 'a> {
             implied_memo: RefCell::default(),
             lambda_bodies: RefCell::default(),
             lambdas_called: RefCell::default(),
+            own_stores: StoreCells::default(),
+            store_read: FxHashMap::default(),
+            child_stored: RefCell::default(),
+            child_stored_grew: Cell::new(false),
         };
         engine.seed_params();
         if let Some(seed) = seed.iterated {
@@ -1116,6 +1504,23 @@ impl<'e, 'a> Engine<'e, 'a> {
     fn collect(&mut self) {
         let (cx, f) = (self.cx, self.f);
         let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        let stored: FxHashSet<&str> = cx
+            .nesting()
+            .stored_by(f.id)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let budget = Budget::of_function("cell stores", f);
+        let mut store_vars: FxHashMap<&str, Vec<VarId>> = FxHashMap::default();
+        if !stored.is_empty() {
+            for i in insts() {
+                if let InstKind::StoreDeref { name, value } = &i.kind
+                    && stored.contains(name.as_str())
+                {
+                    store_vars.entry(name.as_str()).or_default().push(*value);
+                }
+            }
+            self.store_read = own_store_reads(self.shape, &stored, &budget);
+        }
         if insts().any(|i| {
             matches!(&i.kind, InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
                 if name == "isinstance")
@@ -1131,8 +1536,10 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .iter()
                 .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
                 .collect();
+            let value_of = values_named(self.shape, &self.store_read);
             self.narrowing = Some(Narrowing {
                 defs,
+                value_of,
                 phis,
                 entry: vec![None; f.blocks.len()],
             });
@@ -1161,6 +1568,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
         }
+        let own_stores = StoreCells::new(store_vars, &budget, |v| self.bound_fact(v));
+        self.own_stores = own_stores;
         let cell_vars = cell_bindings(f);
         if !cell_vars.is_empty() {
             self.nested_read = true;
@@ -1242,6 +1651,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             self.changed = false;
             self.added_changed = false;
             self.cells_deferred.set(false);
+            self.child_stored_grew.set(false);
             // The cells the lambdas' bodies read may have grown.
             self.lambda_bodies.get_mut().clear();
             for &bb in shape.rpo() {
@@ -1270,7 +1680,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                     }
                 }
             }
-            if !self.changed || acyclic && !self.added_changed && !self.cells_deferred.get() {
+            // Without loops a read of a cell comes after the child scopes storing in it run.
+            let changed = self.changed || self.child_stored_grew.get();
+            if !changed || acyclic && !self.added_changed && !self.cells_deferred.get() {
                 break;
             }
         }
@@ -1294,13 +1706,17 @@ impl<'e, 'a> Engine<'e, 'a> {
             })
             .collect();
         let mut narrowed = FxHashMap::default();
-        if let Some(n) = &self.narrowing {
+        let mut value_of = FxHashMap::default();
+        if let Some(n) = self.narrowing.take() {
             for (b, entry) in (0u32..).zip(&n.entry) {
                 for (v, t) in entry.iter().flatten() {
                     if facts[v.0 as usize] != Fact::Known(t.clone()) {
                         narrowed.insert((BlockId(b), *v), t.clone());
                     }
                 }
+            }
+            if !narrowed.is_empty() {
+                value_of = n.value_of;
             }
         }
         Inferred {
@@ -1309,6 +1725,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             nested_read: self.nested_read,
             cells,
             narrowed,
+            value_of,
         }
     }
 
@@ -1321,10 +1738,38 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// for a type checker, unless what it holds is narrower: an instance of a subclass
     /// (`x: Base = Sub()`), or anything for a declaration of `Any` / `object`.
     fn need(&self, var: VarId) -> Result<Option<&Ty>, Pending> {
-        if let Some(t) = self.cur.get(&var) {
+        let own = self.unnarrowed(var);
+        if !self.cur.is_empty()
+            && let Some(n) = &self.narrowing
+            && let Some(t) = self.cur.get(&n.value(var))
+        {
+            // The checks narrow the value: a name bound where it was narrower (a copy on one of
+            // the paths a block joins) keeps its own class.
+            if let Ok(Some(o)) = own
+                && o.join(t).as_ref() == Some(t)
+            {
+                return own;
+            }
             return Ok(Some(t));
         }
-        self.unnarrowed(var)
+        own
+    }
+
+    /// What a child scope the function runs produces; what it stores in the function's cells
+    /// joins [`Self::child_stored`].
+    fn produced(&self, out: ChildOut) -> Elem {
+        if !out.stored.is_empty() {
+            let mut known = self.child_stored.borrow_mut();
+            for (name, fact) in out.stored.iter() {
+                let slot = known.entry(name.clone()).or_insert(Fact::Unset);
+                let joined = slot.join(fact);
+                if joined != *slot {
+                    *slot = joined;
+                    self.child_stored_grew.set(true);
+                }
+            }
+        }
+        out.produced
     }
 
     /// The facts of the cells the inference of child scope `id` reads, as the function hands
@@ -1335,7 +1780,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         nesting
             .read_by(id)
             .map(|(name, captured)| {
-                let fact = match nesting.bound_only(captured) {
+                let fact = match nesting.bound_besides(captured, id) {
                     Some((owner, bound)) if *owner == self.f.id => self.own_cell(bound),
                     Some(_) => self.cells[name].clone(),
                     None => Fact::Unknown,
@@ -1363,10 +1808,14 @@ impl<'e, 'a> Engine<'e, 'a> {
 
     /// Hands the new fact of `var` to the cell it binds, if it binds one.
     fn rebind(&mut self, var: VarId) {
+        if !self.bound_at.contains_key(&var) && !self.own_stores.binds(var) {
+            return;
+        }
+        let fact = self.bound_fact(var);
+        self.own_stores.set_stored(var, &fact);
         let Some(&i) = self.bound_at.get(&var) else {
             return;
         };
-        let fact = self.bound_fact(var);
         let cell = self.f.var_name(var).and_then(|n| self.own_cells.get_mut(n));
         cell.expect("a variable binds the cell it is named after")
             .bound
@@ -1514,11 +1963,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             }) if args.len() >= 2
                 && matches!(self.need(*c), Ok(Some(Ty::Ref(f))) if f == "builtins.isinstance") =>
             {
-                let x = args[0];
+                let x = n.value(args[0]);
                 let current = n.entry[from.0 as usize]
                     .as_ref()
                     .and_then(|at| at.get(&x))
-                    .or_else(|| self.need(x).ok().flatten());
+                    .or_else(|| self.need(args[0]).ok().flatten());
                 if let Some(classes) = self
                     .need(args[1])
                     .ok()
@@ -1667,9 +2116,18 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::LoadGlobal { name, .. } => return self.global(name),
             // An unassigned local of a function holds no value on this path.
             InstKind::LoadName { name, .. } if self.reads_globals => return self.global(name),
-            InstKind::LoadName { .. } => return Err(Pending),
-            InstKind::LoadDeref { name, .. } => {
-                return self.cells.get(name).map_or(Ok(None), Fact::as_step);
+            // A child scope storing in the cell of a local the function never assigns binds it
+            // (an assignment expression in a comprehension, PEP 572).
+            InstKind::LoadName { name, .. } => {
+                let stored = self.child_stored.borrow();
+                return stored.get(name).map_or(Err(Pending), Fact::as_step);
+            }
+            InstKind::LoadDeref { dst, name } => {
+                if let Some(stored) = self.store_read.get(dst) {
+                    return Ok(self.need(*stored)?.cloned());
+                }
+                let outside = self.cells.get(name).cloned().unwrap_or(Fact::Unknown);
+                return outside.join(&self.own_stores.joined(name)).as_step();
             }
             InstKind::Import { .. } => cx.import_type(inst.span),
             InstKind::Copy { src, .. } => self.need(*src)?.cloned(),
@@ -1744,7 +2202,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 ..
             } => {
                 let seed = self.need(*outer_iter)?.cloned();
-                match cx.child_output(*id, seed, self.child_cells(*id)) {
+                match self.produced(cx.child_output(*id, seed, self.child_cells(*id))) {
                     Elem::Unknown => None,
                     item => Some(Ty::container("typing.Generator", Args::items(item))),
                 }
@@ -1779,7 +2237,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             } => {
                 let seed = self.need(args[0])?.cloned();
                 let id = comprehension_id(callee);
-                return item_ty(cx.child_output(id, seed, self.child_cells(id)));
+                return item_ty(self.produced(cx.child_output(id, seed, self.child_cells(id))));
             }
             InstKind::MethodCall {
                 recv,
@@ -1990,7 +2448,10 @@ impl<'e, 'a> Engine<'e, 'a> {
             return typed;
         }
         for (made, id) in lambdas {
-            let body = self.cx.child_output(id, None, self.child_cells(id));
+            let body = self
+                .cx
+                .child_output(id, None, self.child_cells(id))
+                .produced;
             self.lambda_bodies.borrow_mut().insert(made, body);
         }
         self.call_of(called, call)

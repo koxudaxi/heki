@@ -1,11 +1,13 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the closure cells child scopes read, the iterables child scopes receive from the functions
-//! creating them, the fixpoint joining the stores of attributes, the names its functions store
-//! and read, the stores through namespaces and `setattr`, the classes whose code may store into
-//! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
-//! task factory, the walk to the callable a builtin calls once per item, contracts with many call
-//! targets and argument lists, the names offered for contract entries that match nothing, the
+//! the closure cells child scopes read, the stores of the cells a comprehension's assignment
+//! expressions bind and the reads seeing them, the iterables child scopes receive from the
+//! functions creating them, the fixpoint joining the stores of attributes, the names its
+//! functions store and read, the stores through namespaces and `setattr`, the classes whose code
+//! may store into an instance, the size of the Soundness lane's proof state, the values `EFF107`
+//! follows from a task factory, the walk to the callable a builtin calls once per item, contracts
+//! with many call targets and argument lists, the names offered for contract entries that match
+//! nothing, the
 //! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
 //! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the values class
 //! statements pass as bases, the bindings the deque
@@ -778,6 +780,152 @@ fn scopes_reading_a_cell_bound_many_times_read_its_joined_fact() {
             names
         );
     }
+}
+
+/// A list comprehension that stores `names` variables with assignment expressions, one per
+/// condition, and reads them all in its element; the function then reads each one. Before
+/// Python 3.12 the comprehension has a scope of its own, so each variable is a closure cell that
+/// scope alone stores.
+fn walrus_stores_in_one_comprehension(names: usize) -> String {
+    let stores: Vec<String> = (0..names).map(|k| format!("if (v{k} := make())")).collect();
+    let reads: Vec<String> = (0..names).map(|k| format!("v{k}._given")).collect();
+    let lines = [
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def make() -> Model:".to_owned(),
+        "    return Model()".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs):".to_owned(),
+        format!(
+            "    out = [({},) for _ in xs {}]",
+            reads.join(", "),
+            stores.join(" ")
+        ),
+        format!("    return out, {}", reads.join(", ")),
+    ];
+    lines.join("\n") + "\n"
+}
+
+/// The store of its own each read of such a cell sees is found with a fact per block and cell,
+/// within the budget of the comprehension: past it a read sees every value the cell may hold,
+/// here still a `Model`. Each read in the function is of `Model._given`, and so are those of the
+/// element, reported once at the comprehension.
+#[test]
+fn reads_of_cells_a_comprehension_stores_stay_within_its_budget() {
+    let config = "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n\
+                  [tool.heki.lint]\nselect = [\"MUT203\"]\n\n[[tool.heki.read-owners]]\n\
+                  name = \"given\"\ntargets = [\"m.Model._given\"]\nforbidden-readers = [\"m:*\"]\n";
+    let names = 256;
+    let found = check_past_budgets(names, &["cell stores"], |names| {
+        let p = Project::new(&format!("bounds_walrus_stores_{names}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &walrus_stores_in_one_comprehension(names));
+        p
+    });
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+        names + 1
+    );
+}
+
+/// A list comprehension that stores `names` variables with assignment expressions in its
+/// element, and the function reads each one: a single block in the comprehension's scope, so the
+/// walks over its cells grow with the number of cells alone.
+fn walrus_stores_in_one_element(names: usize) -> String {
+    let stores: Vec<String> = (0..names).map(|k| format!("(v{k} := make())")).collect();
+    let reads: Vec<String> = (0..names).map(|k| format!("v{k}._given")).collect();
+    let lines = [
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def make() -> Model:".to_owned(),
+        "    return Model()".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs):".to_owned(),
+        format!("    out = [({},) for _ in xs]", stores.join(", ")),
+        format!("    return out, {}", reads.join(", ")),
+    ];
+    lines.join("\n") + "\n"
+}
+
+/// The facts a comprehension stores in the cells of its function are collected in one pass over
+/// its instructions, charged to the budget of the cell stores: the steps grow with the
+/// comprehension, not with its instructions times its variables.
+#[test]
+fn the_cells_a_comprehension_stores_are_collected_in_one_pass() {
+    let config = "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n\
+                  [tool.heki.lint]\nselect = [\"MUT203\"]\n\n[[tool.heki.read-owners]]\n\
+                  name = \"given\"\ntargets = [\"m.Model._given\"]\nforbidden-readers = [\"m:*\"]\n";
+    let names = 400;
+    let found = check_linear(names, |names| {
+        let p = Project::new(&format!("bounds_walrus_one_pass_{names}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &walrus_stores_in_one_element(names));
+        p
+    });
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+        names
+    );
+}
+
+/// A list comprehension with `filters` conditions `gate() or (m := make())`, each storing the same
+/// variable, and `reads` reads of it in its element: different stores reach the element, so every
+/// read sees what the cell may hold.
+fn walrus_stores_of_one_cell_read_many_times(filters: usize, reads: usize) -> String {
+    let stores = vec!["if gate() or (m := make())"; filters];
+    let reads = vec!["m._given"; reads];
+    let lines = [
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def make() -> Model:".to_owned(),
+        "    return Model()".to_owned(),
+        String::new(),
+        String::new(),
+        "def gate() -> bool:".to_owned(),
+        "    return False".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs):".to_owned(),
+        format!(
+            "    out = [({},) for _ in xs {}]",
+            reads.join(", "),
+            stores.join(" ")
+        ),
+        "    return out, m".to_owned(),
+    ];
+    lines.join("\n") + "\n"
+}
+
+/// Reads of a cell no single store of the comprehension reaches take its joined fact, kept once
+/// for the cell from the facts of its stores: the work grows with the stores and the reads
+/// added, not with their product.
+#[test]
+fn many_reads_of_a_cell_many_stores_reach_take_one_joined_fact() {
+    let config = "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n\
+                  [tool.heki.lint]\nselect = [\"MUT203\"]\n\n[[tool.heki.read-owners]]\n\
+                  name = \"given\"\ntargets = [\"m.Model._given\"]\nforbidden-readers = [\"m:*\"]\n";
+    let n = 400;
+    let found = check_linear(n, |n| {
+        let p = Project::new(&format!("bounds_walrus_one_join_{n}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &walrus_stores_of_one_cell_read_many_times(n, n));
+        p
+    });
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+        1
+    );
 }
 
 /// A nested function an initializer calls writes a name chosen at run time on the last of a long

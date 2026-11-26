@@ -603,8 +603,16 @@ assignment's, so whenever the nested scope runs the cell has the join of their t
 a method has its class). A scope created in an inlined comprehension (3.12 and later) reads the
 comprehension's iteration variable, a cell of the enclosing frame apart from the frame's own
 variable of the name, which the scopes created outside the comprehension read. A cell that a
-nested scope may rebind (`nonlocal`, an assignment expression in a comprehension scope before
-3.12, any scope nested in a function too large to model) is of unknown type.
+nested scope may rebind (`nonlocal`, any scope nested in a function too large to model) is of
+unknown type, apart from the cell of a variable that only comprehension and generator expression
+scopes the function creates store, through an assignment expression (PEP 572: a list
+comprehension has a scope of its own before 3.12, a generator expression in every version). The
+function reads in that variable the join of what those scopes store. A scope that alone stores
+such a cell reads, where every path reaches one of its own stores last with no suspension or
+`yield` in between, the value that store binds, with what the scope's `isinstance` checks narrow
+it to (`[m for x in xs if isinstance(m := x.f, Model)]`), and elsewhere the join of what the
+function binds and what the scope stores. That walk keeps a fact per block and cell within the
+function's budget, past which every read has the join.
 
 A cell that the function binding it binds only as one of its parameters, and that no nested
 scope rebinds, is that parameter in every scope reading it (`FunctionDecl::captured_params`, one
