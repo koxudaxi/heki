@@ -845,6 +845,13 @@ impl BaselineVersion {
     pub fn records_heuristic(self) -> bool {
         self == Self::V3
     }
+
+    /// Whether a report whose shortest chain ends in another call than the one it names
+    /// ([`Diagnostic::key_target`]) is keyed by the chain's call. Earlier files keyed it by the
+    /// call it names.
+    fn keys_by_chain_call(self) -> bool {
+        self == Self::V3
+    }
 }
 
 /// The baseline format this version writes: counts are violation sites, with the heuristic ones
@@ -1034,7 +1041,7 @@ fn is_zero(n: &u32) -> bool {
 }
 
 impl RatchetBaseline {
-    /// A baseline of site counts ([`baseline_counts`] with [`CountUnit::Sites`]), in the format
+    /// A baseline of site counts ([`baseline_counts`] of [`BaselineVersion::V3`]), in the format
     /// this heki writes.
     pub fn from_counts(counts: BTreeMap<BaselineKey, Tally>) -> Self {
         Self {
@@ -1110,9 +1117,9 @@ impl RatchetBaseline {
         diags: &mut Vec<Diagnostic>,
         key_path: &dyn Fn(&Path) -> String,
     ) -> RatchetComparison {
-        let cmp = self.compare(&baseline_counts(diags, key_path, self.version.unit()));
+        let cmp = self.compare(&baseline_counts(diags, key_path, self.version));
         let regressed: BTreeSet<&BaselineKey> = cmp.regressions.iter().map(|r| &r.key).collect();
-        diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
+        diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path), self.version)));
         cmp
     }
 
@@ -1201,8 +1208,8 @@ impl RatchetBaseline {
     }
 }
 
-/// Baseline key of one diagnostic (`path` = project-relative POSIX path).
-pub fn baseline_key(d: &Diagnostic, path: String) -> BaselineKey {
+/// Baseline key of one diagnostic (`path` = project-relative POSIX path) in a file of `version`.
+pub fn baseline_key(d: &Diagnostic, path: String, version: BaselineVersion) -> BaselineKey {
     // Where a group's report sits is no part of the group.
     let (path, qualname) = if d.group {
         (String::new(), String::new())
@@ -1213,19 +1220,25 @@ pub fn baseline_key(d: &Diagnostic, path: String) -> BaselineKey {
         path,
         qualname,
         rule_code: d.rule_code.clone(),
-        target: d.key_target.as_ref().unwrap_or(&d.target).clone(),
+        target: d
+            .key_target
+            .as_ref()
+            .filter(|_| version.keys_by_chain_call())
+            .unwrap_or(&d.target)
+            .clone(),
     }
 }
 
-/// Count violation sites (or diagnostics) per baseline key, and the heuristic ones among them.
+/// Count violation sites (or diagnostics) per baseline key, and the heuristic ones among them,
+/// the way a file of `version` counts and keys them.
 pub fn baseline_counts(
     diags: &[Diagnostic],
     key_path: &dyn Fn(&Path) -> String,
-    unit: CountUnit,
+    version: BaselineVersion,
 ) -> BTreeMap<BaselineKey, Tally> {
     let mut out: BTreeMap<BaselineKey, Tally> = BTreeMap::new();
     for d in diags {
-        let count = match unit {
+        let count = match version.unit() {
             CountUnit::Sites => d.sites.max(1),
             CountUnit::Diagnostics => 1,
         };
@@ -1234,7 +1247,9 @@ pub fn baseline_counts(
         } else {
             0
         };
-        let tally = out.entry(baseline_key(d, key_path(&d.path))).or_default();
+        let tally = out
+            .entry(baseline_key(d, key_path(&d.path), version))
+            .or_default();
         *tally = *tally + Tally { count, heuristic };
     }
     out
@@ -1406,15 +1421,15 @@ mod tests {
         let mut heuristic = d.clone();
         heuristic.certainty = Certainty::Heuristic;
         let diags = [d.clone(), d, two_sites, heuristic];
-        let counts = |unit| {
-            baseline_counts(&diags, &|p| path_text(p), unit)
+        let counts = |version| {
+            baseline_counts(&diags, &|p| path_text(p), version)
                 .values()
                 .copied()
                 .collect::<Vec<_>>()
         };
         // Sites: a report standing for two sites counts twice; diagnostics: once.
-        assert_eq!(counts(CountUnit::Sites), vec![sites(5, 1)]);
-        assert_eq!(counts(CountUnit::Diagnostics), vec![sites(4, 1)]);
+        assert_eq!(counts(BaselineVersion::V3), vec![sites(5, 1)]);
+        assert_eq!(counts(BaselineVersion::V1), vec![sites(4, 1)]);
     }
 
     #[test]

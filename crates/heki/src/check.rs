@@ -434,13 +434,14 @@ impl Touched {
         &self,
         diags: &[Diagnostic],
         key_path: &dyn Fn(&Path) -> String,
+        version: BaselineVersion,
     ) -> BaselineView<'_> {
         BaselineView {
             touched: self,
             keys: diags
                 .iter()
                 .filter(|d| self.touches(d))
-                .map(|d| heki_diagnostics::baseline_key(d, key_path(&d.path)))
+                .map(|d| heki_diagnostics::baseline_key(d, key_path(&d.path), version))
                 .collect(),
         }
     }
@@ -883,7 +884,7 @@ fn report(
         }
         _ => None,
     };
-    let current = baseline_counts(&diags, &key_path, CountUnit::Sites);
+    let current = baseline_counts(&diags, &key_path, BaselineVersion::V3);
     let found = diags.len();
     let mut regressions = 0;
     // The update the run was asked for did not happen: it fails whatever the reports' severity.
@@ -898,7 +899,7 @@ fn report(
         // `--touched` run judges only the stale entries in view. Every report is on a file the run
         // covers. An entry is judged by a run covering its file: one of a group, of no one
         // file, by a run over the whole project, whose root its empty path names.
-        let in_view = touched.map(|t| t.baseline_view(&diags, &key_path));
+        let in_view = touched.map(|t| t.baseline_view(&diags, &key_path, baseline.version));
         let shown = |key: &BaselineKey, within: &[BaselineKey]| {
             in_view.as_ref().is_none_or(|v| v.shows(key, within))
         };
@@ -911,7 +912,7 @@ fn report(
         if !args.update_baseline {
             let run = analyzed.rules_run();
             let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
-            let withheld = baseline_counts(&analyzed.withheld, &key_path, unit);
+            let withheld = baseline_counts(&analyzed.withheld, &key_path, baseline.version);
             // A report withheld because `lint.heuristic` is off still matches its entry.
             let judged =
                 (cmp.stale_entries.iter()).filter(|e| covered(&e.key) && shown(&e.key, &e.within));
