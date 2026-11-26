@@ -1568,10 +1568,8 @@ impl<'i> Run<'_, 'i> {
     ) -> Res<()> {
         let mut seen = FxHashSet::default();
         let mut members = Vec::new();
-        for c in self.decls.mro_of(&l.class) {
-            if c == "builtins.object" {
-                continue;
-            }
+        let mro = self.decls.mro_of(&l.class);
+        for c in mro.into_iter().filter(|c| c != "builtins.object") {
             if !self.decls.is_project_class(&c) {
                 return Err(Open);
             }

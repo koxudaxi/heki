@@ -136,6 +136,9 @@ fn a_constant_name_selects_only_its_handler() {
     assert_eq!(r["registered"][0]["condition"]["selector"], "\"noop\"");
     assert_eq!(r["registered"][0]["condition"]["others_open"], false);
     assert_eq!(contexts(&p, "panels.views.Page.store"), Vec::new());
+    let (code, text, err) = p.heki(&["inspect", "panels.views.Page.noop"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(text.contains("when \"noop\" == \"noop\"\n"), "{text}");
     let p = panels(
         "dispatch_undefined",
         &[(
@@ -421,6 +424,14 @@ fn premises_that_break_give_no_context() {
             ],
         ),
         (
+            "bare_raise",
+            &[(
+                "adapter.py",
+                "        worker = component()\n",
+                "        worker = component()\n        if worker is not None:\n            raise\n",
+            )],
+        ),
+        (
             "item_of_a_list",
             &[(
                 "adapter.py",
@@ -535,6 +546,12 @@ class Search(Screen):
         return hub.permits(request)
 
     async def post(self, request, hub):
+        return None
+
+    async def put(self, request, hub, *, extra):
+        return None
+
+    async def patch(self, request, hub, extra=None):
         return None
 "#;
 
@@ -680,5 +697,9 @@ fn adapters_decorators_and_kept_tables_under_both_comprehension_models() {
             vec![("relay.hub.Hub".to_owned(), Vec::new())]
         );
         assert_eq!(contexts(&p, "relay.screens.Screen.ready"), Vec::new());
+        // A keyword-only parameter the call leaves unbound fails the call; a default does not.
+        assert_eq!(contexts(&p, "relay.screens.Search.put"), Vec::new());
+        let patched = contexts(&p, "relay.screens.Search.patch");
+        assert_eq!(patched, vec![("relay.hub.Hub".to_owned(), Vec::new())]);
     }
 }
