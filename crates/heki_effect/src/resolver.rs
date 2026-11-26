@@ -9259,8 +9259,9 @@ pub fn aliases_of(f: &IrFunction, roots: impl IntoIterator<Item = VarId>) -> FxH
 // ------------------------------------------------------------------------------ type inference
 
 /// What a call passes at position `index` (the receiver not counted) or by `keyword`, for the
-/// catalog's argument cases (`heki_kb::EcosystemEntry::case_for`), as `fact` describes it.
-/// Nothing is known of an argument `*` / `**` unpacking may pass.
+/// catalog's argument cases (`heki_kb::EcosystemEntry::case_for`), as `fact` describes it;
+/// `None` when it passes nothing there. Nothing is known of an argument `*` / `**` unpacking
+/// may pass.
 pub(crate) fn passed_arg(
     args: &[VarId],
     kwargs: &[(Option<String>, VarId)],
@@ -9268,7 +9269,11 @@ pub(crate) fn passed_arg(
     at: (Option<u8>, Option<&str>),
     fact: impl Fn(VarId) -> ArgFact,
 ) -> Option<ArgFact> {
-    passed_var(args, kwargs, star_from, at).map(fact)
+    match bound_arg(args, kwargs, star_from, at) {
+        BoundArg::Var(v) => Some(fact(v)),
+        BoundArg::Unpacked => Some(ArgFact::default()),
+        BoundArg::Unbound => None,
+    }
 }
 
 /// The variable a call passes at position `index` or by `keyword` ([`passed_arg`]).
@@ -10220,16 +10225,18 @@ impl<'a> TypeCtx<'a> {
             Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => return None,
             Symbol::External => {}
         }
-        if let Some(b) = fqn.strip_prefix("builtins.") {
-            return is_builtin_type(b).then(|| Ty::inst(fqn));
-        }
-        let last = fqn.rsplit('.').next().unwrap_or(fqn);
-        if last.chars().next().is_some_and(char::is_uppercase) {
+        let builtin = fqn.strip_prefix("builtins.");
+        if builtin.is_some_and(is_builtin_type) {
             return Some(Ty::inst(fqn));
         }
-        // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
+        let last = fqn.rsplit('.').next().unwrap_or(fqn);
+        if builtin.is_none() && last.chars().next().is_some_and(char::is_uppercase) {
+            return Some(Ty::inst(fqn));
+        }
+        // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`,
+        // `boto3.client`, `open`).
         let entry = self.catalog(fqn)?;
-        if let Some(rt) = entry.return_type_in(entry.case_for(arg)) {
+        if let Some(rt) = entry.result_class(arg) {
             return Some(Ty::inst(rt));
         }
         (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
@@ -10830,8 +10837,7 @@ impl<'a> TypeCtx<'a> {
         fqn: &str,
         arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
-        let entry = self.kb.declared(fqn)?;
-        entry.return_type_in(entry.case_for(arg)).map(Ty::inst)
+        self.kb.declared(fqn)?.result_class(arg).map(Ty::inst)
     }
 
     /// Value returned by a resolved call target (`arg` as for [`Self::call_result`]).
