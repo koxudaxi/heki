@@ -70,7 +70,7 @@
           "$ref": "#/$defs/LeftOut"
         },
         "paths": {
-          "description": "The paths given on the command line.",
+          "description": "The paths analyzed.",
           "items": {
             "type": "string"
           },
