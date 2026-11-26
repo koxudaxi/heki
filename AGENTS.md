@@ -74,11 +74,15 @@ python3.15 tests/import_verify/verify_imports.py --heki target/debug/heki tests/
 python3.15 tests/sentinel/verify_soundness_kb.py
 # Layer 2 rows of the standard library that type a value, on the running interpreter
 python3.15 tests/sentinel/verify_stdlib_kb.py
+# The container family table (`ContainerFamily`) against the running interpreter
+python3.15 tests/sentinel/verify_container_families.py
 # Layer 2 rows against releases of their distributions (needs uv and PyPI; its own workflow)
 uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py
 # Adversarial Soundness counterexamples (every one Blocked or Disproved)
 python3.15 tests/difftest/counterexamples.py
 python3.15 tests/difftest/soundness_e2e_counterexamples.py
+# Classes a value of a container ABC may be (each runs project code the exact claim rules out)
+python3.15 tests/difftest/container_abc_counterexamples.py
 # Shapes the IR models (frames, bindings, paths); CPython 3.15 only (template strings, PEP 798)
 python3.15 tests/difftest/ir_counterexamples.py
 # Generated documentation

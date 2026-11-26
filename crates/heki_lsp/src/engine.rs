@@ -113,6 +113,8 @@ enum ShownAt {
     SentinelTest(String, String, String),
     /// An import site, by the function holding it (the steps of import chains).
     Import(String),
+    /// A write of shared state made holding a lock (the writes `EFF117` names), by the state.
+    LockedWrite(String),
 }
 
 /// The files the selected import rules that read every module's imports report in: `IMP101`'s,
@@ -147,7 +149,8 @@ fn import_report_files(
 /// forbids (the hops of call chains), the changes its methods make to their own containers (the
 /// methods `MUT113` names), the in-place changes its functions make to their parameters (the
 /// lines `MUT110` names), the comparisons with sentinels its functions make (the tests
-/// `MUT118` names), and its import sites (the steps of import chains).
+/// `MUT118` names), the writes of shared state made holding a lock (`EFF117`'s), and its import
+/// sites (the steps of import chains).
 fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace> {
     let lines = heki_ast::LineIndex::from_source(source);
     let place = |offset: u32| {
@@ -174,6 +177,11 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
                 .flat_map(|(p, spans)| spans.iter().map(|span| (*span, ShownAt::ParamChange(*p)))),
         )
         .collect();
+    changes.extend(
+        (file.local_functions.values())
+            .flat_map(|s| s.guarded.iter().flat_map(|g| &g.locked_writes))
+            .map(|w| (w.span, ShownAt::LockedWrite(w.state.display()))),
+    );
     changes.extend(
         file.local_functions
             .iter()
@@ -299,6 +307,9 @@ pub struct Workspace {
     /// as of the file's latest analysis; kept while `MUT111` is selected: the files reading a
     /// property whose writes change need a new check.
     stale_writes: FxHashMap<PathBuf, BTreeSet<StaleWriteKey>>,
+    /// What `EFF117` reads of the whole project, as of the latest analysis; kept while the rule
+    /// is selected ([`Self::note_guarded`]).
+    guarded: Option<heki_rules::GuardedView>,
     /// The comparisons with `object()` sentinels in the functions of each file, as of the file's
     /// latest analysis; kept while `MUT118` is selected: the files with deep copies need a new
     /// check when they change.
@@ -599,6 +610,9 @@ impl Workspace {
         };
         check_project(&[], &env.cfg, &env.kb, &index, &selection, &extras)
             .map_err(EngineError::Rules)?;
+        let guarded = selection
+            .is_enabled("EFF117")
+            .then(|| heki_rules::GuardedView::of(&index, decls.completed(), &env.root));
         let stale_writes = if selection.is_enabled("MUT111") {
             stale_writes_by_file(&index, decls.completed(), |_| true)
         } else {
@@ -657,6 +671,7 @@ impl Workspace {
                 patching_builtins,
                 class_members,
                 stale_writes,
+                guarded,
                 sentinel_tests,
                 kept_removals,
                 import_report_files,
@@ -983,6 +998,27 @@ impl Workspace {
             })
             .map(|f| f.path.clone())
             .collect()
+    }
+
+    /// Record what `EFF117` reads of the whole project against the current index: when the
+    /// states some writer changes holding a lock, those writers, or whether a thread runs them
+    /// changed, every file may report differently (a write in any file is reported against
+    /// them); when the functions a thread runs, called only holding a lock, or run only while
+    /// objects are built changed, their files may. Returns those files.
+    fn note_guarded(&mut self) -> Vec<PathBuf> {
+        let Some(before) = &self.guarded else {
+            return Vec::new();
+        };
+        let now = heki_rules::GuardedView::of(&self.index, self.decls.completed(), &self.env.root);
+        let affected: Vec<PathBuf> = if before.guards_differ(&now) {
+            self.index.files.keys().cloned().collect()
+        } else {
+            (before.moved_functions(&now))
+                .filter_map(|k| self.index.file_of(k).map(Path::to_path_buf))
+                .collect()
+        };
+        self.guarded = Some(now);
+        affected
     }
 
     /// Record the sentinel comparisons in the functions of `path` against the current index; when
@@ -1324,6 +1360,7 @@ impl Workspace {
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         affected.extend(self.note_class_members());
         affected.extend(self.note_stale_writes(&parsed.path));
+        affected.extend(self.note_guarded());
         affected.extend(self.note_sentinel_tests(&parsed.path));
         affected.extend(self.note_kept_removals(&parsed.path));
         affected.extend(self.note_import_reports(update.imports_changed));
@@ -1443,6 +1480,7 @@ impl Workspace {
         affected.extend(self.note_builtins(path, false));
         affected.extend(self.note_class_members());
         affected.extend(self.note_stale_writes(path));
+        affected.extend(self.note_guarded());
         affected.extend(self.note_sentinel_tests(path));
         affected.extend(self.note_kept_removals(path));
         affected.extend(self.note_import_reports(update.imports_changed));
