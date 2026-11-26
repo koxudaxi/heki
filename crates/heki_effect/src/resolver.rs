@@ -178,6 +178,85 @@ const BUILTIN_TYPES: &[&str] = &[
     "range",
 ];
 
+/// The exception and warning classes of `builtins` (`IOError` and `EnvironmentError`, which name
+/// `OSError`, are left out): a value annotated with one, or built by calling one, is an instance
+/// of a class whose methods and namespace the language fixes, as one of [`BUILTIN_TYPES`] is.
+const BUILTIN_EXCEPTIONS: &[&str] = &[
+    "ArithmeticError",
+    "AssertionError",
+    "AttributeError",
+    "BaseException",
+    "BaseExceptionGroup",
+    "BlockingIOError",
+    "BrokenPipeError",
+    "BufferError",
+    "BytesWarning",
+    "ChildProcessError",
+    "ConnectionAbortedError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "ConnectionResetError",
+    "DeprecationWarning",
+    "EOFError",
+    "EncodingWarning",
+    "Exception",
+    "ExceptionGroup",
+    "FileExistsError",
+    "FileNotFoundError",
+    "FloatingPointError",
+    "FutureWarning",
+    "GeneratorExit",
+    "ImportError",
+    "ImportWarning",
+    "IndentationError",
+    "IndexError",
+    "InterruptedError",
+    "IsADirectoryError",
+    "KeyError",
+    "KeyboardInterrupt",
+    "LookupError",
+    "MemoryError",
+    "ModuleNotFoundError",
+    "NameError",
+    "NotADirectoryError",
+    "NotImplementedError",
+    "OSError",
+    "OverflowError",
+    "PendingDeprecationWarning",
+    "PermissionError",
+    "ProcessLookupError",
+    "PythonFinalizationError",
+    "RecursionError",
+    "ReferenceError",
+    "ResourceWarning",
+    "RuntimeError",
+    "RuntimeWarning",
+    "StopAsyncIteration",
+    "StopIteration",
+    "SyntaxError",
+    "SyntaxWarning",
+    "SystemError",
+    "SystemExit",
+    "TabError",
+    "TimeoutError",
+    "TypeError",
+    "UnboundLocalError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "UnicodeError",
+    "UnicodeTranslateError",
+    "UnicodeWarning",
+    "UserWarning",
+    "ValueError",
+    "Warning",
+    "ZeroDivisionError",
+];
+
+/// Whether `name` is a class of `builtins` whose instances heki types.
+fn is_builtin_type(name: &str) -> bool {
+    BUILTIN_TYPES.contains(&name) || BUILTIN_EXCEPTIONS.contains(&name)
+}
+
 // ------------------------------------------------------------------------------ module names
 
 /// How module names derive from project-relative paths.
@@ -1432,6 +1511,17 @@ impl ModuleDecls {
     /// definitions, then builtin types). `type_checking` also consults `if TYPE_CHECKING:`
     /// imports.
     pub(crate) fn resolve_dotted(&self, text: &str, type_checking: bool) -> Option<String> {
+        self.resolve_dotted_in(text, type_checking, &[])
+    }
+
+    /// [`Self::resolve_dotted`] in a function whose own imports bind `locals`
+    /// ([`TypeCtx::local_imports`]), which shadow the module's names.
+    fn resolve_dotted_in(
+        &self,
+        text: &str,
+        type_checking: bool,
+        locals: &[(String, String)],
+    ) -> Option<String> {
         let (first, rest) = match text.split_once('.') {
             Some((f, r)) => (f, Some(r)),
             None => (text, None),
@@ -1440,6 +1530,9 @@ impl ModuleDecls {
             Some(r) => format!("{base}.{r}"),
             None => base.to_owned(),
         };
+        if let Some((_, t)) = locals.iter().find(|(name, _)| name == first) {
+            return Some(join(t));
+        }
         if let Some(t) = self.imports.get(first) {
             return Some(join(t));
         }
@@ -1452,7 +1545,7 @@ impl ModuleDecls {
         if self.classes.contains_key(first) || self.functions.contains_key(first) {
             return Some(format!("{}.{text}", self.module_name));
         }
-        if rest.is_none() && BUILTIN_TYPES.contains(&first) {
+        if rest.is_none() && is_builtin_type(first) {
             return Some(format!("builtins.{first}"));
         }
         None
@@ -1465,56 +1558,75 @@ impl ModuleDecls {
     /// `ReadOnly` and quotes. An unresolved name of a `typing` generic counts as that generic
     /// (`"Iterable[Model]"` without the import).
     pub fn resolve_annotation_ty(&self, text: &str) -> Option<Ty> {
+        self.resolve_annotation_ty_in(text, &[])
+    }
+
+    /// [`Self::resolve_annotation_ty`] for an annotation inside a function whose own imports
+    /// bind `locals` ([`TypeCtx::local_imports`]): they shadow the module's names.
+    pub(crate) fn resolve_annotation_ty_in(
+        &self,
+        text: &str,
+        locals: &[(String, String)],
+    ) -> Option<Ty> {
         let t = unquote(text);
         let mut parts = split_top_level(t, '|');
         if parts.len() > 1 {
             parts.retain(|p| *p != "None");
-            return self.union_annotation(&parts);
+            return self.union_annotation(&parts, locals);
         }
         let Some((head, inner)) = subscript(t) else {
             // `typing.Self` (also unimported, in a string annotation): the receiver's type.
             if matches!(
-                self.resolve_dotted(t, true).as_deref(),
+                self.resolve_dotted_in(t, true, locals).as_deref(),
                 Some("typing.Self" | "typing_extensions.Self") | None
             ) && t.rsplit('.').next() == Some("Self")
             {
                 return Some(Ty::SelfType);
             }
-            if let Some(named) = self.type_names.get(t) {
+            let local = t
+                .split('.')
+                .next()
+                .is_some_and(|first| locals.iter().any(|(n, _)| n == first));
+            if !local && let Some(named) = self.type_names.get(t) {
                 return Some(named.clone());
             }
             return self
-                .resolve_type_head(t)
+                .resolve_type_head(t, locals)
                 .filter(|c| !special_form(c))
                 .map(Ty::inst);
         };
         let last = head.rsplit('.').next().unwrap_or(head);
         match last {
             "Optional" | "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired"
-            | "ReadOnly" => return self.resolve_annotation_ty(first_arg(inner)),
+            | "ReadOnly" => return self.resolve_annotation_ty_in(first_arg(inner), locals),
             "Union" => {
                 let mut members = split_top_level(inner, ',');
                 members.retain(|p| *p != "None");
-                return self.union_annotation(&members);
+                return self.union_annotation(&members, locals);
             }
             _ => {}
         }
-        if self.is_type_form(head) {
+        if self.is_type_form(head, locals) {
             // Whether `C` is a project class, and which, is decided across the project
             // (`ProjectDecls::declared_ty`).
             let class = self
-                .resolve_annotation_ty(first_arg(inner))?
+                .resolve_annotation_ty_in(first_arg(inner), locals)?
                 .obj()?
                 .class
                 .clone();
             return Some(Ty::Class(class));
         }
         let class = self
-            .resolve_type_head(head)
+            .resolve_type_head(head, locals)
             .or_else(|| typing_generic(last))
             .filter(|c| !special_form(c))?;
         let args = split_top_level(inner, ',');
-        let elem = |i: usize| Elem::of(args.get(i).and_then(|a| self.resolve_annotation_ty(a)));
+        let elem = |i: usize| {
+            Elem::of(
+                args.get(i)
+                    .and_then(|a| self.resolve_annotation_ty_in(a, locals)),
+            )
+        };
         let args = match generic(&class) {
             None => Args::None,
             Some(Generic::Items) => Args::items(elem(0)),
@@ -1535,7 +1647,7 @@ impl ModuleDecls {
             // instance of a class, though the annotation reads `T | None` as `T`.
             Some(Generic::Returns) => match args.as_slice() {
                 [_, result] if !self.admits_none(result) => {
-                    Args::returns(self.resolve_annotation_ty(result))
+                    Args::returns(self.resolve_annotation_ty_in(result, locals))
                 }
                 _ => Args::None,
             },
@@ -1571,13 +1683,13 @@ impl ModuleDecls {
 
     /// The members of a union annotation other than `None`: one type, or instances of at most
     /// [`crate::types::MAX_UNION`] classes.
-    fn union_annotation(&self, members: &[&str]) -> Option<Ty> {
+    fn union_annotation(&self, members: &[&str], locals: &[(String, String)]) -> Option<Ty> {
         if let [one] = members {
-            return self.resolve_annotation_ty(one);
+            return self.resolve_annotation_ty_in(one, locals);
         }
         let mut objs = Vec::new();
         for m in members {
-            let t = self.resolve_annotation_ty(m)?;
+            let t = self.resolve_annotation_ty_in(m, locals)?;
             if t.members().is_empty() {
                 return None;
             }
@@ -1588,8 +1700,8 @@ impl ModuleDecls {
 
     /// Whether the subscripted head `head` is `type` or `typing.Type` (an unresolved `Type`
     /// counts, as an unresolved `typing` generic does).
-    fn is_type_form(&self, head: &str) -> bool {
-        match self.resolve_dotted(head, true) {
+    fn is_type_form(&self, head: &str, locals: &[(String, String)]) -> bool {
+        match self.resolve_dotted_in(head, true, locals) {
             Some(fqn) => matches!(
                 fqn.as_str(),
                 "builtins.type" | "typing.Type" | "typing_extensions.Type"
@@ -1598,7 +1710,7 @@ impl ModuleDecls {
         }
     }
 
-    fn resolve_type_head(&self, head: &str) -> Option<String> {
+    fn resolve_type_head(&self, head: &str, locals: &[(String, String)]) -> Option<String> {
         if head.is_empty()
             || head == "None"
             || !head
@@ -1616,7 +1728,7 @@ impl ModuleDecls {
             _ => None,
         };
         let last = head.rsplit('.').next().unwrap_or(head);
-        let resolved = self.resolve_dotted(head, true);
+        let resolved = self.resolve_dotted_in(head, true, locals);
         if let Some(r) = &resolved {
             if let Some(stripped) = r.strip_prefix("typing.")
                 && let Some(b) = typing_alias(stripped)
@@ -9678,7 +9790,7 @@ impl<'a> TypeCtx<'a> {
             Symbol::External => {}
         }
         if let Some(b) = fqn.strip_prefix("builtins.") {
-            return BUILTIN_TYPES.contains(&b).then(|| Ty::inst(fqn));
+            return is_builtin_type(b).then(|| Ty::inst(fqn));
         }
         let last = fqn.rsplit('.').next().unwrap_or(fqn);
         if last.chars().next().is_some_and(char::is_uppercase) {
@@ -10467,5 +10579,26 @@ impl<'a> TypeCtx<'a> {
     /// Value bound by an `Import` instruction (needs the span-keyed semantic import).
     pub(crate) fn import_type(&self, span: Span) -> Option<Ty> {
         self.import_by_span.get(&span).map(|t| self.named(t))
+    }
+
+    /// The names the imports in the body of the function `f` bind, with what each names: they
+    /// shadow the module's names in the annotations of the function's locals. The parameters'
+    /// annotations are read in the scope around the function, and a module or class body's
+    /// imports are the module's own.
+    pub(crate) fn local_imports(&self, f: &IrFunction) -> Vec<(String, String)> {
+        if f.is_module_body || f.is_class_body {
+            return Vec::new();
+        }
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|inst| {
+                let InstKind::Import { dst, .. } = &inst.kind else {
+                    return None;
+                };
+                let target = self.import_by_span.get(&inst.span)?;
+                Some((f.var_name(*dst)?.to_owned(), target.clone()))
+            })
+            .collect()
     }
 }

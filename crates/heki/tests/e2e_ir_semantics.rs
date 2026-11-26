@@ -1150,7 +1150,8 @@ fn a_definition_in_a_finally_body_is_one_function() {
         .map(|f| f["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(qualnames, ["<module>", "run", "run.<locals>.cleanup"]);
-    // Every copy of the body (return, fall-through, exception) makes the same function.
+    // Every copy of the body (return, exception) makes the same function; the fall-through no
+    // path reaches has no copy.
     let made: Vec<&Value> = function(&ir, "run")["blocks"]
         .as_array()
         .unwrap()
@@ -1159,7 +1160,7 @@ fn a_definition_in_a_finally_body_is_one_function() {
         .filter_map(|i| i["kind"].get("MakeClosure"))
         .map(|m| &m["func_id"])
         .collect();
-    assert_eq!(made.len(), 3, "{made:?}");
+    assert_eq!(made.len(), 2, "{made:?}");
     assert!(made.iter().all(|id| *id == made[0]), "{made:?}");
 }
 

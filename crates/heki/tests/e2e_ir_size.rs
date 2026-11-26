@@ -160,7 +160,7 @@ def remove_path(entry):
     let f = function(&ir, "load_isolated");
     assert!(hazards(f).is_empty(), "{:?}", hazards(f));
     // The `finally` body runs after the `return`, and when the `try` body raises; the
-    // normal completion no path reaches is a third copy.
+    // normal completion no path reaches has no copy.
     let removals = f["blocks"]
         .as_array()
         .unwrap()
@@ -168,7 +168,7 @@ def remove_path(entry):
         .flat_map(|b| b["insts"].as_array().unwrap())
         .filter(|i| i["kind"]["Call"]["callee"] == "remove_path")
         .count();
-    assert_eq!(removals, 3);
+    assert_eq!(removals, 2);
     assert!(units(f) < 400, "{} units", units(f));
     let p = Project::new("ir_size_isolated_load_check");
     p.write("m.py", src);

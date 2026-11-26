@@ -153,7 +153,7 @@ fn type_var_type(shape: &FnShape<'_>, decls: &ModuleDecls, value: VarId) -> Opti
         _ => return None,
     };
     let parts: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let ty = decls.union_annotation(&parts)?;
+    let ty = decls.union_annotation(&parts, &[])?;
     Some((ty, parts.iter().any(|p| decls.admits_none(p))))
 }
 

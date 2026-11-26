@@ -1544,6 +1544,11 @@ impl<'e, 'a> Engine<'e, 'a> {
                 entry: vec![None; f.blocks.len()],
             });
         }
+        let imports = if f.local_annotations.is_empty() {
+            Vec::new()
+        } else {
+            cx.local_imports(f)
+        };
         for ann in f
             .local_annotations
             .iter()
@@ -1551,7 +1556,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         {
             if let Some(t) = cx
                 .module
-                .resolve_annotation_ty(&ann.annotation)
+                .resolve_annotation_ty_in(&ann.annotation, &imports)
                 .and_then(|t| cx.project.declared_ty(&t))
                 .and_then(|t| t.bind_self(self.self_ty.as_ref()))
             {

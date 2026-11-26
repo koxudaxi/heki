@@ -2311,6 +2311,11 @@ environment = "import"
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "importlib.util.module_from_spec"
+return_type = "types.ModuleType"
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "importlib.import_module"
 environment = "import"
 loads_module = { name = { arg = 0, param = "name" }, package = { arg = 1, param = "package" } }

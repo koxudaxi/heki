@@ -3124,6 +3124,11 @@ mod tests {
                 ),
                 returning("asyncio.AbstractEventLoop", entry(&[])),
             ),
+            // A module made from a spec: `types.ModuleType` says nothing of the names it binds.
+            (
+                s(&["importlib.util.module_from_spec"]),
+                returning("types.ModuleType", entry(&[])),
+            ),
             (
                 with_prefix(
                     "asyncio",
@@ -4995,6 +5000,9 @@ mod tests {
                         || FUTURE_CLASSES.contains(&class)
                         || THREAD_LOCAL_CLASSES.contains(&class)
                         || class.starts_with("builtins.")
+                        // Any module: the class says nothing of the names a value binds, and a
+                        // call on one is unresolved by design (`resolver::is_any_module`).
+                        || class == "types.ModuleType"
                         || (e.returns_receiver_items_in(None) && class.starts_with("typing.")),
                     "{symbol} -> {class}"
                 );

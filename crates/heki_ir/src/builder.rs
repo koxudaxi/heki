@@ -2580,16 +2580,23 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.unwind.pop();
         }
 
+        // A way out no path takes (the body cannot raise, or every path in it returns) runs
+        // nothing: its copy of the body is not lowered, since a read of a local in a block no
+        // path enters binds no value, so the copy would hold the objects it reads as unknown.
         if let Some(fin) = raising_finally_bb {
             self.seal_block(fin);
             self.switch_to(fin);
-            self.lower_suite(&t.finalbody);
+            if !self.is_dead(fin) {
+                self.lower_suite(&t.finalbody);
+            }
             self.terminate(Terminator::Raise(None));
         }
         if let Some(fin) = normal_finally_bb {
             self.seal_block(fin);
             self.switch_to(fin);
-            self.lower_suite(&t.finalbody);
+            if !self.is_dead(fin) {
+                self.lower_suite(&t.finalbody);
+            }
             self.terminate(Terminator::Jump(after_bb));
         }
 
