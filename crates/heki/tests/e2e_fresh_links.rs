@@ -872,9 +872,13 @@ fresh-objects = "allow"
 /// read from an object it made by calling the class, is held by that object, so the issue's
 /// `make` returns a new object. A shallow copy's containers are the original's; a container
 /// rebound, or one the constructor does not make on every path or lets other code reach, may be
-/// anyone's.
-const OWNED_MODEL: &str = r#"OLD: list[object] = []
+/// anyone's. Other code is reached by a call handed the instance or a member of it, a store
+/// running a setter, and a base's constructor running either or replacing the namespace.
+const OWNED_MODEL: &str = r#"import abc
+
+OLD: list[object] = []
 OLD_LIST: list["Node"] = []
+SHARED_STATE: dict[str, object] = {}
 
 
 class Node:
@@ -990,6 +994,88 @@ class Replaced:
         self.children: list[Node] = []
 
     __init__ = _shared_init
+
+
+class Announced:
+    def __init__(self) -> None:
+        self.children: list[Node] = []
+        self.ready = True
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.children)
+
+    @ready.setter
+    def ready(self, value: bool) -> None:
+        OLD.append(self.children)
+
+
+class Base:
+    def __init__(self, flag: bool) -> None:
+        self.flag = flag
+
+
+class Derived(Base):
+    def __init__(self) -> None:
+        super().__init__(False)
+        self.children: list[Node] = []
+
+
+class Resets:
+    def __init__(self) -> None:
+        self.children = OLD_LIST
+
+
+class ResetLater(Resets):
+    def __init__(self) -> None:
+        self.children: list[Node] = []
+        super().__init__()
+
+
+class Monostate:
+    def __init__(self) -> None:
+        self.__dict__ = SHARED_STATE
+
+
+class Config(Monostate):
+    def __init__(self) -> None:
+        super().__init__()
+        self.children: list[Node] = []
+
+
+class Abstract(abc.ABC):
+    def __init__(self) -> None:
+        super().__init__()
+        self.children: list[Node] = []
+
+
+class Failure(Exception):
+    def __init__(self) -> None:
+        super().__init__("failed")
+        self.children: list[Node] = []
+
+
+class Meta(type):
+    pass
+
+
+class Metered(metaclass=Meta):
+    def __init__(self) -> None:
+        self.children: list[Node] = []
+"#;
+
+/// A module binding `super` to what heki cannot tell is the builtin.
+const OWNED_SHADOWED: &str = r#"import builtins
+
+from pkg.model import Base, Node
+
+super = getattr(builtins, "super")
+
+
+class Shadowed(Base):
+    def __init__(self) -> None:
+        super().__init__(False)
+        self.children: list[Node] = []
 "#;
 
 const OWNED_PASSES: &str = r#"import copy
@@ -998,14 +1084,21 @@ import types
 from pkg.model import (
     OLD,
     OLD_LIST,
+    Abstract,
+    Announced,
     Child,
+    Config,
     Decorated,
+    Derived,
+    Failure,
     Hashed,
     Hooked,
+    Metered,
     Node,
     Prepared,
     Registered,
     Replaced,
+    ResetLater,
     Shared,
     Sometimes,
     Viewed,
@@ -1013,6 +1106,7 @@ from pkg.model import (
     make,
     reset,
 )
+from pkg.shadowed import Shadowed
 
 
 def pass_factory(node: Node) -> Node:
@@ -1070,6 +1164,70 @@ def appends_to_an_inherited_list(node: Node) -> Child:
 
 def appends_after_a_setup_before_the_store(node: Node) -> Prepared:
     copied = Prepared()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_after_a_plain_base_constructor(node: Node) -> Derived:
+    copied = Derived()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_to_a_list_a_setter_hands_on(node: Node) -> Announced:
+    copied = Announced()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_after_an_abstract_base_constructor(node: Node) -> Abstract:
+    copied = Abstract()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_after_a_library_base_constructor(node: Node) -> Failure:
+    copied = Failure()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_to_a_list_of_a_class_with_a_metaclass(node: Node) -> Metered:
+    copied = Metered()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_after_a_shadowed_super(node: Node) -> Shadowed:
+    copied = Shadowed()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_to_a_list_a_base_constructor_rebinds(node: Node) -> ResetLater:
+    copied = ResetLater()
+    part = Node()
+    copied.children.append(part)
+    part.flag = True
+    return copied
+
+
+def appends_to_a_list_in_a_shared_namespace(node: Node) -> Config:
+    copied = Config()
     part = Node()
     copied.children.append(part)
     part.flag = True
@@ -1300,6 +1458,7 @@ fn containers_the_constructor_made_hold_what_is_added() {
     p.write("pyproject.toml", &config)
         .write("pkg/__init__.py", "")
         .write("pkg/model.py", OWNED_MODEL)
+        .write("pkg/shadowed.py", OWNED_SHADOWED)
         .write("pkg/passes.py", &passes);
     let found = reports(&diagnostics(&p), &passes);
     let at = |func: &str, line: &str| (func.to_owned(), line.to_owned());
@@ -1327,12 +1486,33 @@ fn containers_the_constructor_made_hold_what_is_added() {
         at("adds_an_object_whose_hash_keeps_it", "part.flag = True"),
         // The object may be the input.
         at("appends_to_a_list_of_an_input", "part.flag = True"),
-        // Writing or reading the attribute runs code, the constructor hands the instance on
-        // after making the list, makes it on some paths only, keeps it, or is replaced in the
-        // class body, a class decorator may replace the class, or a library class makes the
-        // object.
+        // Writing or reading the attribute runs code, the constructor hands the instance or a
+        // member of it on, stores another attribute through a setter, makes the list on some
+        // paths only, keeps it, or is replaced in the class body, the base's constructor
+        // replaces the instance's namespace or binds the attribute too, a library base's may
+        // run anything, `super` may be another object, a class decorator or a metaclass may
+        // replace the class or its construction, or a library class makes the object.
         at("appends_under_a_setattr_hook", "part.flag = True"),
         at("appends_through_a_property", "part.flag = True"),
+        at("appends_after_a_setup_before_the_store", "part.flag = True"),
+        at("appends_to_a_list_a_setter_hands_on", "part.flag = True"),
+        at(
+            "appends_to_a_list_in_a_shared_namespace",
+            "part.flag = True",
+        ),
+        at(
+            "appends_to_a_list_a_base_constructor_rebinds",
+            "part.flag = True",
+        ),
+        at(
+            "appends_after_a_library_base_constructor",
+            "part.flag = True",
+        ),
+        at(
+            "appends_to_a_list_of_a_class_with_a_metaclass",
+            "part.flag = True",
+        ),
+        at("appends_after_a_shadowed_super", "part.flag = True"),
         at(
             "appends_to_a_list_the_constructor_hands_on",
             "part.flag = True",

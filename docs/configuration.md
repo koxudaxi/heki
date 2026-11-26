@@ -481,10 +481,13 @@ object into it links the two the same way: `copied = Node(); copied.children.app
 stores, on a list, set, or dict, when they run no project code on what they store). The constructor
 is the project `__init__` the class runs, its own or a base's (no class decorator,
 `__init_subclass__`, `dataclass_transform`, or metaclass other than `type` or `abc.ABCMeta` along
-the MRO, and no code that writing or reading the attribute runs), and it binds the attribute once,
-on every path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
-`bytearray()`, never reads or deletes it through `self`, and from that store on uses `self` only to
-store other attributes. The object must be one the function made by calling the class on every path.
+the MRO, and no code that reading the attribute runs), and it binds the attribute once, on every
+path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
+`bytearray()`. It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
+call `super().__init__(...)`, whose `__init__` along the MRO does the same or is `object`'s, and
+no store in them runs code (a property's setter, a descriptor, `__setattr__`): a call handed
+`self` or a member of it, such as `self.setup()`, may hand the container anywhere. The object must
+be one the function made by calling the class on every path.
 Rebinding the attribute before an object is stored into the list (`copied.children = node.children`
 on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, or a helper handed
 `copied`), or keeping the list, ends the freshness of what is stored into it. A project function

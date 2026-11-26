@@ -4942,8 +4942,22 @@ impl<'a> Extractor<'a> {
             kb.lookup(&format!("{base}.__setattr__"))
                 .is_some_and(|e| e.stores_on_instance)
         };
+        let project = self.cx.project;
+        // What a construction of each class makes is decided once, for every read of it.
+        let constructions: RefCell<FxHashMap<Box<str>, &[_]>> = RefCell::default();
         let made = |class: &str, attr: &str| {
-            (self.cx.project).constructor_container(class, attr, catalog_stores)
+            let known = constructions.borrow().get(class).copied();
+            let containers = known.unwrap_or_else(|| {
+                let made = project.constructor_containers(class, catalog_stores);
+                constructions.borrow_mut().insert(class.into(), made);
+                made
+            });
+            let kind = containers
+                .iter()
+                .find_map(|(a, k)| (&**a == attr).then_some(*k))?;
+            project
+                .attr_read_finds_stored(class, attr, catalog_stores)
+                .then_some(kind)
         };
         let (answers, returned) = rec.resolve(
             self.shape,
@@ -5264,7 +5278,7 @@ impl<'a> Extractor<'a> {
             && self
                 .cx
                 .project
-                .attr_write_stores_value(class, attr, catalog_stores))
+                .attr_write_stores_value(class, &[attr], catalog_stores))
         .then_some(obj)
     }
 
@@ -9812,7 +9826,7 @@ impl BuiltRule {
 }
 
 /// The attributes whose store or deletion replaces an object's whole namespace or its class.
-const NAMESPACE_ATTRS: &[&str] = &["__dict__", "__class__"];
+pub(crate) const NAMESPACE_ATTRS: &[&str] = &["__dict__", "__class__"];
 
 /// A store into a container that may be one a constructor made ([`Escape::Added`]).
 enum AddedBy {

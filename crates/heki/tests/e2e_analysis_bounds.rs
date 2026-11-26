@@ -6247,6 +6247,46 @@ fn stores_into_containers_a_constructor_made_are_decided_once() {
     assert_eq!(writes(&check_linear(2_048, shape)), 1);
 }
 
+/// A constructor binding a list to an attribute through a chain of thousands of names, each
+/// bound to the one before: the walk from the store back to the list visits each copy once, on
+/// the constructor's budget, so the list is still the instance's own and the write before it is
+/// kept is allowed, the one after it reported.
+#[test]
+fn containers_bound_through_long_alias_chains_are_walked_once() {
+    let shape = |aliases: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.attr = 0".to_owned(),
+            "        k0 = []".to_owned(),
+        ];
+        lines.extend((1..=aliases).map(|i| format!("        k{i} = k{}", i - 1)));
+        lines.extend([
+            format!("        self.kids = k{aliases}"),
+            "KEPT = []".to_owned(),
+            "def build():".to_owned(),
+            "    m, p = Model(), Model()".to_owned(),
+            "    m.kids.append(p)".to_owned(),
+            "    p.attr = 1".to_owned(),
+            "    KEPT.append(m.kids)".to_owned(),
+            "    p.attr = 2".to_owned(),
+            "    return m".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_construction_alias_chain_{aliases}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 1);
+    assert_eq!(writes(&check_linear(4_096, shape)), 1);
+}
+
 /// A function of thousands of parameters a nested function captures: the walk to the values
 /// that may be grown starts from each captured variable, and past its budget anything may be
 /// grown, so the module list the function reads is no constant, and another function's query

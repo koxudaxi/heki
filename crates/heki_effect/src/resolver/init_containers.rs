@@ -1,23 +1,29 @@
-//! The containers a class's own `__init__` makes for the instance
-//! ([`super::ClassDecl::init_containers`]): an attribute it binds to a new builtin container,
-//! which the instance alone holds when the constructor returns. A function constructing such an
-//! instance counts what it adds to that container as held by the instance (`fresh-objects`,
+//! The `__init__` of a class that only stores attributes on the instance
+//! ([`super::ClassDecl::plain_init`]), and the containers it makes for the instance, which the
+//! instance alone holds when the constructor returns. A function constructing such an instance
+//! counts what it adds to that container as held by the instance (`fresh-objects`,
 //! `crate::construction`).
 
-use super::{ModuleDecls, is_summarized_function, self_aliases};
+use super::{
+    LocalNames, ModuleDecls, NameBinding, PlainInit, is_summarized_function, self_aliases,
+};
 use crate::ModuleInput;
 use crate::readonly::ContainerKind;
-use heki_ir::walk::{Answer, Budget, Def, FnShape, Use, Visit, reach};
+use crate::summary::NAMESPACE_ATTRS;
+use heki_ir::walk::{Answer, Budget, FnShape, Use, Visit, reach};
 use heki_ir::{BlockId, BuiltinKind, FunctionKind, InstKind, IrFunction, Terminator, VarId};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use std::collections::BTreeMap;
 
 /// A point of a function: block, instruction index.
 type At = (BlockId, usize);
 
-/// [`super::ClassDecl::init_containers`] of the module's classes, from their own `__init__`:
-/// a plain method (no decorator, which may replace it) taking the instance as its first
-/// parameter, the only binding of the name in the class body.
+/// By attribute, the point and value of each store of it through the instance.
+type Stores<'f> = BTreeMap<&'f str, Vec<(At, VarId)>>;
+
+/// [`super::ClassDecl::plain_init`] of the module's classes, from their own `__init__`: a plain
+/// method (no decorator, which may replace it) taking the instance as its first parameter, the
+/// only binding of the name in the class body.
 pub(super) fn init_containers(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     let functions = &input.ir.functions;
     // The class bodies binding `__init__` more than once (a second `def`, an assignment).
@@ -51,87 +57,127 @@ pub(super) fn init_containers(input: &ModuleInput<'_>, decls: &mut ModuleDecls) 
         {
             continue;
         }
-        // The builtin container class a global name the module does not bind reads.
+        // The builtin a global name the module does not bind reads.
         let builtin = |name: &str| {
             let class = format!("builtins.{name}");
-            (decls.resolve_dotted(name, false).as_deref() == Some(class.as_str()))
-                .then(|| ContainerKind::of_class(&class))
-                .flatten()
+            match decls.lookup(name, false, &LocalNames::default()) {
+                NameBinding::Unbound => Some(class),
+                NameBinding::Object(fqn) => (fqn == class).then_some(fqn),
+                NameBinding::Unknown => None,
+            }
         };
-        let found = made_containers(f, this.var, &builtin);
+        let found = plain_init(f, this.var, &builtin);
         if let Some(class) = decls.classes.get_mut(owner) {
-            class.init_containers = found;
+            class.plain_init = found;
         }
     }
 }
 
-/// The attributes `f` binds, through its parameter `this`, to a builtin container it makes, and
-/// that the instance alone holds when `f` returns:
-/// - the container is a list, dict, or set display, or a call of a builtin container class
-///   (`list`, `dict`, `set`, `bytearray`) without arguments, and the store is its only use;
-/// - the store is the only one of the attribute through `this`, `f` never reads or deletes the
-///   attribute through it, and every path to a `return` passes the store;
-/// - from the store on, no code may reach the instance: no instruction other than a store of
-///   another attribute through `this` uses a value that may hold the instance (`this`, what is
-///   read out of it, `super()`, and what any of those flows into), so nothing `f` calls may
-///   rebind the attribute or keep the container.
-fn made_containers(
+/// The [`PlainInit`] `f` is, with `this` its parameter of the instance: no instruction or
+/// terminator uses a value that may hold the instance (`this`, what is read out of it,
+/// `super()`, and what any of those flows into) other than as
+/// - the object of an attribute store through `this`, of any attribute but `__dict__` and
+///   `__class__`, which replace the instance's namespace or its class;
+/// - a copy;
+/// - `super().__init__(...)`, the call of the builtin `super` without arguments, handed no
+///   value that may hold the instance.
+///
+/// Its containers are the attributes bound to a builtin container `f` makes, that the instance
+/// alone holds when `f` returns: the container is a list, dict, or set display, or a call of a
+/// builtin container class (`list`, `dict`, `set`, `bytearray`) without arguments, the store is
+/// its only use and the only store of the attribute, and every path to a `return` passes the
+/// store. Nothing else may reach the instance, so nothing `f` runs may keep the container or
+/// rebind the attribute but the stores and the `__init__` it calls, of which
+/// [`super::ProjectDecls::constructor_containers`] establishes the same. `None` past the budget.
+fn plain_init(
     f: &IrFunction,
     this: VarId,
-    builtin: &dyn Fn(&str) -> Option<ContainerKind>,
-) -> Box<[(Box<str>, ContainerKind)]> {
+    builtin: &dyn Fn(&str) -> Option<String>,
+) -> Option<Box<PlainInit>> {
     let shape = FnShape::new(f);
     let selfs = self_aliases(f, this);
-    // Past the budget, no attribute is known to hold one.
     let budget = Budget::of_function("resolver::init_containers", f);
     let found = holding_values(&shape, &selfs, &budget).and_then(|holding| {
-        let mut stores: BTreeMap<&str, Vec<(At, VarId)>> = BTreeMap::new();
-        let mut used: FxHashSet<&str> = FxHashSet::default();
-        // By block, the last point that uses a value that may hold the instance, other than as
-        // the object of an attribute store.
-        let mut exposed: FxHashMap<BlockId, usize> = FxHashMap::default();
-        for bb in &f.blocks {
-            for (i, inst) in bb.insts.iter().enumerate() {
-                let at = (bb.id, i);
-                let exposes = match &inst.kind {
-                    InstKind::AttrStore { obj, attr, value } if selfs.contains(obj) => {
-                        stores.entry(attr).or_default().push((at, *value));
-                        holding.contains(value)
+        let Some((stores, calls_next)) = instance_uses(&shape, &selfs, &holding, builtin) else {
+            return Answer::Known(None);
+        };
+        let containers = Paths::of(&shape, &budget).and_then(|paths| {
+            (stores.iter())
+                .map(|(attr, stored)| {
+                    let [(at, value)] = stored[..] else {
+                        return Answer::Known(None);
+                    };
+                    if !paths.on_every_return(at) {
+                        return Answer::Known(None);
                     }
-                    InstKind::AttrDelete { obj, attr } | InstKind::AttrLoad { obj, attr, .. }
-                        if selfs.contains(obj) =>
-                    {
-                        used.insert(attr);
-                        true
+                    let kind = made_container(&shape, &budget, value, builtin);
+                    kind.map(|kind| kind.map(|kind| (Box::<str>::from(*attr), kind)))
+                })
+                .collect::<Answer<Vec<_>>>()
+        });
+        containers.map(|containers| {
+            Some(Box::new(PlainInit {
+                stores: stores.keys().map(|a| (*a).into()).collect(),
+                calls_next,
+                containers: containers.into_iter().flatten().collect(),
+            }))
+        })
+    });
+    // Past the budget, the `__init__` is not known to do no more.
+    found.open_means(None)
+}
+
+/// The attributes `f` stores through the instance `selfs` holds, with each store's point and
+/// value, and whether it calls `super().__init__(...)`: `None` when a value that may hold the
+/// instance (`holding`) has another use ([`plain_init`]).
+fn instance_uses<'f>(
+    shape: &FnShape<'f>,
+    selfs: &FxHashSet<VarId>,
+    holding: &FxHashSet<VarId>,
+    builtin: &dyn Fn(&str) -> Option<String>,
+) -> Option<(Stores<'f>, bool)> {
+    let f = shape.f;
+    let mut stores = Stores::new();
+    let mut calls_next = false;
+    let next_init = |recv: VarId, args: &[VarId], kwargs: &[(Option<String>, VarId)]| {
+        let made_by = shape.inst(shape.copy_root(recv)).map(|i| &i.kind);
+        made_by
+            .and_then(|kind| global_call(shape, kind))
+            .is_some_and(|callee| {
+                callee == "super" && builtin(callee).as_deref() == Some("builtins.super")
+            })
+            && !(args.iter().chain(kwargs.iter().map(|(_, v)| v))).any(|v| holding.contains(v))
+    };
+    for bb in &f.blocks {
+        for (i, inst) in bb.insts.iter().enumerate() {
+            match &inst.kind {
+                InstKind::AttrStore { obj, attr, value } if selfs.contains(obj) => {
+                    if NAMESPACE_ATTRS.contains(&attr.as_str()) {
+                        return None;
                     }
-                    InstKind::Copy { .. } => false,
-                    kind => {
-                        kind.operands().iter().any(|v| holding.contains(v))
-                            || matches!(kind, InstKind::Call { callee, .. } if callee == "super")
+                    stores.entry(attr).or_default().push(((bb.id, i), *value));
+                }
+                InstKind::Copy { .. } => {}
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    is_awaited: false,
+                    ..
+                } if method == "__init__" && next_init(*recv, args, kwargs) => calls_next = true,
+                kind => {
+                    if kind.operands().iter().any(|v| holding.contains(v)) {
+                        return None;
                     }
-                };
-                if exposes {
-                    exposed.insert(bb.id, i);
                 }
             }
         }
-        Paths::of(&shape, &exposed, &budget).map(|paths| {
-            let mut out = Vec::new();
-            for (attr, stored) in stores {
-                let [(at, value)] = stored[..] else {
-                    continue;
-                };
-                let Some(kind) = made_container(&shape, value, at, builtin) else {
-                    continue;
-                };
-                if !used.contains(attr) && paths.on_every_return(at) && !paths.exposed_after(at) {
-                    out.push((attr.into(), kind));
-                }
-            }
-            out.into_boxed_slice()
-        })
-    });
-    found.open_means(Box::default())
+    }
+    // A branch on the instance runs its `__bool__`; returning or raising it hands it on.
+    let in_terminator =
+        |v: &VarId| (shape.readers(*v).iter()).any(|u| matches!(u, Use::Terminator(_)));
+    (!holding.iter().any(in_terminator)).then_some((stores, calls_next))
 }
 
 /// What the paths of a function say about its points, each computed once for all its stores.
@@ -141,18 +187,10 @@ struct Paths<'s, 'f> {
     returns_under: Option<BlockId>,
     /// The blocks a path reaches a `return` from.
     reach_return: FxHashSet<BlockId>,
-    /// By block, the last point exposing the instance in it.
-    exposed: &'s FxHashMap<BlockId, usize>,
-    /// The blocks a path of one edge or more leads from to a block exposing the instance.
-    lead_to_exposed: FxHashSet<BlockId>,
 }
 
 impl<'s, 'f> Paths<'s, 'f> {
-    fn of(
-        shape: &'s FnShape<'f>,
-        exposed: &'s FxHashMap<BlockId, usize>,
-        budget: &Budget,
-    ) -> Answer<Self> {
+    fn of(shape: &'s FnShape<'f>, budget: &Budget) -> Answer<Self> {
         let f = shape.f;
         let returning: Vec<BlockId> = (f.blocks.iter())
             .filter(|b| matches!(b.terminator, Terminator::Return(_)) && shape.reachable(b.id))
@@ -160,14 +198,16 @@ impl<'s, 'f> Paths<'s, 'f> {
             .collect();
         let dom = shape.dominators();
         let returns_under = (returning.iter().copied()).reduce(|a, b| dom.common(a, b));
-        let reach_return = backward(shape, budget, returning.iter().copied(), true);
-        let lead_to_exposed = backward(shape, budget, exposed.keys().copied(), false);
-        (reach_return.zip(lead_to_exposed)).map(|(reach_return, lead_to_exposed)| Self {
+        let mut reach_return: FxHashSet<BlockId> = FxHashSet::default();
+        let preds = |b: BlockId, out: &mut Vec<BlockId>| out.extend(shape.preds(b));
+        let walked = reach(budget, returning, preds, |b| {
+            reach_return.insert(b);
+            Visit::<()>::Expand
+        });
+        walked.map(|_| Self {
             shape,
             returns_under,
             reach_return,
-            exposed,
-            lead_to_exposed,
         })
     }
 
@@ -179,35 +219,6 @@ impl<'s, 'f> Paths<'s, 'f> {
         self.returns_under.is_some_and(|r| dom.dominates(at.0, r))
             && (self.shape.f.block(at.0).exc_target).is_none_or(|h| !self.reach_return.contains(&h))
     }
-
-    /// Whether a point exposing the instance may run after the instruction at `at`: later in its
-    /// block, or in a block a path from it reaches (its own again through a loop).
-    fn exposed_after(&self, at: At) -> bool {
-        self.exposed.get(&at.0).is_some_and(|last| *last > at.1)
-            || self.lead_to_exposed.contains(&at.0)
-    }
-}
-
-/// The blocks with a path to one of `to` over the edges of `shape`: of no edge (`to` itself
-/// included) when `inclusive`, else of one edge or more. Open past the budget.
-fn backward(
-    shape: &FnShape<'_>,
-    budget: &Budget,
-    to: impl Iterator<Item = BlockId>,
-    inclusive: bool,
-) -> Answer<FxHashSet<BlockId>> {
-    let starts: Vec<BlockId> = if inclusive {
-        to.collect()
-    } else {
-        to.flat_map(|b| shape.preds(b).iter().copied()).collect()
-    };
-    let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-    let preds = |b: BlockId, out: &mut Vec<BlockId>| out.extend(shape.preds(b));
-    let walked = reach(budget, starts, preds, |b| {
-        seen.insert(b);
-        Visit::<()>::Expand
-    });
-    walked.map(|_| seen)
 }
 
 /// The values that may hold the instance `selfs` holds: those, `super()`, and the result of any
@@ -238,55 +249,68 @@ fn holding_values(
     walked.map(|_| holding)
 }
 
-/// The kind of the new builtin container `value`, stored at `at`, holds, when that store is its
-/// only use: a display, or a call without arguments of the builtin class a global name the
-/// function does not bind reads.
+/// The kind of the new builtin container the stored `value` is, when the store is its only use:
+/// a display, or a call without arguments of the builtin class a global name the function does
+/// not bind reads, also through copies, each the only use of the value it copies. Open past the
+/// budget.
 fn made_container(
     shape: &FnShape<'_>,
+    budget: &Budget,
     value: VarId,
-    at: At,
-    builtin: &dyn Fn(&str) -> Option<ContainerKind>,
-) -> Option<ContainerKind> {
-    let mut v = value;
-    let mut reader = Use::Inst(at.0, u32::try_from(at.1).ok()?);
-    loop {
-        if shape.readers(v) != [reader] {
-            return None;
+    builtin: &dyn Fn(&str) -> Option<String>,
+) -> Answer<Option<ContainerKind>> {
+    let copied = |v: VarId, out: &mut Vec<VarId>| {
+        if let Some(InstKind::Copy { src, .. }) = shape.inst(v).map(|i| &i.kind) {
+            out.push(*src);
         }
-        let (Def::Inst(b, i), Some(inst)) = (shape.def(v), shape.inst(v)) else {
-            return None;
-        };
-        match &inst.kind {
-            InstKind::Copy { src, .. } => {
-                reader = Use::Inst(b, i);
-                v = *src;
-            }
-            InstKind::AllocBuiltin {
+    };
+    // The store, or the copy the walk came from, reads each value the walk visits.
+    let walked = reach(budget, [value], copied, |v| {
+        let made_by = (shape.readers(v).len() == 1)
+            .then(|| shape.inst(v))
+            .flatten()
+            .map(|i| &i.kind);
+        match made_by {
+            Some(InstKind::Copy { .. }) => Visit::Expand,
+            Some(InstKind::AllocBuiltin {
                 kind: BuiltinKind::List,
                 ..
-            } => return Some(ContainerKind::List),
-            InstKind::AllocBuiltin {
+            }) => Visit::Stop(Some(ContainerKind::List)),
+            Some(InstKind::AllocBuiltin {
                 kind: BuiltinKind::Set,
                 ..
-            } => return Some(ContainerKind::Set),
-            InstKind::DictLiteral { .. } => return Some(ContainerKind::Dict),
-            InstKind::Call {
-                callee,
-                callee_var: Some(called),
-                args,
-                kwargs,
-                star_from: None,
-                ..
-            } if args.is_empty()
-                && kwargs.is_empty()
-                && matches!(
-                    shape.inst(*called).map(|i| &i.kind),
-                    Some(InstKind::LoadGlobal { name, .. }) if name == callee
-                ) =>
-            {
-                return builtin(callee);
-            }
-            _ => return None,
+            }) => Visit::Stop(Some(ContainerKind::Set)),
+            Some(InstKind::DictLiteral { .. }) => Visit::Stop(Some(ContainerKind::Dict)),
+            Some(kind) => Visit::Stop(
+                global_call(shape, kind)
+                    .and_then(builtin)
+                    .and_then(|class| ContainerKind::of_class(&class)),
+            ),
+            None => Visit::Stop(None),
         }
+    });
+    walked.map(Option::flatten)
+}
+
+/// The name `kind` calls when it is a call without arguments of the global the name reads.
+fn global_call<'f>(shape: &FnShape<'f>, kind: &'f InstKind) -> Option<&'f str> {
+    match kind {
+        InstKind::Call {
+            callee,
+            callee_var: Some(called),
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if args.is_empty()
+            && kwargs.is_empty()
+            && matches!(
+                shape.inst(*called).map(|i| &i.kind),
+                Some(InstKind::LoadGlobal { name, .. }) if name == callee
+            ) =>
+        {
+            Some(callee)
+        }
+        _ => None,
     }
 }
