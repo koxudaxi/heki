@@ -742,14 +742,13 @@ pub fn render_text(report: &RecommendReport) -> String {
             split.allowed, split.regressions
         );
     }
-    premises::render(&mut out, &report.open_premises);
-    blind_spots::render(&mut out, &report.blind_spots);
     rules::render(
         &mut out,
         &report.rules,
         now.baseline.is_some(),
         &report.analyzed.paths,
     );
+    blind_spots::render(&mut out, &report.blind_spots);
     contracts::render(
         &mut out,
         &report.contracts,
@@ -766,6 +765,9 @@ pub fn render_text(report: &RecommendReport) -> String {
             let _ = writeln!(out, "  - {}", entry.message());
         }
     }
+    // The reports this section is about are those `heki check` does not show: what can be
+    // adopted comes first.
+    premises::render(&mut out, &report.open_premises);
     if !report.notes.is_empty() {
         out.push_str("\nNotes\n");
         for note in &report.notes {

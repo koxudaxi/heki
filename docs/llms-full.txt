@@ -3498,17 +3498,6 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
-- **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
-  of exact rules), counted by the premise of the claim each leaves open and why ([Rule
-  Precision](https://heki.koxudaxi.dev/precision/)), or by the condition of the exact tier that is no premise
-  ("Trip count open": the claim holds, and the change pays off only over a loop the data
-  sizes). Each row says what the cause states, how many reports leave it open, how many leave
-  nothing else open, and what closes it: an annotation, which must be true; a change of the
-  code; heki's catalog, which no configuration sets (the row says where to report the case);
-  or nothing you can apply. None of it enters the block. A report whose rule records no cause
-  is counted as "not recorded", never given a guessed one.
-- **What heki cannot see**: where heki is silent, so no count of reports applies (see
-  [below](https://heki.koxudaxi.dev/recommend/#what-heki-cannot-see)).
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -3517,6 +3506,8 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   heuristic reports says so. A line under the rows gives the `heki check --extend-select` command
   that shows the reports they count (with the paths given; a rule the configuration ignores is
   left out of it, since `ignore` wins). Rules without reports here are named on one line.
+- **What heki cannot see**: where heki is silent, so no count of reports applies (see
+  [below](https://heki.koxudaxi.dev/recommend/#what-heki-cannot-see)).
 - **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
   contracts the code already keeps, as blocks: the candidates whose entries differ only in their
   targets or scopes are one entry. Each block has its confidence, evidence, and the trial run of
@@ -3531,6 +3522,15 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)). They are listed
   whatever `lint.unmatched-contract-entries` says, and the section is left out when there is
   none.
+- **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
+  of exact rules), counted by the premise of the claim each leaves open and why ([Rule
+  Precision](https://heki.koxudaxi.dev/precision/)), or by the condition of the exact tier that is no premise
+  ("Trip count open": the claim holds, and the change pays off only over a loop the data
+  sizes). Each row says what the cause states, how many reports leave it open, how many leave
+  nothing else open, and what closes it: an annotation, which must be true; a change of the
+  code; heki's catalog, which no configuration sets (the row says where to report the case);
+  or nothing you can apply. None of it enters the block. A report whose rule records no cause
+  is counted as "not recorded", never given a guessed one.
 - **Notes**: what to know to weigh the advice. How many of the reports shown now (with a
   baseline, the regressions) make `heki check` fail, with the Ratchet baseline that records them
   so that only new ones fail; and at the default `fail-on`, how many do not (warnings, and
@@ -3804,6 +3804,25 @@ heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 4 heuristic rule(s) off
 
+Rules worth enabling here
+  rule    reports  exact  consequence  right about the code (published)  real harm  block
+  MUT106        1      -  bug          not measured                      -          yes
+  OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
+  see the 2 report(s): heki check app --extend-select MUT106,OPT110
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
+  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
+
+What heki cannot see (no report either way)
+  calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
+    name                  calls  async  loops  if it waits     if it sends a query
+    stripe.Charge.create      1      1      0  EFF101 1 exact  -
+
+Contract candidates
+  effect-boundaries  app.report  medium
+    3 function(s) in 1 module(s) reach no blocking call heki sees
+    trial: EFF201 0
+  For every block, accesses inside code heki cannot follow (unresolved calls, libraries without a catalog) are not seen.
+
 What keeps reports heuristic
   1 heuristic report(s) of exact claims: OPT110 1
   premise: cause                                 reports  only open  closed by
@@ -3814,25 +3833,6 @@ What keeps reports heuristic
     the value looked up may compare otherwise through `hash` than through `==`: a custom `__eq__` / `__hash__`, or an unhashable value
     e.g. app/users.py:14 OPT110
   Nothing here enters the block: an annotation or a change of the code is an edit of the program.
-
-What heki cannot see (no report either way)
-  calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
-    name                  calls  async  loops  if it waits     if it sends a query
-    stripe.Charge.create      1      1      0  EFF101 1 exact  -
-
-Rules worth enabling here
-  rule    reports  exact  consequence  right about the code (published)  real harm  block
-  MUT106        1      -  bug          not measured                      -          yes
-  OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  see the 2 report(s): heki check app --extend-select MUT106,OPT110
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
-  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
-
-Contract candidates
-  effect-boundaries  app.report  medium
-    3 function(s) in 1 module(s) reach no blocking call heki sees
-    trial: EFF201 0
-  For every block, accesses inside code heki cannot follow (unresolved calls, libraries without a catalog) are not seen.
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.

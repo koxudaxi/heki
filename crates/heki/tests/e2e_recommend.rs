@@ -954,6 +954,28 @@ fn the_command_under_the_rules_shows_every_report_they_count() {
     );
 }
 
+/// The sections of the text, in the order it prints them.
+const SECTIONS: &[&str] = &[
+    "\nReports now  ",
+    "\nRules worth enabling here\n",
+    "\nWhat heki cannot see (no report either way)\n",
+    "\nContract candidates\n",
+    "\nWhat keeps reports heuristic\n",
+    "\nNotes\n",
+    "\npyproject.toml: keys to add or change\n",
+];
+
+#[test]
+fn the_sections_come_in_their_order() {
+    let p = shop_with_opt_in("recommend_section_order");
+    let (_, out, _) = p.heki(&["recommend"]);
+    let at: Vec<usize> = SECTIONS
+        .iter()
+        .map(|s| out.find(s).unwrap_or_else(|| panic!("{s:?}: {out}")))
+        .collect();
+    assert!(at.is_sorted(), "{at:?}: {out}");
+}
+
 #[test]
 fn a_rules_reports_do_not_depend_on_the_other_rules_selected() {
     let p = shop_with_opt_in("recommend_independence");
