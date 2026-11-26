@@ -407,11 +407,12 @@ pub(super) fn mut207(
                     obj: a.obj_params,
                 };
                 let callers = Callers::LeaveTargetClasses(&calls_target);
+                let allowance = rule.allowance_for(hits);
                 if hits.is_empty()
                     || !*classified
                         .entry((r, key, a.obj_params, a.name.as_str()))
                         .or_insert_with(|| {
-                            access.counts(cx, &sites, &rule.allowance, &no_class, callers)
+                            access.counts(cx, &sites, &allowance, &no_class, callers)
                         })
                 {
                     continue;

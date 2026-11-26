@@ -168,7 +168,9 @@ coroutine's where it is awaited. Not reported either:
   `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
-  guarded operation is checked where it is called, so what it does inside is part of it.
+  guarded operation is checked where it is called, so what it does inside is part of it. With
+  `targets-call-each-other = "report"` a target is allowed to call itself only, and a call of
+  another target is judged as a one-target contract would judge it.
 
 With `attribution = "lexical"`, a call is judged in the function whose code holds it instead: a
 private helper reports its calls itself, and a function that only runs inside allowed callers
@@ -321,6 +323,10 @@ No automatic fix.
     each call is judged in the function holding it.
   - `own-receiver`: `"report"` (default) or `"allow"`: whether a call through the receiver of the
     method it is judged in (`self`, `cls`, `super()`) is allowed.
+  - `targets-call-each-other`: `"allow"` (default) or `"report"`: whether a target may call the
+    other targets of the contract. With `"report"`, each target is judged like the one target of a
+    contract with the same keys, so a contract listing independent targets reports what one
+    contract per target reports.
   - `allowed-protocols`: project protocols (class patterns, their subclasses included): a call
     through a value typed with one that declares the method, itself or through its protocol
     bases, is allowed, also through a class object typed `type[P]` of one (`MUT207`).

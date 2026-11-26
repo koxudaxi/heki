@@ -10,7 +10,7 @@ use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
     MemberPattern, MergedReports, Named, References, Sites, allows_own_receiver, attribution,
     binds_receiver, counts_references, delegated_reports, escaping_for, matched_name,
-    named_protocols, place_functions, project_classes, reports_unresolved,
+    named_protocols, place_functions, project_classes, reports_unresolved, targets_call_each_other,
 };
 use crate::patterns::{ModuleIndex, PartIndex};
 use crate::{
@@ -21,6 +21,7 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{AccessKind, ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::rc::Rc;
@@ -775,6 +776,22 @@ pub(super) struct CallOwnerRule<'r> {
     pub(super) report_unresolved: bool,
     /// The references that count as calls of a target (`references`).
     pub(super) references: References,
+    /// `targets-call-each-other = "allow"` (default): a target may call the others. With
+    /// `"report"`, a call is judged for the targets it calls alone ([`Self::allowance_for`]).
+    targets_call_each_other: bool,
+}
+
+impl CallOwnerRule<'_> {
+    /// The allowance a call of the targets `group` is judged by: the contract's own, or, when
+    /// its targets do not call each other, one in which only `group` is guarded, as in a
+    /// contract of just those targets.
+    pub(super) fn allowance_for(&self, group: &[usize]) -> Cow<'_, Allowance> {
+        if self.targets_call_each_other {
+            Cow::Borrowed(&self.allowance)
+        } else {
+            Cow::Owned(self.allowance.guarding_only(group))
+        }
+    }
 }
 
 /// `MUT204`: calls of `call-owners` targets outside their allowed callers, reported like the
@@ -832,6 +849,11 @@ pub(crate) fn mut204<'c>(
             note: rule.message.as_deref(),
             report_unresolved,
             references: counts_references(rule.references.as_deref(), "call-owners", &rule.name)?,
+            targets_call_each_other: targets_call_each_other(
+                rule.targets_call_each_other.as_deref(),
+                "call-owners",
+                &rule.name,
+            )?,
         });
     }
     super::unresolved::mut207(cx, &rules, out);
@@ -870,11 +892,12 @@ pub(crate) fn mut204<'c>(
                         families[c].at(cx, &rule.targets, &group, site);
                     let obj = receiver_params(site);
                     let looked_up = looked_up_params(cx, site);
+                    let allowance = rule.allowance_for(&group);
                     let walk = || {
                         delegated_reports(
                             cx,
                             &sites,
-                            (&rule.allowance, &family),
+                            (&allowance, &family),
                             (key, obj, looked_up),
                             inside,
                         )
@@ -924,15 +947,9 @@ pub(crate) fn mut204<'c>(
                     callee: &callee,
                 };
                 let inside = &mut outside[c];
-                let walk = || {
-                    delegated_reports(
-                        cx,
-                        &sites,
-                        (&rule.allowance, &no_family),
-                        (key, 0, 0),
-                        inside,
-                    )
-                };
+                let allowance = rule.allowance_for(&[t]);
+                let walk =
+                    || delegated_reports(cx, &sites, (&allowance, &no_family), (key, 0, 0), inside);
                 let add = |reports: &mut MergedReports<'c, usize>, r: &DelegatedReport, sites| {
                     add_call_report(cx, reports, rule, &call, r, sites);
                 };

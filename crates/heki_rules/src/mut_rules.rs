@@ -1272,7 +1272,7 @@ fn names(patterns: &[DottedPattern], key: &FuncKey) -> bool {
 /// component; an entry with a dot or a glob is a pattern like `allowed-*`). `forbidden-*`
 /// patterns (matched like `allowed-*`) narrow where the contract applies: when set, only
 /// accesses by them are reported, and the allowed functions stay exceptions inside them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Allowance {
     allowed: Vec<DottedPattern>,
     exempt_names: FxHashSet<String>,
@@ -1281,7 +1281,7 @@ pub(crate) struct Allowance {
     forbidden: Vec<DottedPattern>,
     /// Functions the contract guards (`call-owners` targets): they are part of the guarded
     /// operation, whose calls are checked where they are made, so they may use each other.
-    targets: Option<std::sync::Arc<FunctionMatchers>>,
+    targets: Option<GuardedTargets>,
     /// Which function these patterns are matched against for an access.
     attribution: Attribution,
     /// `own-receiver = "allow"`: an access through the receiver of the method judging it is
@@ -1294,6 +1294,26 @@ pub(crate) struct Allowance {
     /// ([`CheckContext::escaping_functions`]), which have callers heki does not see. Each judges
     /// its accesses itself, as if it had no callers ([`delegated_reports`]).
     escaping: Option<std::sync::Arc<FxHashSet<FuncKey>>>,
+}
+
+/// The functions a `call-owners` contract guards, and which of its targets (indices into the
+/// matchers) the allowance treats as guarded: all of them, or the group a call of the contract
+/// is judged for (`targets-call-each-other = "report"`).
+#[derive(Debug, Clone)]
+struct GuardedTargets {
+    matchers: std::sync::Arc<FunctionMatchers>,
+    only: Option<Vec<usize>>,
+}
+
+impl GuardedTargets {
+    fn any(&self, key: &FuncKey) -> bool {
+        match &self.only {
+            None => self.matchers.any(key),
+            Some(only) => {
+                (self.matchers.matching(key).iter()).any(|i| only.binary_search(i).is_ok())
+            }
+        }
+    }
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -1538,8 +1558,24 @@ impl Allowance {
     /// The same allowance, with the guarded functions `targets` allowed too.
     pub(crate) fn with_targets(self, targets: std::sync::Arc<FunctionMatchers>) -> Self {
         Self {
-            targets: Some(targets),
+            targets: Some(GuardedTargets {
+                matchers: targets,
+                only: None,
+            }),
             ..self
+        }
+    }
+
+    /// The same allowance, with only the guarded functions `group` (indices into the targets,
+    /// ascending) allowed: a call of one of them is judged like a call of a contract naming
+    /// just those.
+    pub(crate) fn guarding_only(&self, group: &[usize]) -> Self {
+        Self {
+            targets: self.targets.clone().map(|t| GuardedTargets {
+                only: Some(group.to_vec()),
+                ..t
+            }),
+            ..self.clone()
         }
     }
 
@@ -2721,6 +2757,27 @@ pub(crate) fn named_protocols(
         ));
     }
     Ok(out)
+}
+
+/// `targets-call-each-other` values; the first is the default.
+const TARGETS_CALL_EACH_OTHER: &[&str] = &["allow", "report"];
+
+/// Whether the targets of a `call-owners` contract may call each other
+/// (`targets-call-each-other = "allow"`, the default): or each is judged like the one target of
+/// its own contract (`"report"`).
+pub(crate) fn targets_call_each_other(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        TARGETS_CALL_EACH_OTHER,
+        "`allow` or `report`",
+        section,
+        contract,
+        "targets-call-each-other",
+    )? == "allow")
 }
 
 /// `own-receiver` values; the first is the default.

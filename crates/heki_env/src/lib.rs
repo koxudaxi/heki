@@ -268,6 +268,10 @@ pub struct CallOwnerRule {
     /// `"allow"` or `"report"` (default), as for `WriteOwnerRule`: a call of a method bound to
     /// the receiver of the method it is judged in.
     pub own_receiver: Option<String>,
+    /// `"allow"` (default): the targets may call each other, as the operation they make up is
+    /// checked where it is called; `"report"`: each target is judged like the one target of a
+    /// contract with the same keys, so a call of one target by another is reported.
+    pub targets_call_each_other: Option<String>,
     /// Project protocols, as for `WriteOwnerRule`: a call through a value typed with one that
     /// declares the method is allowed.
     pub allowed_protocols: Vec<String>,
@@ -1167,6 +1171,7 @@ subclasses = false
 references = "calls-and-bases"
 attribution = "lexical"
 own-receiver = "report"
+targets-call-each-other = "report"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -1243,6 +1248,7 @@ import-probes = "report"
                 references: Some("calls-and-bases".into()),
                 attribution: Some("lexical".into()),
                 own_receiver: Some("report".into()),
+                targets_call_each_other: Some("report".into()),
                 allowed_protocols: Vec::new(),
                 protocol_subclasses: None,
             }
