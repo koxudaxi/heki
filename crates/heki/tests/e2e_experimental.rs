@@ -388,7 +388,7 @@ fn the_precision_tables_and_rule_measurements_come_from_the_data() {
     assert_eq!(docs.build_docs(&[]).0, 0);
     let page = docs.0.read("docs/precision.md");
     assert!(
-        page.contains("| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |\n")
+        page.contains("| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 | - |\n")
             && page.contains(
                 "| `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | \
                  40-67% | 4% |\n"

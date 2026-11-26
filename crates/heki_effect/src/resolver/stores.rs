@@ -426,17 +426,13 @@ impl Joins {
             }
         }
         for target in &self.in_place {
-            if let StoreTarget::Attr(class, attr) = target {
-                let declared = decls
-                    .classes
-                    .get(class)
-                    .is_none_or(|c| c.attr_types.contains_key(attr));
-                if !declared {
-                    out.in_place
-                        .entry(class.clone())
-                        .or_default()
-                        .insert(attr.clone());
-                }
+            if let StoreTarget::Attr(class, attr) = target
+                && !declares_items(decls, class, attr)
+            {
+                out.in_place
+                    .entry(class.clone())
+                    .or_default()
+                    .insert(attr.clone());
             }
         }
         for (target, joined) in &self.every {
@@ -448,11 +444,7 @@ impl Joins {
                     }
                 }
                 StoreTarget::Attr(class, attr) => {
-                    let declared = decls
-                        .classes
-                        .get(class)
-                        .is_none_or(|c| c.attr_types.contains_key(attr));
-                    if declared {
+                    if declares_items(decls, class, attr) {
                         continue;
                     }
                     let store = match (established, joined) {
@@ -483,6 +475,18 @@ struct Decided {
     restoring: BTreeSet<String>,
     in_place: BTreeMap<String, BTreeSet<String>>,
     unowned: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Whether the module's stores into `attr` of `class` decide nothing of the attribute's type:
+/// the class is not the module's, or an annotation names more than a container class
+/// (`list[Handler]`), which types every store. A bare container annotation (`list`) fixes only
+/// the class: the stores give the items as they give an unannotated attribute's type.
+fn declares_items(decls: &ModuleDecls, class: &str, attr: &str) -> bool {
+    decls.classes.get(class).is_none_or(|c| {
+        c.attr_types
+            .get(attr)
+            .is_some_and(|t| !t.is_bare_container())
+    })
 }
 
 impl Decided {
@@ -762,9 +766,11 @@ impl Foreign {
 /// `__post_init__` binds to one through `self`, have the join of every store as their type; a
 /// store of a value of unknown type leaves none. An annotation types every store of the name it
 /// declares: an annotated global's stores hold its declaration or a narrower value, and an
-/// attribute its class annotates has no entry. In a module whose globals `globals()` or `exec`
-/// may change, each store of an unannotated global binds a value of unknown type, and so does a
-/// store of the module body before a star import, which may rebind the name.
+/// attribute its class annotates has no entry, unless the annotation is a bare container class
+/// (`list`), which fixes only the class: its stores give the items as they give an unannotated
+/// attribute's type. In a module whose globals `globals()` or `exec` may change, each store of
+/// an unannotated global binds a value of unknown type, and so does a store of the module body
+/// before a star import, which may rebind the name.
 ///
 /// A store reading a name being decided (`self.items = self.items[1:]`,
 /// `self.active = self.client`) binds a value whose type depends on the one being decided. The
@@ -1259,18 +1265,22 @@ impl Deciding<'_> {
             }
             restoring |= joins.restoring.contains(qualname);
             in_place |= joins.in_place.contains(&target);
-            match self.decls.classes[qualname].attr_types.get(attr) {
-                Some(t) => out.add(Some(Some(t))),
-                None => match joins
-                    .every
-                    .get(&StoreTarget::Attr(qualname.to_owned(), attr.to_owned()))
-                {
-                    Some(Stored::Open) => return None,
-                    Some(stored) => {
-                        out.join(stored);
-                    }
-                    None => {}
-                },
+            let declared = self.decls.classes[qualname].attr_types.get(attr);
+            if let Some(t) = declared.filter(|t| !t.is_bare_container()) {
+                out.add(Some(Some(t)));
+                continue;
+            }
+            match joins.every.get(&target) {
+                Some(Stored::Open) => return None,
+                Some(stored) => {
+                    out.join(stored);
+                }
+                None => {}
+            }
+            if let Some(bare) = declared
+                && joins.established(&target).is_none()
+            {
+                out.add(Some(Some(bare)));
             }
         }
         if restoring
@@ -1341,20 +1351,27 @@ impl Deciding<'_> {
             if project.property_at(c, attr) {
                 return None;
             }
-            if let Some(t) = self.decls.classes[qualname].attr_types.get(attr) {
+            let declared = self.decls.classes[qualname].attr_types.get(attr);
+            if let Some(t) = declared.filter(|t| !t.is_bare_container()) {
                 return Some(Read::Of(t.clone()));
             }
+            let bare = declared.map(|t| Read::Of(t.clone()));
             let target = StoreTarget::Attr(qualname.to_owned(), attr.to_owned());
             if !self.establishable.contains(&target) {
+                if bare.is_some() {
+                    return bare;
+                }
                 continue;
             }
             let mut consulted = self.consulted.borrow_mut();
             consulted.push(Key::Name(target.clone()));
             consulted.push(Key::Class(qualname.to_owned()));
             drop(consulted);
-            let family = self.family(class)?;
+            let Some(family) = self.family(class) else {
+                return bare;
+            };
             let joins = self.joins.borrow();
-            return match joins.establishing.get(&target) {
+            let read = match joins.establishing.get(&target) {
                 None | Some(Stored::Nothing) => {
                     self.pending.borrow_mut().insert(target);
                     Some(Read::Pending)
@@ -1362,6 +1379,11 @@ impl Deciding<'_> {
                 Some(Stored::Open) => None,
                 Some(Stored::Of(_)) if joins.any.contains(qualname) => None,
                 Some(Stored::Of(_)) => self.join_family(&joins, &family, attr).map(Read::Of),
+            };
+            return match (declared, read) {
+                (Some(d), Some(Read::Of(t))) => Some(Read::Of(d.holding_stored(Some(t)))),
+                (Some(_), None) => bare,
+                (_, read) => read,
             };
         }
         None
@@ -3456,9 +3478,10 @@ impl ProjectDecls {
 
     /// The join of what the code of the project stores in `attr` of the instances of the
     /// classes of `family` (canonical, [`Self::instance_family`]): each class's stores (an
-    /// annotated attribute's declared type), and what other modules store into its instances;
-    /// `None` for none or an unknown one, and when a class's instances get attributes heki
-    /// cannot name.
+    /// annotated attribute's declared type; a bare container annotation's class, `list`, is
+    /// joined only where `__init__` does not establish the attribute), and what other modules
+    /// store into its instances; `None` for none or an unknown one, and when a class's instances
+    /// get attributes heki cannot name.
     pub(super) fn join_family(&self, family: &[String], attr: &str) -> Option<Ty> {
         let mut out = Stored::Nothing;
         let mut restoring = false;
@@ -3472,15 +3495,25 @@ impl ProjectDecls {
                 return None;
             }
             restoring |= decl.restores_state;
-            if let Some(t) = decl.attr_types.get(attr) {
+            let declared = decl.attr_types.get(attr);
+            if let Some(t) = declared.filter(|t| !t.is_bare_container()) {
                 out.add(Some(Some(t)));
                 continue;
             }
             in_place |= decl.in_place_attrs.iter().any(|a| &**a == attr);
-            match self.attr_store(class, decl, attr) {
+            let store = self.attr_store(class, decl, attr);
+            match store {
                 Some(AttrStore::Established(t) | AttrStore::Of(t)) => out.add(Some(Some(t))),
                 Some(AttrStore::Open) => return None,
                 None => {}
+            }
+            // The class's instances start with a value its stores do not give unless its
+            // `__init__` establishes the attribute (a dataclass's generated `__init__` binds
+            // one): any value of the annotation's class.
+            if let Some(bare) = declared
+                && !matches!(store, Some(AttrStore::Established(_)))
+            {
+                out.add(Some(Some(bare)));
             }
             if let Some(stored) = self.elsewhere.attrs.get(class).and_then(|a| a.get(attr)) {
                 in_place |= stored.in_place;

@@ -178,6 +178,17 @@ enforce.
     rules marked experimental. Please [report](https://github.com/koxudaxi/heki/issues) what heki
     gets wrong on your code.
 
+## 🧭 What heki can do
+
+| Area | What it covers |
+| --- | --- |
+| [State ownership and mutation](ownership.md) | Changes to read-only parameters, `lru_cache` results, and frozen fields, and contracts for who may write, read, or call what |
+| [Async, I/O, and execution effects](effects.md) | Blocking calls in `async def`, queries and clients in loops, lock hazards, effect boundaries, and effect snapshots |
+| [Imports and module boundaries](imports.md) | Import cycles, import-order crashes, test and development code loaded by a package, and import boundaries (experimental) |
+| [Proven performance rewrites](fixes.md) | `OPT` findings, and the rewrites `heki check --fix` applies only after proving them |
+| [Function inspection and configuration advice](recommend.md) | What one function does with `heki inspect`, and the rules and contracts that fit a project with `heki recommend` (both experimental) |
+| [Coding-agent architecture walls](coding-agents.md) | Contracts, a Stop hook, JSON output, and an Agent Skill that keep an agent inside your architecture |
+
 ## ✅ Exact rules
 
 These rules run by default. Each report shows the chain of calls that leads to it.
