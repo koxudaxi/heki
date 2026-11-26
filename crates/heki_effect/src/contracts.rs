@@ -143,7 +143,7 @@ pub trait Contracts: Debug + Send + Sync {
 
     /// Whether a call target with an argument list names every callee (`*(module="pkg.*")`):
     /// the calls heki binds to no project function or class then keep the constants they pass
-    /// by keyword for the marked parameters (`OptInTables::unbound_calls`).
+    /// by keyword for the marked parameters (`FileSummary::unbound_calls`).
     fn any_callee_arguments(&self) -> bool;
 
     /// Whether a call target has a module part (`pkg:Kind`): the call and reference sites then

@@ -290,3 +290,97 @@ call-targets = ['*(module="pkg.backend.*")']
         "{message}"
     );
 }
+
+/// A project forbidding the calls of `pkg.client` that `targets` names, by `call-owners` and
+/// by an effect boundary on `pkg.client.fetch`.
+fn client_project(name: &str, targets: &str, client: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204", "EFF201"]
+
+[[tool.heki.call-owners]]
+name = "blocked"
+targets = [{targets}]
+forbidden-callers = ["pkg.client:*"]
+attribution = "lexical"
+
+[[tool.heki.effect-boundaries]]
+name = "no-blocked"
+scopes = ["pkg.client.fetch"]
+forbid = ["calls"]
+call-targets = [{targets}]
+"#
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/client.py", client);
+    p
+}
+
+/// `(line, code)` of every report of `p`.
+fn lines_and_codes(p: &Project) -> Vec<(u64, String)> {
+    let (reports, _) = run(p);
+    (reports.into_iter())
+        .map(|(_, line, code, _)| (line, code))
+        .collect()
+}
+
+#[test]
+fn a_catalogued_library_call_passes_the_constants_it_writes() {
+    // `requests.get` makes an ecosystem site of its own; its keywords still name the target.
+    let client = r#"import requests
+
+
+def fetch(url):
+    return requests.get(url, params="blocked")
+
+
+def other(url):
+    return requests.get(url, params="open")
+"#;
+    let p = client_project("callee_glob_library", r#"'*(params="blocked")'"#, client);
+    assert_eq!(
+        lines_and_codes(&p),
+        vec![(5, "EFF201".to_owned()), (5, "MUT204".to_owned())]
+    );
+}
+
+#[test]
+fn a_glob_character_in_brackets_matches_itself() {
+    // `[*]`, `[{]`, `[[]`, and `[?]` are the characters themselves, also beside a group with
+    // an empty alternative, which expands around them. The boundary reports the first call of
+    // each target, `MUT204` every call.
+    let client = r#"def fetch(factory):
+    factory(module="pkg*")
+    factory(module="pkgx")
+    factory(module="pkg.{")
+    factory(module="pkg.{.x")
+    factory(module="pkg.y")
+    factory(module="q[?")
+    return factory(module="q[x")
+"#;
+    let p = client_project(
+        "callee_glob_literal",
+        r#"'*(module="pkg[*]")', '*(module="pkg.[{]{,.x}")', '*(module="q[[][?]")'"#,
+        client,
+    );
+    let report = |line, code: &str| (line, code.to_owned());
+    assert_eq!(
+        lines_and_codes(&p),
+        vec![
+            report(2, "EFF201"),
+            report(2, "MUT204"),
+            report(4, "EFF201"),
+            report(4, "MUT204"),
+            report(5, "MUT204"),
+            report(7, "EFF201"),
+            report(7, "MUT204"),
+        ]
+    );
+}

@@ -618,7 +618,9 @@ The call side of `write-owners`.
   that pass each value: `"DataType(is_dict=True)"`, `'container_flags(kind="dict")'`. A value is
   `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A
   string holding `*`, `?`, `[`, or `{` is a glob matched against the whole string constant
-  passed, dots included: `'make(module="pkg.backend.*")'` matches `"pkg.backend.dataclass"`. A call
+  passed, dots included: `'make(module="pkg.backend.*")'` matches `"pkg.backend.dataclass"`. Write
+  one of these characters in brackets to match it literally (`[*]`, `[?]`, `[[]`, `[{]`):
+  `'make(module="pkg[*]")'` matches `"pkg*"` only. A call
   passes it when heki establishes that the argument bound to the parameter is that constant (a
   literal, a string constant bound once, such as a module's `Final` name, or a module's number or
   boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported (by the module or by

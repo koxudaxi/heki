@@ -2627,6 +2627,53 @@ fn steps_callee_globs() -> Vec<Step> {
     ]
 }
 
+/// A call target naming every callee, below a boundary scope and a private helper's caller in
+/// another module: editing only the string a helper passes to a parameter's call changes no
+/// summary, yet the scope's `EFF201` and the caller's `MUT204` follow it.
+fn steps_unbound_helpers() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"no-backend\"\nscopes = [\"pkg.ub_scope.run\"]\nforbid = [\"calls\"]\ncall-targets = ['*(module=\"pkg.backend.*\")']\n\n[[tool.heki.call-owners]]\nname = \"backend-calls\"\ntargets = ['*(module=\"pkg.backend.*\")']\nforbidden-callers = [\"pkg.ub_scope:*\"]\n"
+    );
+    let helper = |value: &str| {
+        format!(
+            "def _make(factory):\n    return factory(module=\"{value}\")\n\n\ndef build(factory):\n    return factory(module=\"{value}\")\n"
+        )
+    };
+    let scope = "from pkg.ub_helper import _make, build\n\n\ndef run(factory):\n    return build(factory)\n\n\ndef make(factory):\n    return _make(factory)\n";
+    const REPORTS: &[(&str, &str)] =
+        &[("pkg/ub_scope.py", "EFF201"), ("pkg/ub_scope.py", "MUT204")];
+    vec![
+        Step::new(
+            "helpers of another module pass a string the glob matches",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/ub_helper.py", helper("pkg.backend.dataclass")),
+                Action::Create("pkg/ub_scope.py", scope.to_owned()),
+            ],
+        )
+        .present(REPORTS),
+        Step::new(
+            "the helpers pass another string",
+            vec![save("pkg/ub_helper.py", &helper("pkg.frontend"))],
+        )
+        .absent(REPORTS),
+        Step::new(
+            "they pass a string the glob matches again",
+            vec![save("pkg/ub_helper.py", &helper("pkg.backend.msgspec"))],
+        )
+        .present(REPORTS),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/ub_scope.py"),
+                Action::Delete("pkg/ub_helper.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(REPORTS),
+    ]
+}
+
 /// A call target with a module part naming a name the package binds to a class of another
 /// module: a read of it through the package object is reported while the package imports the
 /// class, not once the package stops binding it, and again when it binds it back.
@@ -7372,6 +7419,7 @@ sessions!(editing, Session::start, {
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
     callee_globs: steps_callee_globs,
+    unbound_helpers: steps_unbound_helpers,
     module_members: steps_module_members,
     environment: steps_environment,
     outside_targets: steps_outside_targets,

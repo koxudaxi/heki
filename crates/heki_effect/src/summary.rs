@@ -303,7 +303,7 @@ fn extract_module(
                 .extend(external);
         }
         if !unbound.is_empty() {
-            (file.opt_in_tables_mut().unbound_calls)
+            file.unbound_calls
                 .entry(key.clone())
                 .or_default()
                 .extend(unbound);
@@ -820,7 +820,7 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_calls`].
     blind: Vec<BlindCall>,
-    /// [`FileSummary::unbound_calls_of`].
+    /// [`FileSummary::unbound_calls`].
     unbound: Vec<UnboundCall>,
     /// The calls importing a module by name ([`FileSummary::imports`]).
     imports: Vec<ImportSite>,
@@ -1031,7 +1031,7 @@ struct Extractor<'a> {
     /// The calls heki is blind to (`OptInTables::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
-    /// The calls heki binds to no project code ([`FileSummary::unbound_calls_of`]), with
+    /// The calls heki binds to no project code ([`FileSummary::unbound_calls`]), with
     /// [`Contracts::any_callee_arguments`].
     unbound: Vec<UnboundCall>,
     /// The calls importing a module by name, with [`OptInFacts::imports`].
@@ -6749,7 +6749,11 @@ impl<'a> Extractor<'a> {
             for site in &mut self.sites[sites_before..] {
                 site.module_member.clone_from(&member);
             }
-        } else if !matches!(callee, Callee::Project(..)) {
+        }
+        // A library call keeps its unbound record beside its Layer 2 site, which binds no
+        // parameter; a construction of a project class binds them on its own site.
+        let constructs = (self.sites[sites_before..].iter()).any(|s| s.constructs.is_some());
+        if !matches!(callee, Callee::Project(..)) && !constructs {
             self.unbound_call(call);
         }
         if let Some((site, params)) = made
@@ -6767,7 +6771,7 @@ impl<'a> Extractor<'a> {
         self.callees.insert((bb, index), callee);
     }
 
-    /// [`FileSummary::unbound_calls_of`]: `call`, which heki binds to no project function or class,
+    /// [`FileSummary::unbound_calls`]: `call`, which heki binds to no project function or class,
     /// when it passes by keyword a constant for a marked parameter and a call target names
     /// every callee.
     fn unbound_call(&mut self, call: &Call<'_>) {

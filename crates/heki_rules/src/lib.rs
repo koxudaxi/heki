@@ -1586,7 +1586,7 @@ impl<'a> CheckContext<'a> {
     }
 
     /// The calls `func` makes that heki binds to no project code, in its own body and in the
-    /// class bodies it runs ([`heki_effect::OptInTables::unbound_calls`]), with the file
+    /// class bodies it runs ([`heki_effect::FileSummary::unbound_calls`]), with the file
     /// defining it.
     pub(crate) fn unbound_calls<'f>(
         &self,
@@ -1594,8 +1594,8 @@ impl<'a> CheckContext<'a> {
     ) -> impl Iterator<Item = (&'a Path, &'a heki_effect::UnboundCall)> + use<'a, 'f> {
         let index = self.index;
         index.file_of(func).into_iter().flat_map(move |path| {
-            let own = index.files[path].unbound_calls_of(func);
-            own.iter().map(move |u| (path, u))
+            let own = index.files[path].unbound_calls.get(func);
+            own.into_iter().flatten().map(move |u| (path, u))
         })
     }
 

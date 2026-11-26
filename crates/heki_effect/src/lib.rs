@@ -2739,6 +2739,12 @@ pub struct FileSummary {
     /// names such an access, [`Contracts::external_call`]).
     #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
     pub external_accesses: FxHashMap<FuncKey, Vec<ExternalAccess>>,
+    /// The calls each function of the file makes that heki binds to no project function or
+    /// class, in its own body and in the class bodies it runs, passing constants for the
+    /// parameters of a call target naming every callee (local, IR-free; empty unless such a
+    /// target is configured, [`Contracts::any_callee_arguments`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub unbound_calls: FxHashMap<FuncKey, Vec<UnboundCall>>,
     /// The facts of the file's functions that only opt-in readers ask for (IR-free; `None`
     /// while the file has none of them, so that a run without them keeps one word per file).
     /// Read through [`Self::blind_calls`], [`Self::unawaited_handoffs`], and
@@ -2780,11 +2786,6 @@ pub struct OptInTables {
     /// one needs besides its summary ([`OptInFacts::suggestions`]; [`AnnotationFacts`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotation_facts: BTreeMap<String, AnnotationFacts>,
-    /// The calls heki binds to no project function or class, in the function's own body and in
-    /// the class bodies it runs, that pass constants for the parameters of a call target naming
-    /// every callee ([`Contracts::any_callee_arguments`]).
-    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
-    pub unbound_calls: FxHashMap<FuncKey, Vec<UnboundCall>>,
 }
 
 /// A call heki binds to no project function or class: of a function or class outside the
@@ -2853,14 +2854,6 @@ impl FileSummary {
     /// The opt-in tables of the file, made when it first has one of their facts.
     pub(crate) fn opt_in_tables_mut(&mut self) -> &mut OptInTables {
         self.opt_in_tables.get_or_insert_with(Box::default)
-    }
-
-    /// [`OptInTables::unbound_calls`] of `func`: none when the table was not built.
-    pub fn unbound_calls_of(&self, func: &FuncKey) -> &[UnboundCall] {
-        self.opt_in_tables
-            .as_ref()
-            .and_then(|t| t.unbound_calls.get(func))
-            .map_or(&[], Vec::as_slice)
     }
 
     /// [`OptInTables::kept_removals`] (none while the facts are not computed).
