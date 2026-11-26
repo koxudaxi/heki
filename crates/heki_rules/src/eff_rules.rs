@@ -930,7 +930,10 @@ mod never_iterated;
 mod recursion_handlers;
 mod set_order_output;
 mod unawaited_callables;
+mod unlocked_writes;
 mod unretained_task;
+
+pub use unlocked_writes::GuardedView;
 
 /// `EFF106` (opt-in): `await` / blocking network I/O while a sync lock or DB transaction is
 /// held.
@@ -974,6 +977,17 @@ pub(crate) fn eff115(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 /// `EFF116` (opt-in): a call of a generator function whose generator nothing iterates.
 pub(crate) fn eff116(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     never_iterated::run(cx, unit, out);
+}
+
+/// `EFF117` (heuristic): shared state a writer changes holding a thread lock, changed here
+/// holding none, in code a thread can run (`view`: [`GuardedView::of`] the project).
+pub(crate) fn eff117(
+    cx: &CheckContext<'_>,
+    view: &GuardedView,
+    unit: &ModuleUnit<'_>,
+    out: &mut Vec<Diagnostic>,
+) {
+    unlocked_writes::run(cx, view, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one

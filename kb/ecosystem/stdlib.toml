@@ -1169,6 +1169,12 @@ sync_lock_or_tx = true
 exit_suppresses = false
 opaque_to_layer3 = true
 
+# Each thread sees its own attributes of a `threading.local` (EFF117: no shared state).
+[[entries]]
+symbol = "threading.local"
+return_type = "threading.local"
+opaque_to_layer3 = true
+
 # --- One operation at a time (EFF110, opt-in) ---
 # A stream reader reads in one task at a time: a second read while another waits raises
 # `RuntimeError` (`readuntil() called while another coroutine is already waiting for incoming
@@ -1517,6 +1523,10 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.Timer"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.register_at_fork"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2970,6 +2980,7 @@ versions = "CPython 3.11, 3.15"
 symbol = "concurrent.futures.ThreadPoolExecutor.submit"
 arg = 0
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ProcessPoolExecutor.submit"
@@ -2980,11 +2991,13 @@ hands_back = true
 symbol = "threading.Thread"
 arg = 1
 param = "target"
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "threading.Timer"
 arg = 1
 param = "function"
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "multiprocessing.Process"
@@ -2995,24 +3008,55 @@ param = "target"
 symbol = "concurrent.futures.Executor.submit"
 arg = 0
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.Executor.map"
 arg = 0
 param = "fn"
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ThreadPoolExecutor.map"
 arg = 0
 param = "fn"
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ProcessPoolExecutor.map"
 arg = 0
 param = "fn"
 hands_back = true
+
+# The offloading APIs above run the callable on a worker thread; their rows say so (EFF117).
+# `run_in_executor` runs it in a process when the executor (its first argument) is a process pool.
+[[calls_unawaited]]
+symbol = "asyncio.to_thread"
+arg = 0
+hands_back = true
+runs_on = "thread"
+
+[[calls_unawaited]]
+symbol = "asyncio.AbstractEventLoop.run_in_executor"
+arg = 1
+hands_back = true
+runs_on = "thread"
+executor_arg = 0
+
+[[calls_unawaited]]
+symbol = "asyncio.BaseEventLoop.run_in_executor"
+arg = 1
+hands_back = true
+runs_on = "thread"
+executor_arg = 0
+
+# A handler `os.register_at_fork` runs in the child after a fork, before any other thread there.
+[[calls_unawaited]]
+symbol = "os.register_at_fork"
+param = "after_in_child"
+runs_on = "fork-child"
 
 [[calls_unawaited]]
 symbol = "asyncio.AbstractEventLoop.call_soon"
