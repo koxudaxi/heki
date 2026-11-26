@@ -250,6 +250,27 @@ fn an_argument_list_no_named_callable_takes_is_warned_about() {
 }
 
 #[test]
+fn a_module_qualified_argument_list_is_checked_against_the_project_declarations() {
+    let p = project(
+        "module_qualified_parameter",
+        r#"'pkg.lib:make(backend="x")', 'pkg.lib:make(module="x")', 'pkg.parser:dumps(indent=1)'"#,
+        "ignore",
+    );
+    // `pkg.parser` binds the library function `dumps`, whose signature heki does not have.
+    p.write(
+        "pkg/parser.py",
+        &format!("from json import dumps\n\n{PARSER}"),
+    );
+    let (_, warnings) = run(&p);
+    assert_eq!(
+        warnings,
+        vec![
+            "warning: `targets` entry `pkg.lib:make(backend=\"x\")` of call-owners `backend-module` names no function, method, or class taking `backend` in the analyzed files"
+        ]
+    );
+}
+
+#[test]
 fn a_bad_string_glob_is_a_configuration_error() {
     let p = project("bad_string_glob", r#"'*(module="pkg.[backend")'"#, "ignore");
     let (code, _, stderr) = p.check(&[]);

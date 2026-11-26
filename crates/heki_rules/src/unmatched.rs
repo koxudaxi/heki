@@ -886,7 +886,7 @@ fn takes_parameters(
     parameters: &[String],
     context: &'static str,
 ) -> Result<bool, RuleConfigError> {
-    if has_glob_syntax(last_name(name)) || name.contains(':') {
+    if has_glob_syntax(last_name(name)) {
         return Ok(true);
     }
     let m = FunctionMatcher::new(cx, &names.classes, name, context)?;
@@ -909,10 +909,17 @@ fn takes_parameters(
     };
     let named_class =
         |c: &&ContractClass| m.names_def(&c.fqn, c.qualname.as_deref().unwrap_or(&c.fqn));
-    Ok(
-        (names.candidates(name).iter()).any(|k| m.matches(k) && function_takes(k))
-            || (names.candidate_classes(name).filter(named_class)).any(|c| class_takes(&c.fqn)),
-    )
+    let functions: Vec<&FuncKey> = (names.candidates(name).iter())
+        .copied()
+        .filter(|k| m.matches(k))
+        .collect();
+    let classes: Vec<&ContractClass> = names.candidate_classes(name).filter(named_class).collect();
+    // A module-qualified target no project function or class defines names an imported or
+    // aliased object (`binds_imported_name`), whose signature heki does not have.
+    if name.contains(':') && functions.is_empty() && classes.is_empty() {
+        return Ok(true);
+    }
+    Ok(functions.iter().any(|k| function_takes(k)) || classes.iter().any(|c| class_takes(&c.fqn)))
 }
 
 /// Whether the module part of `m` names a project module that binds a name `m` matches to an
