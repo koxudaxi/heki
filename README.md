@@ -7,9 +7,16 @@
 🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust. It tracks side
 effects and mutations across function calls.
 
+It sits next to the tools you already run: Ruff checks syntax and style, ty, mypy, and Pyright
+check types, and heki checks what code does, which effects a call reaches and which state it
+changes, across functions and files. A rule in `AGENTS.md` is advice a coding agent can miss;
+declared as a contract, it is a wall that fails the run
+([the whole setup, end to end](https://heki.koxudaxi.dev/coding-agents/#the-whole-setup-end-to-end)).
+
 By default, it catches blocking calls in `async` code, database queries in loops, quadratic
 loops, and in-place changes to read-only parameters and to `lru_cache` results. You can also add
-rules in `pyproject.toml` to restrict which functions may mutate state or reach I/O.
+contracts in `pyproject.toml` or `heki.toml` to restrict which functions may mutate state or reach
+I/O.
 
 ![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def, and EFF103 a database query one helper below a loop, each with its call chain](https://raw.githubusercontent.com/koxudaxi/heki/main/docs/assets/example-check.svg)
 
@@ -170,12 +177,14 @@ use it next to them.
    blocks to copy.
 
 > [!WARNING]
-> 🧪 **Pre-release.** The exact rules are certified, but heki is still under active development:
-> rules, configuration keys, diagnostics, and output formats can change between releases without
-> a deprecation period, and each change is listed in the release notes. So pin the version you
-> adopt (`heki==0.7.0`, and the hook's `rev`): an upgrade is then a change you review like any
-> other. A Ratchet baseline of today's findings, and `--touched` in the hook, keep old findings
-> from blocking work. Try it on your code and report what it gets wrong.
+> 🧪 **Pre-release.** The default exact rules, with a Ratchet baseline for today's findings, are
+> ready for pull request checks: they are certified, and the baseline keeps old findings from
+> blocking work. `heki recommend`, `heki inspect`, `heki skill`, and `heki check
+> --generate-prompt` are experimental, and so are the rules marked so. heki is under active
+> development: rules, configuration keys, diagnostics, and output formats can change between
+> releases without a deprecation period, and each change is listed in the release notes. So pin
+> the version you adopt (`heki==0.7.0`, and the hook's `rev`): an upgrade is then a change you
+> review like any other. Try it on your code and report what it gets wrong.
 
 ### Installation
 
@@ -280,6 +289,9 @@ message = "change Order.items through app.store"
 /heki-baseline.toml  @your-org/maintainers
 ```
 
+- [The whole setup, end to end](https://heki.koxudaxi.dev/coding-agents/#the-whole-setup-end-to-end)
+  has the GitHub Actions workflow that checks every pull request against these walls and
+  against its base branch, the hook, and the skill, to copy.
 - The `message` becomes the help of every report of the contract, so an agent reads it as the
   fix: `= help: change Order.items through app.store; allowed writers of ...`.
 - With an owner on `heki.toml` and on the baseline, moving a wall is a reviewed change: an agent

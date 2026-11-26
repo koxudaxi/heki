@@ -4,6 +4,8 @@ heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it
 every diagnostic says what was proven, where the evidence is, and what blocks a fix. `heki
 inspect` says what one function does, so an agent does not read its callees to find out. The
 [Agent Skill](#agent-skill-experimental) teaches an agent the routine of this page after an edit.
+To make a project's architecture rules binding for agents, with CI, a Stop hook, and the skill,
+follow [the whole setup, end to end](#the-whole-setup-end-to-end).
 
 ## Analyze the project, not one file
 
@@ -235,6 +237,107 @@ Register it in `.claude/settings.json`:
 
 Run on a project with findings that are already known, it would block every turn: use
 `heki check --baseline heki-baseline.toml` in the script so that only new findings count.
+
+### The whole setup, end to end
+
+One pull request adds the walls, and every later pull request, from a person or an agent, runs
+against them. Replace `app` with your package.
+
+1. Put the walls in a `heki.toml` of their own, with `fail-on = "warning"` and the baseline path:
+
+    ```toml
+    # heki.toml
+    baseline = "heki-baseline.toml"
+
+    [lint]
+    fail-on = "warning"   # contract reports are heuristic: let them fail the run
+
+    [[write-owners]]
+    name = "order-store"
+    targets = ["app.models.Order.items"]
+    allowed-writers = ["app.store.*"]
+    message = "change Order.items through app.store"
+    ```
+
+2. Record today's findings, the old crossings of the walls among them, so that only new ones
+   fail:
+
+    ```console
+    $ uvx heki check --update-baseline
+    ```
+
+3. Give the files that decide the checks an owner. Branch protection must require a review from
+   code owners for this to bind:
+
+    ```text
+    # .github/CODEOWNERS
+    /heki.toml           @your-org/maintainers
+    /heki-baseline.toml  @your-org/maintainers
+    /.github/workflows/  @your-org/maintainers
+    /.claude/            @your-org/maintainers
+    /.agents/            @your-org/maintainers
+    ```
+
+4. Run the checks on every pull request. The first step runs the walls with the baseline. The
+   second compares the pull request with its protected base branch: no inline suppression that
+   hides a report may be new ([Auditing inline suppressions](adoption.md#auditing-inline-suppressions)),
+   and no public function may have gained an effect
+   ([`MUT103` against the base](adoption.md#comparing-with-the-protected-base)):
+
+    ```yaml
+    # .github/workflows/heki.yml
+    name: heki
+    on: pull_request
+    permissions:
+      contents: read
+    jobs:
+      heki:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v7
+            with:
+              fetch-depth: 0   # the base branch is compared below
+          - uses: astral-sh/setup-uv@v10
+          - name: Walls
+            run: uvx heki check
+          - name: Compare with the base branch
+            shell: bash
+            env:
+              BASE: ${{ github.base_ref }}
+            run: |
+              git worktree add ../base "origin/$BASE"
+              keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+              uvx heki check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
+              (cd ../base && uvx heki check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
+              new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
+              test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+              (cd ../base && uvx heki snapshot > "$RUNNER_TEMP/base-summary.json")
+              uvx heki check --select MUT103 --fail-on warning --snapshot "$RUNNER_TEMP/base-summary.json"
+    ```
+
+    The base branch runs its own `heki.toml` and baseline, so the pull request cannot change what
+    it is compared with. `--report-suppressed` and `--snapshot` came after heki 0.7.0, so a pinned
+    `uvx heki==<version>` here needs a later release. The base checkout sits next to the project
+    (`../base`), not inside it, so that heki does not analyze it too.
+
+5. For Claude Code, add the [Stop hook](#a-stop-hook-for-claude-code) and register it in
+   `.claude/settings.json`: the agent then sees a failing report before it ends its turn, not
+   after CI. Its `heki check` reads the baseline `heki.toml` names, and it needs `heki` on the
+   path (`uv tool install heki`).
+
+6. Install the [skill](#install-the-skill) (experimental) and commit it, so that every clone has it, and put the
+   three lines of [Architecture rules with agents](#architecture-rules-with-agents) in `AGENTS.md`
+   or `CLAUDE.md`:
+
+    ```console
+    $ heki skill install --agent claude-code
+    $ heki skill install --agent codex
+    ```
+
+What each layer catches: the hook gives the agent the report at once, the first CI step fails a
+pull request that crosses a wall or adds a finding, and the comparison step fails one that hides
+a report instead of fixing it or gives a public function a new effect. A change to the walls, the
+baseline, the workflow, or the hook is a change to a protected file, so a maintainer reads it.
 
 ## What a function does: `heki inspect` (experimental)
 
