@@ -474,6 +474,11 @@ pub fn owned_chain(chain: &[Arc<CallHop>]) -> Vec<CallHop> {
     chain.iter().map(|hop| CallHop::clone(hop)).collect()
 }
 
+/// A parameter mask that names no parameter: left out of a serialized fact.
+fn no_params(mask: &u64) -> bool {
+    *mask == 0
+}
+
 /// Zero the position of every hop of a kept chain (a hop shared with other chains is copied).
 pub(crate) fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
     for hop in chain {
@@ -1155,6 +1160,17 @@ pub struct EffectSummary {
     /// `"a"` = write to / mutation of the argument's attribute `a`, [`ELEMENTS_PATH`] = a change
     /// of an object the argument holds as an item or an element, or of one below it.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// Parameters (bit `i`) whose entries the function changes as part of the container, itself
+    /// or through its calls: in place (`p["k"].add(v)`, `for row in p: row.clear()`), or by an
+    /// attribute write that heki ties to no project class (`p[0].name = v` with `p: list`), also
+    /// below an entry through items and such attributes. An attribute write on an entry of a
+    /// project class (`for f in p: f.name = v` with `p: list[Field]`, or a call handing the entry
+    /// to a function typing it) is that class's write instead. A helper handed a typed field's
+    /// container writes the field when it so changes an entry ([`WriteKind::IndirectItemMut`]).
+    /// A subset of the [`ELEMENTS_PATH`] changes, only with an ownership contract
+    /// ([`Contracts::ownership`]).
+    #[serde(default, skip_serializing_if = "no_params")]
+    pub entry_change_params: u64,
     /// `param index -> paths` of `mutated_param_paths` that every change, in the function and
     /// through its calls, only fills a memo or initializes lazily
     /// ([`cache_flow::SelfAttrWrite::fills_memo`], `lazy_init`): an in-place change of an
@@ -2269,6 +2285,12 @@ pub struct ArgOrigin {
     /// attribute it is below: `p.a[0]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_elements: Vec<(u8, String)>,
+    /// The caller parameters (bit `i`) whose entries the argument may be as part of the
+    /// container ([`EffectSummary::entry_change_params`]): an item or element of the parameter
+    /// or of a shallow copy of it, or below one through items and attributes of objects heki
+    /// ties to no project class. Only with an ownership contract.
+    #[serde(default, skip_serializing_if = "no_params")]
+    pub param_entries: u64,
     /// A shallow copy of caller parameter `i` itself (`None`) or of its attribute `a`
     /// (`dict(p)`, `copy.copy(p.a)`): it shares the objects below its top level with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

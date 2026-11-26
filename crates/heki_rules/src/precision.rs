@@ -10,8 +10,10 @@ use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
 
 /// The certification of an exact rule (docs/precision.md, "How a rule becomes exact").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Certification {
+    /// The code of the certified rule.
     pub rule: &'static str,
     /// The release that certified it.
     pub release: &'static str,
@@ -27,21 +29,30 @@ pub struct Certification {
 
 /// Reports checked by hand, the false claims found among them, and the harm of the right ones
 /// where the run classed it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Checked {
+    /// The reports checked.
     pub reports: u32,
+    /// The reports found wrong about the code.
     pub false_claims: u32,
+    /// The right reports by class; left out when the run did not class them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harm: Option<Harm>,
 }
 
 /// The right reports of a run by class (docs/precision.md): confirmed, plausible, and benign, and
 /// those the run left without a class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Harm {
+    /// Reports whose problem is real and observable from the code.
     pub confirmed: u32,
+    /// Reports that are right, of code that does harm at realistic sizes.
     pub plausible: u32,
+    /// Reports that are right, of code that is deliberate or harmless at realistic sizes.
     pub benign: u32,
+    /// Right reports the run left without a class.
     pub unclassified: u32,
 }
 
@@ -130,6 +141,7 @@ impl Measurement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PublishedMeasurement {
+    /// The code of the measured rule.
     pub rule: String,
     /// The round of the measurement protocol.
     pub round: u32,

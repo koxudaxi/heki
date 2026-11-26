@@ -23,6 +23,7 @@ nav = [
     { "Configuration" = "configuration.md" },
     { "Adopting heki in a Code Base" = "adoption.md" },
     { "CLI Reference" = "cli-reference.md" },
+    { "Output Formats" = "output-formats.md" },
   ]},
   { "Rules" = "rules/index.md" },
   { "Rule Precision" = "precision.md" },

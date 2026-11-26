@@ -205,7 +205,23 @@ impl Inferred {
         } else {
             self.value_of.clone()
         };
-        NarrowedVals { by_value, value_of }
+        let mut by_block: FxHashMap<BlockId, Vec<(VarId, Val)>> = FxHashMap::default();
+        for (&(bb, value), val) in &by_value {
+            by_block.entry(bb).or_default().push((value, val.clone()));
+        }
+        let mut scopes: FxHashMap<Vec<(VarId, Val)>, usize> = FxHashMap::default();
+        let mut scope_of = FxHashMap::default();
+        for (bb, mut vals) in by_block {
+            vals.sort_unstable_by_key(|(value, _)| *value);
+            let next = scopes.len() + 1;
+            scope_of.insert(bb, *scopes.entry(vals).or_insert(next));
+        }
+        NarrowedVals {
+            by_value,
+            value_of,
+            scope_of,
+            scopes: scopes.len() + 1,
+        }
     }
 
     /// The classes the second argument of each `isinstance(x, C)` call of `f` names, by that
@@ -252,6 +268,10 @@ pub(crate) struct NarrowedVals {
     by_value: FxHashMap<(BlockId, VarId), Val>,
     /// [`Narrowing::value_of`].
     value_of: FxHashMap<VarId, VarId>,
+    /// [`Self::scope`] of each block the checks narrow a value in.
+    scope_of: FxHashMap<BlockId, usize>,
+    /// [`Self::scopes`].
+    scopes: usize,
 }
 
 impl NarrowedVals {
@@ -260,6 +280,20 @@ impl NarrowedVals {
     pub(crate) fn get(&self, bb: BlockId, var: VarId) -> Option<&Val> {
         let value = self.value_of.get(&var).copied().unwrap_or(var);
         self.by_value.get(&(bb, value))
+    }
+
+    /// The narrowing scope of block `bb`, below [`Self::scopes`]: blocks share one when the
+    /// checks guarding them give every value the same type, so that [`Self::get`] answers alike
+    /// in all of them, and the blocks no check narrows a value in share scope 0. A walk reading
+    /// the values of the block it is asked in keeps its answers per scope and value, not per
+    /// block.
+    pub(crate) fn scope(&self, bb: BlockId) -> usize {
+        self.scope_of.get(&bb).copied().unwrap_or(0)
+    }
+
+    /// How many narrowing scopes the function's blocks fall into ([`Self::scope`]).
+    pub(crate) fn scopes(&self) -> usize {
+        self.scopes
     }
 }
 
@@ -1108,6 +1142,10 @@ fn awaited(t: &Ty) -> Step {
     }
 }
 
+/// The most calls through `__call__` one call of a value follows, past which its result is
+/// unknown.
+const MAX_CALL_DEPTH: u8 = 16;
+
 /// The join of every type, `None` when one is unknown or none covers them all.
 fn join_all(types: impl IntoIterator<Item = Option<Ty>>) -> Option<Ty> {
     let mut out: Option<Ty> = None;
@@ -1268,6 +1306,10 @@ struct Engine<'e, 'a> {
     /// and depth, while one block is entered: a condition reaches the same phi through many
     /// paths (a loop header's phi is an input of itself on each `continue`).
     implied_memo: RefCell<FxHashMap<(VarId, bool, BlockId, u8), Narrowed>>,
+    /// How many calls of a value through its `__call__` are in progress ([`Self::called`]): a
+    /// class whose `__call__` is declared as itself (or as a class declaring it back) calls
+    /// itself forever.
+    call_depth: Cell<u8>,
     /// The value of the body of each lambda the function makes and calls (by the variable
     /// holding it), as the function's cells hold in this pass: what calling the lambda gives.
     lambda_bodies: RefCell<FxHashMap<VarId, Elem>>,
@@ -1457,6 +1499,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             narrowing: None,
             cur: FxHashMap::default(),
             implied_memo: RefCell::default(),
+            call_depth: Cell::new(0),
             lambda_bodies: RefCell::default(),
             lambdas_called: RefCell::default(),
             own_stores: StoreCells::default(),
@@ -3176,17 +3219,18 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .map(|t| decl.call_type(t));
         }
         // An attribute of an instance that no class of its MRO defines a method of holds a value
-        // of its declared type: a `Callable[..., T]` gives the `T` it names.
+        // of its declared type, and the call calls that value as a call of a parameter declared
+        // alike does: a `Callable[..., T]` gives the `T` it names, a `type[C]` an instance of `C`
+        // (`TypeCtx::called_member` gives the call's targets).
         if matches!(recv, Ty::Inst(_) | Ty::Super(_))
             && cx.project.is_project_class(class)
             && let Some(result) = self
                 .member(recv, method)
                 .ok()
                 .flatten()
-                .as_ref()
-                .and_then(Ty::returned)
+                .and_then(|value| self.called(&value, call))
         {
-            return Some(result.clone());
+            return Some(result);
         }
         let callee = cx.project.method_targets(class, method, skip_self, cx.kb);
         let entry = match &callee {
@@ -3228,7 +3272,16 @@ impl<'e, 'a> Engine<'e, 'a> {
                 fqns.iter()
                     .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
             ),
-            other => self.member_call(other, "__call__", call),
+            other => {
+                let depth = self.call_depth.get();
+                if depth >= MAX_CALL_DEPTH {
+                    return None;
+                }
+                self.call_depth.set(depth + 1);
+                let result = self.member_call(other, "__call__", call);
+                self.call_depth.set(depth);
+                result
+            }
         }
     }
 

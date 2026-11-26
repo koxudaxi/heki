@@ -28,6 +28,7 @@
 - [Configuration](https://heki.koxudaxi.dev/configuration/): heki reads [tool.heki] from pyproject.toml, or a heki.toml / .heki.toml file with the same keys without the tool.heki prefix
 - [Adopting heki in a Code Base](https://heki.koxudaxi.dev/adoption/): An existing code base usually has findings you cannot fix at once
 - [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostic that fails the run (warnings and heuristic reports are reported without failing it), 1 an exact error diagnostic, or any diagnostic with --fail-on warning (lint.fail-on), among the Ratchet regressions when a baseline is used (or a refused --update-baseline, or pending --diff changes), 2 configuration / I/O / syntax errors
+- [Output Formats](https://heki.koxudaxi.dev/output-formats/): Every JSON format heki writes has a JSON Schema in the repository, so that CI, governance tools, and coding agents can check what they read
 
 ## Integrations
 

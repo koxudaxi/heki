@@ -1,0 +1,461 @@
+{
+  "$defs": {
+    "Candidate": {
+      "additionalProperties": false,
+      "description": "A function to choose from: its name, where it is defined, and its kind.",
+      "properties": {
+        "fqn": {
+          "description": "The fully qualified name.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The kind of function: `method` (the name has a class) or `function`.",
+          "enum": [
+            "method",
+            "function"
+          ],
+          "type": "string"
+        },
+        "line": {
+          "description": "The line of its definition; none when heki could not find it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The file, relative to the project root; none when no file of the project defines it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fqn",
+        "kind",
+        "line",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Docs": {
+      "description": "The page of the documentation, or the section of one, that explains it.",
+      "enum": [
+        "https://heki.koxudaxi.dev/",
+        "https://heki.koxudaxi.dev/getting-started/",
+        "https://heki.koxudaxi.dev/configuration/",
+        "https://heki.koxudaxi.dev/coding-agents/",
+        "https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental",
+        "https://heki.koxudaxi.dev/coding-agents/#install-the-skill",
+        "https://heki.koxudaxi.dev/llms.txt",
+        "https://heki.koxudaxi.dev/configuration/#where-heki-finds-the-configuration",
+        "https://heki.koxudaxi.dev/configuration/#which-tables-hold-the-settings",
+        "https://heki.koxudaxi.dev/configuration/#module-names-follow-the-source-roots",
+        "https://heki.koxudaxi.dev/configuration/#top-level-settings",
+        "https://heki.koxudaxi.dev/configuration/#the-default-target-version",
+        "https://heki.koxudaxi.dev/configuration/#requiring-a-heki-version",
+        "https://heki.koxudaxi.dev/configuration/#which-files-are-checked",
+        "https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint",
+        "https://heki.koxudaxi.dev/configuration/#contracts",
+        "https://heki.koxudaxi.dev/configuration/#write-owners",
+        "https://heki.koxudaxi.dev/configuration/#read-owners",
+        "https://heki.koxudaxi.dev/configuration/#call-owners",
+        "https://heki.koxudaxi.dev/configuration/#effect-boundaries",
+        "https://heki.koxudaxi.dev/configuration/#readonly-returns",
+        "https://heki.koxudaxi.dev/configuration/#invalidation",
+        "https://heki.koxudaxi.dev/configuration/#import-boundaries",
+        "https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports",
+        "https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem",
+        "https://heki.koxudaxi.dev/rules/",
+        "https://heki.koxudaxi.dev/adoption/#ratchet-baselines",
+        "https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103",
+        "https://heki.koxudaxi.dev/fixes/#how-fix-applies-fixes",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-check",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-server",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-rule",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-snapshot",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-assumptions",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-inspect",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-recommend",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-skill-install",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-version",
+        "https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental"
+      ],
+      "type": "string"
+    },
+    "ErrorBody": {
+      "additionalProperties": false,
+      "description": "What a symbol that names no single function got instead.",
+      "properties": {
+        "candidates": {
+          "description": "With `kind` `ambiguous`: the functions the symbol may name.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "docs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Docs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The page of the documentation that explains it."
+        },
+        "errors": {
+          "description": "With `kind` `unknown`: the files heki could not analyze.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "functions": {
+          "description": "With `kind` `module`: the top-level functions of the module.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "help": {
+          "description": "What to do about it, one step per entry.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "`invalid` (the symbol does not parse), `outside_project` (it names a file heki did not\ncheck), `unknown`, `ambiguous`, `class`, or `module`.",
+          "enum": [
+            "invalid",
+            "outside_project",
+            "unknown",
+            "ambiguous",
+            "class",
+            "module"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "description": "What is wrong with the symbol.",
+          "type": "string"
+        },
+        "methods": {
+          "description": "With `kind` `class`: the methods of the class.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "suggestions": {
+          "description": "With `kind` `unknown`: the functions with similar names.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "truncated": {
+          "description": "Whether the list the failure carries is cut short.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "docs",
+        "help",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ImportsReport": {
+      "additionalProperties": false,
+      "description": "The object of `heki inspect --imports --output-format json`.",
+      "properties": {
+        "modules": {
+          "description": "The project modules the query names, one report each.",
+          "items": {
+            "$ref": "#/$defs/ModuleReport"
+          },
+          "type": "array"
+        },
+        "query": {
+          "description": "The module name or glob the report was asked about.",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "description": "The version of this object: 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "query",
+        "modules"
+      ],
+      "type": "object"
+    },
+    "InspectError": {
+      "additionalProperties": false,
+      "description": "The object `heki inspect --output-format json` prints for a symbol that names no single\nfunction (an array of reports and these objects for `-`).",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorBody",
+          "description": "Why the symbol names no function."
+        },
+        "query": {
+          "description": "The symbol, as it was given.",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "description": "The version of this object: 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "error",
+        "query",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Loads": {
+      "additionalProperties": false,
+      "description": "What loading a module loads while it loads.",
+      "properties": {
+        "external": {
+          "description": "The modules outside the project.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "project": {
+          "description": "The project modules.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "project",
+        "external"
+      ],
+      "type": "object"
+    },
+    "ModuleReport": {
+      "additionalProperties": false,
+      "description": "One project module.",
+      "properties": {
+        "imports": {
+          "description": "`None`: heki has no import facts of the module (a typing stub, whose imports never\nrun, or a file it could not read).",
+          "items": {
+            "$ref": "#/$defs/SiteReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`package`, `package_test`, `development`, or `open` ([`CodeKind`]).",
+          "enum": [
+            "package",
+            "package_test",
+            "development",
+            "open"
+          ],
+          "type": "string"
+        },
+        "loads": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Loads"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What loading the module loads while it loads, at least ([`ImportGraph::loads`]);\n`None` when the walks ran out of budget."
+        },
+        "module": {
+          "description": "The dotted name of the module.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, relative to the project root, with forward slashes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "module",
+        "path",
+        "kind",
+        "imports",
+        "loads"
+      ],
+      "type": "object"
+    },
+    "SiteReport": {
+      "additionalProperties": false,
+      "description": "One import site.",
+      "properties": {
+        "column": {
+          "description": "The byte column of the import.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "form": {
+          "description": "`import`, `from`, `star`, `by_name`, or `maybe_by_name`.",
+          "enum": [
+            "import",
+            "from",
+            "star",
+            "by_name",
+            "maybe_by_name"
+          ],
+          "type": "string"
+        },
+        "function": {
+          "description": "The function the site is in (`<module>`: the module body and its class bodies).",
+          "type": "string"
+        },
+        "group": {
+          "description": "`project`, `stdlib`, or `third-party`, of `target`.",
+          "enum": [
+            "project",
+            "stdlib",
+            "third-party"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guarded": {
+          "description": "A handler takes a failure of the import: a missing module or any import error.",
+          "type": "boolean"
+        },
+        "line": {
+          "description": "The line of the import.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "may_load": {
+          "description": "Other modules the site may load instead or as well: the submodule of a `from` import\nheki cannot decide, each module a by-name import may name (`pkg.plugins.*` for the\nmodules under a package).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "missing": {
+          "description": "The module the site names that the project does not have below its package, or, empty,\na relative import climbing past its top-level package.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The name a `from` import takes from its module.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spelling": {
+          "description": "How the site names its modules: `absolute`, `relative` to its own module (`from . import\nb`, `importlib.import_module(\".b\", __package__)`), or `mixed` (a by-name import given\nboth kinds of names); `None` when heki cannot name them.",
+          "enum": [
+            "absolute",
+            "relative",
+            "mixed",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "The module the site certainly loads.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timing": {
+          "description": "`body`, `lazy`, `function`, `type-checking`; `None` when heki cannot tell.",
+          "enum": [
+            "body",
+            "lazy",
+            "function",
+            "type-checking",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unconditional": {
+          "description": "The import runs whenever its function does: no condition guards it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "line",
+        "column",
+        "form",
+        "function",
+        "spelling",
+        "timing",
+        "guarded",
+        "unconditional",
+        "target"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/inspect-imports-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ImportsReport"
+    },
+    {
+      "$ref": "#/$defs/InspectError"
+    }
+  ],
+  "description": "`heki inspect --imports` prints a report, or the error of a name that names no module.",
+  "title": "heki inspect --imports --output-format json"
+}

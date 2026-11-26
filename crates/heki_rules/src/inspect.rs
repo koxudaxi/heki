@@ -311,49 +311,81 @@ fn lines_of(unit: &ModuleUnit<'_>, f: &IrFunction) -> (u32, u32) {
 
 /// One hop of a call chain: the call at `path:line` of the hop before it (the function itself
 /// for the first) calls `calls`, one of `candidates` the call may run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Hop {
+    /// The file of the call, relative to the project root.
     pub path: String,
+    /// The line of the call.
     pub line: u32,
+    /// The function the call runs, or the first of its candidates.
     pub calls: String,
+    /// How many functions the call may run.
     pub candidates: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Location {
+    /// The file, relative to the project root.
     pub path: String,
+    /// The line.
     pub line: u32,
+    /// The byte column.
     pub column: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct InspectReport {
+    /// The version of this object: 1.
     pub version: u32,
+    /// The version of heki that wrote the report.
     pub heki: &'static str,
+    /// The project root, as `heki check` prints paths.
     pub root: String,
+    /// The symbol, as it was given.
     pub query: String,
+    /// How the symbol named the function: `name` (a dotted suffix), `glob`, `suffix`, or `line` (`path.py:LINE`); none for an exact fully qualified name.
+    #[schemars(extend("enum" = ["name", "glob", "suffix", "line", null]))]
     pub resolved_from: Option<&'static str>,
+    /// Whether every file of the project was analyzed: false when `errors` is not empty.
     pub complete: bool,
+    /// The files heki could not read or parse.
     pub errors: Vec<String>,
+    /// What the function is.
     pub function: FunctionInfo,
+    /// Whether the function is pure, and why heki cannot tell.
     pub purity: Purity,
+    /// The effects the function has, directly or through the functions it calls.
     pub effects: Vec<EffectInfo>,
+    /// What the function changes.
     pub changes: Changes,
+    /// What the function keeps.
     pub retains: Retains,
+    /// The container parameters the function only reads.
     pub only_reads: OnlyReads,
+    /// What the function returns.
     pub returns: Returns,
+    /// The functions that call it.
     pub callers: CallersInfo,
+    /// The reports of `heki check` in the function, and with `--callers` those above it.
     pub reports: Vec<Report>,
+    /// The roles the function has in the declared contracts.
     pub contracts: Vec<ContractRole>,
+    /// The registrations that may reach the function with a parameter bound to the registering object.
     pub registered: Vec<RegisteredContext>,
 }
 
 /// A registration that may reach the function with one of its parameters bound to the
 /// registering object, under the condition the name a lookup selects the function by meets
 /// (`heki_effect::dispatch`). Advisory: no other fact, report, or fix assumes it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct RegisteredContext {
+    /// The parameter bound to the registering object.
     pub param: String,
+    /// The position of that parameter.
     pub index: u8,
     /// The registering object's class, the parameter's type under the context.
     #[serde(rename = "type")]
@@ -371,62 +403,94 @@ pub struct RegisteredContext {
     pub changes: Vec<ParamChangeInfo>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Site {
+    /// The function the site is in.
     pub function: String,
+    /// The file, relative to the project root.
     pub path: String,
+    /// The line.
     pub line: u32,
+    /// The byte column.
     pub column: u32,
 }
 
 /// The name looked up equals the function's name.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Condition {
     /// The expression the name is computed from, in the values the row's call passes, or the
     /// constant.
     pub selector: String,
+    /// The name the function is selected by.
     pub equals: String,
     /// The name is not a constant: other names may select other functions, or none.
     pub others_open: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct FunctionInfo {
+    /// The fully qualified name.
     pub fqn: String,
+    /// The module that defines it.
     pub module: String,
+    /// The name within the module.
     pub qualname: String,
+    /// The file, relative to the project root.
     pub path: String,
+    /// The first line of the first definition.
     pub line: u32,
+    /// The last line of the first definition.
     pub end_line: u32,
     /// The first line of every definition (`if ...: def f` / `else: def f`).
     pub definitions: Vec<u32>,
+    /// `module_body`, `nested`, `cached_property`, `property`, `classmethod`, `staticmethod`, `method`, or `function`.
+    #[schemars(extend("enum" = ["module_body", "nested", "cached_property", "property", "classmethod", "staticmethod", "method", "function"]))]
     pub kind: &'static str,
+    /// Whether it is `async def`.
     #[serde(rename = "async")]
     pub is_async: bool,
+    /// Whether it is a generator.
     pub generator: bool,
+    /// Whether it is abstract.
     #[serde(rename = "abstract")]
     pub is_abstract: bool,
+    /// Whether only a stub file declares it.
     pub stub: bool,
+    /// The qualified name of its class; none for a function outside a class.
     pub class: Option<String>,
+    /// Its decorators, as written.
     pub decorators: Vec<String>,
+    /// Its parameters, in order.
     pub params: Vec<String>,
+    /// The call that runs it in a thread or process pool; none when no call does.
     pub offloaded_by: Option<String>,
+    /// Whether a caller drives the coroutine to its end without an event loop.
     pub driven_synchronously: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Purity {
+    /// `pure`, `impure`, or `unknown`.
+    #[schemars(extend("enum" = ["pure", "impure", "unknown"]))]
     pub verdict: &'static str,
+    /// Why the verdict is `unknown`: `unresolved_calls`, `untracked_writes`, or `no_body`; for `impure`, the effects found.
     pub because: Vec<&'static str>,
     /// The first entry of `unknown_reach`, whatever the verdict.
     pub unknown_at: Option<UnknownAt>,
+    /// The functions heki cannot follow.
     pub unknown_reach: UnknownReach,
+    /// The assumptions the verdict rests on.
     pub assumes: Vec<&'static str>,
 }
 
 /// The functions heki cannot follow (calls it cannot resolve, or a body only a stub declares)
 /// among the function and the callees whose facts run in it, nearest first.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct UnknownReach {
     /// At most [`MAX_UNKNOWN`].
     pub entries: Vec<UnknownAt>,
@@ -434,78 +498,126 @@ pub struct UnknownReach {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct UnknownAt {
+    /// The function heki cannot follow.
     pub fqn: String,
+    /// The calls from the function to it.
     pub chain: Vec<Hop>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct EffectInfo {
+    /// The effect, by its name in the catalogs (`blocking_net`).
     pub effect: &'static str,
+    /// Whether it blocks the event loop.
     pub blocking: bool,
+    /// Whether the function has it itself, not only through a callee.
     pub direct: bool,
+    /// When the body runs: `called`, `awaited`, `iterated`, or `result_iterated`.
+    #[schemars(extend("enum" = ["called", "awaited", "iterated", "result_iterated"]))]
     pub runs: &'static str,
+    /// The tests that decide whether the effect happens.
     pub guards: Vec<GuardInfo>,
+    /// The parameters the effect happens once per item of; none when it does not.
     pub once_per: Option<Vec<String>>,
+    /// The calls from the function to the effect.
     pub chain: Vec<Hop>,
+    /// The subclasses whose methods have the effect.
     pub via_subclasses: Vec<SubclassChain>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct GuardInfo {
+    /// The parameter the test is about.
     pub param: String,
+    /// The attribute of the parameter the test is about; none for the parameter itself.
     pub attr: Option<String>,
+    /// `truthy`, `is_none`, `isinstance`, `hasattr`, or `catalog`.
+    #[schemars(extend("enum" = ["truthy", "is_none", "isinstance", "hasattr", "catalog"]))]
     pub test: &'static str,
     /// `isinstance`: the classes tested.
     pub classes: Vec<String>,
     /// `hasattr`: the attribute tested.
     pub has: Option<String>,
+    /// Whether the effect happens when the test holds.
     pub holds: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct SubclassChain {
+    /// The subclass.
     pub class: String,
+    /// The calls from the function to the effect through it.
     pub chain: Vec<Hop>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Changes {
+    /// What the function changes of its parameters.
     pub params: Vec<ParamChangeInfo>,
+    /// The attributes of `self` it changes.
     pub self_attrs: Vec<SelfAttrChange>,
+    /// What it invalidates under an `invalidation` contract.
     pub invalidates: Vec<String>,
+    /// The attributes of classes it writes; none when heki does not follow typed writes.
     pub class_attrs: Option<Vec<ClassAttrWrite>>,
+    /// Why `class_attrs` is none: what turns the analysis on.
     pub class_attrs_needs: Option<&'static str>,
+    /// The module globals and closure variables it changes.
     pub globals: Vec<GlobalChange>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct ParamChangeInfo {
+    /// The parameter.
     pub param: String,
+    /// The position of the parameter.
     pub index: u8,
     /// `""`: the object itself; `a`: its attribute `a`.
     pub what: Vec<String>,
+    /// The keys or attributes changed, as `a` or `["k"]`.
     pub slots: Vec<String>,
+    /// Whether the function changes it itself, not only through a callee.
     pub direct: bool,
+    /// The calls from the function to the change.
     pub chain: Vec<Hop>,
+    /// Where the change is; none when it is in a callee.
     pub at: Option<Location>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct SelfAttrChange {
+    /// The attribute.
     pub attr: String,
+    /// The constant key changed within the attribute; none for the attribute itself.
     pub key: Option<String>,
+    /// Whether the function changes it itself, not only through a callee.
     pub direct: bool,
+    /// The calls from the function to the change.
     pub chain: Vec<Hop>,
+    /// Where the change is; none when it is in a callee.
     pub at: Option<Location>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct ClassAttrWrite {
+    /// The qualified name of the class.
     pub class: String,
+    /// The attribute.
     pub attr: String,
+    /// How it is written: `direct_attr`, `attr_delete`, `container_mut`, `alias_container_mut`, `set_attr`, `dict_direct`, `indirect_helper`, `item_mut`, or `indirect_item_mut`.
+    #[schemars(extend("enum" = ["direct_attr", "attr_delete", "container_mut", "alias_container_mut", "set_attr", "dict_direct", "indirect_helper", "item_mut", "indirect_item_mut"]))]
     pub kind: &'static str,
+    /// Whether the written object is new in the function.
     pub fresh: bool,
     /// The entries of the attribute's container the function's own and passed item writes
     /// change: `"init"` for a constant key, the parameter's name for a key its callers pass
@@ -518,28 +630,39 @@ pub struct ClassAttrWrite {
     pub entries_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct GlobalChange {
+    /// The global or closure variable.
     pub name: String,
     /// The function whose variable the closure cell is (`None`: a module global).
     pub cell_of: Option<String>,
+    /// Whether the function changes it itself, not only through a callee.
     pub direct: bool,
+    /// The calls from the function to the change.
     pub chain: Vec<Hop>,
+    /// Where the change is.
     pub at: Location,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Retains {
+    /// The parameters the function stores.
     pub stored: Vec<String>,
+    /// The parameters it keeps (stores, captures, yields, or returns); none without an ownership contract.
     pub kept: Option<Vec<String>>,
+    /// Why `kept` is none: what turns the analysis on.
     pub kept_needs: Option<&'static str>,
 }
 
 /// The parameters annotated with a mutable container (`list`, `dict`, `set`, their `typing`
 /// forms, `MutableSequence`, `MutableMapping`, `MutableSet`), and what the function does with
 /// them (`heki_effect::ContainerParams`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct OnlyReads {
+    /// The parameters annotated with a mutable container.
     pub containers: Vec<String>,
     /// Those the function only reads: it and every function it hands one to neither change it
     /// in place nor keep it (store, capture, yield, or return it), and every call it is handed
@@ -556,68 +679,108 @@ pub struct OnlyReads {
     pub reads: BTreeMap<String, Vec<&'static str>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Returns {
+    /// `generator`, `coroutine`, or `value`.
+    #[schemars(extend("enum" = ["generator", "coroutine", "value"]))]
     pub kind: &'static str,
+    /// Where the returned object comes from; none when heki does not know.
     pub origins: Option<OriginsInfo>,
+    /// Whether it is a new object: `own`, `copy`, or `no`; none without an ownership contract.
+    #[schemars(extend("enum" = ["own", "copy", "no", null]))]
     pub new_object: Option<&'static str>,
+    /// The producer whose read-only object it returns; none otherwise.
     pub shared_with: Option<SharedWith>,
+    /// The attributes of `self` it returns.
     pub self_attrs: Vec<String>,
+    /// The effects iterating the returned object has.
     pub iterated_effects: Vec<&'static str>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct OriginsInfo {
+    /// Whether it may be a new object.
     pub new: bool,
+    /// Whether it may be an object something else holds.
     pub held: bool,
+    /// The parameters it may be.
     pub params: Vec<String>,
+    /// The parameters whose items it may be.
     pub elements_of: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct SharedWith {
+    /// The function that produces the read-only object.
     pub producer: String,
+    /// The calls from the function to it.
     pub chain: Vec<Hop>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct CallersInfo {
+    /// How many callers there are.
     pub count: usize,
+    /// How many levels of callers are listed.
     pub depth: usize,
+    /// Whether `entries` lists fewer than there are.
     pub truncated: bool,
+    /// The callers, nearest first.
     pub entries: Vec<CallerEntry>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct CallerEntry {
+    /// The caller.
     pub fqn: String,
+    /// The level: 1 for a direct caller.
     pub depth: usize,
     /// The function it calls, for a caller above the direct ones.
     pub via: Option<String>,
+    /// The file of the call, relative to the project root.
     pub path: String,
+    /// The line of the call.
     pub line: u32,
+    /// What the caller does with the result: `call`, `property`, `iterate`, `return`, or `through`.
+    #[schemars(extend("enum" = ["call", "property", "iterate", "return", "through"]))]
     pub role: &'static str,
+    /// Whether the call is awaited.
     pub awaited: bool,
+    /// Whether the call is in a loop.
     pub in_loop: bool,
+    /// How many functions the call may run.
     pub candidates: usize,
 }
 
 /// A diagnostic of `heki check` with what the baseline makes of it and where it is.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Report {
     #[serde(flatten)]
     pub diagnostic: Diagnostic,
     /// `allowed` / `regression` with a baseline, `None` without.
+    #[schemars(extend("enum" = ["allowed", "regression", null]))]
     pub baseline: Option<&'static str>,
     /// `in` the function, or in a caller and `through` it.
+    #[schemars(extend("enum" = ["in", "through"]))]
     #[serde(rename = "where")]
     pub place: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct ContractRole {
+    /// The contract table: `write-owners`, `read-owners`, `call-owners`, `effect-boundaries`, `readonly-returns`, `invalidation`, `import-boundaries`, or `ecosystem`.
+    #[schemars(extend("enum" = ["write-owners", "read-owners", "call-owners", "effect-boundaries", "readonly-returns", "invalidation", "import-boundaries", "ecosystem"]))]
     pub kind: &'static str,
+    /// The name of the contract.
     pub name: String,
+    /// What the function is in the contract, for instance `allowed-writer` or `reported`.
     pub roles: Vec<&'static str>,
 }
 

@@ -12,6 +12,13 @@ pub fn errors(schema: &Value, value: &Value) -> Vec<String> {
     errors
 }
 
+/// Whether `value` meets `schema`, a part of the schema `root`.
+fn matches(root: &Value, schema: &Value, value: &Value) -> bool {
+    let mut errors = Vec::new();
+    check(root, schema, value, "", &mut errors);
+    errors.is_empty()
+}
+
 fn check(root: &Value, schema: &Value, value: &Value, at: &str, errors: &mut Vec<String>) {
     let here = if at.is_empty() { "/" } else { at };
     let rules = schema.as_object().unwrap();
@@ -136,4 +143,74 @@ fn check(root: &Value, schema: &Value, value: &Value, at: &str, errors: &mut Vec
             other => panic!("the schema uses `{other}`, which the test does not check"),
         }
     }
+}
+
+/// The property names `values` use in each object the schema describes by a name of its `$defs`
+/// (`Diagnostic`), found by following `value` through the schema: `$ref`, the option of
+/// `anyOf` / `oneOf` it matches, `properties`, `items`, and `additionalProperties`. A test
+/// compares them with the schema's own property names, so that a field no output shows is
+/// found, next to the `additionalProperties: false` that finds a field the schema lacks.
+pub fn seen_properties(
+    schema: &Value,
+    values: &[Value],
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut seen = std::collections::BTreeMap::new();
+    for value in values {
+        walk(schema, schema, value, &mut seen);
+    }
+    seen
+}
+
+fn walk(
+    root: &Value,
+    schema: &Value,
+    value: &Value,
+    seen: &mut std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference.strip_prefix("#/$defs/").unwrap();
+        if let Some(object) = value.as_object() {
+            seen.entry(name.to_owned())
+                .or_default()
+                .extend(object.keys().cloned());
+        }
+        walk(root, &root["$defs"][name], value, seen);
+        return;
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(options) = schema.get(keyword).and_then(Value::as_array)
+            && let Some(option) = options.iter().find(|o| matches(root, o, value))
+        {
+            walk(root, option, value, seen);
+        }
+    }
+    match value {
+        Value::Object(object) => {
+            for (key, inner) in object {
+                if let Some(property) = schema.get("properties").and_then(|p| p.get(key)) {
+                    walk(root, property, inner, seen);
+                } else if let Some(extra) = schema.get("additionalProperties") {
+                    walk(root, extra, inner, seen);
+                }
+            }
+        }
+        Value::Array(items) => {
+            if let Some(item) = schema.get("items") {
+                for inner in items {
+                    walk(root, item, inner, seen);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The property names the `$defs` entry `name` declares.
+pub fn declared_properties(schema: &Value, name: &str) -> std::collections::BTreeSet<String> {
+    schema["$defs"][name]["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("`{name}` declares no properties"))
+        .keys()
+        .cloned()
+        .collect()
 }

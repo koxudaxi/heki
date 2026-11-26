@@ -26,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextvars
+import importlib.machinery
+import importlib.util
 import inspect
 import sys
 import tempfile
@@ -71,6 +73,13 @@ RECEIVERS: dict[str, Callable[[], list[Any]]] = {
     "contextvars.ContextVar": context_variables,
     "contextvars.Token": tokens,
     "pathlib.Path": paths,
+}
+
+# Calls of the functions of a module whose `return_type` is checked, by symbol.
+FUNCTIONS: dict[str, Callable[[], Any]] = {
+    "importlib.util.module_from_spec": lambda: importlib.util.module_from_spec(
+        importlib.machinery.ModuleSpec("sentinel", None)
+    ),
 }
 
 # The arguments a method is called with, when it takes some.
@@ -201,6 +210,13 @@ def check_return(symbol: str, entry: dict) -> list[str]:
     return failures
 
 
+def check_function(symbol: str, expected: str, call: Callable[[], Any]) -> list[str]:
+    result = call()
+    if type(result) is not resolve(expected):
+        return [f"{symbol}: gives {type(result).__qualname__}, not {expected}"]
+    return []
+
+
 def check_held(symbol: str, held_row: dict) -> list[str]:
     owner, _, method = symbol.rpartition(".")
     make = HOLDERS.get(owner)
@@ -237,7 +253,12 @@ def main() -> int:
     for entry in data.get("entries", []):
         symbol = entry["symbol"]
         owner = symbol.rpartition(".")[0]
-        if entry.get("return_type") or (entry.get("copy_sanitizer") and owner in RECEIVERS):
+        if symbol in FUNCTIONS:
+            failures += checked(
+                symbol, lambda: check_function(symbol, entry["return_type"], FUNCTIONS[symbol])
+            )
+            entries += 1
+        elif entry.get("return_type") or (entry.get("copy_sanitizer") and owner in RECEIVERS):
             failures += checked(symbol, lambda: check_return(symbol, entry))
             entries += owner in RECEIVERS
         if "returns_held" in entry:

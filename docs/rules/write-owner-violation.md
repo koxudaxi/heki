@@ -64,7 +64,15 @@ allowed writers:
   reported once at the outermost call site; a helper changing an entry of the container it is
   handed (`box["k"].add(v)`, also through a local alias of the entry) writes it too, an
   `indirect_item_mut` write, and so does a method of the container changing an entry of its
-  own `self`, called on the attribute's value (an `item_mut` write at the call). A helper that
+  own `self`, called on the attribute's value (an `item_mut` write at the call). An attribute
+  write on an entry is such a change only when heki ties the entry to no project class
+  (`for field in fields: field.name = v` with `fields: list`, also in a function the entry is
+  handed to that does not type it either): on an entry of a project class
+  (`fields: list[Field]`), it is that
+  class's write (`Field.name`), judged by the contracts of `Field.name` as the same write made
+  directly (`for field in model.fields: field.name = v`) is, also when the helper hands the
+  entry to a function typing it (`rename(field, v)`) or writes below one of its attributes
+  (`field.tags.append(v)`). A helper that
   sees the object's class (an annotated parameter, `self` of a method) reports its own write
   instead, so a write it routes through the allowed writers stays allowed for its callers; a helper handed the value of an attribute
   (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
@@ -95,7 +103,10 @@ The written object's class is the one heki infers for it, with annotations as hi
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
 `Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
 `Mapping[...]`, `tuple[...]`, and `set[...]`, and a type alias naming one (`Models: TypeAlias =
-list[Model]`); a constructor call; and what the object comes
+list[Model]`); a constructor call, also of a value declared `type[Model]` wherever it is held (a
+parameter, or an attribute annotated in `__init__` or the class body); a standard library call
+by its declared return type (`importlib.util.module_from_spec(spec)` gives a `types.ModuleType`,
+though a custom loader may return another object); and what the object comes
 from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
 `by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
 `zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
@@ -206,7 +217,8 @@ an object the function did not make, a container, a global, or a closure, no `yi
 call that may keep it ran before the write. An attribute store into another new object of a
 class whose attribute write runs no code links the holder to it instead: the object stays new
 until it, an object holding it, or a value read out of one is kept (see
-[configuration](../configuration.md#write-owners)). A project function keeps an object it
+[configuration](../configuration.md#write-owners)). So does a store into a list, set, or dict
+the class's constructor made for a new instance (`copied.children.append(part)`). A project function keeps an object it
 stores, yields, or hands to code heki does not follow or to a function that keeps it; reading
 or writing it keeps nothing. A
 store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a

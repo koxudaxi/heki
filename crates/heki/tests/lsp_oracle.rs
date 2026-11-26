@@ -152,7 +152,7 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass"]
 write-universe = ["Ticket.flag", "Part.flag"]
 "#;
 
@@ -354,6 +354,13 @@ const LINK_NEG_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\n\n\ndef run(
 const LINK_MODEL: &str = "from typing import Any\n\nfrom pydantic import BaseModel\n\n\nclass Part(BaseModel):\n    flag: bool = False\n    parent: Any = None\n";
 const LINK_MODEL_SUB: &str = "from pydantic import ConfigDict\n\nfrom pkg.link_model import Part\n\n\nclass Validated(Part):\n    model_config = ConfigDict(validate_assignment=True)\n";
 const LINK_MODEL_PASS: &str = "from pkg.link_model import Part\n\n\ndef run() -> Part:\n    copied, part = Part(), Part()\n    part.parent = copied\n    copied.flag = True\n    return copied\n";
+// A class of another module whose constructor makes a list for each instance after calling the
+// constructor of a base in a third module, and a pass storing a new ticket into the list of a new
+// instance (`ClassDecl::plain_init`).
+const OWNED_BASE: &str =
+    "SHARED_STATE = {}\n\n\nclass Base:\n    def __init__(self):\n        self.ready = True\n";
+const OWNED_MODEL: &str = "from pkg.owned_base import Base\n\nSHARED = []\n\n\nclass Holder(Base):\n    def __init__(self):\n        super().__init__()\n        self.parts: list = []\n";
+const OWNED_PASS: &str = "from pkg.copy_ops import Ticket\nfrom pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    part = Ticket()\n    copied.parts.append(part)\n    part.flag = True\n    return copied\n";
 const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
@@ -1325,6 +1332,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/link_neg_pass.py", LINK_NEG_PASS),
         ("pkg/link_model.py", LINK_MODEL),
         ("pkg/link_model_pass.py", LINK_MODEL_PASS),
+        ("pkg/owned_base.py", OWNED_BASE),
+        ("pkg/owned_model.py", OWNED_MODEL),
+        ("pkg/owned_pass.py", OWNED_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -3983,6 +3993,32 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .present(&[("pkg/reseal_helper.py", "MUT207")]),
         Step::new(
+            "the constructor of another module's class binds the list to a shared one",
+            vec![Action::Save(
+                "pkg/owned_model.py",
+                OWNED_MODEL.replace("list = []", "list = SHARED"),
+            )],
+        )
+        .present(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the constructor makes a new list again",
+            vec![save("pkg/owned_model.py", OWNED_MODEL)],
+        )
+        .absent(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the base constructor of a third module replaces the instance's namespace",
+            vec![Action::Save(
+                "pkg/owned_base.py",
+                OWNED_BASE.replace("self.ready = True", "self.__dict__ = SHARED_STATE"),
+            )],
+        )
+        .present(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the base constructor only stores an attribute again",
+            vec![save("pkg/owned_base.py", OWNED_BASE)],
+        )
+        .absent(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
             "the copy helper of another module defaults its table to a shared dict",
             vec![Action::Save(
                 "pkg/copy_ops.py",
@@ -4799,11 +4835,18 @@ fn steps_captured_parameters() -> Vec<Step> {
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`). A change of
 /// an entry of the field's value is one of the field too, unless only the allowed callee makes
-/// it.
+/// it; an attribute write on an entry is one only while the helper does not know the entry's
+/// class, which an annotation alone changes (the helper changes the same paths of its
+/// parameter either way).
 fn steps_indirect_helpers() -> Vec<Step> {
     let changing = RACK_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
     let entry = RACK_OPS.replace("    empty(xs)\n", "    xs[0].append(1)\n    empty(xs)\n");
     let allowed_entry = RACK_OPS.replace("    xs.clear()\n", "    xs[0].clear()\n");
+    let untyped_attr = RACK_OPS.replace("    empty(xs)\n", "    xs[0].label = 1\n    empty(xs)\n");
+    let typed_attr = format!(
+        "from pkg.rack import Rack\n\n\n{}",
+        untyped_attr.replace("def refill(xs):", "def refill(xs: list[Rack]):")
+    );
     let writes = &[
         ("pkg/rack_view.py", "EFF201"),
         ("pkg/rack_view.py", "MUT201"),
@@ -4835,6 +4878,21 @@ fn steps_indirect_helpers() -> Vec<Step> {
             ("pkg/rack_view.py", "EFF201"),
             ("pkg/rack_view.py", "MUT201"),
         ]),
+        Step::new(
+            "the helper sets an attribute of an entry whose class it does not know",
+            vec![Action::Save("pkg/rack_ops.py", untyped_attr)],
+        )
+        .present(writes),
+        Step::new(
+            "the helper types the entries: the attribute is their class's",
+            vec![Action::Save("pkg/rack_ops.py", typed_attr)],
+        )
+        .absent(writes),
+        Step::new(
+            "the helper is back to its first form",
+            vec![save("pkg/rack_ops.py", RACK_OPS)],
+        )
+        .absent(writes),
     ]
 }
 
@@ -9983,6 +10041,55 @@ fn lsp_diagnostics_equal_a_full_check_for_class_objects_across_modules() {
             vec![save("pkg/types.py", CLASS_OBJECTS_TYPES)],
         )
         .present(both),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// The attribute is annotated in a base class of another module than the subclass calling it.
+const CLASS_OBJECT_ATTRIBUTE_BASE: &str = "from pkg.types import DataType\n\n\nclass Parser:\n    def __init__(self) -> None:\n        self.field_type: type[DataType] = DataType\n";
+const CLASS_OBJECT_ATTRIBUTE_USE: &str = "from pkg.base import Parser\nfrom pkg.types import DataType\n\n\nclass OpenAPIParser(Parser):\n    def build(self) -> DataType:\n        return self.field_type(is_dict=True)\n";
+
+/// A call of a class object an attribute declares constructs its class from the declarations of
+/// another module: the subclass calling it sees the base class's annotation change to one of no
+/// known class and back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_class_object_attributes_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/types.py", CLASS_OBJECTS_TYPES.to_owned()),
+        ("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE.to_owned()),
+        ("pkg/use.py", CLASS_OBJECT_ATTRIBUTE_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_class_object_attributes",
+        CLASS_OBJECTS_CONFIG,
+        files,
+        false,
+    );
+    let constructs: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(constructs),
+        Step::new(
+            "the attribute is declared `Any`",
+            vec![save(
+                "pkg/base.py",
+                &format!(
+                    "from typing import Any\n\n{}",
+                    CLASS_OBJECT_ATTRIBUTE_BASE.replace(": type[DataType] =", ": Any =")
+                ),
+            )],
+        )
+        .absent(constructs),
+        Step::new(
+            "it is declared a class object again",
+            vec![save("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE)],
+        )
+        .present(constructs),
     ];
     let mut failures = Vec::new();
     for step in &steps {

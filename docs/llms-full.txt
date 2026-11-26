@@ -644,14 +644,18 @@ Missed findings close as heki learns more:
   class. A read is not.
 - Typed: builtin classes, the builtin exception and warning classes among them
   (`error: ValueError`; not `IOError` or `EnvironmentError`, and not a name the module or the
-  function binds itself), what a standard library call the catalog types gives, an annotation
-  of a local that names an import of its own function (not a name the function binds more than
-  once or otherwise), and, in a `finally` body, what the annotations say before the `try`.
+  function binds itself), what a standard library call the catalog types gives, by its declared
+  return type (`importlib.util.module_from_spec(spec)` is a `types.ModuleType`, though a custom
+  loader's `create_module` may return another object), an annotation of a local that names an
+  import of its own function (not a name the function binds more than once or otherwise), a
+  call of a value declared `type[C]` wherever the value is held (a parameter, a local, or an
+  attribute annotated in `__init__` or the class body, read in a subclass too), and, in a
+  `finally` body, what the annotations say before the `try`.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
   unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
   module binds to a type expression more than once or with type parameters (a type alias bound
   once names its value), calls of a subscripted class other than a builtin or `collections`
-  container (`Box[int]()`), and calls of `type[C]` attributes.
+  container (`Box[int]()`), and calls of a `type[A | B]`.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
@@ -2737,6 +2741,9 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 
 | Field | Content |
 | ----- | ------- |
+| `version`, `heki`, `root`, `query`, `resolved_from` | the version of the object, the heki release, the project root, the symbol as given, and how it named the function (`name`, `glob`, `suffix`, or `line`; `null` for an exact full name) |
+| `complete`, `errors` | `complete` is false when `errors` lists the files heki could not read or parse |
+| `function` | the function: full name, module, kind, definition lines, `async`, `generator`, `abstract`, `stub`, class, decorators, parameters, the call that offloads it to a thread or process pool, and whether a caller drives it without an event loop |
 | `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
@@ -3339,7 +3346,11 @@ A write into the entries of a target's container (`model.meta["kw"][name] = v`) 
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
 after an augmented assignment that changes the container in place and so keeps it
 (`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
-(`count += 1`) binds a new object.
+(`count += 1`) binds a new object. An attribute write on an entry of a project class
+(`model.fields[0].name = v` with `fields: list[Field]`) is a write of that class's attribute
+(`Field.name`), judged by its own contracts, also in a helper handed the container
+(`rename_all(model.fields)`); on an entry heki ties to no project class, a helper handed the
+container writes the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -3371,6 +3382,24 @@ may store what it reads out of it. A project function's result that holds itself
 objects it links (`made.part = part; part.parent = made`) is new at a call until a value read
 out of it is stored. A store into an object the function did not make, or into one of its own
 that was kept before, still ends the freshness of what it stores.
+
+A container a class's constructor makes for each instance is held by that instance, so storing a new
+object into it links the two the same way: `copied = Node(); copied.children.append(part)` leaves
+`part` new while `copied` is (`append`, `appendleft`, `insert`, `add`, `setdefault`, and item
+stores, on a list, set, or dict, when they run no project code on what they store). The constructor
+is the project `__init__` the class runs, its own or a base's (no class decorator,
+`__init_subclass__`, `dataclass_transform`, or metaclass other than `type` or `abc.ABCMeta` along
+the MRO, and no code that reading the attribute runs), and it binds the attribute once, on every
+path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
+`bytearray()`. It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
+call `super().__init__(...)`, whose `__init__` along the MRO does the same or is `object`'s, and
+no store in them runs code (a property's setter, a descriptor, `__setattr__`): a call handed
+`self` or a member of it, such as `self.setup()`, may hand the container anywhere. The object must
+be one the function made by calling the class on every path.
+Rebinding the attribute before an object is stored into the list (`copied.children = node.children`
+on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, or a helper handed
+`copied`), or keeping the list, ends the freshness of what is stored into it. A project function
+returning such an object does not carry the fact to its callers.
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
@@ -5261,9 +5290,21 @@ Options:
           Write the reports that inline suppressions hid (`# heki: ignore[...]`, `# noqa`) to this JSON file, next to any `--output-format`, so CI can compare it with the file of the protected base branch and find the suppressions a change adds. It lists the reports of the files the run shows (`--touched`, PATHS that are files); a baseline changes nothing in it. Each entry names the report (`code`, `file`, `function`, `target` as its baseline key, `line`, `column`) and the `directive` that hid it (`kind`, `file`, `line`, `column`); the entries are sorted, and the same project gives the same bytes. Exits with 2 when the file cannot be written
 
       --output-format-json-schema <TARGET>
-          Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json`
-          
-          [possible values: generate-prompt]
+          Print the JSON Schema of a JSON format heki writes and exit: `generate-prompt` (the object of `--generate-prompt --output-format json`), or a published schema by its name and version, such as `check-1` or `baseline-3` (docs/output-formats.md lists them)
+
+          Possible values:
+          - generate-prompt:     The object of `heki check --generate-prompt --output-format json`
+          - check-1:             The array of `heki check --output-format json`
+          - report-suppressed-1: The file `heki check --report-suppressed` writes
+          - summary-snapshot-1:  The summary snapshot file `heki snapshot --write` writes
+          - baseline-1:          A Ratchet baseline file, version 1 (counts diagnostics)
+          - baseline-2:          A Ratchet baseline file, version 2 (counts violation sites)
+          - baseline-3:          A Ratchet baseline file, version 3 (counts sites and the heuristic ones)
+          - inspect-1:           The output of `heki inspect --output-format json`
+          - inspect-imports-1:   The output of `heki inspect --imports --output-format json`
+          - rule-1:              The output of `heki rule --output-format json`
+          - assumptions-1:       The output of `heki assumptions --json`
+          - error-1:             What a failed command writes to stdout with `--output-format json`
 
   -h, --help
           Print help (see a summary with '-h')
@@ -5744,6 +5785,59 @@ Examples:
   heki version --changelog
       the version, then the changelog section of this release: the rules, keys, and options it adds or changes
 ```
+
+
+---
+
+Source: https://heki.koxudaxi.dev/output-formats/
+
+# Output Formats
+
+Every JSON format heki writes has a JSON Schema in the repository, so that CI, governance tools,
+and coding agents can check what they read. The schemas are in
+[`docs/schemas/`](https://github.com/koxudaxi/heki/tree/main/docs/schemas) and published at
+`https://heki.koxudaxi.dev/schemas/<name>.json`, the `$id` of each. They follow JSON Schema draft
+2020-12 and are derived from the types that write the output, so they cannot drift from it.
+`heki check --output-format-json-schema <name>` prints the same schema.
+
+| Format | Written by | Schema |
+| ------ | ---------- | ------ |
+| Diagnostics, an array | `heki check --output-format json` | [check-1](https://heki.koxudaxi.dev/schemas/check-1.json) |
+| Suppressed reports | `heki check --report-suppressed PATH` | [report-suppressed-1](https://heki.koxudaxi.dev/schemas/report-suppressed-1.json) |
+| Effect summary snapshot | `heki snapshot --write`, or `heki snapshot` on stdout | [summary-snapshot-1](https://heki.koxudaxi.dev/schemas/summary-snapshot-1.json) |
+| Ratchet baseline, version 1 | files written before baselines counted sites | [baseline-1](https://heki.koxudaxi.dev/schemas/baseline-1.json) |
+| Ratchet baseline, version 2 | files that count sites | [baseline-2](https://heki.koxudaxi.dev/schemas/baseline-2.json) |
+| Ratchet baseline, version 3 | `heki check --baseline FILE --update-baseline` | [baseline-3](https://heki.koxudaxi.dev/schemas/baseline-3.json) |
+| Function facts | `heki inspect SYMBOL --output-format json` | [inspect-1](https://heki.koxudaxi.dev/schemas/inspect-1.json) |
+| Import facts | `heki inspect --imports MODULE --output-format json` | [inspect-imports-1](https://heki.koxudaxi.dev/schemas/inspect-imports-1.json) |
+| Rule metadata | `heki rule [CODE] --output-format json` | [rule-1](https://heki.koxudaxi.dev/schemas/rule-1.json) |
+| Assumption A1 hazards | `heki assumptions --json` | [assumptions-1](https://heki.koxudaxi.dev/schemas/assumptions-1.json) |
+| Failure of a command | any command, with `--output-format json` | [error-1](https://heki.koxudaxi.dev/schemas/error-1.json) |
+| Configuration advice | `heki recommend --output-format json` | [recommend-3](https://heki.koxudaxi.dev/schemas/recommend-3.json), and [version 1](https://heki.koxudaxi.dev/schemas/recommend-1.json) and [2](https://heki.koxudaxi.dev/schemas/recommend-2.json) |
+| Prompt for a language model | `heki check --generate-prompt --output-format json` | `heki check --output-format-json-schema generate-prompt` |
+
+The baseline and the snapshot are files you commit. A baseline is TOML: its schema describes its
+values as JSON, which is what a TOML parser gives. Validate a baseline by parsing it first.
+SARIF output (`--output-format sarif`) follows the public
+[SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) schema, which
+heki does not copy.
+
+## Versions
+
+The version of a format is part of its schema name. A format with a `version` or
+`schema_version` field (the snapshot, the suppressed report, the baselines, `heki inspect`,
+`heki recommend`) writes the number its schema is named by; the others (the diagnostics, the rule
+metadata, the assumptions, the failure object) have no field and are known by the schema name.
+
+- A change that breaks a reader, such as a field that is removed, renamed, or changes meaning,
+  or a value a reader would not expect, makes the next version: a new schema file with the next
+  number, and a new `version` where the format has the field. It is listed under Breaking
+  changes in the release notes. The files of the earlier versions stay published.
+- A field that is added is not breaking. The schema of the version gains the property, and the
+  release notes list it. The schemas forbid properties they do not list, because they describe
+  what this release writes; a reader should ignore fields it does not know.
+- A baseline is read in every version. `heki check --update-baseline` writes version 3, and a
+  file of an earlier version keeps its meaning until then.
 
 
 ---
@@ -14325,7 +14419,15 @@ allowed writers:
   reported once at the outermost call site; a helper changing an entry of the container it is
   handed (`box["k"].add(v)`, also through a local alias of the entry) writes it too, an
   `indirect_item_mut` write, and so does a method of the container changing an entry of its
-  own `self`, called on the attribute's value (an `item_mut` write at the call). A helper that
+  own `self`, called on the attribute's value (an `item_mut` write at the call). An attribute
+  write on an entry is such a change only when heki ties the entry to no project class
+  (`for field in fields: field.name = v` with `fields: list`, also in a function the entry is
+  handed to that does not type it either): on an entry of a project class
+  (`fields: list[Field]`), it is that
+  class's write (`Field.name`), judged by the contracts of `Field.name` as the same write made
+  directly (`for field in model.fields: field.name = v`) is, also when the helper hands the
+  entry to a function typing it (`rename(field, v)`) or writes below one of its attributes
+  (`field.tags.append(v)`). A helper that
   sees the object's class (an annotated parameter, `self` of a method) reports its own write
   instead, so a write it routes through the allowed writers stays allowed for its callers; a helper handed the value of an attribute
   (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
@@ -14356,7 +14458,10 @@ The written object's class is the one heki infers for it, with annotations as hi
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
 `Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
 `Mapping[...]`, `tuple[...]`, and `set[...]`, and a type alias naming one (`Models: TypeAlias =
-list[Model]`); a constructor call; and what the object comes
+list[Model]`); a constructor call, also of a value declared `type[Model]` wherever it is held (a
+parameter, or an attribute annotated in `__init__` or the class body); a standard library call
+by its declared return type (`importlib.util.module_from_spec(spec)` gives a `types.ModuleType`,
+though a custom loader may return another object); and what the object comes
 from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
 `by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
 `zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
@@ -14467,7 +14572,8 @@ an object the function did not make, a container, a global, or a closure, no `yi
 call that may keep it ran before the write. An attribute store into another new object of a
 class whose attribute write runs no code links the holder to it instead: the object stays new
 until it, an object holding it, or a value read out of one is kept (see
-[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). A project function keeps an object it
+[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). So does a store into a list, set, or dict
+the class's constructor made for a new instance (`copied.children.append(part)`). A project function keeps an object it
 stores, yields, or hands to code heki does not follow or to a function that keeps it; reading
 or writing it keeps nothing. A
 store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a

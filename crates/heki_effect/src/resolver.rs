@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod fields;
+mod init_containers;
 mod package_paths;
 mod returns;
 mod sentinels;
@@ -673,6 +674,21 @@ pub enum StoreTarget {
     Attr(String, String),
 }
 
+/// A class's own `__init__` that uses the instance only as the object of attribute stores (none
+/// of `__dict__` or `__class__`) and as `super()` for a call of the next `__init__` along the
+/// MRO handed nothing that may hold the instance (`init_containers`). Whether the stores run
+/// code depends on the class constructed ([`ProjectDecls::constructor_containers`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlainInit {
+    /// The attributes it stores through the instance, sorted, each once.
+    pub stores: Box<[Box<str>]>,
+    /// It calls `super().__init__(...)`.
+    pub calls_next: bool,
+    /// The attributes it binds to a builtin container it makes there, with the container's
+    /// kind, sorted: when it returns, the attribute holds that container and nothing else does.
+    pub containers: Box<[(Box<str>, ContainerKind)]>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassDecl {
     /// Base classes, resolved within the defining module (canonicalized on lookup), each the
@@ -793,6 +809,11 @@ pub struct ClassDecl {
     /// capacity ([`ProjectDecls::attr_capacity`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attr_capacities: BTreeMap<String, CapacityOf>,
+    /// What the class's own `__init__` does with the instance when all it does is store
+    /// attributes on it and call the next `__init__` along the MRO ([`PlainInit`]); `None` for
+    /// any other `__init__`, and without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_init: Option<Box<PlainInit>>,
     /// `typing.Protocol` is one of the bases (PEP 544: the class is a protocol, not an
     /// implementation of one).
     pub is_protocol: bool,
@@ -4536,19 +4557,19 @@ impl ProjectDecls {
             })
     }
 
-    /// Whether storing or deleting `attr` on a value of the project class `class` runs no code
-    /// on every class it may be under R2: as [`Self::attr_store_on_instance`], except that a
-    /// class body may bind the name to a function it defines that no decorator replaces (a
-    /// method, which an instance's own attribute shadows) or that is a getter without a setter
-    /// or deleter (`FunctionDecl::is_property`: a `property` raises, a cached property's value
-    /// is the instance's own attribute).
+    /// Whether storing or deleting each of `attrs` on a value of the project class `class` runs
+    /// no code on every class it may be under R2: as [`Self::attr_store_on_instance`], except
+    /// that a class body may bind the name to a function it defines that no decorator replaces
+    /// (a method, which an instance's own attribute shadows) or that is a getter without a
+    /// setter or deleter (`FunctionDecl::is_property`: a `property` raises, a cached property's
+    /// value is the instance's own attribute).
     pub(crate) fn attr_write_runs_no_code(
         &self,
         class: &str,
-        attr: &str,
+        attrs: &[&str],
         catalog_stores: impl Fn(&str) -> bool,
     ) -> bool {
-        let plain_function = |c: &str| {
+        let plain_function = |c: &str, attr: &str| {
             self.own_method(c, attr)
                 .and_then(|k| self.function_decl(&k))
                 .is_some_and(|f| f.called_as_defined || f.is_property)
@@ -4557,27 +4578,29 @@ impl ProjectDecls {
             && self.value_classes(class).iter().all(|c| {
                 self.read(|k| note(&mut k.class_facts, c));
                 self.class(c).is_some_and(|d| {
-                    !d.properties.contains(attr)
-                        && (!d.code_attrs.contains(attr) || plain_function(c))
+                    attrs.iter().all(|attr| {
+                        !d.properties.contains(*attr)
+                            && (!d.code_attrs.contains(*attr) || plain_function(c, attr))
+                    })
                 })
             })
     }
 
-    /// Whether storing `attr` on a value of the project class `class` binds the instance's own
-    /// attribute to the value itself and runs no code of the project, on every class it may be
-    /// under R2: as [`Self::attr_write_runs_no_code`], and when one of those classes derives
-    /// from a base the catalog says stores on the instance (`catalog_stores`), none of them
-    /// configures it: binds a model configuration ([`ClassDecl::configures_model`]) or passes
-    /// class keywords (`ClassDecl::passes_keywords`). With `validate_assignment`,
+    /// Whether storing each of `attrs` on a value of the project class `class` binds the
+    /// instance's own attribute to the value itself and runs no code of the project, on every
+    /// class it may be under R2: as [`Self::attr_write_runs_no_code`], and when one of those
+    /// classes derives from a base the catalog says stores on the instance (`catalog_stores`),
+    /// none of them configures it: binds a model configuration ([`ClassDecl::configures_model`])
+    /// or passes class keywords (`ClassDecl::passes_keywords`). With `validate_assignment`,
     /// `pydantic.BaseModel` stores a validated conversion and runs the project's validators,
     /// which may keep the value.
     pub(crate) fn attr_write_stores_value(
         &self,
         class: &str,
-        attr: &str,
+        attrs: &[&str],
         catalog_stores: impl Fn(&str) -> bool,
     ) -> bool {
-        if !self.attr_write_runs_no_code(class, attr, &catalog_stores) {
+        if !self.attr_write_runs_no_code(class, attrs, &catalog_stores) {
             return false;
         }
         let classes = self.value_classes(class);
@@ -4607,6 +4630,85 @@ impl ProjectDecls {
             && !read.runs_hook(true)
             && read.code_binders.is_empty()
             && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
+    }
+
+    /// The containers a new instance of the project class `class` holds when the call
+    /// constructing it returns, each one the call made and nothing else holds, by attribute
+    /// ([`PlainInit::containers`]): those of the `__init__` the call runs, that of the first class
+    /// along the MRO defining one. Nothing else may run or change the construction: no class
+    /// along the MRO has a class decorator (which may generate another `__init__`),
+    /// `__init_subclass__`, a `dataclass_transform`, or a metaclass other than `type` or
+    /// `abc.ABCMeta` (whose `__call__` may run anything); that `__init__` and every one it
+    /// reaches through `super().__init__(...)` is a [`PlainInit`] (one along the MRO outside the
+    /// project is `object`'s), no `__init__` it reaches stores an attribute it makes a container
+    /// for, and every attribute they store is stored on the instance without running code of the
+    /// project ([`Self::attr_write_stores_value`]). A store running a property's setter or a
+    /// descriptor may hand the instance anywhere, and a base's `__init__` replacing the
+    /// instance's namespace makes every attribute shared. Empty for any other class. A read of
+    /// one of the attributes finds its container when reading it finds what the instance stores
+    /// ([`Self::attr_read_finds_stored`]).
+    pub(crate) fn constructor_containers(
+        &self,
+        class: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> &[(Box<str>, ContainerKind)] {
+        let mro = self.mro(class);
+        let decls: Vec<Option<&ClassDecl>> = (mro.iter())
+            .map(|c| {
+                self.read(|k| note(&mut k.class_facts, c));
+                self.class(c)
+            })
+            .collect();
+        let changes_construction = |d: &ClassDecl| {
+            !d.decorators.is_empty()
+                || d.transform.is_some()
+                || d.members.contains("__init_subclass__")
+        };
+        if self.has_custom_metaclass(class)
+            || decls.iter().flatten().any(|d| changes_construction(d))
+        {
+            return &[];
+        }
+        // From the class at `from` on, the first class defining `__init__`: a project class's
+        // own, or `None` for one outside the project other than a plain base, which may define
+        // its own; `Some(None)` when only `object.__init__` is left.
+        let next_init = |from: usize| -> Option<Option<(usize, &PlainInit)>> {
+            let found = (from..decls.len()).find(|&i| match decls[i] {
+                Some(d) => d.members.contains("__init__"),
+                None => !PLAIN_BASES.contains(&mro[i].as_str()),
+            });
+            let Some(i) = found else {
+                return Some(None);
+            };
+            decls[i]
+                .and_then(|d| d.plain_init.as_deref())
+                .map(|init| Some((i, init)))
+        };
+        let Some(Some((mut at, first))) = next_init(0) else {
+            return &[];
+        };
+        let mut stores: Vec<&str> = first.stores.iter().map(|a| &**a).collect();
+        let mut init = first;
+        while init.calls_next {
+            match next_init(at + 1) {
+                Some(Some((i, next))) => {
+                    // A base's `__init__` storing the attribute may rebind it after the store.
+                    let rebinds = |(a, _): &(Box<str>, _)| next.stores.binary_search(a).is_ok();
+                    if first.containers.iter().any(rebinds) {
+                        return &[];
+                    }
+                    stores.extend(next.stores.iter().map(|a| &**a));
+                    (at, init) = (i, next);
+                }
+                Some(None) => break,
+                None => return &[],
+            }
+        }
+        if self.attr_write_stores_value(class, &stores, &catalog_stores) {
+            &first.containers
+        } else {
+            &[]
+        }
     }
 
     /// The project classes whose bodies may supply an attribute of a value of the class `class`
@@ -7172,6 +7274,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
+    init_containers::init_containers(input, &mut decls);
     code_attrs(input, &mut decls);
     for (class, attr) in class_attrs_rebound(input, &decls) {
         if let Some(c) = decls.classes.get_mut(&class) {
@@ -9613,7 +9716,7 @@ fn set_flags<'i>(
 }
 
 /// Inferred value of an SSA variable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Val {
     /// A named object: module, class, function, or external symbol (by fqn).
     Ref(String),
@@ -10349,10 +10452,16 @@ impl<'a> TypeCtx<'a> {
     /// [`Self::method_targets_complete`] on a receiver of one class. A call of a property's value
     /// runs what calling the value runs, whatever class the getter is found in (the getter's run
     /// is a read of its own): it is complete when calling a value of the type the getter
-    /// declares is ([`Self::call_targets_complete`]).
+    /// declares is ([`Self::call_targets_complete`]). A call of an attribute's value
+    /// ([`Self::attribute_value`]) never is: the instance holds its own value of the name, which
+    /// only the declaration ties to a class, and a class the receiver may be (R2) can define a
+    /// method of the name.
     fn targets_complete_on(&self, recv: Recv<'_>, method: &str, callee: &Callee) -> bool {
         if let Some(value) = self.property_value(recv, method) {
             return self.call_targets_complete(value.as_ref(), callee);
+        }
+        if self.attribute_value(recv, method).is_some() {
+            return false;
         }
         match recv {
             Recv::Inst(class) => self
@@ -10504,8 +10613,9 @@ impl<'a> TypeCtx<'a> {
             Some(recv @ (Recv::Inst(class) | Recv::Super(class))) => {
                 let skip_self = matches!(recv, Recv::Super(_));
                 // `obj.prop(...)` runs the getter as a read of `obj.prop` does (where the summary
-                // records it), then calls the value it gives.
-                match self.property_value(recv, method) {
+                // records it), then calls the value it gives; `obj.kind(...)` calls the value
+                // the attribute holds.
+                match self.called_member(recv, method) {
                     Some(value) => self.resolve_call(value.as_ref()),
                     None => self
                         .project
@@ -10711,6 +10821,41 @@ impl<'a> TypeCtx<'a> {
                 .and_then(|t| t.bind_self(Some(&Ty::inst(class))))
                 .and_then(|t| t.val()),
         )
+    }
+
+    /// The value reading `attr` on the instance `recv` (or on `super()`) of a project class gives
+    /// when no class of its MRO defines a method or a property of the name: the attribute's
+    /// declared type ([`ProjectDecls::member_type`]: its annotation along the MRO, or what the
+    /// project stores there), `typing.Self` bound to the instance. Calling it calls that value,
+    /// as a call of a parameter declared alike does: `self.kind(...)` of `self.kind:
+    /// type[Model]` constructs a `Model` (R2: or a subclass).
+    fn attribute_value(&self, recv: Recv<'_>, attr: &str) -> Option<Val> {
+        let (class, skip_self) = match recv {
+            Recv::Inst(class) => (class, false),
+            Recv::Super(class) => (class, true),
+            Recv::Ref(_) | Recv::Class(_) => return None,
+        };
+        if !self.project.is_project_class(class)
+            || self
+                .project
+                .mro_definition(class, attr, skip_self)
+                .is_some()
+        {
+            return None;
+        }
+        self.project
+            .member_type(class, attr, skip_self)
+            .and_then(|t| self.project.declared_ty(&t))
+            .and_then(|t| t.bind_self(Some(&Ty::inst(class))))
+            .and_then(|t| t.val())
+    }
+
+    /// What `recv.attr(...)` calls when `attr` names no method: the value of a property
+    /// ([`Self::property_value`]) or of an attribute ([`Self::attribute_value`]); `None` when
+    /// neither gives one.
+    pub(crate) fn called_member(&self, recv: Recv<'_>, attr: &str) -> Option<Option<Val>> {
+        self.property_value(recv, attr)
+            .or_else(|| self.attribute_value(recv, attr).map(Some))
     }
 
     /// The targets of calling `method` through a class object, from its definitions `callee`:
