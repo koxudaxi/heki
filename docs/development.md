@@ -66,6 +66,7 @@ $ python3 tests/sentinel/verify_container_families.py
 $ python3 tests/difftest/counterexamples.py
 $ python3 tests/difftest/soundness_e2e_counterexamples.py
 $ python3 tests/difftest/container_abc_counterexamples.py
+$ python3 tests/difftest/cached_result_counterexamples.py
 $ python3.15 tests/difftest/ir_counterexamples.py
 ```
 
@@ -82,6 +83,7 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
 | `ir_counterexamples.py` | that the rewrites heki made before the IR modeled a shape (a binding, an alias, a path) change behavior; needs CPython 3.15 |
 | `container_abc_counterexamples.py` | that a value of a container ABC may be of a class that runs project code when the writer iterates it (a project implementer through the ABC, `UserDict`, or `list`, a registered class, a `register` heki cannot resolve, a `__subclasshook__`, a structural ABC); `e2e_mut101_exact.rs` checks that heki reports each heuristic |
+| `cached_result_counterexamples.py` | that a call whose one project target is cached may run an implementation heki does not see, which caches nothing (an object of a class outside the project with a protocol's method, a class taking the method from a base made at run time), so the change reaches no kept list; `e2e_mut114.rs` checks that heki reports each heuristic and the call through the cached class exact |
 
 The Layer 2 rows of the distributions the catalog lists (`[[distributions]]`) are checked against
 releases of each distribution:

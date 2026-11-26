@@ -756,6 +756,14 @@ const MADE_MEMBER_FACTORY: &str =
     "from pkg import made_models\n\n\ndef make_member():\n    return made_models.Waiter()\n";
 const MADE_MEMBER_USE: &str = "from pkg.made_member import make_member\n\n\nasync def serve_member() -> None:\n    make_member().wait()\n";
 const MADE_MEMBER_REBINDING: &str = "from pkg import made_models\n\n\ndef swap() -> None:\n    made_models.Waiter = made_models.Quiet\n";
+// A factory function and a class attribute annotated with the callable they hold
+// (`Callable[..., Waiter]`, `FunctionDecl::return_type`, `ClassDecl` attribute types): calling
+// what they hold in other files gives a `Waiter` while the annotation names that one class.
+const CALLABLE_FACTORY: &str = "from collections.abc import Callable\n\nfrom pkg.made_models import Waiter\n\n\ndef waiter_factory() -> Callable[..., Waiter]: ...\n\n\nclass Settings:\n    factory: Callable[..., Waiter]\n";
+const CALLABLE_FACTORY_MAYBE: &str = "from collections.abc import Callable\n\nfrom pkg.made_models import Waiter\n\n\ndef waiter_factory() -> Callable[..., Waiter | None]: ...\n\n\nclass Settings:\n    factory: Callable[..., Waiter]\n";
+const CALLABLE_FACTORY_EITHER: &str = "from collections.abc import Callable\n\nfrom pkg.made_models import Quiet, Waiter\n\n\ndef waiter_factory() -> Callable[..., Waiter]: ...\n\n\nclass Settings:\n    factory: Callable[..., Waiter | Quiet]\n";
+const CALLABLE_USE: &str = "from pkg.callable_factory import waiter_factory\n\n\nasync def serve_factory() -> None:\n    waiter_factory()().wait()\n";
+const CALLABLE_ATTRIBUTE_USE: &str = "from pkg.callable_factory import Settings\n\n\nasync def serve_attribute(s: Settings) -> None:\n    s.factory().wait()\n";
 // Functions values hold, defined in one module and called in others: the closure a factory
 // returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
 // `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
@@ -1656,7 +1664,8 @@ fn steps_exact_effects() -> Vec<Step> {
 /// (`ReturnFact::ty`): a connection on the file a module constant names, one in memory, or, on a
 /// path heki cannot decide, a connection in an unknown state; and, for a factory without a
 /// return annotation, an instance of the class of a third module that every return constructs,
-/// while every return constructs that one and it is a class.
+/// while every return constructs that one and it is a class; and a call of what a factory or an
+/// attribute annotated `Callable[..., Waiter]` holds, while that annotation names one class.
 fn steps_returned_types() -> Vec<Step> {
     const MADE: &[(&str, &str)] = &[("pkg/made_use.py", "EFF101")];
     const MEMBER: &[(&str, &str)] = &[("pkg/made_member_use.py", "EFF101")];
@@ -1665,6 +1674,12 @@ fn steps_returned_types() -> Vec<Step> {
     const NEITHER: &[(&str, &str)] = &[
         ("pkg/factory_use.py", "EFF101"),
         ("pkg/factory_use.py", "EFF101 [heuristic]"),
+    ];
+    const CALLABLE_FACTORY_CALL: &[(&str, &str)] = &[("pkg/callable_use.py", "EFF101")];
+    const CALLABLE_ATTRIBUTE: &[(&str, &str)] = &[("pkg/callable_attribute_use.py", "EFF101")];
+    const CALLABLE_BOTH: &[(&str, &str)] = &[
+        ("pkg/callable_use.py", "EFF101"),
+        ("pkg/callable_attribute_use.py", "EFF101"),
     ];
     vec![
         Step::new(
@@ -1734,6 +1749,44 @@ fn steps_returned_types() -> Vec<Step> {
             vec![Action::Delete("pkg/made_member_rebinding.py")],
         )
         .present(MEMBER),
+        Step::new(
+            "a factory and an attribute hold a callable giving the waiting class",
+            vec![
+                Action::Create("pkg/callable_factory.py", CALLABLE_FACTORY.to_owned()),
+                Action::Create("pkg/callable_use.py", CALLABLE_USE.to_owned()),
+                Action::Create(
+                    "pkg/callable_attribute_use.py",
+                    CALLABLE_ATTRIBUTE_USE.to_owned(),
+                ),
+            ],
+        )
+        .present(CALLABLE_BOTH),
+        Step::new(
+            "a comment above the factory",
+            vec![save(
+                "pkg/callable_factory.py",
+                &format!("# factories\n{CALLABLE_FACTORY}"),
+            )],
+        )
+        .present(CALLABLE_BOTH)
+        .cutoff(),
+        Step::new(
+            "the factory's callable may give None",
+            vec![save("pkg/callable_factory.py", CALLABLE_FACTORY_MAYBE)],
+        )
+        .present(CALLABLE_ATTRIBUTE)
+        .absent(CALLABLE_FACTORY_CALL),
+        Step::new(
+            "the attribute's callable gives either of two classes",
+            vec![save("pkg/callable_factory.py", CALLABLE_FACTORY_EITHER)],
+        )
+        .present(CALLABLE_FACTORY_CALL)
+        .absent(CALLABLE_ATTRIBUTE),
+        Step::new(
+            "both give the waiting class again",
+            vec![save("pkg/callable_factory.py", CALLABLE_FACTORY)],
+        )
+        .present(CALLABLE_BOTH),
     ]
 }
 
@@ -4741,6 +4794,40 @@ fn steps_mut119() -> Vec<Step> {
     ]
 }
 
+const TABLE_BASE: &str = "class Base:\n    pass\n";
+const TABLE_BASE_UNKNOWN: &str = "from unknown_lib import Base\n";
+const TABLES: &str = "import functools\n\nfrom pkg.table_base import Base\n\n\nclass Listed(Base):\n    pass\n\n\nclass CachedListed(Listed):\n    @functools.lru_cache(maxsize=None)\n    def rows(self, k: str) -> list[str]:\n        return [k, \"id\"]\n";
+const TABLE_USER: &str = "from pkg.tables import Listed\n\n\ndef add(table: Listed, k):\n    xs = table.rows(k)\n    xs.append(\"x\")\n    return xs\n";
+
+/// `MUT114`: the targets of a call decided by a module the caller does not import: the
+/// receiver's class defines no such method and its base is a project class, so the call runs
+/// the cached method of the one subclass with it; once that module imports the base from a
+/// module heki knows nothing of, the base may define the method, and the server changes the
+/// report's certainty with the CLI.
+fn steps_mut114_targets() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a change of what a cached method of a subclass returns",
+            vec![
+                Action::Create("pkg/table_base.py", TABLE_BASE.to_owned()),
+                Action::Create("pkg/tables.py", TABLES.to_owned()),
+                Action::Create("pkg/table_user.py", TABLE_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/table_user.py", "MUT114")]),
+        Step::new(
+            "the base of the receiver's class becomes one heki knows nothing of",
+            vec![save("pkg/table_base.py", TABLE_BASE_UNKNOWN)],
+        )
+        .present(&[("pkg/table_user.py", "MUT114")]),
+        Step::new(
+            "the base is a project class again",
+            vec![save("pkg/table_base.py", TABLE_BASE)],
+        )
+        .present(&[("pkg/table_user.py", "MUT114")]),
+    ]
+}
+
 /// The blocking helper of `pkg/low.py` with a module-level cache that it reads (`False`) or
 /// clears (`True`) after its blocking call, so that the call keeps its position.
 fn low_with_cache(clears: bool) -> String {
@@ -7081,6 +7168,7 @@ sessions!(editing, Session::start, {
     queue_capacity: steps_queue_capacity,
     mut114_mut202_mut208: steps_mut114_mut202_mut208,
     readonly_contracts: steps_readonly_contracts,
+    mut114_targets: steps_mut114_targets,
     mut115: steps_mut115,
     item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,
