@@ -223,6 +223,13 @@ pub fn may_give_back(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
     facts.lock_facts().gives_back.contains(lock)
 }
 
+/// Whether `f` calls a method `release`: without one it gives no lock back
+/// ([`unheld_releases`]).
+pub(crate) fn calls_release(f: &IrFunction) -> bool {
+    (f.blocks.iter().flat_map(|b| &b.insts))
+        .any(|i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == "release"))
+}
+
 /// The locks `steps` (of a function of shape `shape`) give back where the function does not
 /// hold them by its own acquisitions, at each `release()` a run reaches.
 pub fn unheld_releases(shape: &FnShape<'_>, steps: &LockSteps) -> Vec<ObjRef> {

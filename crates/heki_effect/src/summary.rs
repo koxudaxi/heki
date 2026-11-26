@@ -5726,12 +5726,10 @@ impl<'a> Extractor<'a> {
     /// The locks the function gives back where its own acquisitions do not hold them
     /// (`LockFacts::gives_back`), which it then takes on no return.
     fn lock_gives_back(&mut self) {
-        let releases = (self.f.blocks.iter().flat_map(|b| &b.insts))
-            .any(|i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == "release"));
-        if !releases {
+        if !locks::calls_release(self.f) {
             return;
         }
-        let def = |v: VarId| self.defs.get(&v).copied();
+        let def = |v| self.defs.get(&v).copied();
         let steps = locks::lock_steps(
             self.cx,
             self.f,
