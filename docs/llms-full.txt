@@ -1585,7 +1585,9 @@ references = "ignore"
 - A table's own key overrides the default, an empty list too (`allowed-callers = []` is a list
   of no callers). A list is replaced whole, never merged with the default's.
 - `name` and `targets` name one contract, so they are errors in a defaults table. Any other key
-  of the kind may be defaulted.
+  of the kind may be defaulted, `fail` among them: `fail = true` in `[tool.heki.call-owners-defaults]`
+  makes the reports of every `call-owners` table fail the run, and a table with `fail = false`
+  keeps its reports advisory.
 - A defaults table is one table, not an array of tables. With no table of its kind it changes
   nothing. In a file that is not a `pyproject.toml` it is written without the `tool.heki`
   prefix (`[call-owners-defaults]`).
@@ -2320,6 +2322,8 @@ fail = true
   the run shows decide; the note about the ones it does not show says how many would fail it.
 - The closing note of a text run, which counts the reports that do not fail the run, leaves these
   reports out.
+- `fail = true` in a [`<kind>-defaults` table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind) applies to
+  every table of the kind that does not set `fail` itself.
 - `fail-on = "warning"` is still there for a project that wants every warning and heuristic
   report to fail the run.
 

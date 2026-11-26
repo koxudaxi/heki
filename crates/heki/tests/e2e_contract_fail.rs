@@ -165,6 +165,34 @@ fn a_table_fails_the_run_with_fail_true_and_not_without_it() {
     }
 }
 
+/// The project of `kind` whose `<kind>-defaults` table sets `fail = true`, and whose table
+/// carries `own` (a `fail` line or none).
+fn project_with_defaults(name: &str, kind: &Kind, own: &str) -> Project {
+    let p = project(name, kind, own);
+    let config = p.read("pyproject.toml");
+    p.write(
+        "pyproject.toml",
+        &format!("{config}\n[tool.heki.{}-defaults]\nfail = true\n", kind.key),
+    );
+    p
+}
+
+#[test]
+fn fail_in_a_defaults_table_applies_to_its_tables_and_their_own_fail_wins() {
+    for kind in KINDS {
+        let key = kind.key;
+        for (own, expected) in [("", 1), ("fail = true\n", 1), ("fail = false\n", 0)] {
+            let p = project_with_defaults("fail_defaults", kind, own);
+            let (code, out, err) = check(&p, &["--output-format", "json"]);
+            assert_eq!(code, expected, "{key} {own:?}: {out}{err}");
+            assert!(
+                reports(&out).iter().any(|d| d["rule_code"] == kind.rule),
+                "{key}: {out}"
+            );
+        }
+    }
+}
+
 #[test]
 fn the_outputs_do_not_change_with_fail_true() {
     for kind in KINDS {
