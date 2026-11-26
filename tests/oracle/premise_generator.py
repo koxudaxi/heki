@@ -1044,9 +1044,212 @@ def opt113(sc, strip):
     _add_inputs(sc, entry, lists)
 
 
+# ---------------------------------------------------------------------------------------------
+# EFF109: a lock the entry holds, taken again through helpers
+# ---------------------------------------------------------------------------------------------
+def _holding(lock, body, way, awaits=False):
+    """`body` with `lock` held: in a `with`, or between `acquire()` and a `release()` in
+    `finally`."""
+    if way == "with":
+        return block(f"{'async ' if awaits else ''}with {lock}:", body)
+    acquire = f"{'await ' if awaits else ''}{lock}.acquire()"
+    return [acquire] + block("try:", body) + block("finally:", [f"{lock}.release()"])
+
+
+def _held_strip(sc, lock, body):
+    """The entry's statements, with `lock` not held at the call on some input: taken on one
+    path, given back before the call, or given back by a helper (a handoff)."""
+    way = sc.pick(["one-path", "released", "helper"])
+    if way == "one-path":
+        release = block("if flag:", [f"{lock}.release()"])
+        return block("if flag:", [f"{lock}.acquire()"]) + block("try:", body) + block("finally:", release)
+    if way == "released":
+        inner = [f"{lock}.release()"] + block("try:", body) + block("finally:", [f"{lock}.acquire()"])
+        return block(f"with {lock}:", inner)
+    unlock = sc.name("unlock")
+    sc.define(block(f"def {unlock}():", [f"{lock}.release()"]))
+    return [f"{lock}.acquire()", f"{unlock}()", *body]
+
+
+def _reentrant_lock(sc):
+    """A project class derived from `asyncio.Lock` that takes it again without waiting."""
+    klass = sc.name("Reentrant")
+    sc.define(
+        block(
+            f"class {klass}(asyncio.Lock):",
+            ["depth = 0", ""]
+            + block(
+                "async def acquire(self):",
+                ["self.depth += 1"] + block("if self.depth > 1:", ["return True"]) + ["return await super().acquire()"],
+            )
+            + [""]
+            + block(
+                "def release(self):",
+                ["self.depth -= 1"] + block("if self.depth == 0:", ["super().release()"]),
+            ),
+        )
+    )
+    return klass
+
+
+def _eff109_async(sc, strip, lock, way):
+    """Coroutines one or two deep under the entry; with Non-reentrant stripped, the lock is of a
+    project class derived from `asyncio.Lock`."""
+    sc.imports("import asyncio")
+    made = f"{_reentrant_lock(sc)}()" if strip == "Non-reentrant" else "asyncio.Lock()"
+    sc.define([f"{lock}: asyncio.Lock = {made}"])
+    call = None
+    for _ in range(sc.rng.randint(1, 2)):
+        name = sc.name("astep")
+        inner = _holding(lock, ["v = 1"], sc.pick(["with", "acquire"]), True) if call is None else [f"v = await {call}"]
+        sc.define(block(f"async def {name}({sc.params}):", ["v = None", *inner, "return v"]))
+        call = f"{name}({CONTROLS})"
+    entry = sc.name("handle")
+    sc.define(block(f"async def {entry}({sc.params}):", _holding(lock, [f"return await {call}"], way, True)))
+    _add_inputs(sc, entry, lambda k: [])
+
+
+def eff109(sc, strip):
+    sc.dispatch = None
+    ns = sc.ns
+    way = sc.pick(["with", "acquire"])
+    if strip == "Non-reentrant" or (strip is None and sc.chance(0.3)):
+        _eff109_async(sc, strip, f"LOCK_{ns}", way)
+        return
+    sc.imports("import threading")
+    same_lock_way = sc.pick(["rebound", "argument"]) if strip == "Same lock" else None
+    # The lock is a module global, or an attribute of the entry's parameter that the entry
+    # passes on to the helpers (with Same lock stripped: another object's).
+    by_argument = same_lock_way == "argument" or (strip in (None, "Every return") and sc.chance(0.4))
+    params, args = sc.params, CONTROLS
+    if by_argument:
+        klass = sc.name("Store")
+        sc.define(block(f"class {klass}:", block("def __init__(self):", ["self.lock = threading.Lock()"])))
+        lock, taken = "obj.lock", "box.lock"
+        params, args = f"box: {klass}, {params}", f"box, {args}"
+    else:
+        lock = taken = f"LOCK_{ns}"
+        sc.define([f"{lock} = threading.Lock()"])
+    leaf = _holding(taken, ["v = 1"], sc.pick(["with", "acquire"]))
+    if same_lock_way == "rebound":
+        leaf = [f"global {lock}", f"{lock} = threading.Lock()", *leaf]
+    call = _chain(sc, leaf, strip, params, args, prefix="lock")
+    if by_argument:
+        passed = "obj"
+        if same_lock_way == "argument":
+            passed = sc.name("OTHER")
+            sc.define([f"{passed} = {klass}()"])
+        call = call.replace("(box, ", f"({passed}, ", 1)
+        sc.dispatch = (klass, [klass])
+    body = [f"return {call}"]
+    entry = sc.name("handle")
+    signature = sc.params
+    if sc.dispatch:
+        signature = f"obj: {sc.dispatch[0]}, {sc.params}"
+    lines = _held_strip(sc, lock, body) if strip == "Held" else _holding(lock, body, way)
+    sc.define(block(f"def {entry}({signature}):", lines))
+    _add_inputs(sc, entry, lambda k: [])
+
+
+# ---------------------------------------------------------------------------------------------
+# EFF116: a generator nothing iterates
+# ---------------------------------------------------------------------------------------------
+def _generator_function(sc, strip, body):
+    """A generator function with `body` and the call of it, from the entry: a module function
+    or a method of the entry's receiver; with Generator function stripped, a name bound to a
+    plain definition too (the one the run binds), or a decorator that iterates the generator."""
+    params = sc.params
+    name = sc.name("rows")
+    defs = block(f"def {name}({params}):", body)
+    if strip == "Generator function":
+        way = sc.pick(["bound-twice", "decorated"])
+        if way == "bound-twice":
+            sc.imports("import os")
+            plain = block(f"def {name}({params}):", [line for line in body if not line.startswith("yield")])
+            sc.define(block(f"if not os.environ.get(\"HEKI_ORACLE_{sc.ns}\"):", plain) + block("else:", defs))
+            return f"{name}({CONTROLS})"
+        deco = sc.name("drains")
+        sc.define(block(f"def {deco}(fn):", block("def inner(*a, **k):", ["return list(fn(*a, **k))"]) + ["return inner"]))
+        sc.define([f"@{deco}"] + defs)
+        return f"{name}({CONTROLS})"
+    if sc.chance(0.5):
+        sc.define(defs)
+        return f"{name}({CONTROLS})"
+    klass = sc.name("Rows")
+    sc.define(block(f"class {klass}:", block(f"def rows(self, {params}):", body)))
+    sc.dispatch = (klass, [klass])
+    return f"obj.rows({CONTROLS})"
+
+
+def _generator_dispatch(sc, body):
+    """A method call whose implementations are not all generator functions: a subclass, a
+    union member, or a protocol's implementer with a plain method."""
+    params = sc.params
+    klass, other = sc.name("Impl"), sc.name("Other")
+    plain = [line for line in body if not line.startswith("yield")]
+    way = sc.pick(["subclass", "union", "protocol"])
+    sc.define(block(f"class {klass}:", block(f"def run(self, {params}):", body)))
+    base = f"({klass})" if way == "subclass" else ""
+    sc.define(block(f"class {other}{base}:", block(f"def run(self, {params}):", plain)))
+    receiver = klass if way == "subclass" else f"{klass} | {other}"
+    if way == "protocol":
+        receiver = sc.name("Runner")
+        sc.imports("from typing import Protocol")
+        sc.define(block(f"class {receiver}(Protocol):", block(f"def run(self, {params}):", ["..."])))
+    sc.dispatch = (receiver, [klass, other])
+    return f"obj.run({CONTROLS})"
+
+
+def _unread_generator(sc, call):
+    """The call's generator, never iterated: a statement, or read only by a truth test."""
+    return sc.pick(
+        [
+            [call],
+            block(f"if not {call}:", ["return 1"]),
+            [f"bool({call})"],
+            block(f"while {call}:", ["break"]),
+            [f"assert {call}"],
+        ]
+    )
+
+
+def _iterated_generator(sc, call):
+    """The call's generator, iterated: by a loop, a builtin, `next()` on a name, the caller
+    (returned), or a delegating generator."""
+    return sc.pick(
+        [
+            block(f"for _ in {call}:", ["pass"]),
+            [f"list({call})"],
+            [f"rows = {call}", "next(rows, None)"],
+            [f"return {call}"],
+            [f"yield from {call}"],
+        ]
+    )
+
+
+def eff116(sc, strip):
+    sc.dispatch = None
+    log = f"LOG_{sc.ns}"
+    sc.define([f"{log} = []"])
+    body = [f"{log}.append(n)", "yield flag"]
+    if strip == "Every implementation":
+        call = _generator_dispatch(sc, body)
+    else:
+        call = _generator_function(sc, strip, body)
+    uses = _iterated_generator(sc, call) if strip == "Never iterated" else _unread_generator(sc, call)
+    entry = sc.name("handle")
+    signature = sc.params
+    if sc.dispatch:
+        signature = f"obj: {sc.dispatch[0]}, {sc.params}"
+    sc.define(block(f"def {entry}({signature}):", [*uses, "return None"]))
+    _add_inputs(sc, entry, lambda k: [])
+
+
 BUILDERS = {
     "EFF101": eff101,
     "EFF103": eff103,
+    "EFF109": eff109,
+    "EFF116": eff116,
     "DATA101": data101,
     "MUT101": mut101,
     "MUT110": mut110,
@@ -1070,6 +1273,8 @@ BUILDERS = {
 STRIPS = {
     "EFF101": ["Every return", "Every implementation", "Waits"],
     "EFF103": ["Origin", "Every iteration", "Every return", "Every implementation", "Sends"],
+    "EFF109": ["Non-reentrant", "Held", "Same lock", "Every implementation", "Every return"],
+    "EFF116": ["Generator function", "Every implementation", "Never iterated"],
     "DATA101": ["Loop-carried on every path", "Every iteration", "Origin", "Reallocates"],
     "MUT101": [
         "Cached property",

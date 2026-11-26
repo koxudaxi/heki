@@ -9,23 +9,29 @@ Every event carries:
 
 - `api`: the catalog symbol of the call (`time.sleep`, `sqlite3.Cursor.execute`);
 - `kind`: `sleep`, `net`, `subprocess`, `db_stmt` (a statement sent to a database), `db_other`
-  (a database call that sends no statement), `thread` (a wait on another thread), or `realloc`
-  (a call that copies its inputs into a new array or frame);
+  (a database call that sends no statement), `thread` (a wait on another thread), `realloc`
+  (a call that copies its inputs into a new array or frame), or `lock` (a `threading.Lock` or
+  `asyncio.Lock` taken, given back, or waited for);
 - `waits`: whether this call waited on the calling thread for input or output as `EFF101` means
   it (a nonzero sleep, the network, a child process, a database file); a wait on another thread
   is not such a wait;
-- `detail`: the argument that decided `waits`, for the report;
+- `detail`: the argument that decided `waits`, for the report; for a lock, `[identity of the
+  lock, what happened]` (`taken`, `released`, `busy`: a non-blocking or timed attempt that failed,
+  or `self`: a blocking attempt on a lock the run holds);
 - `inputs` / `output`: the arrays or frames a reallocation read and the one it returned.
 """
 
 from __future__ import annotations
 
+import _thread
+import asyncio as _asyncio
 import ipaddress
 import queue as _queue
 import socket as _socket
 import sqlite3 as _sqlite3
 import subprocess as _subprocess
 import sys
+import threading as _threading
 import time as _time
 import types
 import urllib.request as _urllib_request
@@ -384,6 +390,72 @@ class FakeQueue(_queue.Queue):
 
 
 # ---------------------------------------------------------------------------------------------
+# threading.Lock and asyncio.Lock: the runs have one thread and no event loop, so a lock that is
+# held is held by the thread or task asking for it. A blocking attempt on it waits for itself
+# (assumption R3: the locks are not reentrant): a thread waits for a short timeout, a task
+# cannot wait without a loop; then the attempt raises `WaitsForItself` instead of blocking the
+# run forever.
+# ---------------------------------------------------------------------------------------------
+LOCK_WAIT = 0.05
+
+
+class WaitsForItself(BaseException):
+    """A blocking attempt on a lock the run holds (`EFF109`'s claim). A `BaseException`, so that
+    the program's handlers of `Exception` do not take it for one of its own."""
+
+
+def _lock_event(api, lock, what):
+    _record(api, "lock", False, [id(lock), what])
+
+
+class FakeLock:
+    __slots__ = ("_lock", "__weakref__")
+
+    def __init__(self):
+        self._lock = _thread.allocate_lock()
+
+    def acquire(self, blocking=True, timeout=-1):
+        if self._lock.acquire(False):
+            _lock_event("threading.Lock.acquire", self, "taken")
+            return True
+        if not blocking or timeout >= 0:
+            _lock_event("threading.Lock.acquire", self, "busy")
+            return False
+        _lock_event("threading.Lock.acquire", self, "self")
+        if self._lock.acquire(True, LOCK_WAIT):
+            _lock_event("threading.Lock.acquire", self, "taken")
+            return True
+        raise WaitsForItself()
+
+    __enter__ = acquire
+
+    def release(self):
+        self._lock.release()
+        _lock_event("threading.Lock.release", self, "released")
+
+    def __exit__(self, *exc):
+        self.release()
+
+    def locked(self):
+        return self._lock.locked()
+
+
+class FakeAsyncLock(_asyncio.Lock):
+    async def acquire(self):
+        if self.locked():
+            _lock_event("asyncio.Lock.acquire", self, "self")
+            raise WaitsForItself()
+        # Free: the base class takes it without a loop.
+        await super().acquire()
+        _lock_event("asyncio.Lock.acquire", self, "taken")
+        return True
+
+    def release(self):
+        super().release()
+        _lock_event("asyncio.Lock.release", self, "released")
+
+
+# ---------------------------------------------------------------------------------------------
 # numpy and pandas (modules of their own): arrays and frames as plain lists of values
 # ---------------------------------------------------------------------------------------------
 class FakeArray:
@@ -567,6 +639,8 @@ def install(recorder):
     _urllib_request.urlopen = fake_urlopen
     _sqlite3.connect = fake_sqlite_connect
     _queue.Queue = FakeQueue
+    _threading.Lock = FakeLock
+    _asyncio.Lock = FakeAsyncLock
     requests, exceptions = _requests_module()
     sys.modules["requests"] = requests
     sys.modules["requests.exceptions"] = exceptions
