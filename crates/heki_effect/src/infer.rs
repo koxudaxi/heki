@@ -32,7 +32,7 @@ use crate::invokes;
 use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
-use crate::resolver::{self, Callee, CopyMade, ProjectDecls, TypeCtx, Val};
+use crate::resolver::{self, Callee, CopyMade, LocalNames, ProjectDecls, TypeCtx, Val};
 use crate::types::{Added, Args, Change, Container, Elem, Obj, Operands, Ty};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, Sparse, fixpoint};
@@ -1544,10 +1544,10 @@ impl<'e, 'a> Engine<'e, 'a> {
                 entry: vec![None; f.blocks.len()],
             });
         }
-        let imports = if f.local_annotations.is_empty() {
-            Vec::new()
+        let locals = if f.local_annotations.is_empty() {
+            LocalNames::default()
         } else {
-            cx.local_imports(f)
+            cx.local_names(f)
         };
         for ann in f
             .local_annotations
@@ -1556,7 +1556,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         {
             if let Some(t) = cx
                 .module
-                .resolve_annotation_ty_in(&ann.annotation, &imports)
+                .resolve_annotation_ty_in(&ann.annotation, &locals)
                 .and_then(|t| cx.project.declared_ty(&t))
                 .and_then(|t| t.bind_self(self.self_ty.as_ref()))
             {

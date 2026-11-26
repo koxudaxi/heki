@@ -412,3 +412,184 @@ fn a_function_local_import_types_an_annotation_only_when_it_is_the_one_binding()
         []
     );
 }
+
+/// A name the module or the function binds is that binding, not the builtin of the same name:
+/// an object heki does not know gives no class. `IOError` and `EnvironmentError` are no class
+/// heki types.
+const SHADOWED_BUILTIN: &str = r#"def make_error_class() -> type:
+    return type("Error", (Exception,), {})
+
+
+ValueError = make_error_class()
+
+
+def shadowed_by_the_module(error: ValueError) -> None:
+    error.__dict__["__notes__"] = []  # unresolved
+
+
+def shadowed_by_the_function(value) -> None:
+    KeyError = make_error_class()
+    error: KeyError = value
+    error.__dict__["__notes__"] = []  # unresolved
+
+
+def io_error(error: IOError) -> None:
+    error.__dict__["__notes__"] = []  # unresolved
+
+
+def environment_error(error: EnvironmentError) -> None:
+    error.__dict__["__notes__"] = []  # unresolved
+
+
+def not_shadowed(error: TypeError) -> None:
+    error.__dict__["__notes__"] = []
+"#;
+
+#[test]
+fn a_binding_of_the_module_or_the_function_shadows_a_builtin_class() {
+    check_marks("shadowed_builtin", &[("pkg/shadowed.py", SHADOWED_BUILTIN)]);
+}
+
+/// A project class named `Optional`, in `pkg/wrappers.py`, whose `work` blocks.
+const WRAPPERS: &str = "import time\nfrom typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Optional(Generic[T]):\n    def work(self) -> None:\n        time.sleep(1)\n";
+
+/// An annotation unwraps `Optional[...]` only when the name reads `typing.Optional`: a project
+/// class of that name, imported by the function or the module, is the receiver's class.
+const WRAPPER_NAMES: &str = r#"from typing import Optional as Maybe
+
+from pkg.quiet import Worker
+from pkg.wrappers import Optional
+
+
+async def imported_by_the_function(value):
+    from pkg.wrappers import Optional
+
+    worker: Optional[Worker] = value
+    worker.work()
+
+
+async def imported_by_the_module(value):
+    worker: Optional[Worker] = value
+    worker.work()
+
+
+async def typing_under_another_name(value):
+    from pkg.blocking import Worker
+
+    worker: Maybe[Worker] = value
+    worker.work()
+
+
+async def typing_imported_by_the_function(value):
+    from typing import Optional
+
+    from pkg.quiet import Worker
+
+    worker: Optional[Worker] = value
+    worker.work()
+"#;
+
+#[test]
+fn an_annotation_unwraps_a_wrapper_only_when_it_names_the_typing_object() {
+    let p = "pkg/wrapper_names.py";
+    assert_eq!(
+        blocking_reports(
+            "wrapper_names",
+            &[("pkg/wrappers.py", WRAPPERS), (p, WRAPPER_NAMES)]
+        ),
+        [(p.to_owned(), 11), (p.to_owned(), 16), (p.to_owned(), 23)]
+    );
+}
+
+/// The result of `Callable[..., T]` is read in the function's scope: a function-local import of
+/// the name shadows the module's alias that may be `None`.
+const CALLABLE_RESULT: &str = r#"from typing import Callable, Optional
+
+from pkg.quiet import Worker
+
+Maybe = Optional[Worker]
+
+
+async def local_import_of_the_result(make):
+    from pkg.blocking import Worker as Maybe
+
+    factory: Callable[[], Maybe] = make
+    factory().work()
+
+
+async def the_module_alias(make):
+    factory: Callable[[], Maybe] = make
+    factory().work()
+"#;
+
+/// An import in a `finally` body, which is lowered once per way out of the `try`, is one binding.
+const FINALLY_IMPORT: &str = r#"async def run(value, step):
+    try:
+        step()
+    finally:
+        from pkg.blocking import Worker
+
+    worker: Worker = value
+    worker.work()
+"#;
+
+/// A name the function binds itself, other than by one import, names no class, though the
+/// module imports it.
+const LOCAL_ASSIGNMENT: &str = r#"from pkg.blocking import Worker
+
+
+async def rebound(value, other):
+    Worker = other
+    worker: Worker = value
+    worker.work()
+
+
+def outer(value, other):
+    Worker = other
+
+    async def rebound_nonlocal():
+        nonlocal Worker
+        Worker = other
+        worker: Worker = value
+        worker.work()
+
+    return rebound_nonlocal
+
+
+async def a_wrapper_name_bound_otherwise(value, wrap):
+    Optional = wrap
+    worker: Optional[Worker] = value
+    worker.work()
+
+
+async def not_rebound(value):
+    worker: Worker = value
+    worker.work()
+"#;
+
+#[test]
+fn a_callable_result_reads_the_function_scope_first() {
+    assert_eq!(
+        blocking_reports("callable_result", &[("pkg/callable.py", CALLABLE_RESULT)]),
+        [("pkg/callable.py".to_owned(), 12)]
+    );
+}
+
+#[test]
+fn an_import_in_a_finally_body_is_one_binding() {
+    assert_eq!(
+        blocking_reports(
+            "finally_import",
+            &[("pkg/finally_import.py", FINALLY_IMPORT)]
+        ),
+        [("pkg/finally_import.py".to_owned(), 8)]
+    );
+}
+
+#[test]
+fn a_local_binding_other_than_one_import_shadows_the_module_import() {
+    assert_eq!(
+        blocking_reports("local_assignment", &[("pkg/assigned.py", LOCAL_ASSIGNMENT)]),
+        [("pkg/assigned.py".to_owned(), 30)]
+    );
+}

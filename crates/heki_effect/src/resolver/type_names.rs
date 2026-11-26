@@ -4,7 +4,7 @@
 //! annotation does: the value of an alias, the bound of a type variable, and the type
 //! `typing.cast` names.
 
-use super::{ModuleDecls, unquote};
+use super::{LocalNames, ModuleDecls, unquote};
 use crate::ModuleInput;
 use crate::types::Ty;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -153,7 +153,7 @@ fn type_var_type(shape: &FnShape<'_>, decls: &ModuleDecls, value: VarId) -> Opti
         _ => return None,
     };
     let parts: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let ty = decls.union_annotation(&parts, &[])?;
+    let ty = decls.union_annotation(&parts, &LocalNames::default())?;
     Some((ty, parts.iter().any(|p| decls.admits_none(p))))
 }
 
