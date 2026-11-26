@@ -816,8 +816,10 @@ a builder's result as its receiver (`client.with_options(...)`, an instance of a
 included), and `"C[Self]"` types a result `C` whose items are instances of the receiver's class
 (`Path.iterdir()`, `Path.glob()`). The operators run the special methods the same rows type:
 `path / "a"` is `path.__truediv__("a")`, and `"a" / path`, a `str` having no `__truediv__`, is
-`path.__rtruediv__("a")`; a method a project class defines, and an operand of no known class,
-leave the result untyped. A call that cannot be resolved is not followed (`unknown_calls`); an external function
+`path.__rtruediv__("a")`. `path / x` is typed only when `x` is a `str` or has the same catalogued
+reflected method (`NotImplemented` hands the operation to `x.__rtruediv__`), and `path /= x` only
+when no project class binds `__itruediv__`; a method a project class defines, and an operand of no
+known class, leave the result untyped. A call that cannot be resolved is not followed (`unknown_calls`); an external function
 that Layer 2 does not list has no effect.
 
 Reading an attribute on an instance whose MRO declares no type for it takes the class an

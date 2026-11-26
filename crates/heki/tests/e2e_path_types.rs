@@ -144,6 +144,27 @@ def home_exists() -> bool:
 
 def chained(path: Path) -> bool:
     return (path.parent / "a").with_suffix(".py").exists()
+
+
+def right_str(path: Path, name: str) -> bool:
+    return (path / name).exists()
+
+
+def right_path(path: Path, other: Path) -> bool:
+    return (path / other).exists()
+
+
+class Project(Path):
+    pass
+
+
+def right_project_path(path: Path, other: Project) -> bool:
+    return (path / other).exists()
+
+
+def augmented_div_subclass(path: Project) -> bool:
+    path /= "a"
+    return path.exists()
 "#,
     );
     assert_eq!(
@@ -151,6 +172,7 @@ def chained(path: Path) -> bool:
         [
             "absolute_exists",
             "augmented_div",
+            "augmented_div_subclass",
             "chained",
             "control_open",
             "cwd_exists",
@@ -162,6 +184,9 @@ def chained(path: Path) -> bool:
             "parent_of_parent",
             "reflected_div",
             "relative_exists",
+            "right_path",
+            "right_project_path",
+            "right_str",
             "walrus_joinpath_open",
             "with_name_exists",
             "with_stem_exists",
@@ -258,6 +283,56 @@ def untyped_list(items: list) -> bool:
 
 def name_of(path: Path) -> bool:
     return path.name.exists() or path.stem.exists() or path.suffix.exists()
+"#,
+    );
+    assert_eq!(names(&reports), Vec::<&str>::new(), "{reports:?}");
+}
+
+/// The right operand can take the operation from the path (`Path.__truediv__` gives
+/// `NotImplemented` for it and its `__rtruediv__` runs), and a project class can define the
+/// in-place operator a `/=` runs: the result is then not known to be a path.
+#[test]
+fn an_operand_that_may_take_the_operator_over_leaves_the_result_unknown() {
+    let reports = reported(
+        CONFIG,
+        r#"from pathlib import Path
+
+
+class Pure:
+    def exists(self) -> bool:
+        return True
+
+
+class Other:
+    def __rtruediv__(self, left):
+        return Pure()
+
+
+class Rival(Path):
+    def __rtruediv__(self, left):
+        return Pure()
+
+
+class Inplace(Path):
+    def __itruediv__(self, other):
+        return Pure()
+
+
+def right_project(path: Path, other: Other) -> bool:
+    return (path / other).exists()
+
+
+def right_untyped(path: Path, other) -> bool:
+    return (path / other).exists()
+
+
+def right_overriding_path(path: Path, other: Rival) -> bool:
+    return (path / other).exists()
+
+
+def augmented_override(path: Inplace) -> bool:
+    path /= "a"
+    return path.exists()
 "#,
     );
     assert_eq!(names(&reports), Vec::<&str>::new(), "{reports:?}");

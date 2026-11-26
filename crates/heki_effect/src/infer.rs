@@ -1687,6 +1687,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                         let added = Added::of(&Change::Operator(*op, *rhs), self);
                         Some(t.with_added(&added))
                     }
+                    // A project class defining the in-place method runs it, and what it returns
+                    // is not known.
+                    Some(Ty::Inst(o)) if self.defines_in_place(o, *op) => None,
                     // Without an in-place method (`path /= "a"`) the plain operator runs.
                     other => return self.operator(*op, other, *rhs),
                 },
@@ -2506,11 +2509,24 @@ impl<'e, 'a> Engine<'e, 'a> {
         })
     }
 
+    /// Whether a project class binds the in-place method `x op= y` calls on an instance of
+    /// `o`'s class.
+    fn defines_in_place(&self, o: &Obj, op: BinOpKind) -> bool {
+        let cx = self.cx;
+        let targets = cx
+            .project
+            .method_targets(&o.class, op.in_place_method(), false, cx.kb);
+        matches!(targets, Callee::Project(..) | Callee::TooMany)
+    }
+
     /// What the operator `op` gives on the operands `lhs` and `rhs`, when the catalog types the
     /// special method that runs: the left operand's (`path / "a"`), else, the left operand
     /// being a `str`, which has none of them, the right operand's reflected one (`"a" / path`).
-    /// A method a project class defines is not followed, and an operand of no known class
-    /// leaves the result untyped, whatever the other operand is.
+    /// The left operand's method gives `NotImplemented` for an operand it does not handle, and
+    /// the right operand's reflected method then runs: the left's result is typed only when the
+    /// right operand is a `str` or has the catalogued reflected method itself. A method a
+    /// project class defines is not followed, and an operand of no known class leaves the result
+    /// untyped, whatever the other operand is.
     fn operator(&self, op: BinOpKind, lhs: Option<&Ty>, rhs: VarId) -> Step {
         let Some(Ty::Inst(left)) = lhs else {
             return Ok(None);
@@ -2521,7 +2537,17 @@ impl<'e, 'a> Engine<'e, 'a> {
             matches!(&targets, Callee::External(symbol) if cx.catalog(symbol).is_some())
         };
         if catalogued(left, op.method()) {
-            return Ok(self.member_call(&Ty::Inst(left.clone()), op.method(), Passed::default()));
+            let handled = match self.need(rhs)? {
+                Some(Ty::Inst(o)) => {
+                    o.class == "builtins.str" || catalogued(o, op.reflected_method())
+                }
+                _ => false,
+            };
+            return Ok(if handled {
+                self.member_call(&Ty::Inst(left.clone()), op.method(), Passed::default())
+            } else {
+                None
+            });
         }
         if left.class != "builtins.str" {
             return Ok(None);
