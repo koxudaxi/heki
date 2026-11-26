@@ -118,6 +118,7 @@ fail = true
 # .github/CODEOWNERS
 /heki.toml           @your-org/maintainers
 /heki-baseline.toml  @your-org/maintainers
+/.github/CODEOWNERS  @your-org/maintainers
 ```
 
 - heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds at the
@@ -133,6 +134,8 @@ fail = true
 
 [Contracts](configuration.md#contracts) has every key, and
 [Coding Agents](coding-agents.md#architecture-rules-with-agents) the instructions for the agent.
+[The whole setup, end to end](coding-agents.md#the-whole-setup-end-to-end) adds the GitHub Actions
+workflow that compares a pull request with its base branch, the Stop hook, and the skill.
 
 ## Ratchet baselines
 

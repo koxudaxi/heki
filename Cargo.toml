@@ -21,7 +21,7 @@ rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/koxudaxi/heki"
 homepage = "https://github.com/koxudaxi/heki"
-description = "Experimental static checker for Python that tracks side effects and mutations across function calls"
+description = "Static checker for Python that tracks side effects and mutations across function calls"
 
 [workspace.dependencies]
 # Internal crates (crates.io needs a version next to each path; it must equal
