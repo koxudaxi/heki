@@ -2,6 +2,7 @@
 
 mod declared;
 mod defaults;
+pub mod glob;
 pub mod problem;
 mod schema;
 mod stdlib;
