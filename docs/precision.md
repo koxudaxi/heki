@@ -241,6 +241,10 @@ count, which keeps a subset of the reports their census and holdout run checked.
 
 ## Harm of the exact reports
 
+The table below is why the size-dependent `OPT` rewrites are opt-in: almost none of their exact
+reports were of real harm. The bug rules (`EFF`, `MUT`) are a different kind. A report of one names
+a defect, and [Measurements](#measurements) gives the real-harm share of each in its own row.
+
 The certification runs of the `OPT` rules classed the harm of their exact reports. The census
 reused the classes of an earlier pre-check, which classed a sample, so some census reports have
 none.

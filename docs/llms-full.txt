@@ -893,7 +893,9 @@ Source: https://heki.koxudaxi.dev/installation/
 # Installation
 
 heki is a single executable: its Python package ships only that executable and installs no
-Python dependencies into your environment.
+Python dependencies into your environment. It is published as prebuilt wheels on PyPI for the
+platforms listed below, so `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
+toolchain and compile nothing.
 
 ## With uv, pipx, or pip
 
@@ -930,16 +932,6 @@ Wheels are published for these platforms:
 | macOS | Apple silicon, Intel |
 | Windows | x86-64 |
 
-## From source
-
-heki needs Rust 1.99 or newer:
-
-```console
-$ git clone https://github.com/koxudaxi/heki
-$ cd heki
-$ cargo install --path crates/heki
-```
-
 ## Check the installation
 
 ```console
@@ -954,6 +946,20 @@ $ heki rule --all
 - The version of the checked code comes from
   [`target-version`](https://heki.koxudaxi.dev/configuration/#top-level-settings), or from `requires-python`; see
   [Scope](https://heki.koxudaxi.dev/scope/#the-target-python-version) for what it changes.
+
+## From source
+
+??? note "Only for a platform without a wheel, or for development on heki"
+
+    heki needs Rust 1.99 or newer:
+
+    ```console
+    $ git clone https://github.com/koxudaxi/heki
+    $ cd heki
+    $ cargo install --path crates/heki
+    ```
+
+    `pip install` of the source distribution builds the same executable with maturin.
 
 
 ---
@@ -1339,6 +1345,7 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 - [Configuration: contracts](https://heki.koxudaxi.dev/configuration/#contracts) lists every key of the five contracts.
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adoption recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have contracts to copy for a web service and a layered application.
 - [Coding agents](https://heki.koxudaxi.dev/coding-agents/) shows how the same contracts keep an agent out of the files it must not change.
 - `heki inspect app.cart.remove` (experimental) shows what one function changes, keeps, and returns.
 
@@ -1491,7 +1498,7 @@ The run exits with code 1. When the new effect is intended, refresh the snapshot
 ## 👉 Next steps
 
 - [Configuration: effect-boundaries](https://heki.koxudaxi.dev/configuration/#effect-boundaries) lists every key and `forbid` token.
-- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](https://heki.koxudaxi.dev/adoption/#an-async-web-or-database-service) to copy.
 - `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental).
 - [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) covers the contracts about who may change, read, or call a thing.
 
@@ -1645,7 +1652,7 @@ The import is in `total`, so it runs when `total` runs, and loading `app.domain.
 
 - [Configuration: import-boundaries](https://heki.koxudaxi.dev/configuration/#import-boundaries) lists every key of the contract.
 - [Configuration: imports](https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports) lists `cycle-edges` and `module-distributions`.
-- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline, and has a [domain boundary with a read-only settings contract](https://heki.koxudaxi.dev/adoption/#a-layered-application) to copy.
 - [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) and [Async and Execution Effects](https://heki.koxudaxi.dev/effects/) cover the other contracts.
 
 
@@ -4461,6 +4468,57 @@ Their reports can be wrong about the code: they are printed, and fail the run on
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
+Two contracts keep the rest of the service in line: handlers that never block, and database
+writes that only the repository layer makes. `fail = true` makes their reports fail the run.
+
+```toml
+# heki.toml
+[[effect-boundaries]]
+name = "handlers-do-not-block"
+scopes = ["app.web.*"]
+forbid = ["blocking"]
+message = "await an async client, or move the call to app.repo and run it in a thread"
+fail = true
+
+[[call-owners]]
+name = "db-writes-in-repo"
+targets = ["app.db.Session.add", "app.db.Session.commit"]
+allowed-callers = ["app.repo.*"]
+message = "write through a function of app.repo"
+fail = true
+```
+
+The first reports a `time.sleep` two calls below an `async def` in `app.web` (`EFF201`). The
+second reports a handler that calls `session.add` or `session.commit` itself (`MUT204`). Use
+`write-owners` instead when the rule is about a field, not a call:
+[State Ownership](https://heki.koxudaxi.dev/ownership/#which-contract-do-i-need).
+
+### A layered application
+
+Keep the domain free of the web and infrastructure layers, and keep a shared settings object
+from being changed in place:
+
+```toml
+# heki.toml
+[[import-boundaries]]   # experimental
+name = "domain-is-a-leaf"
+importers = ["app.domain", "app.domain.*"]
+forbidden-imports = ["app.web", "app.web.*", "app.infra", "app.infra.*"]
+message = "pass what the domain needs in as an argument"
+fail = true
+
+[[readonly-returns]]
+name = "shared-settings"
+producers = ["app.settings.get_settings"]
+deep = true
+fail = true
+```
+
+A module of `app.domain` that imports `app.infra` is reported as `IMP201`, and a view that
+assigns to `get_settings().debug` or appends to `get_settings().hosts` as `MUT202`. See
+[Imports](https://heki.koxudaxi.dev/imports/#architecture-import-boundaries) and
+[State Ownership](https://heki.koxudaxi.dev/ownership/#which-contract-do-i-need).
+
 ### Walls for a team or a coding agent
 
 Declare the architecture as contracts, make their reports fail the run with `fail = true`, and give
@@ -4504,6 +4562,10 @@ fail = true
   that wants that can still set. Record today's findings in the baseline first
   (`uvx heki==0.9.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
+- A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
+  review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
+  its base and compare them ([Auditing inline suppressions](https://heki.koxudaxi.dev/adoption/#auditing-inline-suppressions)).
+  `CODEOWNERS` covers the contract and baseline files, and this comparison covers the comments.
 - For Claude Code, add the [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code): it runs
   `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
   and sends a failing report back to it.
@@ -4683,14 +4745,10 @@ repos:
       - id: heki
 ```
 
-[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
-there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
-moves `rev` to the latest release.
-
-To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
-`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
-(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
-first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its prebuilt PyPI
+wheel (the [platforms](https://heki.koxudaxi.dev/installation/) heki publishes wheels for), so it compiles nothing and needs
+no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate` moves `rev` to the
+latest release.
 
 A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
@@ -4744,6 +4802,14 @@ report of its key, so a run with `--touched` compares all of them and shows ever
 grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
 the commit added the report. It judges the stale entries of the touched files and of the reports
 that touch them only: a stale entry elsewhere is left to a run over the whole project.
+
+??? note "Building the hook from source"
+
+    Only a platform without a wheel, or a development version of heki, needs this. Point `repo` at
+    `https://github.com/koxudaxi/heki` with a release `rev`. pre-commit then installs the repository
+    as a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
+    `PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
+    pre-commit keeps the installed hook for later runs.
 
 ## Continuous integration
 
@@ -4871,6 +4937,17 @@ The configuration, the baseline, and the CI files that decide this (`pyproject.t
 `heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
 the audit file shows what suppressions hide, and a weakened configuration or baseline is the
 code owners' to review.
+
+## Stability on the way to 1.0
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that
+run by default, the format of the Ratchet baseline, the contract tables `write-owners`,
+`read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with
+`fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A
+change to one of them is listed under "Breaking changes" in the release notes. The experimental
+features can change in any release: `heki recommend`, `heki inspect`, `heki skill`,
+`--generate-prompt`, and the rules marked experimental
+([Experimental Features](https://heki.koxudaxi.dev/experimental/) has the list).
 
 ## Rolling out rules
 
@@ -5975,6 +6052,10 @@ count, which keeps a subset of the reports their census and holdout run checked.
 
 ## Harm of the exact reports
 
+The table below is why the size-dependent `OPT` rewrites are opt-in: almost none of their exact
+reports were of real harm. The bug rules (`EFF`, `MUT`) are a different kind. A report of one names
+a defect, and [Measurements](https://heki.koxudaxi.dev/precision/#measurements) gives the real-harm share of each in its own row.
+
 The certification runs of the `OPT` rules classed the harm of their exact reports. The census
 reused the classes of an earlier pre-check, which classed a sample, so some census reports have
 none.
@@ -6052,6 +6133,8 @@ Source: https://heki.koxudaxi.dev/experimental/
 Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. A feature leaves this page when it becomes stable.
 
 An experimental rule is never enabled by default: it runs only when `select` or `extend-select` names its code or name, and `heki check` then reports it like any other rule. `heki rule <CODE>` and the rule's page say that it is experimental.
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that run by default, the format of the Ratchet baseline, the contract tables `write-owners`, `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with `fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A change to one of them is listed under "Breaking changes" in the release notes. See [Adopting heki](https://heki.koxudaxi.dev/adoption/#stability-on-the-way-to-10).
 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
