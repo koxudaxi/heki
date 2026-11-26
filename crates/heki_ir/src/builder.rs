@@ -478,6 +478,7 @@ impl<'a> ModuleLowerer<'a> {
             starred: Vec::new(),
             pattern_subjects: Vec::new(),
             str_heads: Vec::new(),
+            finally_bodies: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
             loop_carried: Vec::new(),
@@ -786,6 +787,8 @@ struct FnBuilder<'m, 'a> {
     class_bases: Vec<(VarId, u32)>,
     /// `IrFunction::str_heads`.
     str_heads: Vec<(VarId, String)>,
+    /// `IrFunction::finally_bodies`.
+    finally_bodies: Vec<Span>,
     /// The statement uses of the function (`ModuleIr::statement_uses`).
     statement_uses: Vec<(VarId, Span)>,
     /// The annotations the function evaluates (`ModuleIr::annotations`).
@@ -886,6 +889,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             pattern_subjects: Vec::new(),
             class_bases: Vec::new(),
             str_heads: Vec::new(),
+            finally_bodies: Vec::new(),
             statement_uses: Vec::new(),
             annotations: Vec::new(),
             type_values: Vec::new(),
@@ -2531,6 +2535,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let dispatch_bb = has_handlers.then(|| self.new_block(false));
         let after_bb = self.new_block(false);
         let normal_next = normal_finally_bb.unwrap_or(after_bb);
+        if let (Some(first), Some(last)) = (t.finalbody.first(), t.finalbody.last()) {
+            self.finally_bodies.push(Span {
+                start: Span::from(first.range()).start,
+                end: Span::from(last.range()).end,
+            });
+        }
         if has_finally {
             self.unwind.push(Unwind::Finally {
                 body: &t.finalbody,
@@ -4099,6 +4109,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.starred.clear();
         self.class_bases.clear();
         self.str_heads.clear();
+        self.finally_bodies.clear();
         self.statement_uses.clear();
         self.annotations.clear();
         self.type_values.clear();
@@ -4202,6 +4213,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             starred: self.starred,
             pattern_subjects: self.pattern_subjects,
             str_heads: self.str_heads,
+            finally_bodies: self.finally_bodies,
             blocks: self.blocks,
             loops: self.finished_loops,
             loop_carried,

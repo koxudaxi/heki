@@ -4,8 +4,8 @@
 //!   `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`, `MUT120`,
 //!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`, `MUT208`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
-//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`,
-//!   `DATA101`)
+//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF118`,
+//!   `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
@@ -667,6 +667,19 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "State that another writer changes holding a thread lock (`threading.Lock`, `RLock`, `Condition`, `Semaphore`), changed here holding none, where a thread heki resolves can run one of the writes: an update can be lost.",
         doc: include_str!("../rule-docs/EFF117.md"),
+    },
+    RuleMeta {
+        code: "EFF118",
+        slug: "unshielded-cleanup-checkpoint",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        unsafe_fix: false,
+        auto_fix_default: false,
+        summary: "A cleanup (a `finally` body, an `except` taking the cancellation, an `__aexit__`) that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way: in a cancelled scope the cleanup stops there.",
+        doc: include_str!("../rule-docs/EFF118.md"),
     },
     RuleMeta {
         code: "EFF201",
@@ -1381,6 +1394,7 @@ pub fn check_project(
             if let Some(view) = &guarded {
                 eff_rules::eff117(&cx, view, u, &mut d);
             }
+            eff_rules::eff118(&cx, u, &mut d);
             mut_rules::mut106(&cx, u, &mut d);
             mut_rules::mut202(&cx, u, &readonly, &mut d);
             mut_rules::mut119(&cx, u, &mut d);

@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "EFF118", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -1030,6 +1030,13 @@ const LOCKED_LIST_CLEAR: &str =
     "from pkg import locked_list\n\n\ndef clear() -> None:\n    locked_list.seen.clear()\n";
 const LOCKED_LIST_RUN: &str =
     "from pkg.locked_list import add\n\n\ndef run(line: str) -> None:\n    add(line)\n";
+
+// A `finally` body awaiting a helper in another module that sleeps (`EFF118`), and a third module
+// calling the function holding the cleanup.
+const CLEANUP_HELPERS: &str =
+    "import anyio\n\n\nasync def stop() -> None:\n    await anyio.sleep(1)\n";
+const CLEANUP_USE: &str = "from pkg.cleanup_helpers import stop\n\n\nasync def close() -> None:\n    try:\n        pass\n    finally:\n        await stop()\n        print(\"stopped\")\n";
+const CLEANUP_CALLER: &str = "import anyio\n\nfrom pkg.cleanup_use import close\n\n\nasync def shutdown() -> None:\n    with anyio.CancelScope(shield=True):\n        await close()\n";
 
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
@@ -5688,6 +5695,58 @@ fn steps_eff117() -> Vec<Step> {
 /// `EFF116`: whether a call's callees are generator functions comes from their declarations in
 /// other modules, a function's and a method's and its override's, which change between a
 /// generator function and a plain one; a call that may run a plain override is no report.
+/// `EFF118`: whether the `finally` body's await is reported comes from the helper's module, whose
+/// sleep stops or starts being shielded, and from the module calling the function holding the
+/// cleanup, which runs it shielded or not.
+fn steps_eff118() -> Vec<Step> {
+    let shielded_helper = CLEANUP_HELPERS.replace(
+        "    await anyio.sleep(1)\n",
+        "    with anyio.CancelScope(shield=True):\n        await anyio.sleep(1)\n",
+    );
+    let unshielded_caller = CLEANUP_CALLER.replace(
+        "    with anyio.CancelScope(shield=True):\n        await close()\n",
+        "    await close()\n",
+    );
+    vec![
+        Step::new(
+            "a `finally` body awaits a helper in another module that sleeps",
+            vec![
+                Action::Create("pkg/cleanup_helpers.py", CLEANUP_HELPERS.to_owned()),
+                Action::Create("pkg/cleanup_use.py", CLEANUP_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the helper's module shields the sleep",
+            vec![save("pkg/cleanup_helpers.py", &shielded_helper)],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the sleep is unshielded again",
+            vec![save("pkg/cleanup_helpers.py", CLEANUP_HELPERS)],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the only call of the function holding the cleanup runs it shielded",
+            vec![Action::Create(
+                "pkg/cleanup_caller.py",
+                CLEANUP_CALLER.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the call stops shielding it",
+            vec![save("pkg/cleanup_caller.py", &unshielded_caller)],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "it shields it again",
+            vec![save("pkg/cleanup_caller.py", CLEANUP_CALLER)],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+    ]
+}
+
 fn steps_eff116() -> Vec<Step> {
     vec![
         Step::new(
@@ -7630,6 +7689,7 @@ sessions!(editing, Session::start, {
     eff115: steps_eff115,
     eff116: steps_eff116,
     eff117: steps_eff117,
+    eff118: steps_eff118,
     attribute_types: steps_attribute_types,
     builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,

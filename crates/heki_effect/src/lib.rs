@@ -21,6 +21,7 @@ mod blind_spots;
 pub use blind_spots::{Blind, BlindCall, BlindSpotReach, UnresolvedReason};
 pub mod cache_flow;
 mod callgraph;
+pub mod cancellation;
 pub use callgraph::{HopGap, MustExplainer, MustGap, SiteMust};
 pub mod capacity;
 pub mod code_kind;
@@ -2525,6 +2526,10 @@ pub struct CallSite {
     /// them runs).
     #[serde(default, skip_serializing_if = "LockHeld::is_none")]
     pub locks: LockHeld,
+    /// Whether the call runs shielded from the cancellation of the AnyIO or Trio scopes around
+    /// the caller (only computed while `EFF118` runs, [`cancellation::ShieldPoints`]).
+    #[serde(default, skip_serializing_if = "ShieldAt::is_unshielded")]
+    pub shield: ShieldAt,
     /// The targets are every implementation the call can run under R2 and R5: the receiver
     /// is no protocol, every member of a union resolves, and no project subclass's
     /// implementation is missing; for a read that runs property getters, every class the
@@ -2582,6 +2587,28 @@ impl LockHeld {
 
     pub fn thread(self) -> bool {
         matches!(self, Self::Thread | Self::Both)
+    }
+}
+
+/// Whether a point of a function runs shielded from the cancellation of the scopes around it
+/// ([`CallSite::shield`]); ordered so that the stronger of two answers is the greater.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum ShieldAt {
+    /// No cancel scope with a shield around it.
+    #[default]
+    Unshielded,
+    /// A cancel scope around it may shield it or not: its `shield` is no constant, is set on
+    /// the scope, or the scope is made elsewhere.
+    Open,
+    /// A cancel scope made with `shield=True` around it on every path.
+    Shielded,
+}
+
+impl ShieldAt {
+    pub fn is_unshielded(&self) -> bool {
+        *self == Self::Unshielded
     }
 }
 
@@ -2664,8 +2691,13 @@ impl CallSite {
         }
     }
 
-    /// Whether the effect `e` of the callees does not block the caller's thread here.
+    /// Whether the effect `e` of the callees does not reach the caller here: blocking work on a
+    /// worker thread does not block the caller's thread, and a checkpoint reached on another
+    /// thread or under a shield (or a scope that may shield) does not cancel the caller.
     pub fn hides(&self, e: ExecEffectKind) -> bool {
+        if e == ExecEffectKind::Checkpoint {
+            return self.runner == Runner::Worker || !self.shield.is_unshielded();
+        }
         match self.runner {
             Runner::Caller | Runner::PerItem => false,
             Runner::Worker => e.blocks(),
@@ -3205,6 +3237,9 @@ pub struct OptInFacts {
     pub unawaited_handoffs: bool,
     /// [`EffectSummary::guarded`] and [`CallSite::locks`] (`EFF117`).
     pub guarded: bool,
+    /// The cancellation checkpoints awaits reach (`ExecEffectKind::Checkpoint`) and
+    /// [`CallSite::shield`] (`EFF118`).
+    pub checkpoints: bool,
     /// [`OptInTables::fresh_returns`].
     pub fresh_returns: bool,
     /// [`OptInTables::imports`].
@@ -3238,6 +3273,7 @@ impl OptInFacts {
         call_cycles: true,
         unawaited_handoffs: true,
         guarded: true,
+        checkpoints: true,
         fresh_returns: true,
         imports: true,
         only_read: true,

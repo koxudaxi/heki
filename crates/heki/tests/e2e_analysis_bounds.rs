@@ -10,7 +10,8 @@
 //! with many call targets and argument lists, the names offered for contract entries that match
 //! nothing, the
 //! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the values class
+//! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the shields and
+//! re-delivered cancellations `EFF118` follows, the values class
 //! statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
@@ -4900,6 +4901,56 @@ fn guarded_writes_in_one_released_region_take_linear_steps() {
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["C.reset"; n]);
+}
+
+/// A `finally` body of `n` awaits: each helper sleeps, one in two inside a shielded scope of its
+/// own, one in two followed by the re-delivery checkpoint, and the body ends with one.
+fn shielded_cleanups(n: usize) -> Project {
+    let mut lines = vec!["import anyio".to_owned(), String::new()];
+    for i in 0..n {
+        lines.extend([
+            String::new(),
+            format!("async def stop{i}() -> None:"),
+            "    await anyio.sleep(0)".to_owned(),
+        ]);
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "async def close() -> None:",
+            "    try:",
+            "        pass",
+            "    finally:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..n {
+        if i % 2 == 0 {
+            lines.push("        with anyio.CancelScope(shield=True):".to_owned());
+            lines.push(format!("            await stop{i}()"));
+        } else {
+            lines.push(format!("        await stop{i}()"));
+            lines.push("        await anyio.lowlevel.checkpoint()".to_owned());
+        }
+    }
+    lines.push("        await anyio.lowlevel.checkpoint()".to_owned());
+    let p = Project::new(&format!("bounds_shielded_cleanups_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of awaits in one `finally` body, half of them in shielded scopes and half followed
+/// by a re-delivered cancellation: the shields are one dataflow with a bit per scope, and each
+/// re-delivery's walk to the end of the function stops at the first call after it.
+#[test]
+fn shielded_cleanups_take_linear_steps() {
+    let n = 2_000;
+    let found = check_linear(n, shielded_cleanups);
+    let reported = found.iter().filter(|d| d["rule_code"] == "EFF118").count();
+    // Each unshielded helper and each re-delivery something runs after, once per position (the
+    // body is built once per way out); not the last re-delivery.
+    assert_eq!(reported, n);
 }
 
 /// `n` attributes a thread writes holding a lock, each through the next of a chain of `n` names

@@ -6,6 +6,7 @@
 use crate::UnboundCall;
 use crate::blind_spots::{self, Blind, BlindCall, UnresolvedReason};
 use crate::cache_flow::{self, KeptRemovalKind};
+use crate::cancellation;
 use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
@@ -935,6 +936,11 @@ struct Extractor<'a> {
     lock_held: OnceCell<FxHashSet<Position>>,
     /// Where the function certainly holds thread locks (`EFF117`, [`Self::thread_lock_points`]).
     thread_locks: OnceCell<guarded::LockPoints>,
+    /// Where the function runs shielded from cancellation (`EFF118`, [`Self::shield_here`]).
+    shields: OnceCell<cancellation::ShieldPoints>,
+    /// The budget of the walks after the function's re-delivery checkpoints (`EFF118`, its own:
+    /// they never spend the budget of the walks other rules read).
+    redelivery_budget: OnceCell<Budget>,
     /// The blocks acquiring each lock (`locks::BlockTests::common`).
     lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
     /// The tests of state on every path to each block (`EFF109`).
@@ -1381,6 +1387,8 @@ impl<'a> Extractor<'a> {
             lock_blocks: std::collections::BTreeMap::new(),
             lock_held: OnceCell::new(),
             thread_locks: OnceCell::new(),
+            shields: OnceCell::new(),
+            redelivery_budget: OnceCell::new(),
             state_tests: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
@@ -4092,6 +4100,7 @@ impl<'a> Extractor<'a> {
             queues: None,
             state_tests: None,
             locks: crate::LockHeld::None,
+            shield: crate::ShieldAt::Unshielded,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
@@ -5666,13 +5675,21 @@ impl<'a> Extractor<'a> {
             InstKind::MakeIter {
                 iterable, is_async, ..
             } if self.f.var_name(*iterable) != Some(".0") => {
-                self.protocol_call(bb, *iterable, iteration_protocol(*is_async), span)
+                self.protocol_call(bb, *iterable, iteration_protocol(*is_async), false, span)
             }
             InstKind::EnterWith {
                 mgr,
                 is_async: false,
                 ..
-            } => self.protocol_call(bb, *mgr, "__enter__", span),
+            } => self.protocol_call(bb, *mgr, "__enter__", false, span),
+            // Entering an async context manager awaits its `__aenter__` (a lock's acquisition).
+            InstKind::EnterWith {
+                mgr,
+                is_async: true,
+                ..
+            } if self.opt_in.checkpoints => {
+                self.protocol_call(bb, *mgr, "__aenter__", true, span);
+            }
             _ => {}
         }
     }
@@ -5803,7 +5820,7 @@ impl<'a> Extractor<'a> {
                 _ => None,
             });
         if let Some(is_async) = first_is_async {
-            self.protocol_call(bb, iterable, iteration_protocol(is_async), span);
+            self.protocol_call(bb, iterable, iteration_protocol(is_async), false, span);
         }
     }
 
@@ -5811,9 +5828,16 @@ impl<'a> Extractor<'a> {
     /// (`__iter__`, `__aiter__` when a `for` loop, a comprehension, or a consuming call such as
     /// `list(...)` iterates it; `__enter__` when a `with` enters it): the catalog's entry for
     /// it is a call at `span` (`for row in session.query(User):` runs the query,
-    /// `with fsspec.open(path):` opens the file). Project classes' special methods are not
-    /// followed.
-    fn protocol_call(&mut self, bb: BlockId, value: VarId, protocol: &str, span: Span) {
+    /// `with fsspec.open(path):` opens the file; `__aenter__`, awaited, when an `async with`
+    /// enters it). Project classes' special methods are not followed.
+    fn protocol_call(
+        &mut self,
+        bb: BlockId,
+        value: VarId,
+        protocol: &str,
+        is_awaited: bool,
+        span: Span,
+    ) {
         let Some(Val::Inst(class)) = self.val(value) else {
             return;
         };
@@ -5822,7 +5846,7 @@ impl<'a> Extractor<'a> {
         }
         let symbol = format!("{class}.{protocol}");
         if self.cx.catalog(&symbol).is_some() {
-            self.external_call(bb, symbol, Passed::NOTHING, false, span);
+            self.external_call(bb, symbol, Passed::NOTHING, is_awaited, span);
         }
     }
 
@@ -7196,7 +7220,7 @@ impl<'a> Extractor<'a> {
                 );
                 // `list(query)` iterates the query as a `for` loop does.
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
-                    self.protocol_call(bb, iterable, iteration_protocol(false), call.span);
+                    self.protocol_call(bb, iterable, iteration_protocol(false), false, call.span);
                 }
                 self.note_returned_realloc(symbol, call);
                 // A project class without a project `__init__` (a dataclass, a pydantic model),
@@ -7238,6 +7262,7 @@ impl<'a> Extractor<'a> {
                         arguments,
                         state_tests: None,
                         locks: crate::LockHeld::None,
+                        shield: crate::ShieldAt::Unshielded,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
@@ -8082,11 +8107,42 @@ impl<'a> Extractor<'a> {
                         .held_at(self.pos.0, self.pos.1)
                         .is_empty(),
             ),
+            shield: self.shield_here(),
             complete,
             on_every_return,
             made_by: None,
             module_member: None,
         }
+    }
+
+    /// Whether the instruction at [`Self::pos`] runs shielded from cancellation (`EFF118`;
+    /// unshielded while the rule does not run).
+    fn shield_here(&self) -> crate::ShieldAt {
+        if !self.opt_in.checkpoints {
+            return crate::ShieldAt::Unshielded;
+        }
+        self.shields
+            .get_or_init(|| {
+                cancellation::ShieldPoints::of(self.cx, self.shape, &self.types, &self.live)
+            })
+            .at(self.pos.0, self.pos.1)
+    }
+
+    /// Whether an awaited catalog checkpoint `symbol` at [`Self::pos`] lets a cancellation in
+    /// here: only while `EFF118` runs, outside a shield, and, for one doing no work of its own,
+    /// where something runs after it ([`cancellation::REDELIVERIES`]).
+    fn checkpoint_counts(&self, symbol: &str, is_awaited: bool) -> bool {
+        is_awaited
+            && self.opt_in.checkpoints
+            && self.shield_here().is_unshielded()
+            && !(cancellation::REDELIVERIES.contains(&symbol)
+                && cancellation::runs_nothing_after(
+                    self.shape,
+                    self.redelivery_budget
+                        .get_or_init(|| Budget::of_function("cancellation::redelivery", self.f)),
+                    self.pos.0,
+                    self.pos.1,
+                ))
     }
 
     /// Whether the call at [`Self::pos`] has as its targets every implementation it can run
@@ -8515,6 +8571,9 @@ impl<'a> Extractor<'a> {
             .iter()
             .copied()
             .filter(|e| !((is_awaited || finished) && BLOCKING_EFFECTS.contains(e)))
+            .filter(|e| {
+                *e != ExecEffectKind::Checkpoint || self.checkpoint_counts(&symbol, is_awaited)
+            })
             .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
             .filter(|e| !(setting && *e == ExecEffectKind::BlockingDb))
             .collect();
@@ -9304,6 +9363,7 @@ fn role_site(
         arguments: None,
         state_tests: site.state_tests.clone(),
         locks: site.locks,
+        shield: site.shield,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
