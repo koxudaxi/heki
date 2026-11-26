@@ -137,6 +137,9 @@ pub struct LintConfig {
     /// `error`: warnings, and heuristic reports, which count as warnings, are reported without
     /// failing the run.
     pub fail_on: Option<Severity>,
+    /// Rules (codes, names, or prefixes, as `select` takes them) whose reports fail the run
+    /// whatever their tier and severity, as `fail = true` does for the reports of a contract.
+    pub fail: Vec<String>,
     /// Report the codes of suppression comments that suppressed no report of a rule that ran,
     /// and the baseline entries that matched no report. Defaults to `false`.
     pub report_unused_suppressions: Option<bool>,

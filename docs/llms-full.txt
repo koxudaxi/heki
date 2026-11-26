@@ -1383,6 +1383,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. A report of a contract with [`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) fails the run at either value. |
+| `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) records or an inline [suppression](https://heki.koxudaxi.dev/configuration/#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing). |
@@ -2295,7 +2296,8 @@ fail = true
 - `fail = true` in a [`<kind>-defaults` table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind) applies to
   every table of the kind that does not set `fail` itself.
 - `fail-on = "warning"` is still there for a project that wants every warning and heuristic
-  report to fail the run.
+  report to fail the run. To fail the run on the reports of single rules that belong to no
+  contract (`IMP101`), list them in [`lint.fail`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
 
 ### How contracts report
 
@@ -2881,7 +2883,7 @@ extend-select = [
 
 Their reports can be wrong about the code: they are printed, and fail the run only with
 `fail-on = "warning"`. A [contract](https://heki.koxudaxi.dev/configuration/#contracts) can make its own reports fail it with
-`fail = true`. Before adding a rule, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) counts the reports
+`fail = true`, and `fail = ["IMP101"]` in `[tool.heki.lint]` does so for the reports of the rules it lists. Before adding a rule, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) counts the reports
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
@@ -5419,7 +5421,7 @@ Each diagnostic has:
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
 The run exits with 1 when it shows an exact `error`, a bug that can be critical, a report of a
-contract with `fail = true`, or with `fail-on = "warning"` any report: a heuristic report counts
+contract with `fail = true`, a report of a rule `lint.fail` lists, or with `fail-on = "warning"` any report: a heuristic report counts
 as a warning, whatever its `severity`.
 
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says

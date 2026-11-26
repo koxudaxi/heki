@@ -81,7 +81,7 @@ extend-select = [
 
 Their reports can be wrong about the code: they are printed, and fail the run only with
 `fail-on = "warning"`. A [contract](configuration.md#contracts) can make its own reports fail it with
-`fail = true`. Before adding a rule, [`heki recommend`](recommend.md) counts the reports
+`fail = true`, and `fail = ["IMP101"]` in `[tool.heki.lint]` does so for the reports of the rules it lists. Before adding a rule, [`heki recommend`](recommend.md) counts the reports
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
