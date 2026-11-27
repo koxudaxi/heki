@@ -217,7 +217,7 @@ fn eff101_resolves_receivers_through_imports_globals_annotations_and_classes() {
     )
     .write("app/models.py", MODELS)
     .write("app/handlers.py", HANDLERS);
-    let diags = diagnostics(&p, &[]);
+    let diags = diagnostics(&p, &["--extend-select", "EFF102"]);
     let h = "app/handlers.py";
     assert_eq!(
         found(&diags),
@@ -445,7 +445,7 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
     p.write("pkg/dup.py", &dup);
     assert_eq!(mut103(&p), vec![("push".to_owned(), 23)]);
     // Python 3.12 inlines the comprehension (PEP 709); Python 3.11 calls its own frame.
-    let diags = diagnostics(&p, &["pkg/comps.py"]);
+    let diags = diagnostics(&p, &["pkg/comps.py", "--extend-select", "EFF102"]);
     assert_eq!(
         found(&diags),
         vec![
@@ -887,7 +887,7 @@ def names(cursor: sqlite3.Cursor, ids):
 fn each_effect_has_its_own_help() {
     let p = Project::new("effects_help");
     p.write("app.py", EFFECTS);
-    let diags = diagnostics(&p, &["--extend-select", "EFF105"]);
+    let diags = diagnostics(&p, &["--extend-select", "EFF105,EFF102"]);
     let reports: Vec<(u64, &str, &str)> = diags
         .iter()
         .map(|d| {
@@ -934,7 +934,7 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 32,
-                "`reads` reaches the blocking filesystem call `builtins.open` on the event loop",
+                "`reads` runs the blocking filesystem call `builtins.open` on the event loop",
                 &format!("{offload} use an async file API")
             ),
             (
@@ -944,12 +944,12 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 42,
-                "`requests.get` allocates an unpooled client on every loop iteration",
+                "every iteration over parameter `urls` allocates an unpooled client: `requests.get`",
                 client
             ),
             (
                 43,
-                "`app.get` allocates an unpooled client (`requests.get`) on every loop iteration",
+                "every iteration over parameter `urls` allocates an unpooled client: `requests.get` (through `app.get`)",
                 client
             ),
             (

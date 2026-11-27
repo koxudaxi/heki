@@ -217,13 +217,13 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     }
     // Also among other rules in its cell.
     let (code, out) = docs.check_with(
-        "docs/adoption.md",
-        "| heuristic | async services |",
-        "| heuristic | experimental async services |",
+        "docs/ownership.md",
+        "a read of such a stale property | exact, experimental, opt-in |",
+        "a read of such a stale property | exact, opt-in |",
     );
     assert_eq!(code, 1);
     assert!(
-        out.contains(": the row of EFF105, EFF107 says experimental"),
+        out.contains(": the row of MUT101, MUT111 does not say experimental"),
         "{out}"
     );
     // A rule named in the text of a cell is not the row's rule.
@@ -267,17 +267,17 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
     let heading = "Heuristic rules are marked differently from the rules (edit them by hand):";
     let index = docs.0.read("docs/rules/index.md");
     assert!(
-        index.contains("| EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | ")
+        index.contains("| OPT112 | [loop-linear-list-lookup](loop-linear-list-lookup.md) | ")
             && index.contains(" | ≈ |\n")
             && index.contains(" | ≈ 📜 |\n")
             && index.contains(" | ≈ 🔌 🧪 |\n"),
         "{index}"
     );
-    let page = docs.0.read("docs/rules/loop-unpooled-client.md");
+    let page = docs.0.read("docs/rules/loop-linear-list-lookup.md");
     assert!(
         page.contains("· Heuristic · Off by default · ")
             && page.contains("!!! note \"Heuristic\"\n\n    This rule is heuristic: ")
-            && page.contains("Of 50 sampled reports (round 3, 2026-11-21), 54% were right"),
+            && page.contains("Of 50 sampled reports (round 3, 2026-11-21), 90% were right"),
         "{page}"
     );
     let contract = docs.0.read("docs/rules/write-owner-violation.md");
@@ -298,15 +298,15 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
         ),
         (
             "docs/precision.md",
-            "| `EFF102` | heuristic | round 3",
-            "| `EFF102` | exact | round 3",
-            "EFF102",
+            "| `OPT112` | heuristic | round 3",
+            "| `OPT112` | exact | round 3",
+            "OPT112",
         ),
         (
             "ARCHITECTURE.md",
-            "| **EFF102** | Off (heuristic) |",
-            "| **EFF102** | On |",
-            "EFF102",
+            "| **OPT112** | Off (heuristic) |",
+            "| **OPT112** | On |",
+            "OPT112",
         ),
     ] {
         let (code, out) = docs.check_with(rel, old, new);
@@ -366,14 +366,14 @@ fn the_precision_tables_and_rule_measurements_come_from_the_data() {
             &json!({"reports": 152, "false_claims": 0})
         )
     );
-    let (_, out, _) = p.heki(&["rule", "EFF102", "--output-format", "json"]);
+    let (_, out, _) = p.heki(&["rule", "OPT112", "--output-format", "json"]);
     let rule: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(
         rule["measurement"],
         json!({
-            "rule": "EFF102", "round": 3, "date": "2026-11-21", "sample": 50, "confirmed": 0,
-            "plausible": 2, "benign": 25, "false_claims": 23, "right_percent": 54,
-            "interval_percent": [40, 67], "real_harm_percent": 4
+            "rule": "OPT112", "round": 3, "date": "2026-11-21", "sample": 50, "confirmed": 0,
+            "plausible": 2, "benign": 43, "false_claims": 5, "right_percent": 90,
+            "interval_percent": [79, 96], "real_harm_percent": 4
         })
     );
     assert_eq!(rule["certification"], Value::Null);
@@ -390,8 +390,8 @@ fn the_precision_tables_and_rule_measurements_come_from_the_data() {
     assert!(
         page.contains("| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 | - |\n")
             && page.contains(
-                "| `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | \
-                 40-67% | 4% |\n"
+                "| `OPT112` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 43 / 5 | 90% | \
+                 79-96% | 4% |\n"
             ),
         "{page}"
     );
