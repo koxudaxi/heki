@@ -129,7 +129,16 @@ app/stock.py:10:5: MUT110 (readonly-param-mutation) [warning] `prepare` passes i
 ...
 ```
 
-`MUT110` is a warning, because the bug it reports is rarely harmful, so it does not fail the run. Pass a copy (`list(names)`), or annotate the helper's parameter with a mutable type.
+`MUT110` is a warning, because the bug it reports is rarely harmful, so it does not fail the run. Copy the parameter to a local list, sort the copy, and return it, so the caller's object stays as it was:
+
+```python
+def prepare(names: Sequence[str]) -> list[str]:
+    ordered = list(names)
+    sort_names(ordered)
+    return ordered
+```
+
+Or annotate the helper's parameter with a mutable type, so the type checker shows the mismatch at the call.
 
 ### A cached result changed in place
 
@@ -216,11 +225,14 @@ class Subscriptions:
         self._cursor = self._cycle()
 
     def _cycle(self):
-        while True:
+        while self.by_node:
             yield from self.by_node.values()  # MUT113
 
-    def next_subscriber(self) -> object:
-        return next(self._cursor)
+    def next_subscriber(self) -> object | None:
+        subscriber = next(self._cursor, None)
+        if subscriber is None:
+            self._cursor = self._cycle()  # no subscribers: return None, start over next time
+        return subscriber
 
     def drop(self, node: str) -> None:
         self.by_node.pop(node, None)

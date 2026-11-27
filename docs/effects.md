@@ -40,7 +40,7 @@ extend-select = ["EFF105", "EFF107"]
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF105`](rules/async-blocking-fs.md) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
-| [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
+| [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result bound to a local variable that is never awaited, returned, or stored; a call whose result is discarded is not reported | heuristic, opt-in |
 | [`EFF112`](rules/set-order-output.md) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
 | [`EFF114`](rules/recursion-error-as-value.md) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
 | [`EFF115`](rules/async-def-as-sync-callback.md) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |

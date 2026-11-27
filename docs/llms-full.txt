@@ -1316,7 +1316,16 @@ app/stock.py:10:5: MUT110 (readonly-param-mutation) [warning] `prepare` passes i
 ...
 ```
 
-`MUT110` is a warning, because the bug it reports is rarely harmful, so it does not fail the run. Pass a copy (`list(names)`), or annotate the helper's parameter with a mutable type.
+`MUT110` is a warning, because the bug it reports is rarely harmful, so it does not fail the run. Copy the parameter to a local list, sort the copy, and return it, so the caller's object stays as it was:
+
+```python
+def prepare(names: Sequence[str]) -> list[str]:
+    ordered = list(names)
+    sort_names(ordered)
+    return ordered
+```
+
+Or annotate the helper's parameter with a mutable type, so the type checker shows the mismatch at the call.
 
 ### A cached result changed in place
 
@@ -1403,11 +1412,14 @@ class Subscriptions:
         self._cursor = self._cycle()
 
     def _cycle(self):
-        while True:
+        while self.by_node:
             yield from self.by_node.values()  # MUT113
 
-    def next_subscriber(self) -> object:
-        return next(self._cursor)
+    def next_subscriber(self) -> object | None:
+        subscriber = next(self._cursor, None)
+        if subscriber is None:
+            self._cursor = self._cycle()  # no subscribers: return None, start over next time
+        return subscriber
 
     def drop(self, node: str) -> None:
         self.by_node.pop(node, None)
@@ -1529,7 +1541,7 @@ extend-select = ["EFF105", "EFF107"]
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
-| [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
+| [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | an `asyncio.create_task` result bound to a local variable that is never awaited, returned, or stored; a call whose result is discarded is not reported | heuristic, opt-in |
 | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
 | [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
 | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
