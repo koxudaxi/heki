@@ -303,19 +303,17 @@ fn decide(
 }
 
 /// The `heki check` command that shows the reports the section counts, and how many it adds.
-pub(super) struct ShownByCheck {
-    pub command: String,
-    pub reports: usize,
-    pub exact: usize,
-    pub heuristic: usize,
+struct ShownByCheck {
+    command: String,
+    reports: usize,
     /// With a baseline: the regressions among them, which a run with the baseline prints.
-    pub regressions: usize,
+    regressions: usize,
 }
 
 /// The command naming in `extend-select` every rule with reports here, in the order the section
 /// lists them, but those the configuration ignores; `None` when there is none. A rule's reports do
 /// not depend on the other rules selected, so its count holds among the others.
-pub(super) fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Option<ShownByCheck> {
+fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Option<ShownByCheck> {
     let mut named: Vec<&RuleAdvice> = (rules.iter())
         .filter(|r| r.reports > Some(0) && r.reason != IGNORED)
         .collect();
@@ -324,6 +322,19 @@ pub(super) fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Optio
         return None;
     }
     let codes: Vec<&str> = named.iter().map(|r| r.code.as_str()).collect();
+    Some(ShownByCheck {
+        command: check_command(analyzed, &codes),
+        reports: named.iter().map(|r| r.reports.unwrap_or_default()).sum(),
+        regressions: (named.iter())
+            .filter_map(|r| r.baseline.as_ref())
+            .map(|b| b.regressions)
+            .sum(),
+    })
+}
+
+/// The `heki check` command that analyzes and selects as the run did, with `codes` named in
+/// `extend-select` when there are any.
+pub(super) fn check_command(analyzed: &Analyzed, codes: &[&str]) -> String {
     let mut command = "heki check".to_owned();
     if analyzed.check_paths != ["."] {
         for word in &analyzed.check_paths {
@@ -335,18 +346,11 @@ pub(super) fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Optio
         command.push(' ');
         command.push_str(&super::command_word(word));
     }
-    command.push_str(" --extend-select ");
-    command.push_str(&codes.join(","));
-    Some(ShownByCheck {
-        command,
-        reports: named.iter().map(|r| r.reports.unwrap_or_default()).sum(),
-        exact: named.iter().map(|r| r.exact).sum(),
-        heuristic: named.iter().map(|r| r.heuristic).sum(),
-        regressions: (named.iter())
-            .filter_map(|r| r.baseline.as_ref())
-            .map(|b| b.regressions)
-            .sum(),
-    })
+    if !codes.is_empty() {
+        command.push_str(" --extend-select ");
+        command.push_str(&codes.join(","));
+    }
+    command
 }
 
 /// The measurement as the text prints it.

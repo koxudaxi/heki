@@ -147,16 +147,18 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         rest,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
+         1. Quickest safety win: fix EFF101 at app/api.py:4 (get_user), the one exact report of a \
+         bug shown now, through 4 place(s): heki check (Reports now)\n\
+         2. Smallest wall for a coding agent: the effect-boundaries table \"app.lists without \
+         blocking calls\" (medium): 3 function(s) of app.lists reach no blocking call heki sees; \
+         with fail = true, heki check fails on an edit that makes one reach a blocking call \
+         (Contract candidates; the table is in the keys at the end)\n\
+         3. Biggest blind spot: 1 call(s) heki does not resolve through a parameter without \
+         annotation or a value annotated `Any` or `object`; an annotation naming the class lets \
+         heki follow them (What heki cannot see)\n\
+         \n\
          Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
          off\n\
-         \n\
-         Start here\n\
-         \x20 - heki check fails on 1 report(s) now: a Ratchet baseline records them, so that it \
-         fails only on new ones (Notes)\n\
-         \x20 - heki check --extend-select EFF101,OPT101,OPT110 shows 3 report(s) not shown now: \
-         0 exact, 3 heuristic (heuristic reports can be wrong)\n\
-         \x20 - 1 contract block(s) in the keys at the end: the code keeps them today; adopt only \
-         the boundaries you intend to keep (Notes)\n\
          \n\
          Types the code already keeps\n\
          \x20 No read-only parameter to suggest a type for here.\n\
@@ -1034,8 +1036,8 @@ fn the_command_under_the_rules_shows_every_report_they_count() {
 
 /// The sections of the text, in the order it prints them.
 const SECTIONS: &[&str] = &[
+    "\n1. ",
     "\nReports now  ",
-    "\nStart here\n",
     "\nTypes the code already keeps\n",
     "\nRules worth enabling here\n",
     "\nWhat heki cannot see (no report either way)\n",
@@ -1056,49 +1058,96 @@ fn the_sections_come_in_their_order() {
     assert!(at.is_sorted(), "{at:?}: {out}");
 }
 
-/// The steps of "Start here" in `heki recommend <args>`, without their dash.
-fn steps(p: &Project, args: &[&str]) -> Vec<String> {
+/// The takeaways `heki recommend <args>` starts with, without their numbers, which count up
+/// from 1.
+fn takeaways(p: &Project, args: &[&str]) -> Vec<String> {
     let mut all = vec!["recommend"];
     all.extend_from_slice(args);
     let (_, out, _) = p.heki(&all);
-    (out.lines())
-        .skip_while(|l| *l != "Start here")
-        .skip(1)
-        .map_while(|l| l.strip_prefix("  - "))
-        .map(str::to_owned)
-        .collect()
+    let mut lines = out.lines().skip(2);
+    let mut found = Vec::new();
+    while let Some(line) =
+        (lines.next()).and_then(|l| l.strip_prefix(&format!("{}. ", found.len() + 1)))
+    {
+        found.push(line.to_owned());
+    }
+    found
 }
 
 #[test]
-fn start_here_repeats_the_first_steps_the_report_has() {
-    let p = shop_with_opt_in("recommend_start_here");
-    let (_, report, _) = recommend_json(&p, &[]);
+fn the_takeaways_come_first_one_of_each_kind() {
+    let p = shop_with_opt_in("recommend_takeaways");
     let (_, out, _) = p.heki(&["recommend"]);
-    let command = (out.lines())
-        .find_map(|l| l.strip_prefix("  see the 7 report(s): "))
-        .unwrap_or_else(|| panic!("{out}"));
-    let failing = report["reports_now"]["failing"].as_u64().unwrap();
-    assert!(failing > 0);
-    // The failing reports first, then the command of "Rules worth enabling here"; three at most.
+    let lines = takeaways(&p, &[]);
     assert_eq!(
-        steps(&p, &[]),
+        lines,
         [
-            format!(
-                "heki check fails on {failing} report(s) now: a Ratchet baseline records them, so \
-                 that it fails only on new ones (Notes)"
-            ),
-            format!("{command} shows 7 report(s) not shown now: 0 exact, 7 heuristic (heuristic reports can be wrong)"),
-            "1 contract block(s) in the keys at the end: the code keeps them today; adopt only the \
-             boundaries you intend to keep (Notes)"
-                .to_owned(),
-        ]
+            "Quickest safety win: fix EFF101 at app/api.py:4 (get_user), the one exact report of \
+             a bug shown now, through 4 place(s): heki check (Reports now)",
+            "Smallest wall for a coding agent: the effect-boundaries table \"scopes of app \
+             without blocking calls\" (medium): 10 function(s) of app.lists and 1 more reach no \
+             blocking call heki sees; with fail = true, heki check fails on an edit that makes \
+             one reach a blocking call (Contract candidates; the table is in the keys at the end)",
+            "Biggest blind spot: 1 call(s) heki does not resolve through a parameter without \
+             annotation or a value annotated `Any` or `object`; an annotation naming the class \
+             lets heki follow them (What heki cannot see)",
+        ],
+        "{out}"
     );
-    // With a baseline holding every report, nothing fails; the exact types come before the
-    // contract blocks.
+    // Each says what a part further down says: the report heki check prints, the table in the
+    // keys, the calls the section counts.
+    let eff101 = checked(&p, &[]);
+    assert!(
+        (eff101.iter())
+            .any(|d| d["rule_code"] == "EFF101" && d["line"] == 4 && d["certainty"] == "exact"),
+        "{eff101:#?}"
+    );
+    assert!(
+        out.contains("\n  name = \"scopes of app without blocking calls\"\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\n  calls heki does not resolve: 1 call(s) in 1 function(s)\n"),
+        "{out}"
+    );
+    // `--all` lists more, and starts with the same takeaways.
+    assert_eq!(takeaways(&p, &["--all"]), lines);
+    // At `fail-on = "warning"`, a contract's reports fail the run without `fail = true`.
+    p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n");
+    assert!(takeaways(&p, &[])[1].ends_with(
+        "; at fail-on = \"warning\", heki check fails on an edit that makes one reach a \
+             blocking call (Contract candidates; the table is in the keys at the end)"
+    ));
+}
+
+#[test]
+fn the_quickest_safety_win_is_the_rule_with_the_most_exact_reports_of_a_bug() {
+    let p = shop("recommend_takeaway_rule");
+    let lines = takeaways(&p, &["--select", "OPT101"]);
+    assert_eq!(
+        lines[0],
+        "Quickest safety win: EFF101 adds 1 exact report(s) of a bug here: heki check --select \
+         OPT101 --extend-select EFF101 (Rules worth enabling here)"
+    );
+    let command: Vec<&str> = "--select OPT101 --extend-select EFF101"
+        .split(' ')
+        .collect();
+    let shown = checked(&p, &command);
+    assert!(
+        (shown.iter()).any(|d| d["rule_code"] == "EFF101" && d["certainty"] == "exact"),
+        "{shown:#?}"
+    );
+    // With EFF101 on, the exact report of a bug shown now through the fewest places.
     p.write(
-        "app/core.py",
-        "def total(rows: list[int]) -> int:\n    return sum(rows)\n",
+        "app/jobs.py",
+        "import time\n\n\nasync def tick():\n    time.sleep(1)\n",
     );
+    assert_eq!(
+        takeaways(&p, &[])[0],
+        "Quickest safety win: fix EFF101 at app/jobs.py:5 (tick), of the 2 exact reports of a bug \
+         shown now the one through the fewest places (2): heki check (Reports now)"
+    );
+    // With a baseline, the regressions among its reports.
     let (code, _, err) = p.heki(&[
         "check",
         "--select",
@@ -1108,29 +1157,84 @@ fn start_here_repeats_the_first_steps_the_report_has() {
         "--update-baseline",
     ]);
     assert_eq!(code, 0, "{err}");
-    let with_baseline = steps(&p, &["--baseline", "b.toml"]);
-    assert!(with_baseline[0].ends_with(
-        " shows 0 regression(s) among 7 report(s) not shown now: 0 exact, 7 heuristic \
-             (heuristic reports can be wrong)"
-    ));
     assert_eq!(
-        with_baseline[1],
-        "1 exact read-only parameter type(s) to write (Types the code already keeps)"
+        takeaways(&p, &["--select", "OPT101", "--baseline", "b.toml"])[0],
+        "Quickest safety win: EFF101 adds 2 exact report(s) of a bug here, 0 regression(s) among \
+         its reports: heki check --select OPT101 --baseline b.toml --extend-select EFF101 (Rules \
+         worth enabling here)"
     );
-    // A source root the block adds: the contract candidates wait for a run with it.
-    let q = subdirectory_app("recommend_start_here_src");
+}
+
+#[test]
+fn a_takeaway_with_nothing_behind_it_is_left_out() {
+    let p = Project::new("recommend_takeaways_none");
+    p.write("app.py", "def f():\n    return 1\n");
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.lines().nth(2).unwrap().starts_with("Reports now  "),
+        "{out}"
+    );
+    // Nothing removes an A1 hazard but a change of the code.
+    p.write("app.py", "def introspect():\n    return locals()\n");
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(out.contains(" function(s) with an A1 hazard"), "{out}");
+    assert_eq!(takeaways(&p, &[]), Vec::<String>::new(), "{out}");
+}
+
+#[test]
+fn a_source_root_the_block_adds_comes_first() {
+    let p = subdirectory_app("recommend_takeaways_src");
+    p.write(
+        "backend/jobs.py",
+        "import time\n\n\nasync def tick():\n    time.sleep(1)\n",
+    );
     assert_eq!(
-        steps(&q, &[]),
+        takeaways(&p, &[]),
         [
-            "add src = [\"backend\"] (keys at the end), then run heki recommend again: it renames \
-         modules, and the contract candidates come from that run"
+            "Biggest blind spot: 2 import(s) name files below backend, which heki does not take \
+             for a source root; add src = [\"backend\"] (keys at the end), then run heki \
+             recommend again: it renames modules (What heki cannot see)",
+            "Quickest safety win: fix EFF101 at backend/jobs.py:5 (tick), the one exact report of \
+             a bug shown now, through 2 place(s): heki check (Reports now)",
         ]
     );
-    // Nothing to start with: no section.
-    let r = Project::new("recommend_start_here_none");
-    r.write("app.py", "def f():\n    return 1\n");
-    let (_, out, _) = r.heki(&["recommend"]);
-    assert!(!out.contains("Start here"), "{out}");
+}
+
+#[test]
+fn the_biggest_blind_spot_is_the_part_with_the_most_calls_a_setting_or_an_annotation_removes() {
+    let p = Project::new("recommend_takeaway_blind");
+    p.write("app/__init__.py", "").write("app/pay.py", BLIND);
+    let blind_spot = |p: &Project| takeaways(p, &[]).pop().unwrap();
+    // Three calls of `stripe`, one of a name the catalog lacks, one on a parameter without
+    // annotation.
+    assert_eq!(
+        blind_spot(&p),
+        "Biggest blind spot: 3 call(s) of 3 library name(s) without a catalog entry, which heki \
+         takes to have no effect, such as stripe.Charge.create; an [[tool.heki.ecosystem]] entry \
+         for a name whose effects you know removes it (What heki cannot see)"
+    );
+    // In a heki.toml, the table is at the top level.
+    p.write("heki.toml", "");
+    assert!(
+        blind_spot(&p).contains("; an [[ecosystem]] entry for a name"),
+        "{}",
+        blind_spot(&p)
+    );
+    // A name of a package the catalog covers is for the catalog.
+    let q = Project::new("recommend_takeaway_catalog");
+    q.write(
+        "app.py",
+        "import requests\n\n\nasync def link(path: str):\n    return requests.utils.quote(path)\n",
+    );
+    assert_eq!(
+        takeaways(&q, &[]),
+        [format!(
+            "Biggest blind spot: 1 call(s) of 1 name(s) heki's catalog lacks in packages it \
+             covers, such as requests.utils.quote; if they wait or send a query, report them at \
+             {}/issues for a catalog entry (What heki cannot see)",
+            env!("CARGO_PKG_REPOSITORY")
+        )]
+    );
 }
 
 #[test]

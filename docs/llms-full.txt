@@ -1875,15 +1875,14 @@ every rule without reports.
 ## What it prints
 
 - **The project**: the root, and the files and functions analyzed.
+- **The takeaways**: at most three numbered lines, one of each kind: the quickest safety win,
+  the smallest wall for a coding agent, and the biggest blind spot. Each repeats what a part
+  further down says, names that part, and ends with the command or the setting that acts on it.
+  A kind with nothing behind it has no line ([below](https://heki.koxudaxi.dev/recommend/#the-takeaways)).
 - **Reports now**: what `heki check` prints with the configuration, as exact and heuristic
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
-- **Start here**: up to three first steps, each repeating what a later part says: the reports
-  that fail `heki check` now (the baseline that records them is in the notes), a source root
-  the block adds (the contract candidates come from a run with it), the command that shows the
-  reports the rules count, the exact types, and the contract blocks in the keys. It is left out
-  when there is none.
 - **Types the code already keeps**: the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions), counted exact and
   heuristic, and whether heki found a type checker's configuration (without one, half of each
   guard is missing). The first 3 exact groups by rank are listed, each on one line with its
@@ -1946,6 +1945,37 @@ every rule without reports.
   `.heki.toml`, or a `--config` file. Without a configuration file, the keys go into a new
   `pyproject.toml`. The block only adds: an array the file already sets is written whole, with
   the additions named in a comment, since TOML cannot append to an array.
+
+## The takeaways
+
+Each line is chosen from counts the report already has, so it adds no claim, and `--all` starts
+with the same lines:
+
+- **Quickest safety win**: of the rules the block enables, the one with the most exact reports
+  of a bug here, with the `heki check --extend-select` command that shows them (with a baseline,
+  the regressions among its reports). When no such rule adds an exact report: the exact report
+  of a bug that `heki check` shows now (with a baseline, a regression) naming the fewest other
+  places (the hops of its call chain, a definition), with the `heki check` command that shows
+  it.
+- **Smallest wall for a coding agent**: the contract block that, with `fail = true` on its table,
+  guards the most code an edit could cross it from (a wall as
+  [Coding Agents](https://heki.koxudaxi.dev/coding-agents/#architecture-rules-with-agents) describes them). Of the blocks
+  shown without `--all`, a high one before a medium one, then the one with the most other
+  modules reading its targets (`write-owners`), using their classes (`read-owners`), or calling
+  into its scopes (`effect-boundaries`), then the one with the fewest targets. With
+  `fail-on = "warning"`, its reports fail `heki check` without `fail = true`. Without a
+  candidate (when the block sets `src`, for one), there is no line.
+- **Biggest blind spot**: a source root the block adds, with its `src` key. Otherwise the part
+  of "What heki cannot see" with the most calls among those something you can write removes:
+  the calls of library names without a catalog entry (an `[[tool.heki.ecosystem]]` entry, for a
+  name whose effects you know), the calls of names heki's catalog lacks in packages it covers
+  (an entry in heki's catalog, asked for at its issue tracker), and the calls heki does not
+  resolve through a parameter without annotation or a value annotated `Any` or `object` (an
+  annotation naming the class). The other calls heki does not resolve, and the functions with
+  an A1 hazard, have no such remedy and make no line.
+
+A source root the block adds comes first: it renames modules, so the other counts, and the
+contract candidates, come from a run with it. Otherwise the lines come in the order above.
 
 ## What heki cannot see
 
@@ -2202,12 +2232,11 @@ def test_load_user() -> None:
 $ heki recommend app
 heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
-Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
+1. Quickest safety win: fix EFF101 at app/api.py:5 (get_user), the one exact report of a bug shown now, through 4 place(s): heki check app (Reports now)
+2. Smallest wall for a coding agent: the effect-boundaries table "app.report without blocking calls" (medium): 3 function(s) of app.report reach no blocking call heki sees; with fail = true, heki check fails on an edit that makes one reach a blocking call (Contract candidates; the table is in the keys at the end)
+3. Biggest blind spot: 1 call(s) of 1 library name(s) without a catalog entry, which heki takes to have no effect, such as stripe.Charge.create; an [[tool.heki.ecosystem]] entry for a name whose effects you know removes it (What heki cannot see)
 
-Start here
-  - heki check fails on 1 report(s) now: a Ratchet baseline records them, so that it fails only on new ones (Notes)
-  - heki check app --extend-select MUT106,OPT110 shows 2 report(s) not shown now: 0 exact, 2 heuristic (heuristic reports can be wrong)
-  - 2 exact read-only parameter type(s) to write (Types the code already keeps)
+Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
 
 Types the code already keeps
   2 read-only parameter group(s), exact; 2 heuristic (heki recommend --all lists them)
