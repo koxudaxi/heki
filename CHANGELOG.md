@@ -82,8 +82,7 @@ under "Breaking changes".
   function bound once and they are every implementation it can run, and heuristic where the name is
   bound to more than one definition or the receiver is typed by a protocol. (#605)
 - Neither rule is experimental any more. (#605)
-- `heki recommend` (experimental), text output: the report starts with up to three first steps
-  ("Start here"), each repeating what a later part says, and then a new section, "Types the code
+- `heki recommend` (experimental), text output: after the takeaways (below), a new section, "Types the code
   already keeps", which lists the exact read-only parameter groups (the first 3 by rank, every group
   with `--all`, the heuristic ones last with the premises they leave open), what each group states,
   its guards, and whether a type checker is configured. "Rules worth enabling here" comes next and
@@ -95,6 +94,16 @@ under "Breaking changes".
   calls in test code come after the rest. "What keeps reports heuristic" moves after the contract
   candidates. The hint at the end of a clean `heki check` names the parameter types. The JSON object
   is unchanged but for `content`. (#578)
+- `heki recommend` (experimental), text output: the report starts with at most three numbered
+  takeaways, before "Reports now", in place of "Start here": the quickest safety win (the rule the
+  block enables with the most exact reports of a bug, with its `heki check --extend-select`
+  command, or else the exact report of a bug shown now that names the fewest other places), the
+  smallest wall for a coding agent (the contract block that, with `fail = true`, guards the most
+  code an edit could cross it from), and the biggest blind spot (a source root the block adds, or
+  else the part of "What heki cannot see" with the most calls that a catalog entry, a request for
+  one, or an annotation removes). Each line names the section that backs it; a source root comes
+  first, a kind with nothing behind it has no line, and `--all` starts with the same lines. The
+  JSON object is unchanged but for `content`. (#604)
 - Calls on what common standard library functions return are resolved by the class of the result:
   `subprocess.run` gives a `subprocess.CompletedProcess`, `os.stat`, `os.lstat`, `Path.stat` and
   `Path.lstat` an `os.stat_result`, `re.compile` a `re.Pattern`, `logging.getLogger` a
