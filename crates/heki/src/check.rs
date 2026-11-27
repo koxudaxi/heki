@@ -817,6 +817,9 @@ pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
         for r in &mut d.related {
             r.path = shown_path(&r.path);
         }
+        for c in &mut d.contract_locations {
+            c.path = shown_path(&c.path);
+        }
     }
 }
 
@@ -1479,6 +1482,7 @@ mod tests {
                     message: String::new(),
                 })
                 .collect(),
+            contract_locations: Vec::new(),
             fix: Some(vec![TextEdit {
                 span,
                 replacement: "y".to_owned(),

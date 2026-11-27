@@ -69,6 +69,7 @@ docs_pages! {
     ImportBoundaries => "configuration/#import-boundaries",
     Groups => "configuration/#named-groups",
     Include => "configuration/#several-configuration-files",
+    DefinedAt => "configuration/#where-a-contract-is-defined",
     Imports => "configuration/#imports-toolhekiimports",
     Ecosystem => "configuration/#ecosystem-knowledge-toolhekiecosystem",
     Rules => "rules/",
@@ -452,20 +453,29 @@ pub(crate) fn settings_root(
 
 /// The tables an item holds: itself, or each table of an array of tables.
 pub(crate) fn table_items(item: &toml_edit::Item) -> Vec<&dyn toml_edit::TableLike> {
+    (tables_at(item).into_iter()).map(|(t, _)| t).collect()
+}
+
+/// [`table_items`], each with the offset where it starts: its header, or its `{` when inline.
+pub(crate) fn tables_at(item: &toml_edit::Item) -> Vec<(&dyn toml_edit::TableLike, Option<usize>)> {
+    let start = |span: Option<Range<usize>>| span.map(|s| s.start);
     if let Some(array) = item.as_array_of_tables() {
         return array
             .iter()
-            .map(|t| t as &dyn toml_edit::TableLike)
+            .map(|t| (t as &dyn toml_edit::TableLike, start(t.span())))
             .collect();
     }
     if let Some(array) = item.as_array() {
         return array
             .iter()
             .filter_map(|v| v.as_inline_table())
-            .map(|t| t as &dyn toml_edit::TableLike)
+            .map(|t| (t as &dyn toml_edit::TableLike, start(t.span())))
             .collect();
     }
-    item.as_table_like().into_iter().collect()
+    let at = |t: &toml_edit::Table| start(t.span());
+    (item.as_table_like().into_iter())
+        .map(|t| (t, item.as_table().and_then(at)))
+        .collect()
 }
 
 /// The span of `value` in `item`: the item itself, or an entry of its array.

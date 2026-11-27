@@ -227,11 +227,12 @@ fn project(name: &str, config: &str) -> Project {
     p
 }
 
-/// Every report of `heki check`, as the JSON it prints.
+/// Every report of `heki check`, as the JSON it prints, without where its contracts are
+/// defined ([`without_places`]).
 fn reports(p: &Project) -> Vec<Value> {
     let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
     assert!(code == 0 || code == 1, "{code}: {stdout}{stderr}");
-    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"))
+    serde_json::from_value(without_places(&stdout)).unwrap()
 }
 
 /// `qualname target` of the reports of `code`, sorted.
@@ -245,12 +246,15 @@ fn of_rule(reports: &[Value], code: &str) -> Vec<String> {
     found
 }
 
-/// The JSON of `json` without the project directory it names, which differs between two projects.
-fn without_root(json: &str) -> Value {
+/// The JSON of `json` without what differs between two forms of one configuration in two
+/// projects: the project directory it names, and where the contracts and entries are defined.
+fn without_places(json: &str) -> Value {
     fn strip(value: &mut Value) {
         match value {
             Value::Object(map) => {
-                map.remove("root");
+                for place in ["root", "contract_locations", "entry_at", "contracts_at"] {
+                    map.remove(place);
+                }
                 map.values_mut().for_each(strip);
             }
             Value::Array(items) => items.iter_mut().for_each(strip),
@@ -391,14 +395,18 @@ fn assert_inspect_and_recommend_agree(longhand: &Project, shorthand: &Project) {
         assert_eq!(code, 0, "{symbol}: {expected}{err}");
         let (code, found, err) = shorthand.heki(&args);
         assert_eq!(code, 0, "{symbol}: {found}{err}");
-        assert_eq!(without_root(&found), without_root(&expected), "{symbol}");
+        assert_eq!(
+            without_places(&found),
+            without_places(&expected),
+            "{symbol}"
+        );
     }
     let args = ["recommend", "--output-format", "json"];
     let (code, expected, err) = longhand.heki(&args);
     assert_eq!(code, 0, "{expected}{err}");
     let (code, found, err) = shorthand.heki(&args);
     assert_eq!(code, 0, "{found}{err}");
-    assert_eq!(without_root(&found), without_root(&expected));
+    assert_eq!(without_places(&found), without_places(&expected));
 }
 
 #[test]
@@ -565,7 +573,11 @@ fn a_split_configuration_with_groups_reports_and_keys_a_baseline_as_its_one_file
     let args = ["--output-format", "json"];
     let (code, expected, err) = longhand.check(&args);
     assert_eq!(code, 1, "{expected}{err}");
-    assert_eq!(shorthand.check(&args), (code, expected.clone(), err));
+    let (found_code, found, found_err) = shorthand.check(&args);
+    assert_eq!(
+        (found_code, without_places(&found), found_err),
+        (code, without_places(&expected), err)
+    );
     for code in ["MUT201", "MUT203", "EFF201", "IMP201"] {
         let found: Vec<Value> = serde_json::from_str(&expected).unwrap();
         assert!(!of_rule(&found, code).is_empty(), "{code}: {expected}");
@@ -665,14 +677,14 @@ allowed-writers = ["@more-writers"]
         .collect();
     for expected in [
         "the group `unused` (pyproject.toml:9) is used by no contract",
-        "`targets` entry `pkg.m:Model.gone` of write-owners `main` names no attribute, method, or `__dict__` key of `pkg.m:Model` in the analyzed files",
-        "`targets` entry `pkg.m:Model.missing` of write-owners `included` (from contracts/w.toml:6) names no attribute, method, or `__dict__` key of `pkg.m:Model` in the analyzed files",
+        "`targets` entry `pkg.m:Model.gone` of write-owners `main` (from pyproject.toml:13; contract at pyproject.toml:11) names no attribute, method, or `__dict__` key of `pkg.m:Model` in the analyzed files",
+        "`targets` entry `pkg.m:Model.missing` of write-owners `included` (from contracts/w.toml:6; contract at contracts/w.toml:4) names no attribute, method, or `__dict__` key of `pkg.m:Model` in the analyzed files",
     ] {
         assert!(warned.contains(&expected), "{expected}\n{stdout}{stderr}");
     }
     assert!(
         warned.iter().any(|w| w.starts_with(
-            "`allowed-writers` entry `pkg.m:gone_writer` of write-owners `main` and `included` (from group `more-writers` at contracts/w.toml:2) names no function or method"
+            "`allowed-writers` entry `pkg.m:gone_writer` of write-owners `main` and `included` (from group `more-writers` at contracts/w.toml:2; contracts at pyproject.toml:11, contracts/w.toml:4) names no function or method"
         )),
         "{stdout}{stderr}"
     );

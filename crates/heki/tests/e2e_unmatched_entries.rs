@@ -56,12 +56,33 @@ const REPRO_ENTRIES: [&str; 3] = [
     "`targets` entry `pkg.model.Field.removed_method` of call-owners `store-calls` names no function, method, or class in the analyzed files",
 ];
 
-/// The lines of `stderr` that start with `prefix`, without it.
-fn lines<'s>(stderr: &'s str, prefix: &str) -> Vec<&'s str> {
+/// The lines of `stderr` that start with `prefix`, without it and without the places of the
+/// entry and its contracts (`a_warning_names_where_the_entry_and_its_contracts_are`).
+fn lines(stderr: &str, prefix: &str) -> Vec<String> {
     stderr
         .lines()
         .filter_map(|l| l.strip_prefix(prefix))
+        .map(|l| match (l.find(" (from "), l.find(") names no ")) {
+            (Some(start), Some(end)) if start < end => format!("{}{}", &l[..start], &l[end + 1..]),
+            _ => l.to_owned(),
+        })
         .collect()
+}
+
+/// A warning names where the entry is written and where its contract is.
+#[test]
+fn a_warning_names_where_the_entry_and_its_contracts_are() {
+    let p = repro("unmatched_places", "");
+    let (_, stdout, stderr) = p.heki(&["check"]);
+    let warned: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("warning: "))
+        .collect();
+    assert_eq!(
+        warned[2],
+        "`targets` entry `pkg.model.Field.removed_method` of call-owners `store-calls` (from pyproject.toml:15; contract at pyproject.toml:13) names no function, method, or class in the analyzed files",
+        "{stdout}{stderr}"
+    );
 }
 
 /// A run over the whole project warns about the entries that name nothing, which do not fail
@@ -684,7 +705,7 @@ fn a_run_over_some_files_judges_only_with_the_key() {
     let (_, _, stderr) = p.heki(&["check", "pkg/stores"]);
     let warned = lines(&stderr, "warning: ");
     assert!(
-        warned.contains(&"`targets` entry `pkg.model.Field.replace_type` of call-owners `store-calls` names no function, method, or class in the analyzed files"),
+        warned.iter().any(|w| w == "`targets` entry `pkg.model.Field.replace_type` of call-owners `store-calls` names no function, method, or class in the analyzed files"),
         "{stderr}"
     );
 }

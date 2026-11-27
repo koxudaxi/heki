@@ -63,7 +63,8 @@ Pyrefly, or ty; the Helix example pairs it with Pyright, and the others work the
 ## What the server provides
 
 - Diagnostics for open files, with every hop of a call chain (for example the path from an
-  `async def` to `time.sleep`) as related information you can jump to. The message is the
+  `async def` to `time.sleep`) as related information you can jump to, and a contract report's
+  [contract and entry](output-formats.md#where-a-contract-report-points) after them. The message is the
   report's one sentence; its help, what to do about it, is the last related-information entry
   (`help: ...`) at the diagnostic's own range, the way rust-analyzer shows a `help:` note.
 - The message of a [heuristic](precision.md) report ends in `[heuristic]`, and every diagnostic's

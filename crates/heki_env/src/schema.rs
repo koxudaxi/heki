@@ -129,6 +129,11 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("targets", r#"["pkg.model.DataModel.fields"]"#),
     ("message", r#""use GenerationStore.set_fields() instead""#),
     ("fail", "true"),
+    ("source", r#""scripts/tables.py:120""#),
+    (
+        "entry-sources",
+        r#"{ "pkg.model.DataModel.fields" = "scripts/tables.py:131" }"#,
+    ),
     ("exempt-methods", r#"["__deepcopy__"]"#),
     ("fresh-objects", r#""allow""#),
     ("unresolved", r#""report""#),

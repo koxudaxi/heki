@@ -29,6 +29,21 @@ SARIF output (`--output-format sarif`) follows the public
 [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) schema, which
 heki does not copy.
 
+## Where a contract report points
+
+A report of a contract rule gives, in `contract_locations` of the JSON diagnostics, where the
+configuration defines each contract it is of, then the entry of the contract whose text is the
+report's `target`, when there is one (a target of `write-owners`, `read-owners`, or
+`call-owners`, a producer of `readonly-returns` written without a glob). Each has a
+`path`, a 1-based `line` and byte `column`, and a `message` (``write-owners contract `fields` ``,
+``` `targets` entry `pkg.m.Model.fields` ```, with ``from group `name` `` for an entry a group
+holds). The places are where the file writes the table and the entry: in the main configuration
+file, an included one, a defaults table, or a group. A table's
+[`source` and `entry-sources`](configuration.md#where-a-contract-is-defined) name other places,
+which are given instead. SARIF output adds the same places to `relatedLocations`, after the
+steps of the report's chain, and the [language server](lsp.md) to its related information. The
+places are no part of a baseline key.
+
 ## Versions
 
 The version of a format is part of its schema name. A format with a `version` or

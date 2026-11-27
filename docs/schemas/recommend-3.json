@@ -563,7 +563,7 @@
     },
     "EntryPlace": {
       "additionalProperties": false,
-      "description": "Where a contract entry is written when no contract table of the main configuration file holds\nits text: in a table of an included file, or in a group.",
+      "description": "A place of the configuration: where a file writes a contract table or an entry of one (in a\ntable, or in a group), or the place the table's `source` or `entry-sources` names instead.",
       "properties": {
         "file": {
           "description": "The file, relative to the project root when it is below it.",
@@ -577,7 +577,7 @@
           ]
         },
         "line": {
-          "description": "The line of the entry (from 1).",
+          "description": "The line (from 1).",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -2155,9 +2155,23 @@
           },
           "type": "array"
         },
+        "contracts_at": {
+          "description": "Where each contract of `contracts` is defined, in their order: as its `source` names\nit, else its table.",
+          "items": {
+            "$ref": "#/$defs/EntryPlace"
+          },
+          "type": "array"
+        },
         "entry": {
           "description": "The entry as configured.",
           "type": "string"
+        },
+        "entry_at": {
+          "description": "Where the entry is defined: each place once, as `entry-sources` names it, else as\nwritten (in a table, or in a group).",
+          "items": {
+            "$ref": "#/$defs/EntryPlace"
+          },
+          "type": "array"
         },
         "key": {
           "description": "The key holding the entry (`targets`, `allowed-writers`).",
@@ -2196,7 +2210,9 @@
         "entry",
         "contracts",
         "names_no",
-        "nearest"
+        "nearest",
+        "entry_at",
+        "contracts_at"
       ],
       "type": "object"
     },

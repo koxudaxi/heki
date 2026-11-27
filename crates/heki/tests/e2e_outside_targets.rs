@@ -230,7 +230,7 @@ fn outside_targets_are_no_unmatched_entries() {
     assert_eq!(
         warned,
         vec![
-            "warning: `targets` entry `Feild.removed` of read-owners `reads` names no class in the analyzed files"
+            "warning: `targets` entry `Feild.removed` of read-owners `reads` (from pyproject.toml:14; contract at pyproject.toml:12) names no class in the analyzed files"
         ],
         "{warnings}"
     );

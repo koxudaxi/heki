@@ -1443,7 +1443,7 @@ pub fn check_project(
         }
         same
     });
-    gates::mark_failing_reports(config, selection, &mut out);
+    gates::add_contract_facts(config, selection, &mut out);
     Ok(out)
 }
 
@@ -1765,6 +1765,7 @@ impl<'a> CheckContext<'a> {
             evidence: None,
             blocker: None,
             related: self.related(chain),
+            contract_locations: Vec::new(),
             fix: None,
             sites: 1,
             fold_key: None,

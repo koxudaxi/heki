@@ -564,6 +564,7 @@ mod tests {
             evidence: None,
             blocker: None,
             related: Vec::new(),
+            contract_locations: Vec::new(),
             fix: None,
             sites: 1,
             fold_key: None,
