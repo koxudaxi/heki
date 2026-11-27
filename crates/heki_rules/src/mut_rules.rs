@@ -231,6 +231,7 @@ struct StaleWrite<'m, 'a> {
 /// the order `MUT101` reports them, among the family members `writers` admits. Decided from the
 /// index alone ([`heki_effect::CacheFlow`]), so a writer in a file that is not checked counts
 /// too.
+#[allow(clippy::too_many_arguments)]
 fn stale_writes<'m, 'a>(
     index: &'a ProjectIndex,
     decls: &ProjectDecls,

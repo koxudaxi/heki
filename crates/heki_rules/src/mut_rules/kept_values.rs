@@ -46,6 +46,7 @@ pub(super) fn calls_by_span<'i>(index: &'i ProjectIndex, writer: &Method<'_>) ->
 /// Whether the write `w` to `self.<attr>`, which the `@cached_property` named `prop` reads,
 /// establishes every premise of `MUT101`'s exact claim when `writer` runs it on any instance
 /// that runs it; `kept` is the **Kept to the return** fact of its definition.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn established(
     index: &ProjectIndex,
     decls: &ProjectDecls,
