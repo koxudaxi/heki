@@ -183,7 +183,7 @@ under "Breaking changes".
   reported. (#416, #588)
 - A class statement unpacking a mapping of keywords heki cannot read (`class C(**options)`) may pass
   a metaclass, so the class's metaclass is unknown; the entries of a dict display with string keys
-  count as keywords (`**{"metaclass": Meta}` passes `Meta`). (#416, #588)
+  count as keywords (`**{"metaclass": Meta}` passes `Meta`). (#416, #567)
 - `fresh-objects = "allow"`: a construction keeps what the class's `__init__` keeps of `self`, its
   own or a base's reached through `super().__init__()` in another module: an `__init__` storing
   `self` somewhere older (`REGISTRY.append(self)`) or handing it to a helper that keeps it no longer
