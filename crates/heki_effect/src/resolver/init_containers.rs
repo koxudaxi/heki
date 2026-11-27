@@ -1,8 +1,9 @@
 //! The `__init__` of a class that only stores attributes on the instance
 //! ([`super::ClassDecl::plain_init`]), and the containers it makes for the instance, which the
-//! instance alone holds when the constructor returns. A function constructing such an instance
-//! counts what it adds to that container as held by the instance (`fresh-objects`,
-//! `crate::construction`).
+//! instance alone holds when the constructor returns. A construction running only such
+//! `__init__`s keeps nothing of the instance, and a function constructing it counts what it adds
+//! to those containers as held by the instance ([`super::ProjectDecls::constructor`],
+//! `fresh-objects`, `crate::construction`).
 
 use super::{
     LocalNames, ModuleDecls, NameBinding, PlainInit, is_summarized_function, self_aliases,
@@ -13,7 +14,8 @@ use crate::summary::NAMESPACE_ATTRS;
 use heki_ir::walk::{Answer, Budget, FnShape, Use, Visit, reach};
 use heki_ir::{BlockId, BuiltinKind, FunctionKind, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::FxHashSet;
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A point of a function: block, instruction index.
 type At = (BlockId, usize);
@@ -57,16 +59,25 @@ pub(super) fn init_containers(input: &ModuleInput<'_>, decls: &mut ModuleDecls) 
         {
             continue;
         }
-        // The builtin a global name the module does not bind reads.
+        // The builtin a global name the module does not bind reads, each name answered kept for
+        // the star imports of the module (`PlainInit::builtins`).
+        let read = RefCell::new(BTreeSet::new());
         let builtin = |name: &str| {
             let class = format!("builtins.{name}");
-            match decls.lookup(name, false, &LocalNames::default()) {
+            let found = match decls.lookup(name, false, &LocalNames::default()) {
                 NameBinding::Unbound => Some(class),
                 NameBinding::Object(fqn) => (fqn == class).then_some(fqn),
                 NameBinding::Unknown => None,
+            };
+            if found.is_some() {
+                read.borrow_mut().insert(Box::<str>::from(name));
             }
+            found
         };
-        let found = plain_init(f, this.var, &builtin);
+        let found = plain_init(f, this.var, &builtin).map(|mut init| {
+            init.builtins = read.take().into_iter().collect();
+            init
+        });
         if let Some(class) = decls.classes.get_mut(owner) {
             class.plain_init = found;
         }
@@ -88,7 +99,7 @@ pub(super) fn init_containers(input: &ModuleInput<'_>, decls: &mut ModuleDecls) 
 /// its only use and the only store of the attribute, and every path to a `return` passes the
 /// store. Nothing else may reach the instance, so nothing `f` runs may keep the container or
 /// rebind the attribute but the stores and the `__init__` it calls, of which
-/// [`super::ProjectDecls::constructor_containers`] establishes the same. `None` past the budget.
+/// [`super::ProjectDecls::constructor`] establishes the same. `None` past the budget.
 fn plain_init(
     f: &IrFunction,
     this: VarId,
@@ -120,6 +131,7 @@ fn plain_init(
                 stores: stores.keys().map(|a| (*a).into()).collect(),
                 calls_next,
                 containers: containers.into_iter().flatten().collect(),
+                builtins: Box::default(),
             }))
         })
     });

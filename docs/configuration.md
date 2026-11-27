@@ -452,6 +452,7 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
 
 - the object was allocated in the same call chain: by calling its class, by `object.__new__`
   (`object.__new__(Node)`), by a copy, or by a project function returning a new object;
+  calling the class runs its `__init__`, which may keep the object (below);
 - nothing can hold it yet: no store, `yield`, closure, or call that may keep it ran before the
   write, except a store into another new object that links the two (below).
 
@@ -479,21 +480,36 @@ objects it links (`made.part = part; part.parent = made`) is new at a call until
 out of it is stored. A store into an object the function did not make, or into one of its own
 that was kept before, still ends the freshness of what it stores.
 
+Calling a project class keeps of the new object what the `__init__` the call runs keeps of
+`self`: that of the first class along the MRO defining one, and each one it reaches through
+`super().__init__()`, in any module. One storing `self` anywhere but in an attribute of `self`
+(`REGISTRY.append(self)`), or handing it to a helper that keeps it, makes an object another part
+of the program holds, as the same store in the function would; one handing it to a helper that
+only stores attributes on it keeps nothing. An `__init__` of a class outside the project (a
+pydantic model's, a dataclass's) keeps nothing of the object itself; two things it runs are not
+followed yet: a property setter run by an attribute store, and a project `__post_init__` or
+`model_post_init` a generated initializer calls (#601). No construction gives a new object when the
+class may return an existing instance (an `Enum`, a `__new__`), has a metaclass other than
+`type` or `abc.ABCMeta` or a base heki names no class for, or runs an `__init__` a decorator
+replaces or the project rebinds outside the class body (`Base.__init__ = other` in any module).
+
 A container a class's constructor makes for each instance is held by that instance, so storing a new
 object into it links the two the same way: `copied = Node(); copied.children.append(part)` leaves
 `part` new while `copied` is (`append`, `appendleft`, `insert`, `add`, `setdefault`, and item
-stores, on a list, set, or dict, when they run no project code on what they store). The constructor
+stores other than slice stores, which iterate what they store, on a list, set, or dict, when they
+run no project code on what they store). The constructor
 is the project `__init__` the class runs, its own or a base's (no class decorator,
 `__init_subclass__`, `dataclass_transform`, or metaclass other than `type` or `abc.ABCMeta` along
 the MRO, and no code that reading the attribute runs), and it binds the attribute once, on every
 path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
-`bytearray()`. It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
+`bytearray()` (no star import of its module may bind the name, nor `super`). It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
 call `super().__init__(...)`, whose `__init__` along the MRO does the same or is `object`'s, and
 no store in them runs code (a property's setter, a descriptor, `__setattr__`): a call handed
 `self` or a member of it, such as `self.setup()`, may hand the container anywhere. The object must
 be one the function made by calling the class on every path.
 Rebinding the attribute before an object is stored into the list (`copied.children = node.children`
-on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, or a helper handed
+on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, `vars(copied)`,
+`getattr(copied, "__dict__")`, or `object.__getattribute__(copied, "__dict__")`, or a helper handed
 `copied`), or keeping the list, ends the freshness of what is stored into it. A project function
 returning such an object does not carry the fact to its callers.
 

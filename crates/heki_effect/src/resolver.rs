@@ -679,7 +679,7 @@ pub enum StoreTarget {
 /// A class's own `__init__` that uses the instance only as the object of attribute stores (none
 /// of `__dict__` or `__class__`) and as `super()` for a call of the next `__init__` along the
 /// MRO handed nothing that may hold the instance (`init_containers`). Whether the stores run
-/// code depends on the class constructed ([`ProjectDecls::constructor_containers`]).
+/// code depends on the class constructed ([`ProjectDecls::constructor`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlainInit {
     /// The attributes it stores through the instance, sorted, each once.
@@ -689,6 +689,28 @@ pub struct PlainInit {
     /// The attributes it binds to a builtin container it makes there, with the container's
     /// kind, sorted: when it returns, the attribute holds that container and nothing else does.
     pub containers: Box<[(Box<str>, ContainerKind)]>,
+    /// The global names it reads as builtins, since its module binds them no other way
+    /// (`super`, the container classes it calls), sorted: a star import may still bind one.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub builtins: Box<[Box<str>]>,
+}
+
+/// What a construction of a project class keeps of the instance it makes
+/// ([`ProjectDecls::constructor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Constructor<'d> {
+    /// Nothing beyond stores into the instance's own attributes: the object is new when the
+    /// call returns. `containers`: the builtin containers it holds by attribute that the call
+    /// made and nothing else holds ([`PlainInit::containers`]).
+    KeepsNothing {
+        containers: &'d [(Box<str>, ContainerKind)],
+    },
+    /// The `__init__` the call runs uses the instance otherwise: the call hands the instance to
+    /// that `__init__`'s first parameter, which keeps it when the `__init__` keeps that
+    /// parameter (`EffectSummary::retains_params`).
+    HandsToInit,
+    /// The call may give an object something else holds, or heki cannot tell what it runs.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4769,26 +4791,37 @@ impl ProjectDecls {
             && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
     }
 
-    /// The containers a new instance of the project class `class` holds when the call
-    /// constructing it returns, each one the call made and nothing else holds, by attribute
-    /// ([`PlainInit::containers`]): those of the `__init__` the call runs, that of the first class
-    /// along the MRO defining one. Nothing else may run or change the construction: no class
-    /// along the MRO has a class decorator (which may generate another `__init__`),
-    /// `__init_subclass__`, a `dataclass_transform`, or a metaclass other than `type` or
-    /// `abc.ABCMeta` (whose `__call__` may run anything); that `__init__` and every one it
-    /// reaches through `super().__init__(...)` is a [`PlainInit`] (one along the MRO outside the
-    /// project is `object`'s), no `__init__` it reaches stores an attribute it makes a container
-    /// for, and every attribute they store is stored on the instance without running code of the
-    /// project ([`Self::attr_write_stores_value`]). A store running a property's setter or a
-    /// descriptor may hand the instance anywhere, and a base's `__init__` replacing the
-    /// instance's namespace makes every attribute shared. Empty for any other class. A read of
-    /// one of the attributes finds its container when reading it finds what the instance stores
-    /// ([`Self::attr_read_finds_stored`]).
-    pub(crate) fn constructor_containers(
+    /// What a call constructing an instance of the project class `class` keeps of it
+    /// ([`Constructor`]), from the `__init__` the call runs, that of the first class along the
+    /// MRO defining one, and every one it reaches through `super().__init__(...)`:
+    /// - [`Constructor::Unknown`] when the class may give an existing instance
+    ///   ([`Self::may_reuse_instances`]) or has a metaclass other than `type` or `abc.ABCMeta`, or
+    ///   a base heki names no class for ([`Self::has_custom_metaclass`], whose `__call__` may run
+    ///   anything); when the classes along the MRO up to one whose `__init__` the call runs may
+    ///   bind another `__init__` than their bodies do ([`Self::lookup_rebound`]); when such an
+    ///   `__init__` is a project function a decorator replaces; or when a star import of the
+    ///   module of a [`PlainInit`] may bind a builtin it reads (`super`, `list`).
+    /// - [`Constructor::HandsToInit`] when one of them is a project `__init__` that is no
+    ///   [`PlainInit`], or a store of theirs may run code of the project (a property's setter, a
+    ///   descriptor, `__setattr__`, [`Self::attr_write_stores_value`]): what keeps the instance
+    ///   is what the first one does with its first parameter.
+    /// - [`Constructor::KeepsNothing`] otherwise: every one is a [`PlainInit`], `object`'s, or
+    ///   that of a class outside the project, which keeps nothing of the instance (a dataclass's
+    ///   or a pydantic model's construction runs only such an `__init__`). Its containers are
+    ///   those of the first one, when every one is a [`PlainInit`], no later one stores an
+    ///   attribute the first makes a container for (it may rebind it), and no class along the MRO
+    ///   has a class decorator (which may generate another `__init__`), `__init_subclass__`, or a
+    ///   `dataclass_transform`. A base's `__init__` replacing the instance's namespace makes every
+    ///   attribute shared. A read of one of the attributes finds its container when reading it
+    ///   finds what the instance stores ([`Self::attr_read_finds_stored`]).
+    pub(crate) fn constructor(
         &self,
         class: &str,
         catalog_stores: impl Fn(&str) -> bool,
-    ) -> &[(Box<str>, ContainerKind)] {
+    ) -> Constructor<'_> {
+        if self.may_reuse_instances(class) || self.has_custom_metaclass(class) {
+            return Constructor::Unknown;
+        }
         let mro = self.mro(class);
         let decls: Vec<Option<&ClassDecl>> = (mro.iter())
             .map(|c| {
@@ -4796,56 +4829,92 @@ impl ProjectDecls {
                 self.class(c)
             })
             .collect();
+        // From the class at `from` on, the first class defining `__init__`: a project class's
+        // own, or one outside the project other than a plain base; `None` when only
+        // `object.__init__` is left.
+        let next_init = |from: usize| {
+            (from..decls.len()).find(|&i| match decls[i] {
+                Some(d) => d.members.contains("__init__"),
+                None => !PLAIN_BASES.contains(&mro[i].as_str()),
+            })
+        };
+        let star_bound = |c: &str, init: &PlainInit| {
+            let module = self.split_module(c).map(|(m, _)| m);
+            (init.builtins.iter()).any(|name| {
+                module.is_some_and(|m| {
+                    !m.binds(name)
+                        && (m.star_imports.iter().flatten())
+                            .any(|source| self.star_import_may_bind(&m.module_name, source, name))
+                })
+            })
+        };
+        let mut from = 0;
+        let mut first: Option<&PlainInit> = None;
+        let mut stores: Vec<&str> = Vec::new();
+        // Every `__init__` the call runs is a project one, and none rebinds a container of the
+        // first.
+        let mut all_plain = true;
+        loop {
+            let found = next_init(from);
+            let reached = found.map_or(mro.len(), |i| i + 1);
+            if self.lookup_rebound(&mro[from..reached], "__init__") {
+                return Constructor::Unknown;
+            }
+            let Some(i) = found else { break };
+            let Some(d) = decls[i] else {
+                all_plain = false;
+                break;
+            };
+            let Some(init) = d.plain_init.as_deref() else {
+                let decl =
+                    (self.own_method(&mro[i], "__init__")).and_then(|k| self.function_decl(&k));
+                // A static or class method `__init__` is not handed the instance, and its
+                // call ends the chain.
+                if decl
+                    .as_ref()
+                    .is_some_and(|f| f.called_as_defined && (f.is_staticmethod || f.is_classmethod))
+                {
+                    all_plain = false;
+                    break;
+                }
+                let as_defined = decl.is_some_and(|f| f.called_as_defined);
+                return if as_defined {
+                    Constructor::HandsToInit
+                } else {
+                    Constructor::Unknown
+                };
+            };
+            if star_bound(&mro[i], init) {
+                return Constructor::Unknown;
+            }
+            if let Some(first) = first {
+                let rebinds = |(a, _): &(Box<str>, _)| init.stores.binary_search(a).is_ok();
+                all_plain &= !first.containers.iter().any(rebinds);
+            }
+            first = first.or(Some(init));
+            stores.extend(init.stores.iter().map(|a| &**a));
+            if !init.calls_next {
+                break;
+            }
+            from = i + 1;
+        }
+        if !stores.is_empty() && !self.attr_write_stores_value(class, &stores, &catalog_stores) {
+            return Constructor::HandsToInit;
+        }
         let changes_construction = |d: &ClassDecl| {
             !d.decorators.is_empty()
                 || d.transform.is_some()
                 || d.members.contains("__init_subclass__")
         };
-        if self.has_custom_metaclass(class)
-            || decls.iter().flatten().any(|d| changes_construction(d))
-        {
-            return &[];
-        }
-        // From the class at `from` on, the first class defining `__init__`: a project class's
-        // own, or `None` for one outside the project other than a plain base, which may define
-        // its own; `Some(None)` when only `object.__init__` is left.
-        let next_init = |from: usize| -> Option<Option<(usize, &PlainInit)>> {
-            let found = (from..decls.len()).find(|&i| match decls[i] {
-                Some(d) => d.members.contains("__init__"),
-                None => !PLAIN_BASES.contains(&mro[i].as_str()),
-            });
-            let Some(i) = found else {
-                return Some(None);
-            };
-            decls[i]
-                .and_then(|d| d.plain_init.as_deref())
-                .map(|init| Some((i, init)))
-        };
-        let Some(Some((mut at, first))) = next_init(0) else {
-            return &[];
-        };
-        let mut stores: Vec<&str> = first.stores.iter().map(|a| &**a).collect();
-        let mut init = first;
-        while init.calls_next {
-            match next_init(at + 1) {
-                Some(Some((i, next))) => {
-                    // A base's `__init__` storing the attribute may rebind it after the store.
-                    let rebinds = |(a, _): &(Box<str>, _)| next.stores.binary_search(a).is_ok();
-                    if first.containers.iter().any(rebinds) {
-                        return &[];
-                    }
-                    stores.extend(next.stores.iter().map(|a| &**a));
-                    (at, init) = (i, next);
-                }
-                Some(None) => break,
-                None => return &[],
+        let containers = match first {
+            Some(first)
+                if all_plain && !decls.iter().flatten().any(|d| changes_construction(d)) =>
+            {
+                &*first.containers
             }
-        }
-        if self.attr_write_stores_value(class, &stores, &catalog_stores) {
-            &first.containers
-        } else {
-            &[]
-        }
+            _ => &[],
+        };
+        Constructor::KeepsNothing { containers }
     }
 
     /// The project classes whose bodies may supply an attribute of a value of the class `class`

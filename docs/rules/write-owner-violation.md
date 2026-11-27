@@ -218,7 +218,11 @@ project function that returns such an object (at a call leaving an optional para
 default without elements, such as `None`, the paths returning an element of it return
 nothing) or returns the one it is handed, and nothing else can hold it yet: no store into
 an object the function did not make, a container, a global, or a closure, no `yield`, and no
-call that may keep it ran before the write. An attribute store into another new object of a
+call that may keep it ran before the write. Calling the class may keep it too: the
+construction keeps what the `__init__` it runs, or a base's reached through
+`super().__init__()`, keeps of `self` (`REGISTRY.append(self)`, a helper handed `self` that
+keeps it), and a class with a metaclass other than `type` or `abc.ABCMeta`, a decorated
+`__init__`, or an `__init__` rebound outside its class body gives no new object. An attribute store into another new object of a
 class whose attribute write runs no code links the holder to it instead: the object stays new
 until it, an object holding it, or a value read out of one is kept (see
 [configuration](../configuration.md#write-owners)). So does a store into a list, set, or dict

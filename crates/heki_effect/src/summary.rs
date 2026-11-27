@@ -34,7 +34,7 @@ use crate::readonly::{
 };
 use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
-    self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
+    self, Callee, Constructor, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
 };
 use crate::types::{Held, Ty};
@@ -1028,6 +1028,9 @@ struct Extractor<'a> {
     /// position, for the check after the visit of whether they hand the value to code of the
     /// project.
     added: FxHashMap<crate::construction::Pos, AddedBy>,
+    /// What a construction of each project class keeps of its instance, decided once per class
+    /// for the function ([`Self::constructor`]).
+    constructors: RefCell<FxHashMap<Box<str>, Constructor<'a>>>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
     /// The opt-in facts the enabled rules read.
@@ -1433,6 +1436,7 @@ impl<'a> Extractor<'a> {
             unpacked: FxHashMap::default(),
             unpacked_displays: FxHashSet::default(),
             added: FxHashMap::default(),
+            constructors: RefCell::default(),
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
@@ -5017,26 +5021,15 @@ impl<'a> Extractor<'a> {
                 self.specials_run_project_code(&specials)
             }
         });
-        let kb = self.cx.kb;
-        let catalog_stores = |base: &str| {
-            kb.lookup(&format!("{base}.__setattr__"))
-                .is_some_and(|e| e.stores_on_instance)
-        };
-        let project = self.cx.project;
-        // What a construction of each class makes is decided once, for every read of it.
-        let constructions: RefCell<FxHashMap<Box<str>, &[_]>> = RefCell::default();
         let made = |class: &str, attr: &str| {
-            let known = constructions.borrow().get(class).copied();
-            let containers = known.unwrap_or_else(|| {
-                let made = project.constructor_containers(class, catalog_stores);
-                constructions.borrow_mut().insert(class.into(), made);
-                made
-            });
+            let Constructor::KeepsNothing { containers } = self.constructor(class) else {
+                return None;
+            };
             let kind = containers
                 .iter()
                 .find_map(|(a, k)| (&**a == attr).then_some(*k))?;
-            project
-                .attr_read_finds_stored(class, attr, catalog_stores)
+            (self.cx.project)
+                .attr_read_finds_stored(class, attr, |base| self.catalog_stores(base))
                 .then_some(kind)
         };
         let (answers, returned) = rec.resolve(
@@ -5341,6 +5334,23 @@ impl<'a> Extractor<'a> {
         true
     }
 
+    /// What a construction of the project class `class` keeps of its instance
+    /// ([`resolver::ProjectDecls::constructor`]).
+    fn constructor(&self, class: &str) -> Constructor<'a> {
+        if let Some(known) = self.constructors.borrow().get(class) {
+            return *known;
+        }
+        let found = (self.cx.project).constructor(class, |base| self.catalog_stores(base));
+        self.constructors.borrow_mut().insert(class.into(), found);
+        found
+    }
+
+    /// Whether the catalog says storing an attribute on an instance of the library class `base`
+    /// stores it in the instance (R3, `pydantic.BaseModel`).
+    fn catalog_stores(&self, base: &str) -> bool {
+        (self.cx.kb.lookup(&format!("{base}.__setattr__"))).is_some_and(|e| e.stores_on_instance)
+    }
+
     /// The holder of an attribute store of `attr` into the object `obj` holds, when that store
     /// may link a new object into another one ([`Escape::Into`]): `obj` may be new and is an
     /// instance of a project class whose write of `attr` stores the value itself and runs no
@@ -5349,16 +5359,9 @@ impl<'a> Extractor<'a> {
         let Some(Val::Inst(class)) = self.types.get(&obj) else {
             return None;
         };
-        let kb = self.cx.kb;
-        let catalog_stores = |base: &str| {
-            kb.lookup(&format!("{base}.__setattr__"))
-                .is_some_and(|e| e.stores_on_instance)
-        };
         (self.may_be_new(obj)
-            && self
-                .cx
-                .project
-                .attr_write_stores_value(class, &[attr], catalog_stores))
+            && (self.cx.project)
+                .attr_write_stores_value(class, &[attr], |base| self.catalog_stores(base)))
         .then_some(obj)
     }
 
@@ -5419,10 +5422,16 @@ impl<'a> Extractor<'a> {
             | InstKind::Yield {
                 value: Some(value), ..
             } => self.escape(*value, Escape::Definite),
+            // A slice store iterates the value, which may run code of the project that keeps it.
             InstKind::SubscriptStore {
-                obj, index, value, ..
+                obj,
+                index,
+                value,
+                is_slice,
+                ..
             } => {
                 let kind = (self.types.get(obj).map(Val::instance_classes))
+                    .filter(|_| !*is_slice)
                     .and_then(|classes| classes.first().filter(|_| classes.len() == 1))
                     .and_then(|class| ContainerKind::of_class(class))
                     .filter(|k| matches!(k, ContainerKind::List | ContainerKind::Dict));
@@ -5585,6 +5594,7 @@ impl<'a> Extractor<'a> {
                 index,
                 key_const,
                 value,
+                ..
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, false, span);
                 // A store under a key the container holds changes no iterator's step.
@@ -7676,7 +7686,8 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.param_origins = buffer;
-                self.project_alloc(call, returns);
+                let inits: Vec<usize> = handovers.iter().map(|(_, i, _)| *i).collect();
+                self.project_alloc(call, returns, &inits);
                 if !handed_state.is_empty() {
                     self.summary.shared_state_mut().handed.extend(handed_state);
                 }
@@ -8548,10 +8559,11 @@ impl<'a> Extractor<'a> {
         match callee {
             Callee::External(symbol) if self.adds_to_container(symbol, call) => {}
             Callee::External(symbol) => {
-                let new_instance = call
-                    .constructs
-                    .as_ref()
-                    .is_some_and(|c| !self.cx.project.may_reuse_instances(c));
+                // A bare allocation runs no `__init__`: it stays new whatever one keeps.
+                let bare = symbol.ends_with(".__new__");
+                let new_instance = (call.constructs.as_deref()).is_some_and(|c| {
+                    bare || matches!(self.constructor(c), Constructor::KeepsNothing { .. })
+                });
                 self.external_escapes(
                     symbol,
                     call.dst,
@@ -8609,7 +8621,7 @@ impl<'a> Extractor<'a> {
     /// call handing back an argument as itself ([`Self::same_objects`]) gives that argument's
     /// object, and a project function returning an instance of a project class a new object
     /// when every candidate returns one.
-    fn project_alloc(&mut self, call: &Call<'_>, returns: Vec<NewFrom>) {
+    fn project_alloc(&mut self, call: &Call<'_>, returns: Vec<NewFrom>, inits: &[usize]) {
         if !self.ownership {
             return;
         }
@@ -8617,9 +8629,21 @@ impl<'a> Extractor<'a> {
             return;
         };
         if let Some(class) = &call.constructs {
-            if !self.cx.project.may_reuse_instances(class) {
-                let made = (NewKind::Own, Some(class.as_str()));
-                self.rec.alloc(self.at(), dst, made, Vec::new());
+            let hands = match self.constructor(class) {
+                Constructor::KeepsNothing { .. } => false,
+                Constructor::HandsToInit if !inits.is_empty() => true,
+                Constructor::HandsToInit | Constructor::Unknown => return,
+            };
+            // The `__init__`s the call may run, each handed the object as its `self`.
+            let site = u32::try_from(self.sites.len()).ok();
+            let handed: Option<Vec<Escape>> = (inits.iter().filter(|_| hands))
+                .map(|&init| Some(Escape::Initialized(site?, u16::try_from(init).ok()?)))
+                .collect();
+            let Some(handed) = handed else { return };
+            let made = (NewKind::Own, Some(class.as_str()));
+            self.rec.alloc(self.at(), dst, made, Vec::new());
+            for how in handed {
+                self.escape(dst, how);
             }
         } else if let Some(&arg) = self.same_objects.get(&dst) {
             self.rec.handed_back(dst, arg);
@@ -8681,24 +8705,31 @@ impl<'a> Extractor<'a> {
         constructs: bool,
     ) {
         // The object an attribute write by name writes (the receiver of a bound
-        // `obj.__setattr__`), and the name.
-        let written = match recv {
+        // `obj.__setattr__`, the first argument of `object.__setattr__(obj, ...)` called on the
+        // class), and the name.
+        let bound = recv.filter(|r| !matches!(self.val(*r), Some(Val::Ref(_))));
+        let written = match bound {
             Some(obj) => Some((obj, args.first())),
             None => args.first().map(|obj| (*obj, args.get(1))),
         };
-        if let Some((obj, name)) = written
-            && let Some(named) = match symbol {
+        if let Some((obj, name)) = written {
+            let name = || name.and_then(|a| self.shape.str_const(*a));
+            let attr = match symbol {
                 "builtins.setattr"
                 | "builtins.object.__setattr__"
                 | "builtins.delattr"
-                | "builtins.object.__delattr__" => Some(true),
-                "builtins.vars" => Some(false),
+                | "builtins.object.__delattr__" => Some(name()),
+                "builtins.vars" => Some(None),
+                // Reading the namespace by name, as `obj.__dict__` does, or under a name heki
+                // cannot read.
+                "builtins.getattr" | "builtins.object.__getattribute__" => name()
+                    .is_none_or(|a| NAMESPACE_ATTRS.contains(&a))
+                    .then_some(None),
                 _ => None,
+            };
+            if let Some(attr) = attr {
+                self.attr_written(obj, attr);
             }
-        {
-            let attr = name.filter(|_| named);
-            let attr = attr.and_then(|a| self.shape.str_const(*a));
-            self.attr_written(obj, attr);
         }
         let method = symbol.rsplit('.').next().unwrap_or(symbol);
         let deep_kwarg = || {

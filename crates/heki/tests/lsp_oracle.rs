@@ -152,8 +152,8 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass"]
-write-universe = ["Ticket.flag", "Part.flag"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass", "pkg.owned_flag_pass"]
+write-universe = ["Ticket.flag", "Part.flag", "Holder.flag"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -361,6 +361,9 @@ const OWNED_BASE: &str =
     "SHARED_STATE = {}\n\n\nclass Base:\n    def __init__(self):\n        self.ready = True\n";
 const OWNED_MODEL: &str = "from pkg.owned_base import Base\n\nSHARED = []\n\n\nclass Holder(Base):\n    def __init__(self):\n        super().__init__()\n        self.parts: list = []\n";
 const OWNED_PASS: &str = "from pkg.copy_ops import Ticket\nfrom pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    part = Ticket()\n    copied.parts.append(part)\n    part.flag = True\n    return copied\n";
+// A pass writing an instance it constructs: new while the constructors it runs keep nothing of
+// it, the base's in a third module included (`ProjectDecls::constructor`).
+const OWNED_FLAG_PASS: &str = "from pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    copied.flag = True\n    return copied\n";
 const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
@@ -1344,6 +1347,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/owned_base.py", OWNED_BASE),
         ("pkg/owned_model.py", OWNED_MODEL),
         ("pkg/owned_pass.py", OWNED_PASS),
+        ("pkg/owned_flag_pass.py", OWNED_FLAG_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -4064,6 +4068,25 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![save("pkg/owned_base.py", OWNED_BASE)],
         )
         .absent(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the base constructor of a third module keeps the instance",
+            vec![Action::Save(
+                "pkg/owned_base.py",
+                OWNED_BASE.replace("self.ready = True", "SHARED_STATE[0] = self"),
+            )],
+        )
+        .present(&[
+            ("pkg/owned_flag_pass.py", "EFF201"),
+            ("pkg/owned_pass.py", "EFF201"),
+        ]),
+        Step::new(
+            "the base constructor keeps nothing again",
+            vec![save("pkg/owned_base.py", OWNED_BASE)],
+        )
+        .absent(&[
+            ("pkg/owned_flag_pass.py", "EFF201"),
+            ("pkg/owned_pass.py", "EFF201"),
+        ]),
         Step::new(
             "the copy helper of another module defaults its table to a shared dict",
             vec![Action::Save(

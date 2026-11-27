@@ -2055,6 +2055,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                         index,
                         key_const,
                         value: res,
+                        is_slice,
                     },
                     span,
                 );
@@ -2084,13 +2085,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::Subscript(sub) => {
                 let obj = self.lower_expr(&sub.value);
-                let (index, key_const, _, _, _) = self.lower_subscript_index(&sub.slice);
+                let (index, key_const, is_slice, _, _) = self.lower_subscript_index(&sub.slice);
                 self.emit(
                     InstKind::SubscriptStore {
                         obj,
                         index,
                         key_const,
                         value,
+                        is_slice,
                     },
                     span,
                 );
@@ -3720,6 +3722,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                         index,
                         key_const: extract_const_str(key),
                         value,
+                        is_slice: false,
                     },
                     elt_span,
                 );
