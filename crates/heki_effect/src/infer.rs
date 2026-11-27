@@ -2395,7 +2395,16 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
-                Some(Ty::Ref(fqn) | Ty::Class(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
+                Some(recv @ (Ty::Ref(fqn) | Ty::Class(fqn))) => {
+                    let subclasses = matches!(recv, Ty::Class(_));
+                    match cx
+                        .project
+                        .class_object_attribute(fqn, attr, subclasses, cx.kb)
+                    {
+                        Some(class) => Some(Ty::inst(class)),
+                        None => Some(cx.named(&format!("{fqn}.{attr}"))),
+                    }
+                }
                 Some(recv) => return self.member(recv, attr),
                 None => None,
             },

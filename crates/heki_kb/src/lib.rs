@@ -399,6 +399,13 @@ pub struct EcosystemEntry {
     /// value stored may be a validated conversion, and validators of the project may run
     /// (`pydantic.BaseModel` with `validate_assignment`).
     pub stores_on_instance: bool,
+    /// The class is a base whose instances keep what their code stores in an attribute in their
+    /// own `__dict__`: neither the class nor its metaclass defines `__setattr__`,
+    /// `__delattr__`, `__getattribute__`, or `__getattr__`, the metaclass keeps a class-body
+    /// object of no class it knows as it is (a `cached_property` stays one), and the class binds
+    /// no data descriptor but the names listed (`django.db.models.Model`: its `pk` property).
+    /// `None` when the catalog does not say. A name a subclass's body binds is that class's own.
+    pub plain_attributes_except: Option<Vec<String>>,
     /// An instance of this class built without a value for a field starts from the field's
     /// default itself when the default is hashable, and from a deep copy of an unhashable one
     /// (pydantic 2's `BaseModel`, through `pydantic-core`). A field that validates its default
@@ -1245,6 +1252,27 @@ pub struct AttributeType {
     pub class: String,
 }
 
+/// What reading an attribute on a class object deriving from a library base gives
+/// (`[[class_attributes]]`): the base keeps, for each of its subclasses, instances of the
+/// library class `type` as class attributes. Reading `attribute` on a subclass gives an instance
+/// of `type` when no class along its MRO binds the name, nor binds another name in its body to
+/// an instance of `type` or of a subclass of it (the base then makes none); a name a subclass's
+/// body binds to an instance of a project subclass of `type` gives, read on the class, an
+/// instance of that class (Django's `ModelBase` adds a `Manager` as `objects` to a model that
+/// declares no manager, and its `ManagerDescriptor` gives a copy of the manager a model
+/// declares). An instance of the subclass has no such attribute, so a read on one is not typed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassAttribute {
+    /// The library base, as an import names it (`django.db.models.Model`).
+    pub base: String,
+    pub attribute: String,
+    #[serde(rename = "type")]
+    pub class: String,
+    /// The versions whose source the row was checked against.
+    pub versions: String,
+}
+
 /// A distribution whose catalog rows were checked against its releases
 /// (`[[distributions]]`): every entry and attribute row under `packages` holds in each release
 /// `verified` admits, which `tests/sentinel/verify_ecosystem_kb.py` checks on the oldest, the
@@ -1275,6 +1303,8 @@ struct EcosystemKbFile {
     entries: Vec<EcosystemEntry>,
     #[serde(default)]
     attributes: Vec<AttributeType>,
+    #[serde(default)]
+    class_attributes: Vec<ClassAttribute>,
     #[serde(default)]
     invokes: Vec<Invokes>,
     #[serde(default)]
@@ -1317,6 +1347,10 @@ pub struct EffectiveEcosystemKb {
     /// `Class.attribute` -> the class of what reading it on an instance gives
     /// ([`AttributeType`]), the built-in rows and the users' `attribute-type`.
     pub attributes: BTreeMap<String, String>,
+    /// The attributes library bases give the class objects deriving from them
+    /// ([`ClassAttribute`]).
+    #[serde(default)]
+    pub class_attributes: Vec<ClassAttribute>,
     /// The releases each distribution's rows were checked against ([`Distribution`]); the
     /// analysis never reads them.
     pub distributions: Vec<Distribution>,
@@ -1392,6 +1426,7 @@ impl EffectiveEcosystemKb {
             declared_fields: Vec::new(),
             annotation_readers: Vec::new(),
             attributes: BTreeMap::new(),
+            class_attributes: Vec::new(),
             distributions: Vec::new(),
             provides: Vec::new(),
             result_of_names,
@@ -1415,6 +1450,7 @@ impl EffectiveEcosystemKb {
         let mut declared_fields = Vec::new();
         let mut annotation_readers = Vec::new();
         let mut attributes = BTreeMap::new();
+        let mut class_attributes = Vec::new();
         let mut distributions = Vec::new();
         let mut provides = Vec::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
@@ -1423,6 +1459,7 @@ impl EffectiveEcosystemKb {
             provides.extend(parsed.provides);
             raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
             attributes.extend(parsed.attributes.into_iter().map(|a| (a.symbol, a.class)));
+            class_attributes.extend(parsed.class_attributes);
             opaque_packages.extend(parsed.opaque_packages);
             invokes.extend(parsed.invokes.into_iter().map(|i| (i.symbol.clone(), i)));
             cached_properties.extend(
@@ -1464,10 +1501,11 @@ impl EffectiveEcosystemKb {
         let fields = serde_json::to_string(&declared_fields).unwrap_or_default();
         let readers = serde_json::to_string(&annotation_readers).unwrap_or_default();
         let read = serde_json::to_string(&attributes).unwrap_or_default();
+        let class_read = serde_json::to_string(&class_attributes).unwrap_or_default();
         let provided = serde_json::to_string(&provides).unwrap_or_default();
         kb.digest = blake3::hash(
             format!(
-                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{provided}",
+                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{class_read}|{provided}",
                 kb.digest
             )
             .as_bytes(),
@@ -1480,6 +1518,7 @@ impl EffectiveEcosystemKb {
         kb.declared_fields = declared_fields;
         kb.annotation_readers = annotation_readers;
         kb.attributes = attributes;
+        kb.class_attributes = class_attributes;
         kb.distributions = distributions;
         kb.provides = provides;
         kb.user_symbols = overrides
@@ -1681,6 +1720,20 @@ impl EffectiveEcosystemKb {
         self.attributes
             .get(&format!("{class}.{attr}"))
             .map(String::as_str)
+    }
+
+    /// Whether storing `attr` on an instance of a subclass of the library base `base` stores
+    /// it in the instance as far as `base` goes ([`EcosystemEntry::plain_attributes_except`]).
+    pub fn stores_plainly(&self, base: &str, attr: &str) -> bool {
+        (self
+            .lookup(base)
+            .and_then(|e| e.plain_attributes_except.as_ref()))
+        .is_some_and(|except| !except.iter().any(|name| name == attr))
+    }
+
+    /// The rows of `[[class_attributes]]` for the library base `base` ([`ClassAttribute`]).
+    pub fn class_attributes_of(&self, base: &str) -> impl Iterator<Item = &ClassAttribute> {
+        (self.class_attributes.iter()).filter(move |row| row.base == base)
     }
 }
 

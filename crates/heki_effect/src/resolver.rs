@@ -907,6 +907,10 @@ pub struct NamedAttr {
     /// wrapped in `staticmethod`): `body` is then `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_partial: Option<Box<PartialAttr>>,
+    /// The class body binds the attribute last, on every path, to what a call of this name gives
+    /// (`objects = StreamManager()`): `body` is then `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_call: Option<String>,
     /// The class body annotates the attribute outside `ClassVar` and `InitVar`: a field, where
     /// a base the project does not define may build an `__init__` that stores the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2829,6 +2833,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
+    /// The answers of [`Self::class_object_attribute`] so far, by class, name, and whether a
+    /// subclass may be read; cleared with the indexes.
+    class_object_attributes: SharedMemo<(String, String, bool), Option<String>, DeclKeys>,
     /// The answers of [`Self::object_attr_read_runs_no_code`] so far, by class and name;
     /// cleared with the indexes.
     object_attr_reads: SharedMemo<(String, String), bool, DeclKeys>,
@@ -3196,6 +3203,7 @@ impl ProjectDecls {
         self.capacities.clear();
         self.star_bindings.clear();
         self.catalog_attributes.clear();
+        self.class_object_attributes.clear();
         self.object_attr_reads.clear();
         // What other modules change, which deciding what a module's `__getattr__` serves reads
         // (`Self::getattr_open`) while the indexes are built: as for new declarations, nothing
@@ -5314,6 +5322,23 @@ impl ProjectDecls {
     /// call in its body or defines `__getattr__` or `__getattribute__`, every base is a project
     /// class (or `object`, `NamedTuple`, `Generic`), and no metaclass heki does not know creates
     /// the class.
+    /// Whether a store of `attr` on a value of the class `class` stores it in the instance as far
+    /// as the bases go: every class along the MRO of every class the value may be
+    /// ([`Self::value_classes`]) is a project class, a plain base, or a library base the
+    /// catalog says keeps what its subclasses' code stores in the instance and binds no data
+    /// descriptor of the name (`heki_kb::EcosystemEntry::plain_attributes_except`, R3:
+    /// `django.db.models.Model`).
+    pub fn bases_store_plainly(&self, class: &str, attr: &str, kb: &EffectiveEcosystemKb) -> bool {
+        let plain = |c: &String| {
+            self.is_project_class(c)
+                || PLAIN_BASES.contains(&c.as_str())
+                || kb.stores_plainly(c, attr)
+        };
+        self.value_classes(class)
+            .iter()
+            .all(|c| self.mro(c).iter().all(plain))
+    }
+
     pub fn plain_attr(&self, class: &str, attr: &str) -> bool {
         let read = self.attr_read(class, attr);
         read.bases_known && read.declared && !read.runs_hook(true) && read.code_binders.is_empty()
@@ -6420,6 +6445,114 @@ impl ProjectDecls {
                 self.find_catalog_attribute(&class, attr, kb)
                     .map(str::to_owned)
             })
+    }
+
+    /// The class of what reading `attr` on the class object of the project class `class` gives
+    /// (with `subclasses`, on one of its project subclasses too: `cls`, `type(self)`), from the
+    /// `[[class_attributes]]` rows of the first base outside the project along each class's MRO
+    /// (`heki_kb::ClassAttribute`, R3): where the first class along the MRO binding `attr` binds
+    /// it in its body to a call of a class deriving from a row's `type`
+    /// (`objects = StreamManager()`), that class; where none binds it, the `type` of the row of
+    /// `attr`, unless a class body along the MRO may bind an instance of a row's `type` under
+    /// another name ([`Self::may_bind_instance_of`]: the base then gives no such attribute).
+    /// `None` when a class on the way binds the name otherwise or outside its body, has a
+    /// metaclass heki does not know, a project class follows the base, or no row applies.
+    ///
+    /// The answer is kept per class and name for the life of the indexes, as
+    /// [`Self::catalog_attribute`]'s.
+    pub(crate) fn class_object_attribute(
+        &self,
+        class: &str,
+        attr: &str,
+        subclasses: bool,
+        kb: &EffectiveEcosystemKb,
+    ) -> Option<String> {
+        let class = self.canonical(class);
+        if !self.is_project_class(&class) {
+            return None;
+        }
+        let mro = self.mro(&class);
+        let base = mro.iter().find(|c| !self.is_project_class(c))?;
+        kb.class_attributes_of(base).next()?;
+        self.class_object_attributes
+            .ask(self, (class.clone(), attr.to_owned(), subclasses), || {
+                let along = |mro: &[String]| self.class_row_along(mro, attr, kb);
+                match subclasses {
+                    true => self.row_of_every_value(&class, along).map(str::to_owned),
+                    false => along(&mro).map(str::to_owned),
+                }
+            })
+    }
+
+    /// [`Self::class_object_attribute`] along the MRO `mro` of one class.
+    fn class_row_along<'s>(
+        &'s self,
+        mro: &[String],
+        attr: &str,
+        kb: &'s EffectiveEcosystemKb,
+    ) -> Option<&'s str> {
+        let at = mro.iter().position(|c| !self.is_project_class(c))?;
+        let base = &mro[at];
+        if mro[at..].iter().any(|c| self.is_project_class(c)) {
+            return None;
+        }
+        let kept: Vec<&str> = kb
+            .class_attributes_of(base)
+            .map(|r| r.class.as_str())
+            .collect();
+        let mut may_bind = false;
+        for c in &mro[..at] {
+            self.read(|k| note(&mut k.class_facts, c));
+            let d = self.class(c)?;
+            if d.custom_metaclass || d.rebound_attrs.contains(attr) {
+                return None;
+            }
+            if d.members.contains(attr) {
+                let callee = d.named_attrs.get(attr)?.body_call.as_deref()?;
+                return (kept.iter().any(|t| self.derives_from(callee, t))).then_some(callee);
+            }
+            may_bind |= self.may_bind_instance_of(c, d, &kept);
+        }
+        if may_bind {
+            return None;
+        }
+        (kb.class_attributes_of(base))
+            .find(|r| r.attribute == attr)
+            .map(|r| r.class.as_str())
+    }
+
+    /// Whether the body of the project class `class` (`decl`) may bind a name to an instance of
+    /// one of the library classes `kept` or of a subclass: to a call of one of them or of a
+    /// project class deriving from one, to what a call of a project function or method returns
+    /// (`QuerySet.as_manager()`), or to a value heki cannot name. Methods, properties, nested
+    /// classes, and calls of other library names (fields) bind none.
+    fn may_bind_instance_of(&self, class: &str, decl: &ClassDecl, kept: &[&str]) -> bool {
+        let bound = decl
+            .code_attrs
+            .iter()
+            .filter(|name| decl.members.contains(*name));
+        bound.into_iter().any(|name| {
+            match decl
+                .named_attrs
+                .get(name)
+                .and_then(|n| n.body_call.as_deref())
+            {
+                Some(callee) => {
+                    let callee = self.canonical(callee);
+                    match self.symbol(&callee) {
+                        Symbol::Class(_) | Symbol::External => {
+                            kept.iter().any(|t| self.derives_from(&callee, t))
+                        }
+                        _ => true,
+                    }
+                }
+                None => {
+                    !decl.properties.contains(name)
+                        && self.own_method(class, name).is_none()
+                        && self.class(&format!("{class}.{name}")).is_none()
+                }
+            }
+        })
     }
 
     /// [`Self::catalog_attribute`] of the canonical `class`, decided

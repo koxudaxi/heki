@@ -20,6 +20,7 @@ use heki_effect::{
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
+use heki_kb::EffectiveEcosystemKb;
 use heki_semantic::mangling;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
@@ -233,6 +234,7 @@ struct StaleWrite<'m, 'a> {
 fn stale_writes<'m, 'a>(
     index: &'a ProjectIndex,
     decls: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
     methods: &'m [Method<'a>],
     family: &[&'m Method<'a>],
     init_called: &FxHashSet<FuncKey>,
@@ -348,7 +350,7 @@ fn stale_writes<'m, 'a>(
                     kept_values::KeptAfterWrites::of(index, calls, &flows[fi], p_name)
                 });
                 let exact =
-                    kept_values::established(index, decls, &m.key, p_name, attr, write, kept);
+                    kept_values::established(index, decls, kb, &m.key, p_name, attr, write, kept);
                 found(StaleWrite {
                     prop: p,
                     writer: m,
@@ -390,6 +392,7 @@ pub(crate) fn mut101_mut111(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         stale_writes(
             cx.index,
             cx.decls,
+            cx.kb,
             methods,
             &family,
             &init_called,
@@ -457,6 +460,7 @@ pub struct StaleWriteKey {
 pub fn stale_writes_by_file(
     index: &ProjectIndex,
     decls: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
     wanted: impl Fn(&Path) -> bool,
 ) -> FxHashMap<PathBuf, BTreeSet<StaleWriteKey>> {
     let classes = ClassMethods::new(&[], index);
@@ -468,23 +472,32 @@ pub fn stale_writes_by_file(
         }
         let init_called = private_methods_called_from_init(index, &family);
         let writers = |m: &Method<'_>| wanted(m.path);
-        stale_writes(index, decls, methods, &family, &init_called, writers, |w| {
-            out.entry(w.writer.path.to_path_buf())
-                .or_default()
-                .insert(StaleWriteKey {
-                    prop: w.prop.key.clone(),
-                    writer: w.writer.key.clone(),
-                    attr: w.attr.to_owned(),
-                    span: w.span,
-                    running: stale_reads::classes_running(
-                        index,
-                        decls,
-                        &w.writer.key,
-                        w.prop.name(),
-                    ),
-                    exact: w.exact,
-                });
-        });
+        stale_writes(
+            index,
+            decls,
+            kb,
+            methods,
+            &family,
+            &init_called,
+            writers,
+            |w| {
+                out.entry(w.writer.path.to_path_buf())
+                    .or_default()
+                    .insert(StaleWriteKey {
+                        prop: w.prop.key.clone(),
+                        writer: w.writer.key.clone(),
+                        attr: w.attr.to_owned(),
+                        span: w.span,
+                        running: stale_reads::classes_running(
+                            index,
+                            decls,
+                            &w.writer.key,
+                            w.prop.name(),
+                        ),
+                        exact: w.exact,
+                    });
+            },
+        );
     }
     out
 }

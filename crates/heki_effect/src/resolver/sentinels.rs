@@ -212,6 +212,7 @@ impl NamedAttr {
             self.body_defined = other.body_defined;
         }
         self.body_partial = self.body_partial.take().or(other.body_partial);
+        self.body_call = self.body_call.take().or(other.body_call);
         self.annotated |= other.annotated;
         self.validates_default |= other.validates_default;
         self.held.extend(other.held);
@@ -263,6 +264,8 @@ enum Binding {
     Copy(VarId),
     /// The class's own `def name(...)`.
     Def,
+    /// A call made under the name (`name = models.CharField(...)`).
+    Call(VarId),
     /// Anything else: an import, an augmented assignment, an `except` clause, a nested class.
     Other,
 }
@@ -299,6 +302,9 @@ fn class_body_names(
                 }
                 InstKind::Copy { src, .. } => Binding::Copy(*src),
                 InstKind::MakeClosure { .. } => Binding::Def,
+                InstKind::Call { dst, .. } | InstKind::MethodCall { dst, .. } => {
+                    Binding::Call(*dst)
+                }
                 _ => Binding::Other,
             };
             let Some(name) = inst
@@ -362,8 +368,19 @@ fn class_body_names(
         let (field, validates_default) = fields.get(name).copied().unwrap_or((false, false));
         let attr = match reaching[..] {
             [i] => {
-                let Binding::Copy(value) = binds[i].2 else {
-                    continue;
+                let value = match binds[i].2 {
+                    Binding::Copy(value) => value,
+                    Binding::Call(value) => {
+                        if let Some(callee) = called_name(&shape, value, decls, stores) {
+                            let attr = NamedAttr {
+                                body_call: Some(callee),
+                                ..NamedAttr::default()
+                            };
+                            found.push((body.qualname.clone(), name.to_owned(), attr));
+                        }
+                        continue;
+                    }
+                    Binding::Def | Binding::Other => continue,
                 };
                 // `attr: T = field(default=NAME)`: a stdlib dataclass makes `NAME` the class
                 // attribute, and `init=False` leaves the field out of `__init__`.
@@ -386,6 +403,15 @@ fn class_body_names(
                         };
                     let Some(partial) = partial_of(&shape, wrapped, decls, stores, is_static)
                     else {
+                        if !is_static
+                            && let Some(callee) = called_name(&shape, value, decls, stores)
+                        {
+                            let attr = NamedAttr {
+                                body_call: Some(callee),
+                                ..NamedAttr::default()
+                            };
+                            found.push((body.qualname.clone(), name.to_owned(), attr));
+                        }
                         continue;
                     };
                     let attr = NamedAttr {
@@ -452,7 +478,7 @@ fn bound_on_paths(
                 continue;
             }
             Binding::Copy(value) => value,
-            Binding::Other => return None,
+            Binding::Call(_) | Binding::Other => return None,
         };
         let (value, is_static) = match static_method_of(shape, value, staticmethod_trusted) {
             Some(wrapped) => (wrapped, true),
@@ -530,6 +556,32 @@ fn partial_of(
         keywords: !kwargs.is_empty(),
         is_static,
     })
+}
+
+/// The module-level name whose call gives `value` (`StreamManager()`, `models.Manager()`), by
+/// the fqn its module gives it ([`named_value`]), or a name of a module it imports.
+fn called_name(
+    shape: &FnShape<'_>,
+    value: VarId,
+    decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
+) -> Option<String> {
+    match shape.inst(shape.copy_root(value)).map(|i| &i.kind) {
+        Some(InstKind::Call {
+            callee_var: Some(callee),
+            ..
+        }) => named_value(shape, *callee, decls, stores),
+        // A name of an imported module (`models.CharField(...)`).
+        Some(InstKind::MethodCall { recv, method, .. }) => {
+            match shape.inst(shape.copy_root(*recv)).map(|i| &i.kind) {
+                Some(InstKind::LoadGlobal { name, .. }) => {
+                    Some(format!("{}.{method}", decls.fixed_import(name)?))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// `(default, init)` of a field specifier `value` holds (`dataclasses.field(default=NAME)`):
