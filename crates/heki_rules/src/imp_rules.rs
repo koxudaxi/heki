@@ -21,7 +21,7 @@ pub(crate) use development::imp104;
 use crate::mut_rules::{contract_places, mode, reports_unresolved};
 use crate::patterns::PartIndex;
 use crate::{CheckContext, GLOB_CHARACTERS, NamePart, RuleConfigError, RuleSelection};
-use heki_diagnostics::{Diagnostic, RelatedLocation};
+use heki_diagnostics::{ContractEntry, Diagnostic, RelatedLocation};
 use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Named, Target, Timing};
 use heki_env::{HekiConfig, ImportBoundaryRule};
 use heki_ir::walk::{Answer, Budget, Visit, reach_breadth_first};
@@ -227,6 +227,20 @@ impl Imports {
             ImportPattern::Module(_) | ImportPattern::Name { .. } => None,
         })
     }
+
+    /// The place of the first pattern matching the import of `module`, of which `indexed` is
+    /// the first module pattern the index of module patterns finds: a group or a name of a
+    /// module before it, else `indexed`.
+    fn first_matching(&self, module: Imported<'_>, indexed: Option<usize>) -> Option<usize> {
+        let group = Group::of(module);
+        let before = &self.patterns[..indexed.unwrap_or(self.patterns.len())];
+        let other = before.iter().position(|p| match p {
+            ImportPattern::Group(g) => *g == group,
+            ImportPattern::Name { .. } => p.names(module),
+            ImportPattern::Module(_) => false,
+        });
+        other.or(indexed)
+    }
 }
 
 /// What a contract walks from an importer (`reach`).
@@ -238,6 +252,38 @@ enum Reach {
     ImportTime,
     /// What any chain of imports that run leads to.
     All,
+}
+
+/// Why an import breaks a contract, with the entry of the contract that says so: the first
+/// `forbidden-imports` pattern the module matches (`Forbidden`), or the `relative-imports` one
+/// (`Absolute`), by its list and place there.
+#[derive(Debug, Clone, Copy)]
+struct Breach {
+    why: Why,
+    entry: Option<(&'static str, usize)>,
+}
+
+impl From<Why> for Breach {
+    fn from(why: Why) -> Self {
+        Self { why, entry: None }
+    }
+}
+
+/// A module pattern of `allowed-imports`, `forbidden-imports`, or `relative-imports` that a
+/// name matches: its contract, its list, and its place there.
+#[derive(Debug, Clone, Copy)]
+struct Matched {
+    contract: usize,
+    side: Side,
+    position: usize,
+}
+
+/// The place of the first pattern of contract `c` on `side` among `matched`.
+fn first_matched(matched: &[Matched], c: usize, side: Side) -> Option<usize> {
+    (matched.iter())
+        .filter(|m| m.contract == c && m.side == side)
+        .map(|m| m.position)
+        .min()
 }
 
 /// Why an import breaks a contract.
@@ -297,9 +343,9 @@ impl ImportContract<'_> {
 
     /// The text of a report naming the `broken` modules, each with why it breaks the contract:
     /// the modules of one reason together, `after` following the first of them.
-    fn breaks_text(&self, broken: &[(String, Why)], after: &str) -> String {
+    fn breaks_text(&self, broken: &[(String, Breach)], after: &str) -> String {
         let mut reasons: Vec<(Vec<String>, Why)> = Vec::new();
-        for (name, why) in broken {
+        for (name, Breach { why, .. }) in broken {
             match reasons.iter_mut().find(|(_, w)| w == why) {
                 Some((names, _)) => names.push(name.clone()),
                 None => reasons.push((vec![name.clone()], *why)),
@@ -360,7 +406,7 @@ struct ImportContracts<'c> {
     every_module: Vec<usize>,
     exempt: (PartIndex, Vec<usize>),
     /// The module patterns of `allowed-imports`, `forbidden-imports`, and `relative-imports`.
-    imports: (PartIndex, Vec<(usize, Side)>),
+    imports: (PartIndex, Vec<Matched>),
     /// The importer sides of `ignored-imports`, each with its pair.
     ignored: (PartIndex, Vec<IgnoredPair>),
 }
@@ -422,7 +468,13 @@ impl<'c> ImportContracts<'c> {
                     }
                     let pattern = ImportPattern::new(text, context, side != Side::Relative)?;
                     if let ImportPattern::Module(part) = &pattern {
-                        imports.push((part.clone(), (c, side)));
+                        let position = sides[side as usize].patterns.len();
+                        let matched = Matched {
+                            contract: c,
+                            side,
+                            position,
+                        };
+                        imports.push((part.clone(), matched));
                     }
                     sides[side as usize].patterns.push(pattern);
                 }
@@ -507,8 +559,8 @@ impl<'c> ImportContracts<'c> {
         out
     }
 
-    /// The contracts' module patterns that `name` matches, with the side of each.
-    fn matched(&self, name: &str) -> Vec<(usize, Side)> {
+    /// The contracts' module patterns that `name` matches.
+    fn matched(&self, name: &str) -> Vec<Matched> {
         let (index, owners) = &self.imports;
         let mut ids = Vec::new();
         index.find(name, &mut ids);
@@ -517,45 +569,45 @@ impl<'c> ImportContracts<'c> {
 
     /// Whether contract `c` allows `module` by what it lists as allowed (`allowed-imports`,
     /// `relative-imports`), by the module patterns it `matched`.
-    fn allows(&self, c: usize, module: Imported<'_>, matched: &[(usize, Side)]) -> bool {
+    fn allows(&self, c: usize, module: Imported<'_>, matched: &[Matched]) -> bool {
         let contract = &self.contracts[c];
         let allowed = &contract.allowed;
         (allowed.is_set()
             && (allowed.groups().any(|g| g == Group::of(module))
-                || matched.contains(&(c, Side::Allowed))
+                || first_matched(matched, c, Side::Allowed).is_some()
                 || allowed.patterns.iter().any(|p| p.names(module))))
-            || matched.contains(&(c, Side::Relative))
+            || first_matched(matched, c, Side::Relative).is_some()
     }
 
     /// Why importing `module` breaks contract `c`, by the module patterns it `matched`; `None`
     /// when the contract allows it. A module of `relative-imports` is allowed here: how an import
     /// names it is judged apart ([`Self::judge`]).
-    fn violates(&self, c: usize, module: Imported<'_>, matched: &[(usize, Side)]) -> Option<Why> {
+    fn violates(&self, c: usize, module: Imported<'_>, matched: &[Matched]) -> Option<Breach> {
         let contract = &self.contracts[c];
-        let group = Group::of(module);
         let forbidden = &contract.forbidden;
-        let forbids = forbidden.is_set()
-            && (forbidden.groups().any(|g| g == group)
-                || matched.contains(&(c, Side::Forbidden))
-                || forbidden.patterns.iter().any(|p| p.names(module)));
         match (contract.lists_allowed(), forbidden.is_set()) {
-            (false, false) => Some(Why::AllowsNone),
-            (_, true) => (forbids && !self.allows(c, module, matched)).then_some(Why::Forbidden),
-            (true, false) => (!self.allows(c, module, matched)).then_some(Why::NotAllowed),
+            (false, false) => Some(Why::AllowsNone.into()),
+            (_, true) => {
+                let indexed = first_matched(matched, c, Side::Forbidden);
+                let position = forbidden.first_matching(module, indexed)?;
+                (!self.allows(c, module, matched)).then_some(Breach {
+                    why: Why::Forbidden,
+                    entry: Some(("forbidden-imports", position)),
+                })
+            }
+            (true, false) => (!self.allows(c, module, matched)).then_some(Why::NotAllowed.into()),
         }
     }
 
     /// Why the name that the import of `module` takes breaks contract `c` by a forbidden name
     /// alone (`forbidden-imports = ["pkg.db:_*"]`), unless the contract allows it.
-    fn forbids_taken(
-        &self,
-        c: usize,
-        module: Imported<'_>,
-        matched: &[(usize, Side)],
-    ) -> Option<Why> {
+    fn forbids_taken(&self, c: usize, module: Imported<'_>, matched: &[Matched]) -> Option<Breach> {
         let forbidden = &self.contracts[c].forbidden;
-        (forbidden.patterns.iter().any(|p| p.names(module)) && !self.allows(c, module, matched))
-            .then_some(Why::Forbidden)
+        let position = forbidden.patterns.iter().position(|p| p.names(module))?;
+        (!self.allows(c, module, matched)).then_some(Breach {
+            why: Why::Forbidden,
+            entry: Some(("forbidden-imports", position)),
+        })
     }
 
     /// Whether contract `c` accepts the import of `module` by `importer` (`ignored-imports`).
@@ -597,13 +649,16 @@ impl<'c> ImportContracts<'c> {
         module: Imported<'_>,
         absolute: bool,
         loading: bool,
-    ) -> Option<Why> {
+    ) -> Option<Breach> {
         if self.ignores(c, importer, module) {
             return None;
         }
         let matched = self.matched(module.name);
-        if matched.contains(&(c, Side::Relative)) {
-            return absolute.then_some(Why::Absolute);
+        if let Some(position) = first_matched(&matched, c, Side::Relative) {
+            return absolute.then_some(Breach {
+                why: Why::Absolute,
+                entry: Some(("relative-imports", position)),
+            });
         }
         if loading {
             self.violates(c, module, &matched)
@@ -702,14 +757,14 @@ enum Verdict {
     Fine,
     /// The site imports these modules (several for a by-name import of one of them), each
     /// breaking the contract for its reason.
-    Breaks(Vec<(String, Why)>),
+    Breaks(Vec<(String, Breach)>),
     /// The site may import a module that breaks the contract, for one of these reasons.
     Open(OpenImport, Vec<Why>),
 }
 
 /// One answer of a part of a by-name import: whether the module it names breaks the contract.
 enum Part {
-    Breaks(String, Why),
+    Breaks(String, Breach),
     Fine,
     /// It may break the contract, for one of these reasons.
     Open(Vec<Why>),
@@ -857,11 +912,11 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 // The name the import takes may be the submodule, which a forbidden name does not
                 // name: that break alone is open, not exact.
                 let mut whys = Vec::new();
-                if let Some(why) = one(*package, 0, !walked) {
+                if let Some(breach) = one(*package, 0, !walked) {
                     if judge(Imported::of(graph, *package), 0, !walked).is_some() {
-                        return Verdict::Breaks(vec![(graph.name(*package).to_owned(), why)]);
+                        return Verdict::Breaks(vec![(graph.name(*package).to_owned(), breach)]);
                     }
-                    whys.push(why);
+                    whys.push(breach.why);
                 }
                 let imported = Imported {
                     name: submodule,
@@ -872,7 +927,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 if contracts.names_taken(c, importer, Imported::of(graph, *package).at(site)) {
                     return Verdict::Fine;
                 }
-                if let Some(why) = judge(imported, 0, true)
+                if let Some(Breach { why, .. }) = judge(imported, 0, true)
                     && !whys.contains(&why)
                 {
                     whys.push(why);
@@ -907,9 +962,9 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                         _ => Part::Open(vec![contract.open_why()]),
                     })
                     .collect();
-                let broken: Vec<(String, Why)> = (parts.iter())
+                let broken: Vec<(String, Breach)> = (parts.iter())
                     .filter_map(|p| match p {
-                        Part::Breaks(name, why) => Some((name.clone(), *why)),
+                        Part::Breaks(name, breach) => Some((name.clone(), *breach)),
                         _ => None,
                     })
                     .collect();
@@ -920,7 +975,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 let mut whys: Vec<Why> = Vec::new();
                 for part in &parts {
                     let given = match part {
-                        Part::Breaks(_, why) => std::slice::from_ref(why),
+                        Part::Breaks(_, breach) => std::slice::from_ref(&breach.why),
                         Part::Open(whys) => whys.as_slice(),
                         Part::Fine => &[],
                     };
@@ -1040,13 +1095,13 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             let imported = Imported::of(graph, module);
             // Only whether the contract allows the module: how the importer's own imports name
             // it is judged at its sites below, and the other steps are not the importer's.
-            let Some(why) = contracts.violates(c, imported, &contracts.matched(imported.name))
+            let Some(breach) = contracts.violates(c, imported, &contracts.matched(imported.name))
             else {
                 continue;
             };
             let chain = chain_to(module);
             let site = first_site(&chain).expect("a module reached has a chain to it");
-            let verdict = Verdict::Breaks(vec![(imported.name.to_owned(), why)]);
+            let verdict = Verdict::Breaks(vec![(imported.name.to_owned(), breach)]);
             self.emit(c, m, site, &chain[1..], verdict);
         }
         // The sites whose module a walk cannot take: judged where the chain to them ends. The
@@ -1114,9 +1169,12 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             _ => target.certain().map(|t| graph.name(t)),
         };
         let mut module_key = None;
+        // The entry of the first module the report names that an entry breaks the contract by.
+        let mut entry = None;
         let (code, target, message) = match verdict {
             Verdict::Fine => return,
             Verdict::Breaks(mut broken) => {
+                entry = broken.iter().find_map(|(_, breach)| breach.entry);
                 // `from m import n` imports the name `n` of `m`: the report names it.
                 if let ([(module, _)], None) = (&mut broken[..], first)
                     && let Some(taken) = taken_name(site, module)
@@ -1156,6 +1214,9 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             }
         };
         let related: Vec<RelatedLocation> = chain.iter().map(|step| self.related(step)).collect();
+        let entries: Vec<ContractEntry> = (entry.into_iter())
+            .map(|(list, position)| ContractEntry::new(c, list, position))
+            .collect();
         let help = contract.note.map(str::to_owned);
         let (span, qualname) = (site.span, site.qualname.as_str());
         let cx = self.cx;
@@ -1172,6 +1233,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         ) {
             d.related = related;
             d.contracts = contract_places([c]);
+            d.contract_entries = entries;
             d.key_module = module_key;
         }
     }
