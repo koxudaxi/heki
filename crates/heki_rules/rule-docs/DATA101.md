@@ -1,7 +1,7 @@
 ## What it does
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
-`df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`, and
-the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
+`df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`,
+`arr = np.r_[arr, x]` (and `np.c_`), and the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
 accumulation is reported: the result feeds the next iteration and is computed from the previous
 value, also when it grows on some iterations only. An update through a project function counts
 when that function returns a reallocation of the argument carrying the previous value, directly

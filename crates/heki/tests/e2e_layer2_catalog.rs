@@ -4701,3 +4701,174 @@ fn a_pool_taken_from_a_urllib3_manager_makes_network_calls() {
         ]
     );
 }
+
+const XINFERENCE: &str = r#"import asyncio
+
+from xinference_client import AsyncRESTfulClient, RESTfulClient
+
+
+async def tp_handles(url: str) -> None:
+    client = RESTfulClient(url)
+    model = client.get_model("chat")
+    model.chat("hello")
+    client.list_models()
+
+
+async def tp_by_defining_path(url: str) -> None:
+    from xinference_client.client.restful.restful_client import Client
+
+    Client(url).launch_model("m")
+
+
+def tn_sync_function(url: str) -> None:
+    RESTfulClient(url).list_models()
+
+
+async def tn_offloaded(client: RESTfulClient) -> None:
+    await asyncio.to_thread(client.list_models)
+
+
+async def tn_async_client(url: str) -> None:
+    client = AsyncRESTfulClient(url)
+    await client.list_models()
+"#;
+
+/// The synchronous Xinference client, its constructor, and the handles `get_model` gives wait on
+/// the network; the asynchronous client and offloaded calls do not block the loop.
+#[test]
+fn xinference_client_calls_wait_on_the_network() {
+    let found = check("catalog_xinference", "app/models.py", XINFERENCE, "EFF101");
+    assert_eq!(
+        found,
+        vec![
+            d(7, "EFF101", "tp_handles", "xinference_client.RESTfulClient"),
+            d(
+                8,
+                "EFF101",
+                "tp_handles",
+                "xinference_client.RESTfulClient.get_model"
+            ),
+            d(
+                9,
+                "EFF101",
+                "tp_handles",
+                "xinference_client.client.restful.restful_client.RESTfulModelHandle.chat"
+            ),
+            d(
+                10,
+                "EFF101",
+                "tp_handles",
+                "xinference_client.RESTfulClient.list_models"
+            ),
+            d(
+                16,
+                "EFF101",
+                "tp_by_defining_path",
+                "xinference_client.client.restful.restful_client.Client"
+            ),
+            d(
+                16,
+                "EFF101",
+                "tp_by_defining_path",
+                "xinference_client.client.restful.restful_client.Client.launch_model"
+            ),
+        ]
+    );
+}
+
+const SUPABASE: &str = r#"import asyncio
+
+from supabase import Client, create_client
+
+
+async def tp_query(client: Client, user_id: int) -> None:
+    client.table("users").select("*").eq("id", user_id).execute()
+
+
+async def tp_created(url: str, key: str) -> None:
+    create_client(url, key).table("users").insert({"id": 1}).execute()
+
+
+def tp_per_row(client: Client, ids: list[int]) -> None:
+    for i in ids:
+        client.table("users").update({"seen": True}).eq("id", i).execute()
+
+
+def tn_one_statement(client: Client, ids: list[int]) -> None:
+    client.table("users").select("*").in_("id", ids).execute()
+
+
+async def tn_built_not_sent(client: Client) -> None:
+    client.table("users").select("*").limit(10)
+
+
+async def tn_offloaded(client: Client) -> None:
+    query = client.table("users").select("*")
+    await asyncio.to_thread(query.execute)
+"#;
+
+/// A table query waits for the PostgREST server when it is executed, not while it is built.
+#[test]
+fn supabase_queries_wait_when_executed() {
+    let found = check(
+        "catalog_supabase",
+        "app/db.py",
+        SUPABASE,
+        "EFF101,EFF102,EFF103",
+    );
+    let execute = "postgrest._sync.request_builder.SyncSelectRequestBuilder.execute";
+    assert_eq!(
+        found,
+        vec![
+            d(7, "EFF101", "tp_query", execute),
+            d(11, "EFF101", "tp_created", execute),
+            d(16, "EFF103", "tp_per_row", execute),
+        ]
+    );
+}
+
+const NUMPY_R_AND_C: &str = r#"import numpy as np
+
+
+def tp_r(chunks: list[np.ndarray]) -> np.ndarray:
+    arr = np.array([])
+    for chunk in chunks:
+        arr = np.r_[arr, chunk]
+    return arr
+
+
+def tp_c(columns: list[np.ndarray]) -> np.ndarray:
+    grid = np.empty((3, 0))
+    for column in columns:
+        grid = np.c_[grid, column]
+    return grid
+
+
+def tn_once(chunks: list[np.ndarray]) -> np.ndarray:
+    return np.r_[tuple(chunks)]
+
+
+def tn_not_the_previous_value(chunks: list[np.ndarray]) -> np.ndarray:
+    out = np.array([])
+    for chunk in chunks:
+        out = np.r_[chunk, chunk]
+    return out
+"#;
+
+/// `numpy.r_[...]` and `numpy.c_[...]` concatenate their items like `numpy.hstack`: rebuilding the
+/// accumulated array through them on every iteration is quadratic.
+#[test]
+fn numpy_r_and_c_concatenations_accumulate() {
+    assert_eq!(
+        check(
+            "catalog_numpy_r_c",
+            "app/arrays.py",
+            NUMPY_R_AND_C,
+            "DATA101"
+        ),
+        vec![
+            d(7, "DATA101", "tp_r", "arr"),
+            d(14, "DATA101", "tp_c", "grid")
+        ]
+    );
+}

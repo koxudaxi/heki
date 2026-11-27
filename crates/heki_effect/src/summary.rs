@@ -5577,6 +5577,13 @@ impl<'a> Extractor<'a> {
                 {
                     self.container_change(*obj, ContainerChange::Resizes, span);
                 }
+                if let Some(symbol) = self.subscript_symbol(*obj) {
+                    let passed = Passed {
+                        args: std::slice::from_ref(index),
+                        ..Passed::NOTHING
+                    };
+                    self.external_call(bb, symbol, passed, false, span);
+                }
             }
             // `obj.__dict__ |= other` updates the namespace in place, whatever the result is
             // stored to.
@@ -6105,6 +6112,24 @@ impl<'a> Extractor<'a> {
         if self.cx.catalog(&symbol).is_some() {
             self.external_call(bb, symbol, Passed::NOTHING, is_awaited, span);
         }
+    }
+
+    /// The catalog's `__getitem__` entry of the object `obj` names or is an instance of, when it
+    /// carries effects: subscripting is the call (`numpy.r_[acc, x]` concatenates what the
+    /// subscript lists), with the index as its one argument. An entry that only types the
+    /// looked-up value is no call.
+    fn subscript_symbol(&self, obj: VarId) -> Option<String> {
+        let (Val::Ref(named) | Val::Inst(named, _)) = self.val(obj)? else {
+            return None;
+        };
+        if named.starts_with("builtins.") || self.cx.project.is_project_class(named) {
+            return None;
+        }
+        let symbol = format!("{named}.__getitem__");
+        self.cx
+            .catalog(&symbol)
+            .is_some_and(|entry| !entry.effects.is_empty())
+            .then_some(symbol)
     }
 
     /// The origin of a receiver bound to a method's first parameter, and whether it is the
