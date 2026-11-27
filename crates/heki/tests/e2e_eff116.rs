@@ -255,8 +255,9 @@ def hands_back(text: str, items: list[str]) -> None:
 "#;
 
 /// A method whose call may run a plain implementation, which is no report, one whose every
-/// implementation is a generator function (or an async generator function), and a name bound to
-/// two definitions, which the report words as such.
+/// implementation is a generator function (or an async generator function; on an instance of
+/// exactly the class, only the class's own counts), and a name bound to two definitions, which
+/// the report words as such.
 const POSSIBLE: &str = r#"import sys
 
 
@@ -308,7 +309,7 @@ def chunks():
 
 def run(source: Source, stream: Stream, pager: Pager) -> None:
     source.rows()
-    Source().rows()
+    Source().rows()  # EFF116
     stream.rows()  # EFF116
     chunks()  # EFF116
     pager.pages()  # EFF116

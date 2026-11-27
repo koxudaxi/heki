@@ -1117,11 +1117,18 @@ def a_read_on_an_instance(field: Field) -> Field:
     copied = copy(field)
     copied.required = True
     return copied
+
+
+def a_read_on_a_parameter(copier: Copier, field: Field) -> Field:
+    copy = copier._copy
+    copied = copy(field)
+    copied.required = True
+    return copied
 "#;
 
 const PARTIAL_LIBRARY_CALLS: &str = r#"from __future__ import annotations
 
-from pkg.defs import Copier, a_read_of_the_attribute, a_read_on_an_instance
+from pkg.defs import Copier, a_read_of_the_attribute, a_read_on_a_parameter, a_read_on_an_instance
 from pkg.model import Field
 
 
@@ -1138,12 +1145,17 @@ def read_through_the_class(field: Field) -> Field:
 
 
 def read_through_an_instance(field: Field) -> Field:
-    return a_read_on_an_instance(field)  # unresolved, writes
+    return a_read_on_an_instance(field)
+
+
+def read_through_a_parameter(copier: Copier, field: Field) -> Field:
+    return a_read_on_a_parameter(copier, field)  # unresolved, writes
 "#;
 
 /// A partial class attribute holding keywords for a library function leaves the call
 /// unresolved (the catalog reads the arguments the call shows), and so does one a subclass
-/// binds to another callable; reading the attribute first and calling the value resolves it.
+/// binds to another callable, also when the attribute is read first and its value called; on an
+/// instance of exactly the class (`Copier()._copy`) only the class's own binding counts.
 #[test]
 fn a_partial_class_attribute_is_followed_through_reads_and_subclasses() {
     check_marks(
