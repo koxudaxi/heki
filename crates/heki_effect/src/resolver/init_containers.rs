@@ -193,7 +193,7 @@ fn instance_uses<'f>(
 }
 
 /// What the paths of a function say about its points, each computed once for all its stores.
-struct Paths<'s, 'f> {
+pub(super) struct Paths<'s, 'f> {
     shape: &'s FnShape<'f>,
     /// The nearest block dominating every `return` the entry reaches (`None`: none does).
     returns_under: Option<BlockId>,
@@ -202,7 +202,7 @@ struct Paths<'s, 'f> {
 }
 
 impl<'s, 'f> Paths<'s, 'f> {
-    fn of(shape: &'s FnShape<'f>, budget: &Budget) -> Answer<Self> {
+    pub(super) fn of(shape: &'s FnShape<'f>, budget: &Budget) -> Answer<Self> {
         let f = shape.f;
         let returning: Vec<BlockId> = (f.blocks.iter())
             .filter(|b| matches!(b.terminator, Terminator::Return(_)) && shape.reachable(b.id))
@@ -226,7 +226,7 @@ impl<'s, 'f> Paths<'s, 'f> {
     /// Whether every path from the entry to a `return` runs the instruction at `at`: its block
     /// dominates every `return`, and no `return` is reached through the block's exception
     /// target, which an instruction before `at` may raise into.
-    fn on_every_return(&self, at: At) -> bool {
+    pub(super) fn on_every_return(&self, at: At) -> bool {
         let dom = self.shape.dominators();
         self.returns_under.is_some_and(|r| dom.dominates(at.0, r))
             && (self.shape.f.block(at.0).exc_target).is_none_or(|h| !self.reach_return.contains(&h))

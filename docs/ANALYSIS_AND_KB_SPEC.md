@@ -3340,6 +3340,20 @@ only when no project class before the library class along its MRO binds one of t
 (`ProjectDecls::replaces_delegate`): otherwise the call's targets are not every implementation
 it runs (the **Every implementation** premise), and through `super()` the same holds for every
 class the instance may be.
+A method's own row may list more names (`QuerySet.get` looks up `filter`, `_fetch_all`,
+`__len__`, ...; `QuerySet.acount` looks up `count` and what `count` does), which add to the
+class's. An entry's `aliases` are other names an import gives the class
+(`django.db.models.QuerySet` of `django.db.models.query.QuerySet`): a project class's base
+named so is the catalog's class, so the project class derives from it. A row's
+`effect_through` names a library base whose `effect_methods` the call runs on an instance it
+makes (`QuerySet.create` saves a new instance of the queryset's model: `Model.save`,
+`save_base`, `_save_table`, ...). The row describes the call only while every project class
+deriving from the base binds those names, if at all, as methods calling the next definition of
+their name along the MRO (`super().save(...)`, or `super(Model, self).save(...)`) on every path
+to a return (`ClassDecl::chains_to_next`), and no library class but a plain base comes before
+the base along its MRO (`ProjectDecls::effect_methods_replaced`, one walk over the base's
+project subclasses kept for the life of the indexes); otherwise the **Every implementation**
+premise is open.
 
 A fourth table, `[[attributes]]` (`heki_kb::AttributeType`), gives the class of what reading an
 attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat"`,

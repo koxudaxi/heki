@@ -10779,3 +10779,70 @@ fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);
 }
+
+const OVERRIDE_MODELS: &str = "from django.db import models\n\n\nclass Stream(models.Model):\n    def save(self, *args, **kwargs):\n        self.touched = True\n        super().save(*args, **kwargs)\n";
+const OVERRIDE_QUERYSETS: &str = "from django.db import models\n\n\nclass StreamQuerySet(models.QuerySet):\n    def live(self):\n        return self.filter(live=True)\n";
+const OVERRIDE_USE: &str = "from pkg.models import Stream\n\n\ndef add(ids: list[int]) -> None:\n    for i in ids:\n        Stream.objects.create(id=i)\n\n\ndef fetch(ids: list[int]) -> None:\n    for i in ids:\n        Stream.objects.filter(id=i).get()\n";
+
+/// A model's `save` behind `QuerySet.create`, and a project `QuerySet` subclass, in other
+/// modules: the insert per item is heuristic while `save` may return without calling
+/// `super().save()`, the lookup per item while the subclass binds a name `get` looks up, and
+/// both come back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_django_overrides_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/models.py", OVERRIDE_MODELS.to_owned()),
+        ("pkg/querysets.py", OVERRIDE_QUERYSETS.to_owned()),
+        ("pkg/use.py", OVERRIDE_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_django_overrides", MANAGER_CONFIG, files, false);
+    let queries: &[(&str, &str)] = &[("pkg/use.py", "EFF103")];
+    let guessed: &[(&str, &str)] = &[("pkg/use.py", "EFF103 [heuristic]")];
+    let both: &[(&str, &str)] = &[
+        ("pkg/use.py", "EFF103"),
+        ("pkg/use.py", "EFF103 [heuristic]"),
+    ];
+    let steps = [
+        Step::new("initial index", Vec::new())
+            .present(queries)
+            .absent(guessed),
+        Step::new(
+            "`save` returns early on one path",
+            vec![save(
+                "pkg/models.py",
+                &OVERRIDE_MODELS.replace(
+                    "        self.touched = True\n",
+                    "        if self.touched:\n            return\n",
+                ),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it calls `super().save()` on every path again",
+            vec![save("pkg/models.py", OVERRIDE_MODELS)],
+        )
+        .present(queries)
+        .absent(guessed),
+        Step::new(
+            "the queryset binds `_fetch_all`",
+            vec![save(
+                "pkg/querysets.py",
+                &OVERRIDE_QUERYSETS.replace("    def live(self):", "    def _fetch_all(self):"),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it only adds a method again",
+            vec![save("pkg/querysets.py", OVERRIDE_QUERYSETS)],
+        )
+        .present(queries)
+        .absent(guessed),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
