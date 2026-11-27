@@ -223,6 +223,27 @@ const STR_PIECES: &str = r#"class Buffer:
         for row in rows:
             self.text += f"{row}"
 
+    def prefixed_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "-" + str(row)
+
+    def chain_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += str(row) + "-" + repr(row) + "-" + ascii(row)
+
+    def too_deep_a_chain(self, rows) -> None:
+        for row in rows:
+            self.text += str(row) + str(row) + str(row) + str(row) + str(row) + str(row)
+
+    def through_a_local(self, rows) -> None:
+        for row in rows:
+            piece = repr(row)
+            self.text += piece
+
+    def starred(self, rows) -> None:
+        for row in rows:
+            self.text += str(*row)
+
     def percent_of_unknown(self, rows) -> None:
         for row in rows:
             self.text += "%s" % row
@@ -247,8 +268,9 @@ const STR_PIECES: &str = r#"class Buffer:
 #[test]
 fn str_pieces_of_known_type_are_reported_and_a_piece_of_unknown_type_is_not() {
     // A `str` subclass instance returned by another class's `__str__`, `__repr__`, or
-    // `__format__` (or an operand with `__rmod__`) is not an exact `str`: `str(row)` of an
-    // unknown `row` stays silent.
+    // `__format__` is not an exact `str`: `str(row)` of an unknown `row` is a heuristic report
+    // (see `a_str_piece_of_unknown_class_leaves_its_exact_type_open`). A piece that may be of
+    // any type (`convert(row)`, `"%s" % row`, `sep.join(row)`) stays silent.
     assert_reports(
         "reg_str_pieces",
         STR_PIECES,
@@ -264,6 +286,13 @@ fn str_pieces_of_known_type_are_reported_and_a_piece_of_unknown_type_is_not() {
             ("Buffer.field_of_int", "OPT103"),
             ("Buffer.fields", "OPT103"),
             ("Buffer.concatenation", "OPT103"),
+            ("Buffer.str_of_unknown", "OPT103"),
+            ("Buffer.repr_of_unknown", "OPT103"),
+            ("Buffer.format_of_unknown", "OPT103"),
+            ("Buffer.field_of_unknown", "OPT103"),
+            ("Buffer.prefixed_unknown", "OPT103"),
+            ("Buffer.chain_of_unknown", "OPT103"),
+            ("Buffer.through_a_local", "OPT103"),
         ],
     );
 }

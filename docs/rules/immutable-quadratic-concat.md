@@ -15,8 +15,12 @@ Checks quadratic accumulation of immutable values in a loop:
   kind (`self.text = ""`): `self.values += (i,)` extends a list in place.
   A piece of that kind is a literal, a concatenation of them, an f-string, `"".join(...)`,
   `"...".format(...)`, `"..." % scalar`, or `str`, `repr`, `ascii`, or `format` of a value of a
-  builtin type (`str(len(items))`). `str(x)` of a value of unknown type is not: another class's
-  `__str__` may return a `str` subclass instance, which `str(x)` returns unchanged.
+  builtin type (`str(len(items))`). `str(x)`, `repr(x)`, `ascii(x)`, and `format(x)` of a value
+  of unknown type, an f-string field, and a concatenation of such pieces are a `str` or a
+  subclass of it, not an exact `str`: another class's `__str__` / `__format__` may return a
+  `str` subclass instance that overrides `__radd__`. The report is heuristic, and its open
+  premise (`Rewrite proven safe`, cause `exact-type`) says so. A piece of any other unknown
+  type (`convert(x)`, `"%s" % x`) is not reported.
 
 Local `str` accumulation is not reported: CPython already appends in place when the string has
 no other reference. Neither are:

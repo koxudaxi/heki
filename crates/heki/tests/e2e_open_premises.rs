@@ -576,6 +576,22 @@ fn an_accumulator_passed_to_unseen_code_leaves_the_rewrite_unproven() {
 }
 
 #[test]
+fn a_str_piece_of_unknown_class_leaves_its_exact_type_open() {
+    let source = "class Buffer:\n    def __init__(self):\n        self.text = \"\"\n\n    def add(self, rows):\n        for row in rows:\n            self.text += str(row)\n";
+    let report = reports("op_opt_str_piece", OPT, source);
+    assert_eq!(report.len(), 1, "{report:#?}");
+    assert_eq!(report[0]["rule"], "OPT103");
+    assert_eq!(report[0]["certainty"], "heuristic");
+    let open = open_of(&report[0]);
+    assert!(
+        open.contains(&("Rewrite proven safe".to_owned(), "exact-type".to_owned())),
+        "{report:#?}"
+    );
+    let detail = report[0].to_string();
+    assert!(detail.contains("may override `__radd__`"), "{detail}");
+}
+
+#[test]
 fn a_read_of_the_accumulator_inside_the_loop_leaves_the_rewrite_unproven() {
     let open = "def build(items):\n    x = ()\n    for i in items:\n        x = x + (i,)\n        print(len(x))\n    return x\n";
     heuristic(
