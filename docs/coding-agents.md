@@ -16,7 +16,7 @@ A directory below the project root is analyzed as given and misses what its call
 root.
 
 A diagnostic sits where the problem shows, which is often not the file that was edited. In the
-[first example](index.md#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
+[first example](index.md#a-bug-found-with-no-configuration) of the overview, adding
 `requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
 reaches it through two helpers. To see the diagnostics an edit can have caused, pass the edited
 files to `--touched`, or name them as paths: heki still analyzes the project, and shows only the
