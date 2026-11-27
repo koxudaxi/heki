@@ -4139,8 +4139,18 @@ impl<'a> Extractor<'a> {
             }
             _ => None,
         };
+        // `allowed-protocols` allows a reference by the protocol the receiver is typed with; a
+        // reference keeps no declaration of it ([`Dispatch::declared`]).
+        let protocol = self.receiver_protocol(recv, &callees);
+        let dispatch = protocol.map(|(protocol, _)| {
+            Box::new(Dispatch {
+                protocol: Some(protocol.clone()),
+                ..Dispatch::default()
+            })
+        });
         Some(CallSite {
             module_member: member,
+            dispatch,
             ..self.handed_site(span, self.f.block_loop_depth(bb), callees, constructs)
         })
     }
@@ -7867,26 +7877,38 @@ impl<'a> Extractor<'a> {
             .clone()
     }
 
-    /// [`Dispatch::declared`]: the definition of the called method in the project protocol the
-    /// receiver is typed with, when the protocol declares it.
-    fn declared_method(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<FuncKey> {
-        let Some(Val::Inst(protocol, _)) = self.val(call.recv_var?) else {
+    /// [`Dispatch::protocol`]: the project protocol the receiver `recv` is typed with, with the
+    /// name of the member the first of `callees` is, when the protocol declares it. The receiver
+    /// tells it whatever the callees bind: a static method binds no receiver, and a class method
+    /// binds the class.
+    fn receiver_protocol<'b>(
+        &self,
+        recv: Option<VarId>,
+        callees: &'b [BoundCallee],
+    ) -> Option<(&String, Cow<'b, str>)> {
+        let Some(Val::Inst(protocol, _)) = self.val(recv?) else {
             return None;
         };
         let name = heki_semantic::mangling::member_name(&callees.first()?.callee.qualname);
-        let project = self.cx.project;
-        project
+        self.cx
+            .project
             .protocol_declares(protocol, &name)
-            .then(|| project.mro_method(protocol, &name))?
+            .then_some((protocol, name))
     }
 
     /// What the receiver of `call` tells about the implementations `callees` run
     /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
     /// class, or the class a constructor call makes) when a callee is inherited from a proper
     /// base of it, and, on a parameter of the caller as itself (`self` too), the callees that
-    /// are overrides of subclasses.
+    /// are overrides of subclasses; for a receiver typed with a project protocol declaring the
+    /// method, the protocol and, unless the callees are the protocol's own methods, the method's
+    /// definition in it.
     fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
         let project = self.cx.project;
+        let through = self.receiver_protocol(call.recv_var, callees);
+        let protocol = through.as_ref().map(|(p, _)| (*p).clone());
+        // A receiver of no project class (`class` unknown, or the `self` of a method of a class
+        // heki keeps no line of) is typed with no project protocol either.
         let own;
         let class: &str = if call.recv_is_self {
             own = self.cx.owner_fqn(self.f)?;
@@ -7911,7 +7933,13 @@ impl<'a> Extractor<'a> {
                 .is_some_and(|r| r == owner)
         };
         if callees.iter().filter_map(class_of).all(|c| is(c, class)) {
-            return None;
+            // The protocol's own methods: no definition other than them to judge the call by.
+            return protocol.map(|protocol| {
+                Box::new(Dispatch {
+                    protocol: Some(protocol),
+                    ..Dispatch::default()
+                })
+            });
         }
         let line = if call.recv_is_self {
             self.own_line()?
@@ -7939,8 +7967,8 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        let declared = self.declared_method(call, callees);
-        (receiver.is_some() || !providers.is_empty() || declared.is_some()).then(|| {
+        let declared = through.and_then(|(p, name)| project.mro_method(p, &name));
+        (receiver.is_some() || !providers.is_empty() || protocol.is_some()).then(|| {
             Box::new(Dispatch {
                 receiver,
                 receiver_param: receiver_param
@@ -7948,6 +7976,7 @@ impl<'a> Extractor<'a> {
                     .unwrap_or(0),
                 providers,
                 declared,
+                protocol,
                 recv_params: 0,
             })
         })
