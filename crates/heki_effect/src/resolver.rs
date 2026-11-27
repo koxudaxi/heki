@@ -4941,6 +4941,13 @@ impl ProjectDecls {
             && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
     }
 
+    /// Whether a call of the class `class` may give an existing instance, or run a metaclass
+    /// `__call__` that returns anything (an instance of a subclass): what the call makes is not
+    /// decided by the class body.
+    pub(crate) fn construction_is_open(&self, class: &str) -> bool {
+        self.may_reuse_instances(class) || self.has_custom_metaclass(class)
+    }
+
     /// What a call constructing an instance of the project class `class` keeps of it
     /// ([`Constructor`]), from the `__init__` the call runs, that of the first class along the
     /// MRO defining one, and every one it reaches through `super().__init__(...)`:
@@ -4969,7 +4976,7 @@ impl ProjectDecls {
         class: &str,
         catalog_stores: impl Fn(&str) -> bool,
     ) -> Constructor<'_> {
-        if self.may_reuse_instances(class) || self.has_custom_metaclass(class) {
+        if self.construction_is_open(class) {
             return Constructor::Unknown;
         }
         let mro = self.mro(class);
@@ -5867,9 +5874,11 @@ impl ProjectDecls {
         (out, multiple)
     }
 
-    /// Whether calling the class `class` may return an existing instance instead of a new one: a
-    /// project class along its MRO defines `__new__`, or it is an enumeration (`Color("red")`
-    /// returns a member).
+    /// Whether calling the class `class` may return an existing instance, or one of another
+    /// class, instead of a new one of it: a project class along its MRO binds `__new__`, in its
+    /// body or after it ([`Self::lookup_rebound`]; [`Self::bound_after_body`], also a class
+    /// decorator's or an `__init_subclass__`'s store on the class it is handed), or it is an
+    /// enumeration (`Color("red")` returns a member).
     pub fn may_reuse_instances(&self, class: &str) -> bool {
         const ENUMS: &[&str] = &[
             "enum.Enum",
@@ -5879,9 +5888,14 @@ impl ProjectDecls {
             "enum.IntFlag",
             "enum.ReprEnum",
         ];
-        self.mro(class)
-            .iter()
-            .any(|c| ENUMS.contains(&c.as_str()) || self.own_method(c, "__new__").is_some())
+        let mro = self.mro(class);
+        mro.iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            ENUMS.contains(&c.as_str())
+                || self.own_method(c, "__new__").is_some()
+                || (self.class(c)).is_some_and(|decl| decl.members.contains("__new__"))
+        }) || self.lookup_rebound(&mro, "__new__")
+            || self.bound_after_body(&["__new__"])
     }
 
     /// The MRO of `class` as a [`crate::ClassLine`], one copy shared by every site and fact
@@ -6729,23 +6743,58 @@ impl ProjectDecls {
         missing == Answer::Known(None)
     }
 
+    /// [`Self::instance_targets_complete`] on an instance of exactly `class`: the definition its
+    /// MRO finds is a target ([`Self::runs_a_target`]); no subclass's runs.
+    pub(crate) fn exact_targets_complete(
+        &self,
+        class: &str,
+        method: &str,
+        callee: &Callee,
+        kb: &EffectiveEcosystemKb,
+    ) -> bool {
+        self.runs_a_target(&self.canonical(class), method, callee, kb)
+    }
+
+    /// Whether calling the project class `class` by name makes an instance of exactly that class
+    /// (`Inferred::exact`): no project class along its MRO binds `__new__`, in its body or after
+    /// it, and no metaclass is custom ([`Self::construction_is_open`]; either may return an
+    /// instance of another class, a subclass picked by the arguments), and the project binds the
+    /// name to no other object ([`Self::call_rebound`]).
+    pub(crate) fn constructs_exactly(&self, class: &str) -> bool {
+        let class = self.canonical(class);
+        self.is_project_class(&class)
+            && !self.call_rebound(&class)
+            && !self.construction_is_open(&class)
+    }
+
     /// Whether reading `attr` on every instance of the project class `class` or of a project
-    /// subclass (R2) runs one of the getters `keys`: what each such class takes the name from is
-    /// one of them ([`Self::function_taken`]: not a plain attribute, a method, or a value stored on
-    /// the class outside its body, and no base outside the project before it), and no class is a
-    /// protocol, defines `__getattribute__`, or has a metaclass heki does not know.
-    pub(crate) fn getters_complete(&self, class: &str, attr: &str, keys: &[FuncKey]) -> bool {
+    /// subclass (R2; only of `class` itself when the instance is `exact`) runs one of the getters
+    /// `keys`: what each such class takes the name from is one of them
+    /// ([`Self::function_taken`]: not a plain attribute, a method, or a value stored on the class
+    /// outside its body, and no base outside the project before it), and no class is a protocol,
+    /// defines `__getattribute__`, or has a metaclass heki does not know.
+    pub(crate) fn getters_complete(
+        &self,
+        class: &str,
+        attr: &str,
+        keys: &[FuncKey],
+        exact: bool,
+    ) -> bool {
         let class = self.canonical(class);
         let read = self.attr_read(&class, attr);
         if read.getattribute || read.custom_metaclass {
             return false;
         }
-        self.every_class_finds(&class, keys, |c| {
+        let taken = |c: &str| {
             self.protocol(c)
                 .is_none()
                 .then(|| self.function_taken(c, attr))
                 .flatten()
-        })
+        };
+        if exact {
+            return taken(&class).is_some_and(|k| keys.contains(&k));
+        }
+        self.every_class_finds(&class, keys, taken)
     }
 
     /// Whether reading `attr` through `super()` in the project class `owner` runs one of the
@@ -6832,10 +6881,10 @@ impl ProjectDecls {
         }
     }
 
-    /// Resolve `class.method` on the class object `class` itself (`Base.method(obj)`, and the
-    /// `__init__` of constructing it): the definition its MRO finds first
-    /// ([`Self::declared_mro`]). The overrides of subclasses do not count: the class object is
-    /// no subclass.
+    /// Resolve `class.method` on an object that is exactly `class`: the class object itself
+    /// (`Base.method(obj)`, and the `__init__` of constructing it) or an instance of exactly the
+    /// class ([`Recv::Exact`]). The definition its MRO finds first ([`Self::declared_mro`]); the
+    /// overrides of subclasses do not count, as the object is no subclass's.
     pub(crate) fn class_targets(
         &self,
         class: &str,
@@ -6870,17 +6919,18 @@ impl ProjectDecls {
 
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
     /// (`FunctionDecl::is_property`), found like [`Self::method_targets`]' candidates: the MRO
-    /// definition when it is a getter, plus the getters of overriding project subclasses
-    /// (Priority 4 CHA), at most `CHA_CANDIDATE_LIMIT` of them (`TooMany` beyond). `None` when
-    /// no modeled getter runs: a plain attribute, a method, an attribute of an external class
-    /// (never a Layer 2 symbol: an `[[attributes]]` row types what a read gives, not what it
-    /// runs), or a property with a setter or
-    /// deleter (`FunctionDecl::is_property`).
+    /// definition when it is a getter, plus (unless `skip_self` or `exact`, an instance of exactly
+    /// the class) the getters of overriding project subclasses (Priority 4 CHA), at most
+    /// `CHA_CANDIDATE_LIMIT` of them (`TooMany` beyond). `None` when no modeled getter runs: a
+    /// plain attribute, a method, an attribute of an external class (never a Layer 2 symbol: an
+    /// `[[attributes]]` row types what a read gives, not what it runs), or a property with a
+    /// setter or deleter (`FunctionDecl::is_property`).
     pub(crate) fn property_targets(
         &self,
         class: &str,
         attr: &str,
         skip_self: bool,
+        exact: bool,
     ) -> Option<Callee> {
         self.read(|k| note(&mut k.property_names, attr));
         if !self.property_names.contains(attr) {
@@ -6891,7 +6941,8 @@ impl ProjectDecls {
             return None;
         }
         let is_getter = |k: &FuncKey| self.function_decl(k).is_some_and(|d| d.is_property);
-        let found = self.definitions(&class, attr, skip_self, !skip_self, is_getter);
+        let overrides = !skip_self && !exact;
+        let found = self.definitions(&class, attr, skip_self, overrides, is_getter);
         match found.len() {
             0 => None,
             n if n > CHA_CANDIDATE_LIMIT => Some(Callee::TooMany),
@@ -10225,8 +10276,9 @@ fn set_flags<'i>(
 pub enum Val {
     /// A named object: module, class, function, or external symbol (by fqn).
     Ref(String),
-    /// An instance of the class `fqn`.
-    Inst(String),
+    /// An instance of the class `fqn`; `true` when it is exactly that class, never a subclass:
+    /// the function constructs it by calling the class by name (`Inferred::exact`).
+    Inst(String, bool),
     /// A class object that is `fqn` or one of its subclasses ([`Ty::Class`]).
     Class(String),
     /// `super()` inside a method of class `fqn`.
@@ -10242,6 +10294,9 @@ pub enum Val {
 pub(crate) enum Recv<'v> {
     Ref(&'v str),
     Inst(&'v str),
+    /// An instance of exactly the class: a call on it runs what the class's MRO finds, and no
+    /// subclass's override.
+    Exact(&'v str),
     Class(&'v str),
     Super(&'v str),
 }
@@ -10256,7 +10311,7 @@ impl Recv<'_> {
     /// heki does not know.
     fn says_nothing(self) -> bool {
         match self {
-            Recv::Inst(class) | Recv::Class(class) => {
+            Recv::Inst(class) | Recv::Exact(class) | Recv::Class(class) => {
                 of_any_class(class) || is_any_callable(class) || is_any_module(class)
             }
             Recv::Ref(fqn) => is_unbound_name(fqn),
@@ -10297,7 +10352,7 @@ impl Val {
     /// any other value.
     pub(crate) fn instance_classes(&self) -> &[String] {
         match self {
-            Self::Inst(c) => std::slice::from_ref(c),
+            Self::Inst(c, _) => std::slice::from_ref(c),
             Self::Union(cs) => cs,
             _ => &[],
         }
@@ -10323,7 +10378,8 @@ impl Val {
     pub(crate) fn recv(&self) -> Option<Recv<'_>> {
         match self {
             Val::Ref(f) => Some(Recv::Ref(f)),
-            Val::Inst(c) => Some(Recv::Inst(c)),
+            Val::Inst(c, false) => Some(Recv::Inst(c)),
+            Val::Inst(c, true) => Some(Recv::Exact(c)),
             Val::Class(c) => Some(Recv::Class(c)),
             Val::Super(c) => Some(Recv::Super(c)),
             Val::Union(_) | Val::OneOf(_) => None,
@@ -10418,7 +10474,7 @@ impl Ty {
         match self {
             Ty::Ref(f) => Some(Val::Ref(f.clone())),
             Ty::Class(c) => Some(Val::Class(c.clone())),
-            Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
+            Ty::Inst(o) => Some(Val::Inst(o.class.clone(), false)),
             Ty::Super(c) => Some(Val::Super(c.clone())),
             Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
             Ty::OneOf(fqns) => Some(Val::OneOf(fqns.clone())),
@@ -10876,7 +10932,7 @@ impl<'a> TypeCtx<'a> {
     fn dispatch_classes<'v>(&'v self, value: Option<&'v Val>) -> Option<&'v [String]> {
         match value? {
             Val::Union(classes) => Some(classes),
-            Val::Inst(class) => self.project.protocol_implementers(class),
+            Val::Inst(class, _) => self.project.protocol_implementers(class),
             Val::Ref(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_) => None,
         }
     }
@@ -10906,6 +10962,7 @@ impl<'a> TypeCtx<'a> {
             Some(Recv::Inst(class)) => self
                 .project
                 .method_targets(class, "__call__", false, self.kb),
+            Some(Recv::Exact(class)) => self.project.class_targets(class, "__call__", self.kb),
             Some(Recv::Super(_)) | None => Callee::Unresolved,
         }
     }
@@ -10949,12 +11006,12 @@ impl<'a> TypeCtx<'a> {
         match recv {
             Some(Val::Union(classes)) => classes
                 .iter()
-                .all(|c| self.project.getters_complete(c, attr, keys)),
+                .all(|c| self.project.getters_complete(c, attr, keys, false)),
             Some(Val::Super(owner)) => self.project.super_getters_complete(owner, attr, keys),
             // A read on a class or module object runs no getter (`resolve_attr_load` resolves
             // none).
             _ => {
-                matches!(recv, Some(Val::Inst(class)) if self.project.getters_complete(class, attr, keys))
+                matches!(recv, Some(Val::Inst(class, exact)) if self.project.getters_complete(class, attr, keys, *exact))
             }
         }
     }
@@ -10977,6 +11034,9 @@ impl<'a> TypeCtx<'a> {
             Recv::Inst(class) => self
                 .project
                 .instance_targets_complete(class, method, callee, self.kb),
+            Recv::Exact(class) => self
+                .project
+                .exact_targets_complete(class, method, callee, self.kb),
             Recv::Class(class) => {
                 self.project.is_project_class(class)
                     && self
@@ -11038,9 +11098,12 @@ impl<'a> TypeCtx<'a> {
     pub fn call_targets_complete(&self, value: Option<&Val>, callee: &Callee) -> bool {
         match value {
             Some(Val::Ref(fqn)) => !self.project.call_rebound(fqn),
-            Some(Val::Inst(class)) => self
+            Some(Val::Inst(class, false)) => self
                 .project
                 .instance_targets_complete(class, "__call__", callee, self.kb),
+            Some(Val::Inst(class, true)) => self
+                .project
+                .exact_targets_complete(class, "__call__", callee, self.kb),
             Some(Val::Union(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_)) | None => false,
         }
     }
@@ -11120,16 +11183,19 @@ impl<'a> TypeCtx<'a> {
             Some(Recv::Class(class)) => {
                 self.through_class(self.project.method_targets(class, method, false, self.kb))
             }
-            Some(recv @ (Recv::Inst(class) | Recv::Super(class))) => {
-                let skip_self = matches!(recv, Recv::Super(_));
+            Some(recv @ (Recv::Inst(class) | Recv::Exact(class) | Recv::Super(class))) => {
                 // `obj.prop(...)` runs the getter as a read of `obj.prop` does (where the summary
                 // records it), then calls the value it gives; `obj.kind(...)` calls the value
                 // the attribute holds.
-                match self.called_member(recv, method) {
-                    Some(value) => self.resolve_call(value.as_ref()),
-                    None => self
-                        .project
-                        .method_targets(class, method, skip_self, self.kb),
+                match (self.called_member(recv, method), recv) {
+                    (Some(value), _) => self.resolve_call(value.as_ref()),
+                    (None, Recv::Exact(_)) => self.project.class_targets(class, method, self.kb),
+                    (None, _) => self.project.method_targets(
+                        class,
+                        method,
+                        matches!(recv, Recv::Super(_)),
+                        self.kb,
+                    ),
                 }
             }
             None => Callee::Unresolved,
@@ -11211,6 +11277,7 @@ impl<'a> TypeCtx<'a> {
             Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
             Recv::Class(class) => (class, false, true),
             Recv::Inst(class) => (class, true, true),
+            Recv::Exact(class) => (class, true, false),
             Recv::Ref(_) | Recv::Super(_) => return None,
         };
         // Every method call asks, and the receiver's class may have thousands of subclasses:
@@ -11320,7 +11387,7 @@ impl<'a> TypeCtx<'a> {
     /// instance; `Some(None)` when it is not declared.
     pub(crate) fn property_value(&self, recv: Recv<'_>, attr: &str) -> Option<Option<Val>> {
         let (class, skip_self) = match recv {
-            Recv::Inst(class) => (class, false),
+            Recv::Inst(class) | Recv::Exact(class) => (class, false),
             Recv::Super(class) => (class, true),
             Recv::Ref(_) | Recv::Class(_) => return None,
         };
@@ -11341,7 +11408,7 @@ impl<'a> TypeCtx<'a> {
     /// type[Model]` constructs a `Model` (R2: or a subclass).
     fn attribute_value(&self, recv: Recv<'_>, attr: &str) -> Option<Val> {
         let (class, skip_self) = match recv {
-            Recv::Inst(class) => (class, false),
+            Recv::Inst(class) | Recv::Exact(class) => (class, false),
             Recv::Super(class) => (class, true),
             Recv::Ref(_) | Recv::Class(_) => return None,
         };
@@ -11402,7 +11469,7 @@ impl<'a> TypeCtx<'a> {
         let runs = |key: &FuncKey| matches!(callee, Callee::Project(keys, _) if keys.contains(key));
         let classes = match recv {
             Some(Val::Union(classes)) => classes.as_slice(),
-            Some(Val::Inst(class)) => self
+            Some(Val::Inst(class, _)) => self
                 .project
                 .protocol_implementers(class)
                 .unwrap_or(std::slice::from_ref(class)),
@@ -11435,7 +11502,7 @@ impl<'a> TypeCtx<'a> {
             // A class whose read of `attr` runs no getter adds none.
             let getters = |c: &str| {
                 self.project
-                    .property_targets(c, attr, false)
+                    .property_targets(c, attr, false, false)
                     .unwrap_or(Callee::Unresolved)
             };
             return match union_targets(classes, getters, |_| true) {
@@ -11444,8 +11511,8 @@ impl<'a> TypeCtx<'a> {
             };
         }
         match recv? {
-            Val::Inst(class) => self.project.property_targets(class, attr, false),
-            Val::Super(class) => self.project.property_targets(class, attr, true),
+            Val::Inst(class, exact) => self.project.property_targets(class, attr, false, *exact),
+            Val::Super(class) => self.project.property_targets(class, attr, true, false),
             Val::Union(_) | Val::Ref(_) | Val::Class(_) | Val::OneOf(_) => None,
         }
     }
@@ -11621,7 +11688,7 @@ impl<'a> TypeCtx<'a> {
                             let read = self.global_read(inst, &|_| Some(module.clone()))?;
                             return self.global_read_str(read).map(str::to_owned);
                         }
-                        Val::Inst(class) if project.is_project_class(class) => {
+                        Val::Inst(class, _) if project.is_project_class(class) => {
                             (class, ConstantRead::Instance)
                         }
                         Val::Class(class) if project.is_project_class(class) => {

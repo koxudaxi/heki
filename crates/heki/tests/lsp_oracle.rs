@@ -2494,6 +2494,106 @@ fn steps_method_lookups() -> Vec<Step> {
     ]
 }
 
+const XN_BASE: &str = "class Root:\n    pass\n";
+const XN_BASE_NEW: &str =
+    "class Root:\n    def __new__(cls):\n        return object.__new__(cls)\n";
+const XN_CORE: &str = "from pkg.xn_base import Root\n\n\nclass Notes(Root):\n    def preview(self) -> int:\n        return 1\n\n\ndef prepare(notes: Notes) -> int:\n    return notes.preview()\n";
+const XN_EXACT: &str = "from pkg.xn_core import Notes, prepare\n\n\nasync def concrete() -> int:\n    return prepare(Notes())\n";
+const XN_OPEN: &str = "from pkg.xn_core import Notes, prepare\n\n\nasync def from_argument(notes: Notes) -> int:\n    return prepare(notes)\n";
+const XN_GATE: &str = "import time\n\nfrom pkg.xn_core import Notes, prepare\n\n\nclass Gate(Notes):\n    def preview(self) -> int:\n        time.sleep(1)\n        return 1\n\n\nasync def gated() -> int:\n    return prepare(Gate())\n";
+const XN_HUB: &str = "from pkg.xn_core import Notes, prepare\n";
+const XN_HUB_REBOUND: &str = "from pkg.xn_core import Notes, prepare\nfrom pkg.xn_gate import Gate\n\n\ndef use_gate() -> None:\n    global Notes\n    Notes = Gate\n";
+const XN_VIA: &str = "from pkg import xn_hub\n\n\nasync def via_hub() -> int:\n    return xn_hub.prepare(xn_hub.Notes())\n";
+const XN_PATCH: &str = "from pkg.xn_base import Root\n\n\ndef make(cls: type) -> object:\n    return object.__new__(cls)\n\n\nRoot.__new__ = staticmethod(make)\n";
+
+/// A subclass in another module overriding a method a helper calls on its parameter: a caller
+/// passing an instance of exactly the base class runs only the base's implementation, a caller
+/// passing its own parameter or an instance of the subclass may run the subclass's
+/// (`EffectSummary::provided_effects`), as the subclass is added and removed. A `__new__` added
+/// to a base in a third module, in its body or by a store on the class object, makes the
+/// construction no exact instance, and so does a module the class is read through binding the
+/// name again.
+fn steps_exact_instances() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a helper calls a method on its parameter, called with an exact instance and with a parameter",
+            vec![
+                Action::Create("pkg/xn_base.py", XN_BASE.to_owned()),
+                Action::Create("pkg/xn_core.py", XN_CORE.to_owned()),
+                Action::Create("pkg/xn_exact.py", XN_EXACT.to_owned()),
+                Action::Create("pkg/xn_open.py", XN_OPEN.to_owned()),
+            ],
+        )
+        .absent(&[
+            ("pkg/xn_exact.py", "EFF101 [heuristic]"),
+            ("pkg/xn_open.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "a subclass in another module overrides the method with a blocking one",
+            vec![Action::Create("pkg/xn_gate.py", XN_GATE.to_owned())],
+        )
+        .present(&[
+            ("pkg/xn_open.py", "EFF101 [heuristic]"),
+            ("pkg/xn_gate.py", "EFF101 [heuristic]"),
+        ])
+        .absent(&[
+            ("pkg/xn_exact.py", "EFF101 [heuristic]"),
+            ("pkg/xn_exact.py", "EFF101"),
+        ]),
+        Step::new(
+            "the base of the class defines `__new__`",
+            vec![save("pkg/xn_base.py", XN_BASE_NEW)],
+        )
+        .present(&[
+            ("pkg/xn_exact.py", "EFF101 [heuristic]"),
+            ("pkg/xn_open.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "the base defines no `__new__` again",
+            vec![save("pkg/xn_base.py", XN_BASE)],
+        )
+        .present(&[("pkg/xn_open.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/xn_exact.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "another module stores a `__new__` on the base",
+            vec![Action::Create("pkg/xn_patch.py", XN_PATCH.to_owned())],
+        )
+        .present(&[("pkg/xn_exact.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the module storing the `__new__` is deleted",
+            vec![Action::Delete("pkg/xn_patch.py")],
+        )
+        .absent(&[("pkg/xn_exact.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the class is constructed through a module re-exporting it",
+            vec![
+                Action::Create("pkg/xn_hub.py", XN_HUB.to_owned()),
+                Action::Create("pkg/xn_via.py", XN_VIA.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/xn_via.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the re-exporting module binds the name to the subclass in a function",
+            vec![save("pkg/xn_hub.py", XN_HUB_REBOUND)],
+        )
+        .present(&[("pkg/xn_via.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the re-exporting module binds the name no more",
+            vec![save("pkg/xn_hub.py", XN_HUB)],
+        )
+        .absent(&[("pkg/xn_via.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/xn_gate.py")],
+        )
+        .absent(&[
+            ("pkg/xn_exact.py", "EFF101 [heuristic]"),
+            ("pkg/xn_open.py", "EFF101 [heuristic]"),
+            ("pkg/xn_via.py", "EFF101 [heuristic]"),
+        ]),
+    ]
+}
+
 const PV: &str = "class Pv:\n    def __run(self) -> int:\n        return 1\n\n    def go(self) -> int:\n        return self.__run()\n";
 const PV_USE: &str = "from pkg.pv import Pv\n\n\ndef use(p: Pv) -> int:\n    return p._Pv__run()\n";
 const PV_SUB: &str = "from pkg.pv import Pv\n\n\nclass Sub(Pv):\n    def __run(self) -> int:\n        return 2\n\n    def own(self) -> int:\n        return self.__run()\n\n    def peek(self) -> int:\n        return self._Pv__run()\n";
@@ -8253,6 +8353,7 @@ sessions!(editing, Session::start, {
     helper_witnesses: steps_helper_witnesses,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,
+    exact_instances: steps_exact_instances,
     private_names: steps_private_names,
     contracts: steps_contracts,
     allowed_examples: steps_allowed_examples,

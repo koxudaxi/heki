@@ -243,7 +243,7 @@ impl<'a> Extractor<'a> {
     ) -> Option<(String, &'a FieldValues)> {
         let fields = self.cx.catalog(symbol)?.builds_receiver.as_ref()?;
         let class = match self.val(call.recv_var?)? {
-            Val::Ref(class) | Val::Class(class) | Val::Inst(class) => class,
+            Val::Ref(class) | Val::Class(class) | Val::Inst(class, _) => class,
             Val::Super(_) | Val::Union(_) | Val::OneOf(_) => return None,
         };
         if !self.cx.project.is_project_class(class) {
@@ -252,7 +252,7 @@ impl<'a> Extractor<'a> {
         if fields.only_from_dict {
             let mapping = self.field_mapping(call, fields)?;
             let dict = matches!(self.mapping(mapping), Ways::Built(_))
-                || matches!(self.val(mapping), Some(Val::Inst(c)) if c == "builtins.dict");
+                || matches!(self.val(mapping), Some(Val::Inst(c, _)) if c == "builtins.dict");
             if !dict {
                 return None;
             }

@@ -132,9 +132,13 @@ Each step of the chain is established, not assumed:
   `with` header, or the call itself when it is a helper) that a handler takes and then returns
   or goes on is a path without it;
 - every implementation the call can run is followed, and each one makes the next call: all the
-  overrides in project subclasses of the receiver's class, every class that inherits a mixin
-  method calling `self`, every member of a union; a receiver typed by a protocol has
-  implementations heki cannot list, and is not followed; a call of a property's value
+  overrides in project subclasses of the receiver's class (none for an object the caller
+  constructs by calling the class by name, which is exactly that class when no project class
+  along its MRO binds `__new__`, in its body or after it, no metaclass is custom, and no module
+  on the way binds the name again: `global Base; Base = Sub`, another store, or a star import
+  that may bind it), every class that inherits a mixin method calling `self`, every member of a
+  union; a receiver typed by a protocol has implementations heki cannot list, and is not
+  followed; a call of a property's value
   (`self.handler()`) runs what calling a value of the type the getter declares runs (a protocol
   is not followed), and a read of the property runs the getter, followed when every class the
   object may be finds a getter of the project for the name first, also after the class a
@@ -213,7 +217,12 @@ Its premises:
 - **Every implementation**: each call on the chain has as its targets every implementation it
   can run (assumptions R1, R2, and R5), each a synchronous function run as written, and each
   has the fact. Open in a heuristic report: through a method call, one candidate implementation
-  that leads on is enough.
+  that leads on is enough. A subclass's override that a helper runs on its parameter counts only
+  where the argument may be an instance of the subclass: not where the caller passes an object
+  it constructs exactly (as above) by calling a class that does not have the subclass on its MRO
+  (an instance of a class inheriting the override from the subclass runs it). An override that
+  reaches another subclass's override on a second parameter counts only where both arguments
+  may be instances of their subclasses.
 - **Waits**: the last call waits for the network, a database, a child process, or a sleep on
   every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
   the arguments that opened its connection included (R6; a SQLite connection only when it was

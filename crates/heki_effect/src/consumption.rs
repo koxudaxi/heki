@@ -835,7 +835,7 @@ fn is_iterator_annotation(tcx: &TypeCtx<'_>, annotation: &str) -> bool {
 
 /// `var` holds a `str` or `bytes`.
 fn is_text(types: &FxHashMap<VarId, Val>, var: VarId) -> bool {
-    matches!(types.get(&var), Some(Val::Inst(t)) if t == "builtins.str" || t == "builtins.bytes")
+    matches!(types.get(&var), Some(Val::Inst(t, _)) if t == "builtins.str" || t == "builtins.bytes")
 }
 
 /// For the iterator `iter` a `MakeIter` defines: the block entered when its loop is exhausted,

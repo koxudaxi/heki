@@ -227,7 +227,7 @@ fn attr_state(
 /// The builtin container kind of a value heki types as one.
 fn container(types: &FxHashMap<VarId, Val>, var: VarId) -> Option<ContainerKind> {
     match types.get(&var) {
-        Some(Val::Inst(class)) => ContainerKind::of_class(class),
+        Some(Val::Inst(class, _)) => ContainerKind::of_class(class),
         _ => None,
     }
 }
@@ -248,7 +248,7 @@ pub fn state_written(
     };
     match kind {
         InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
-            if matches!(types.get(&shape.copy_root(*obj)), Some(Val::Inst(c)) if thread_local_class(tcx, c))
+            if matches!(types.get(&shape.copy_root(*obj)), Some(Val::Inst(c, _)) if thread_local_class(tcx, c))
             {
                 return None;
             }
@@ -310,7 +310,7 @@ pub fn state_writes(
 /// to one and no nested scope rebinds it.
 fn is_thread_lock(tcx: &TypeCtx<'_>, types: &FxHashMap<VarId, Val>, var: VarId) -> bool {
     match types.get(&var) {
-        Some(Val::Inst(class)) => tcx.catalog(class).is_some_and(|e| e.sync_lock_or_tx),
+        Some(Val::Inst(class, _)) => tcx.catalog(class).is_some_and(|e| e.sync_lock_or_tx),
         _ => false,
     }
 }

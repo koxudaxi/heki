@@ -367,7 +367,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
                     Some(Val::Ref(module)) => {
                         decls.small_global(&format!("{module}.{attr}")).cloned()
                     }
-                    Some(Val::Inst(class)) => decls.small_attr(&class, attr),
+                    Some(Val::Inst(class, _)) => decls.small_attr(&class, attr),
                     _ => None,
                 }
             }
@@ -488,7 +488,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         for (bb, span, recv, method) in calls {
             // Only a receiver that is certainly a builtin `list` (`set.remove`, `str.index`, a
             // project class's `remove`, or an unknown type are not linear scans of a list).
-            let is_list = matches!(types.get(&recv), Some(Val::Inst(t)) if t == "builtins.list");
+            let is_list = matches!(types.get(&recv), Some(Val::Inst(t, _)) if t == "builtins.list");
             // A data-sized loop (not a small constant range or display, a retry, or daemon
             // polling) runs the call again on the same list.
             let hot: Vec<&NaturalLoop> = f
@@ -1089,7 +1089,7 @@ impl<'a> Defs<'a> {
             UNHASHABLE.iter().find(|u| **u == name).copied()
         };
         match types.get(&var)? {
-            Val::Inst(class) => unhashable(class),
+            Val::Inst(class, _) => unhashable(class),
             Val::Union(classes) => classes
                 .iter()
                 .map(|c| unhashable(c))
@@ -1398,7 +1398,7 @@ const READING_METHODS: &[&str] = &[
 /// of an inferred union.
 fn known_instance(types: &FxHashMap<VarId, Val>, v: VarId, classes: &[&str]) -> bool {
     match types.get(&v) {
-        Some(Val::Inst(class)) => classes.contains(&class.as_str()),
+        Some(Val::Inst(class, _)) => classes.contains(&class.as_str()),
         Some(Val::Union(members)) => members.iter().all(|c| classes.contains(&c.as_str())),
         _ => false,
     }
@@ -1535,7 +1535,7 @@ impl JoinPremises<'_, '_, '_> {
     /// name.
     fn plain_key_attr(&self, obj: VarId, attr: &str) -> bool {
         match self.types.get(&obj) {
-            Some(Val::Inst(class)) => self.decls.plain_attr(class, attr),
+            Some(Val::Inst(class, _)) => self.decls.plain_attr(class, attr),
             Some(Val::Union(classes)) => classes.iter().all(|c| self.decls.plain_attr(c, attr)),
             _ => false,
         }
@@ -1796,7 +1796,7 @@ impl JoinPremises<'_, '_, '_> {
     /// is unknown, or it is known and the load is not a plain one of it.
     fn key_load_cause(&self, obj: VarId) -> &'static OpenCause {
         match self.types.get(&obj) {
-            Some(Val::Inst(_) | Val::Union(_)) => &premises::KEY_LOAD_MAY_RUN_CODE,
+            Some(Val::Inst(_, _) | Val::Union(_)) => &premises::KEY_LOAD_MAY_RUN_CODE,
             _ => &premises::ITEM_TYPE_UNKNOWN,
         }
     }
@@ -1890,7 +1890,7 @@ impl JoinPremises<'_, '_, '_> {
                 // A type annotation closes an unknown type, unless a project subclass of a
                 // builtin container defines its own `__iter__`.
                 let unknown_type = by_type
-                    && !matches!(self.types.get(&v), Some(Val::Inst(_) | Val::Union(_)))
+                    && !matches!(self.types.get(&v), Some(Val::Inst(_, _) | Val::Union(_)))
                     && self.not_overridden(CONTAINERS, "__iter__", false);
                 if builds {
                     walk::Visit::Prune

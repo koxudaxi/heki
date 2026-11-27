@@ -131,7 +131,7 @@ pub fn use_step(
 /// The class of `var` when it is an instance of one (`types`: the inferred values).
 pub fn instance_class(types: &FxHashMap<VarId, Val>, var: VarId) -> Option<String> {
     match types.get(&var)? {
-        Val::Inst(c) => Some(c.clone()),
+        Val::Inst(c, _) => Some(c.clone()),
         _ => None,
     }
 }

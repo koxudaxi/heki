@@ -1918,7 +1918,7 @@ impl<'i> Iterated<'_, 'i> {
     fn instances(&self, var: VarId) -> Option<Vec<String>> {
         use crate::resolver::Val;
         match self.types.get(&var)? {
-            Val::Inst(class) => Some(vec![self.project_class(class)?]),
+            Val::Inst(class, _) => Some(vec![self.project_class(class)?]),
             Val::Union(classes) => classes.iter().map(|c| self.project_class(c)).collect(),
             _ => None,
         }

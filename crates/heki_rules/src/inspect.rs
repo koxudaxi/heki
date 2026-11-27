@@ -14,8 +14,8 @@ use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     AttrKeyPath, CallHop, CallsByCaller, CellChange, EffectSummary, EntryKey, FuncKey, GuardTest,
-    ParamChange, ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot, TypedFieldWriteSite,
-    func_qualname, is_stub,
+    Need, ParamChange, ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot,
+    TypedFieldWriteSite, func_qualname, is_stub,
 };
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb, ExecEffectKind};
@@ -525,7 +525,8 @@ pub struct EffectInfo {
     pub once_per: Option<Vec<String>>,
     /// The calls from the function to the effect.
     pub chain: Vec<Hop>,
-    /// The subclasses whose methods have the effect.
+    /// The subclasses whose methods have the effect, run only when a parameter is an instance
+    /// of one.
     pub via_subclasses: Vec<SubclassChain>,
 }
 
@@ -550,10 +551,25 @@ pub struct GuardInfo {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct SubclassChain {
+    /// The parameter the subclass's method is called on (`self` for the method's own).
+    pub param: String,
     /// The subclass.
     pub class: String,
+    /// The other parameters that must be instances of subclasses for the chain to run: a
+    /// subclass's method reaching the method another subclass gives a call on a second
+    /// parameter.
+    pub also: Vec<SubclassOf>,
     /// The calls from the function to the effect through it.
     pub chain: Vec<Hop>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct SubclassOf {
+    /// The parameter the subclass's method is called on.
+    pub param: String,
+    /// The subclass.
+    pub class: String,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -1257,7 +1273,7 @@ fn effects(b: &Builder<'_, '_>, s: &EffectSummary, params: &[String]) -> Vec<Eff
             .direct_exec_effects
             .iter()
             .chain(&facts.transitive_exec_effects)
-            .chain(facts.receiver_effects.iter().flat_map(|r| r.keys()))
+            .chain(facts.provided_effects.iter().flat_map(|r| r.keys()))
             .copied()
             .collect();
         for e in all {
@@ -1300,13 +1316,23 @@ fn effects(b: &Builder<'_, '_>, s: &EffectSummary, params: &[String]) -> Vec<Eff
                         .map(|h| &**h),
                 ),
                 via_subclasses: facts
-                    .receiver_effects
+                    .provided_effects
                     .iter()
                     .flat_map(|r| r.get(&e))
                     .flatten()
-                    .map(|(line, chain)| SubclassChain {
-                        class: line.class().to_owned(),
-                        chain: b.hops(chain.iter().map(|h| &**h)),
+                    .filter_map(|way| {
+                        let subclass_of = |need: &Need| SubclassOf {
+                            param: param_name(need.param, params),
+                            class: need.provider.class().to_owned(),
+                        };
+                        let (first, also) = way.needs.split_first()?;
+                        let SubclassOf { param, class } = subclass_of(first);
+                        Some(SubclassChain {
+                            param,
+                            class,
+                            also: also.iter().map(subclass_of).collect(),
+                            chain: b.hops(way.chain.iter().map(|h| &**h)),
+                        })
                     })
                     .collect(),
             });

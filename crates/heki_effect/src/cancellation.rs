@@ -127,7 +127,7 @@ fn scope_shield(
         };
     }
     let made_elsewhere = match types.get(&mgr) {
-        Some(Val::Inst(class)) => tcx
+        Some(Val::Inst(class, _)) => tcx
             .kb
             .lookup(class)
             .is_some_and(|e: &EcosystemEntry| e.cancel_scope.is_some()),

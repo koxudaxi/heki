@@ -555,6 +555,7 @@ fn effects_say_when_they_run_and_what_they_need() {
     let run = report(&p, "Mixin.run");
     let sleep = effect(&run, "sleep");
     assert_eq!(sleep["via_subclasses"][0]["class"], "m.Worker");
+    assert_eq!(sleep["via_subclasses"][0]["param"], "self");
     assert_eq!(
         hops(&sleep["via_subclasses"][0]["chain"]).last().unwrap().1,
         "time.sleep"
@@ -2070,6 +2071,54 @@ fn a_read_only_producer_wrapper_shares_its_result() {
     assert_eq!(r["returns"]["shared_with"]["producer"], "m.Store.read");
 }
 
+/// A subclass's method on one parameter (`Rack.put` on `tray`) reaching the method another
+/// subclass gives a call on a second parameter (`Gate.preview` on `card`) runs only when both
+/// arguments are instances of them: the way names both.
+const NEEDS: &str = r#"import time
+
+
+class Card:
+    def preview(self):
+        return None
+
+
+class Gate(Card):
+    def preview(self):
+        time.sleep(1)
+
+
+class Tray:
+    def put(self, card: Card):
+        return None
+
+
+class Rack(Tray):
+    def put(self, card: Card):
+        return card.preview()
+
+
+def forward(tray: Tray, card: Card):
+    return tray.put(card)
+"#;
+
+#[test]
+fn a_way_through_two_subclasses_names_both() {
+    let p = Project::new("inspect_needs");
+    p.write("m.py", NEEDS);
+    let forward = report(&p, "forward");
+    let way = &effect(&forward, "sleep")["via_subclasses"][0];
+    assert_eq!(way["param"], "tray");
+    assert_eq!(way["class"], "m.Rack");
+    assert_eq!(
+        way["also"],
+        serde_json::json!([{"param": "card", "class": "m.Gate"}])
+    );
+    let (code, out, err) = p.heki(&["inspect", "--heuristic", "m.forward"]);
+    assert_eq!(code, 0, "{err}");
+    let line = "through subclass m.Rack of `tray` and subclass m.Gate of `card`:";
+    assert!(out.contains(line), "`{line}` not in:\n{out}");
+}
+
 #[test]
 fn the_text_form_shows_every_kind_of_fact() {
     let p = Project::new("inspect_text_kinds");
@@ -2091,7 +2140,7 @@ fn the_text_form_shows_every_kind_of_fact() {
     has(&text("m.only_with", &[]), "only when hasattr(x, \"url\")");
     has(&text("facts.Store.conn", &[]), "once per self");
     let run = text("facts.Mixin.run", &[]);
-    has(&run, "through subclass facts.Worker:");
+    has(&run, "through subclass facts.Worker of `self`:");
     has(
         &text("m.deep1", &[]),
         "global G       m.py:81 m.deep2 -> ... -> m.py:93 m.deep5 -> m.py:98",

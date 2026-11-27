@@ -452,7 +452,7 @@ impl<'a> Mut202Fn<'a> {
     /// The class of a value's inferred type, when it is one class.
     fn class_of(&self, v: VarId) -> Option<&str> {
         match self.types.get(&v) {
-            Some(Val::Inst(class)) => Some(class.as_str()),
+            Some(Val::Inst(class, _)) => Some(class.as_str()),
             _ => None,
         }
     }
