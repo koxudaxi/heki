@@ -443,7 +443,7 @@
           "type": "string"
         },
         "via_subclasses": {
-          "description": "The subclasses whose methods have the effect.",
+          "description": "The subclasses whose methods have the effect, run only when a parameter is an instance\nof one.",
           "items": {
             "$ref": "#/$defs/SubclassChain"
           },
@@ -1697,9 +1697,14 @@
         "class": {
           "description": "The subclass.",
           "type": "string"
+        },
+        "param": {
+          "description": "The parameter the subclass's method is called on (`self` for the method's own).",
+          "type": "string"
         }
       },
       "required": [
+        "param",
         "class",
         "chain"
       ],

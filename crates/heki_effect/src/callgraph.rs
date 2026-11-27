@@ -14,10 +14,10 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
     CellChange, Construction, ContractSharing, Delivery, EffectSummary, EntryKey, Facts, FuncKey,
-    KeptBy, LocalOrigins, MayGiven, NewArg, NewCond, NewFrom, NewKind, Origins, PROVIDED_CHAIN_LIMIT,
-    PROVIDED_LIMIT, ProjectIndex, Provided,
-    ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole,
-    Slot, TypedFieldWrite, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
+    KeptBy, LocalOrigins, MayGiven, NewArg, NewCond, NewFrom, NewKind, Origins,
+    PROVIDED_CHAIN_LIMIT, PROVIDED_LIMIT, ProjectIndex, ProtectedReturn, Provided, ReturnsNew,
+    Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole, Slot, TypedFieldWrite,
+    TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;

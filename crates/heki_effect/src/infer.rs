@@ -171,9 +171,8 @@ fn exact_instances(
         Fact::Known(Ty::Inst(o)) => Some(o.class.as_str()),
         _ => None,
     };
-    let named_class = |fqn: &str, made: &str| {
-        project.canonical(fqn) == made && project.constructs_exactly(made)
-    };
+    let named_class =
+        |fqn: &str, made: &str| project.canonical(fqn) == made && project.constructs_exactly(made);
     let module_named = |v: VarId| match fact(v) {
         Fact::Known(Ty::Ref(m)) if project.module(m).is_some() => Some(m.as_str()),
         _ => None,
@@ -231,8 +230,7 @@ fn exact_instances(
         .zip(facts)
         .map(|(i, _)| VarId(i))
         .filter(|v| {
-            instance_class(*v)
-                .is_some_and(|class| made.get(&shape.copy_root(*v)) == Some(&class))
+            instance_class(*v).is_some_and(|class| made.get(&shape.copy_root(*v)) == Some(&class))
         })
         .collect()
 }

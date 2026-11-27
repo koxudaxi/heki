@@ -1206,7 +1206,10 @@ fn calls_on_unions_and_protocols_resolve_class_by_class() {
             method(&Val::Inst("m.Runner".into(), false), "run"),
             "project true A.run,B.run"
         );
-        assert_eq!(method(&Val::Inst("m.Marker".into(), false), "run"), "unresolved");
+        assert_eq!(
+            method(&Val::Inst("m.Marker".into(), false), "run"),
+            "unresolved"
+        );
         // Calling a union value, reading a property on one.
         assert_eq!(
             callee(&cx.resolve_call(Some(&union(&["A", "B"])))),

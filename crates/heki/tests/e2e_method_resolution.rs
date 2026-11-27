@@ -1113,9 +1113,11 @@ fn an_effect_through_self_and_a_plain_call_runs_for_every_receiver() {
 /// A helper calling a method on its parameter runs a subclass's override only when the argument
 /// may be an instance of the subclass: an object the caller constructs by calling the class by
 /// name (directly, through a copy, through its module) is exactly that class, and so is the
-/// object such a construction hands its `__init__`; a parameter, `cls(...)`, or an instance of
+/// object such a construction hands its `__init__`; calling it or reading its property runs its
+/// class's implementations alone. A parameter, `cls(...)`, a factory's result, or an instance of
 /// the subclass may be one. The helpers handing the parameter on keep the question for their
-/// callers (`EffectSummary::provided_effects`).
+/// callers (`EffectSummary::provided_effects`), also where one subclass's override reaches
+/// another's on what it is handed (`Rack.put` on a factory's result).
 const EXACT_CORE: &str = r#"class Notes:
     def __init__(self):
         self.setup()
@@ -1129,9 +1131,29 @@ const EXACT_CORE: &str = r#"class Notes:
     def run(self):
         return self.preview()
 
+    def __call__(self):
+        return 1
+
+    @property
+    def size(self):
+        return 1
+
 
 def prepare(notes: Notes):
     return notes.preview()
+
+
+def make() -> Notes:
+    return Notes()
+
+
+class Shelf:
+    def put(self, notes: Notes):
+        return 1
+
+
+def store(shelf: Shelf):
+    return shelf.put(make())
 
 
 def hand_on(notes: Notes):
@@ -1167,6 +1189,26 @@ async def constructed():
     return Notes()
 
 
+async def called():
+    Notes()()
+
+
+async def sized():
+    return Notes().size
+
+
+async def made():
+    prepare(make())  # EFF101 [heuristic]
+
+
+async def stored(shelf: Shelf):
+    store(shelf)  # EFF101 [heuristic]
+
+
+async def stored_exact():
+    store(Shelf())
+
+
 class Maker:
     @classmethod
     async def make(cls):
@@ -1185,6 +1227,19 @@ class Gate(Notes):
 
     def preview(self):
         time.sleep(1)
+
+    def __call__(self):
+        time.sleep(1)
+
+    @property
+    def size(self):
+        time.sleep(1)
+        return 1
+
+
+class Rack(core.Shelf):
+    def put(self, notes: Notes):
+        return notes.preview()
 
 
 async def subclass():

@@ -7936,7 +7936,9 @@ impl<'a> Extractor<'a> {
         (receiver.is_some() || !providers.is_empty() || declared.is_some()).then(|| {
             Box::new(Dispatch {
                 receiver,
-                receiver_param: receiver_param.filter(|_| !providers.is_empty()).unwrap_or(0),
+                receiver_param: receiver_param
+                    .filter(|_| !providers.is_empty())
+                    .unwrap_or(0),
                 providers,
                 declared,
                 recv_params: 0,
