@@ -1514,9 +1514,13 @@ fn apply_edge(
     {
         // The functions the chains gain at this call: the callee, and the one iterating it.
         let contexts = index.contracts.as_deref().map_or(0, |c| {
+            let overriding = |k: &FuncKey| {
+                (index.summary(k).and_then(|s| s.override_roles.as_deref()))
+                    .map_or(0, |roles| roles.writer_contexts)
+            };
             std::iter::once(&bc.callee)
                 .chain(d.via)
-                .fold(0, |acc, k| acc | c.writer_contexts(k))
+                .fold(0, |acc, k| acc | c.writer_contexts(k) | overriding(k))
         });
         transfer_typed_writes(
             index, target, caller, site, bc, callee, facts, &lead, rewrite, here, contexts,

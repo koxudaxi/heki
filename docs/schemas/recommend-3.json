@@ -2148,6 +2148,13 @@
       "additionalProperties": false,
       "description": "A contract entry that matches nothing in the analyzed files, with every contract of its kind\nholding the same text under the same key.",
       "properties": {
+        "alternatives": {
+          "description": "The names a `{...}` group of the entry lists that name nothing, written out\n(`Base.c` of `Base.{a,c}`); empty when the entry is one name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "contracts": {
           "description": "The contracts holding it, in configuration order: a name, or `#<position>` (from 1) for\na contract without one.",
           "items": {

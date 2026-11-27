@@ -86,6 +86,8 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 | "after changing this field, always call that function" | `invalidation` |
 | "this code must not write, read, or call anything of that kind, however deep" | `effect-boundaries`, see [Async and Execution Effects](effects.md#contracts-for-execution-effects) |
 
+A contract names a method as `Class.method`, and a subclass that overrides the method is another function. Set `include-overrides = true` on a contract (or in its [defaults table](configuration.md#defaults-for-the-tables-of-a-kind)) and an entry naming a method in `allowed-*`, `forbidden-*`, `exempt-methods`, `invalidators`, or `exempt-writers` also names the overrides of it in the project subclasses of `Class`. The key is off by default because it allows a subclass written later to do what its base class may, with no change of the configuration. See [Allowed and forbidden functions](configuration.md#allowed-and-forbidden-functions).
+
 `lru_cache` and `cache` results are protected without a contract. A `readonly-returns` entry adds the producers that are not cached, such as a function that returns a module-level dict.
 
 ## 🤝 Not breaking a value you borrowed or share

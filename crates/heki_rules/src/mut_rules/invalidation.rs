@@ -128,7 +128,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
             };
             for (key, path, s) in place_functions(cx, |_| true) {
                 // An exempt writer's writes need no announcement of their own.
-                if contract.names_exempt_writer(&key.fqn(), &key.qualname) {
+                if contract.exempts(cx.decls, key) {
                     let own = s
                         .typed_field_write_sites
                         .iter()
@@ -203,7 +203,7 @@ fn announced_by_callers<'i>(
         let mut callers: Vec<&FuncKey> = callers.iter().collect();
         callers.sort();
         for caller in callers {
-            if contract.names_exempt_writer(&caller.fqn(), &caller.qualname) {
+            if contract.exempts(cx.decls, caller) {
                 announced = true;
                 continue;
             }

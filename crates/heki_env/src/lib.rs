@@ -215,6 +215,10 @@ pub struct WriteOwnerRule {
     /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target of any
     /// `write-owners` contract covering the class names; `"ignore"` (default) does not.
     pub unlisted_dict_keys: Option<String>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
@@ -254,6 +258,10 @@ pub struct ReadOwnerRule {
     pub allowed_protocols: Vec<String>,
     /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
     pub protocol_subclasses: Option<bool>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
@@ -311,6 +319,10 @@ pub struct CallOwnerRule {
     pub allowed_protocols: Vec<String>,
     /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
     pub protocol_subclasses: Option<bool>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
@@ -427,6 +439,10 @@ pub struct EffectBoundaryRule {
     /// write of an attribute `write-targets` or `write-universe` names on an object of unknown
     /// class; `"ignore"` (default) does not.
     pub unresolved: Option<String>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
@@ -477,6 +493,10 @@ pub struct InvalidationRule {
     /// Functions (dotted patterns) whose writes need no announcement of their own: the
     /// owner's operations, which announce or batch the change themselves.
     pub exempt_writers: Vec<String>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// The help of every `MUT208` report of this contract.
     pub message: Option<String>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
@@ -1350,6 +1370,7 @@ name = "graph-index"
 targets = ["DataType.data_types"]
 invalidators = ["GenerationStore.note_changed_models"]
 exempt-writers = ["pkg.parser.generation.*"]
+include-overrides = true
 message = "announce the change to the store"
 
 [[tool.heki.effect-boundaries]]
@@ -1400,6 +1421,7 @@ import-probes = "report"
                 own_receiver: Some("allow".into()),
                 allowed_protocols: vec!["*Host".into()],
                 protocol_subclasses: Some(false),
+                include_overrides: None,
                 fail: None,
                 source: None,
                 entry_sources: BTreeMap::new(),
@@ -1422,6 +1444,7 @@ import-probes = "report"
                 targets_call_each_other: Some("report".into()),
                 allowed_protocols: Vec::new(),
                 protocol_subclasses: None,
+                include_overrides: None,
                 fail: None,
                 source: None,
                 entry_sources: BTreeMap::new(),
@@ -1449,6 +1472,7 @@ import-probes = "report"
                 references: Some("calls".into()),
                 import_probes: Some("report".into()),
                 unresolved: None,
+                include_overrides: None,
                 fail: None,
                 source: None,
                 entry_sources: BTreeMap::new(),
@@ -1462,6 +1486,7 @@ import-probes = "report"
                 targets: vec!["DataType.data_types".into()],
                 invalidators: vec!["GenerationStore.note_changed_models".into()],
                 exempt_writers: vec!["pkg.parser.generation.*".into()],
+                include_overrides: Some(true),
                 message: Some("announce the change to the store".into()),
                 fail: None,
                 source: None,
