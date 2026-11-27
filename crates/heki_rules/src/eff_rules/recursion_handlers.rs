@@ -29,8 +29,7 @@ use heki_effect::{
 };
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{
-    BlockId, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId,
-    is_builtin_name,
+    BlockId, BuiltinKind, Inst, InstKind, IrFunction, Terminator, VarId, is_builtin_name,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
@@ -738,15 +737,7 @@ fn is_cli_boundary(
         })
         .peekable();
     let exit_status = |value: Option<VarId>| {
-        value.is_some_and(|v| {
-            matches!(
-                shape.inst(v).map(|i| &i.kind),
-                Some(InstKind::Const {
-                    literal: ConstLiteral::Int(_),
-                    ..
-                })
-            )
-        })
+        value.is_some_and(|v| tcx.int_constant_in(shape, v, types).is_some())
     };
     if returns.peek().is_none() || !returns.all(exit_status) {
         return false;

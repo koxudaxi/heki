@@ -11,16 +11,35 @@
 //! `return` gives, whatever the name. A `return` of anything else, of nothing, or of different
 //! objects leaves the name unknown.
 //!
+//! A return may also hand the table's value to a function of the module that calls it when it
+//! is a function object (`return _load(name, _EXPORTS[name])`, where `_load` returns `entry()`
+//! past `isinstance(entry, str)` and `isinstance(entry, tuple)` tests): that serves what calling
+//! the value gives.
+//!
+//! The hook may also be what a project function returns (`__getattr__, __dir__ =
+//! make_hooks(__name__, _EXPORTS)`, [`GetattrExports::made_by`]): the function's module records
+//! what the hook serves for a key of the table it takes, read through a closure cell bound to
+//! that parameter, and under the literal names its code decides ([`hook_factories`]), and the
+//! project puts the call's arguments in ([`Instance`]).
+//!
 //! Like the return facts, it is pass 1: inferred against the module's own declarations
-//! completed against themselves, so it stays a function of the module's text (a factory another
-//! module defines gives nothing there). What other modules change is the declarations' to see
-//! ([`ProjectDecls::served_by_getattr`]).
+//! completed against themselves, so it stays a function of the module's text. What other
+//! modules change is the declarations' to see ([`ProjectDecls::served_by_getattr`]).
 
-use super::{GetattrExports, ModuleDecls, ProjectDecls, Symbol, Ty, TypeCtx, complete_decls};
+use super::{
+    FunctionDecl, GetattrExports, HookArg, HookParam, KeyServes, MadeBy, MadeHook, ModuleDecls,
+    ProjectDecls, Symbol, Ty, TypeCtx, complete_decls,
+};
 use crate::ModuleInput;
-use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, KeySet, Sparse, fixpoint};
-use heki_ir::{BuiltinKind, CompareOpKind, ConstLiteral, InstKind, Terminator, UnaryOpKind, VarId};
+use crate::infer::ParamCells;
+use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, KeySet, Sparse, Visit, fixpoint, reach};
+use heki_ir::{
+    BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FunctionKind, GlobalStores, InstKind,
+    IrFunction, ModuleIr, Terminator, UnaryOpKind, VarId,
+};
 use heki_kb::EffectiveEcosystemKb;
+use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// [`ModuleDecls::getattr_exports`] of the module `input` declares as `decls`, after its return
@@ -37,85 +56,294 @@ pub(super) fn getattr_exports(
         || decls.imports.contains_key("__getattr__")
         || decls.aliases.contains_key("__getattr__")
         || decls.alias_paths.contains_key("__getattr__");
-    let fixed = !input.ir.constants.dynamic && !hook_bound_again;
-    let (hook, name) = heki_ir::module_getattr_hook(input.ir).filter(|_| fixed)?;
+    if input.ir.constants.dynamic || hook_bound_again {
+        return None;
+    }
+    let hook_global = format!("{}.__getattr__", decls.module_name);
+    let Some((hook, name)) = heki_ir::module_getattr_hook(input.ir) else {
+        let made = made_by(input, decls)?;
+        return Some(GetattrExports {
+            served: BTreeMap::new(),
+            globals: [hook_global].into(),
+            made_by: Some(Box::new(made)),
+        });
+    };
     let shape = FnShape::new(hook);
     decides_names(&shape, name).then_some(())?;
-    let own = ProjectDecls::new([decls.clone()]);
-    let completed = ProjectDecls::new([complete_decls(input, decls.clone(), &own, kb)]);
+    let completed = own_completed(input, decls, kb);
     let cx = TypeCtx::new(input, &completed, kb);
-    let reads = Hook {
-        shape: &shape,
-        name,
-        module: &decls.module_name,
+    let decider = Decider {
+        ir: input.ir,
+        cx: &cx,
         project: &completed,
+        module: &decls.module_name,
     };
-    let module_body = &input.ir.functions[input.ir.module_fn.0 as usize];
-    let budget = Budget::of_functions(
-        "heki_effect::resolver::getattr_exports",
-        [hook, module_body],
-    );
-    let reaching = reads.names_reaching(&budget).map(Some).open_means(None)?;
-    let returns: Vec<(Option<VarId>, &Reaching<'_>)> = (shape.rpo().iter().enumerate())
-        .filter_map(|(i, b)| match hook.block(*b).terminator {
-            Terminator::Return(value) => Some((value, reaching.get(i)?)),
-            _ => None,
-        })
-        .collect();
-    // The names the hook decides: those a branch lets reach a `return`, and the keys of the
-    // tables a `return` any name reaches reads.
-    let mut names: BTreeSet<&str> = BTreeSet::new();
-    for (value, reach) in &returns {
-        match reach {
-            Reaching::Only(only) => names.extend(only.iter().copied()),
-            Reaching::AllBut(but) => names.extend(
-                (value.and_then(|v| reads.keyed_return(v)).into_iter())
-                    .flat_map(|(keyed, _)| keyed.entries.iter().map(|(key, _)| &**key))
-                    .filter(|key| !but.contains(key)),
-            ),
-        }
-    }
+    let decided = decider.hook_serves(&shape, name, None, &[])?;
     // A name the module binds only under `if TYPE_CHECKING:` is no name it binds at run time.
-    let unbound = |key: &&str| !decls.binds(key) || decls.type_checking_only.contains(*key);
-    let mut served: BTreeMap<&str, Served> = (names.into_iter().filter(unbound))
-        .map(|key| (key, Served::Nothing))
-        .collect();
-    let inferred = cx.infer_types(hook);
-    for (value, reach) in &returns {
-        let keys: Vec<&str> = match reach {
-            Reaching::Only(only) => (only.iter().copied())
-                .filter(|key| served.contains_key(key))
-                .collect(),
-            Reaching::AllBut(but) => (served.keys().copied())
-                .filter(|key| !but.contains(key))
-                .collect(),
-        };
-        for key in keys {
-            budget.take(1).then_some(())?;
-            let given = match value {
-                Some(v) => reads.value_for(*v, key, |v| inferred.ty(v).cloned()),
-                // `return` alone, or the end of the body: `None`.
-                None => Served::Open,
-            };
-            let slot = served.get_mut(key)?;
-            *slot = std::mem::replace(slot, Served::Nothing).join(given);
-        }
-    }
-    let mut globals = reads.own_globals(decls);
-    let mut out = BTreeMap::new();
-    for (key, served) in served {
-        if let Served::Gives(ty @ (Ty::Ref(_) | Ty::Class(_)), read) = served {
+    let unbound = |key: &str| !decls.binds(key) || decls.type_checking_only.contains(key);
+    let mut globals = own_globals(&shape, decls);
+    globals.push(hook_global);
+    let mut served = BTreeMap::new();
+    for (key, (ty, read)) in decided.served {
+        if unbound(&key) {
             globals.extend(read);
-            out.insert(key.to_owned(), ty);
+            served.insert(key, ty);
         }
     }
     globals.sort();
     globals.dedup();
-    let served = (!out.is_empty()).then_some(out)?;
+    (!served.is_empty()).then_some(())?;
     Some(GetattrExports {
         served,
         globals: globals.into(),
+        made_by: None,
     })
+}
+
+/// The module's own declarations completed against themselves, which the hooks are read against.
+fn own_completed(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+    kb: &EffectiveEcosystemKb,
+) -> ProjectDecls {
+    let own = ProjectDecls::new([decls.clone()]);
+    ProjectDecls::new([complete_decls(input, decls.clone(), &own, kb)])
+}
+
+/// The call of a project function that the module binds its `__getattr__` to, once, at module
+/// level and outside any loop ([`GetattrExports::made_by`]): `make_hook(...)`,
+/// `make_hooks(...)[0]`, or a target of unpacking what it returns (`__getattr__, __dir__ =
+/// make_hooks(...)`), passing no `*` or `**` unpacking. As for a `def`, no code of the module
+/// loads the hook.
+fn made_by(input: &ModuleInput<'_>, decls: &ModuleDecls) -> Option<MadeBy> {
+    let ir = input.ir;
+    let loads_hook = |kind: &InstKind| {
+        matches!(kind, InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
+            if name == "__getattr__")
+    };
+    let loaded = (ir.functions.iter()).any(|f| {
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| loads_hook(&i.kind))
+    });
+    if loaded || !GlobalStores::of(&ir.functions).once("__getattr__") {
+        return None;
+    }
+    let body = ir.function(ir.module_fn);
+    let shape = FnShape::new(body);
+    let value = (body.blocks.iter())
+        .filter(|b| shape.loop_depth(b.id) == 0)
+        .flat_map(|b| &b.insts)
+        .find_map(|i| match &i.kind {
+            InstKind::StoreGlobal { name, value } if name == "__getattr__" => Some(*value),
+            _ => None,
+        })?;
+    // The module body holds its names in values: the global a value is, by the store of it.
+    let mut stored: FxHashMap<VarId, &String> = FxHashMap::default();
+    for i in body.blocks.iter().flat_map(|b| &b.insts) {
+        if let InstKind::StoreGlobal { name, value } = &i.kind {
+            stored.entry(shape.copy_root(*value)).or_insert(name);
+        }
+    }
+    let global = |v: VarId| {
+        let root = shape.copy_root(v);
+        match &shape.inst(root)?.kind {
+            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => Some(name),
+            _ => stored.get(&root).copied(),
+        }
+    };
+    let mut call = shape.copy_root(value);
+    let mut item = None;
+    if let InstKind::SubscriptLoad {
+        obj,
+        index,
+        is_slice: false,
+        ..
+    } = &shape.inst(call)?.kind
+    {
+        item = Some(u8::try_from(shape.int_const(shape.copy_root(*index))?).ok()?);
+        call = shape.copy_root(*obj);
+    }
+    let InstKind::Call {
+        callee_var: Some(callee),
+        args,
+        kwargs,
+        star_from: None,
+        ..
+    } = &shape.inst(call)?.kind
+    else {
+        return None;
+    };
+    let callee = global(*callee)?;
+    let factory = match decls.imports.get(callee) {
+        Some(target) => target.clone(),
+        None => (decls.functions.contains_key(callee))
+            .then(|| format!("{}.{callee}", decls.module_name))?,
+    };
+    let arg = |a: VarId| match shape.inst(shape.copy_root(a)).map(|i| &i.kind) {
+        Some(InstKind::Const { literal, .. }) => HookArg::Literal(literal.clone()),
+        _ => global(a).map_or(HookArg::Other, |name| HookArg::Global(name.clone())),
+    };
+    let kwargs = (kwargs.iter())
+        .map(|(key, a)| Some((key.clone()?, arg(*a))))
+        .collect::<Option<Vec<_>>>()?;
+    Some(MadeBy {
+        factory,
+        item,
+        args: args.iter().map(|a| arg(*a)).collect(),
+        kwargs,
+    })
+}
+
+/// The entries of a table: each key with the type of its value ([`super::Table`]).
+type Entries<'t> = &'t [(Box<str>, Option<Ty>)];
+
+/// The functions taking a name a factory returns ([`returned_hooks`]).
+type ReturnedHooks<'m> = Vec<(Option<u8>, &'m IrFunction, VarId)>;
+
+/// The key standing for every key of a factory's table in the walk over a hook it makes: no
+/// name a module binds or a literal spells it.
+const ANY_KEY: &str = "\0key";
+
+/// What a hook decides ([`Decider::hook_serves`]).
+#[derive(Default)]
+struct Decided {
+    /// By literal name, the named object or class object served, with the module globals
+    /// deciding it beyond those the hook reads.
+    served: BTreeMap<String, (Ty, Vec<String>)>,
+    /// What a key of the factory's table gets.
+    keyed: Option<KeyServes>,
+    /// The literal names the hook's tests name, and those it decides.
+    literals: BTreeSet<String>,
+}
+
+/// Reads hooks against the declarations of their module.
+struct Decider<'d> {
+    ir: &'d ModuleIr,
+    cx: &'d TypeCtx<'d>,
+    project: &'d ProjectDecls,
+    module: &'d str,
+}
+
+impl Decider<'_> {
+    /// What the hook `shape` serves under the names it decides, given in `name`, with the
+    /// closure cell `table_cell` read as a table of any keys ([`ANY_KEY`]); `None` past the
+    /// budget, which covers the hook, the module body, and `more`.
+    fn hook_serves(
+        &self,
+        shape: &FnShape<'_>,
+        name: VarId,
+        table_cell: Option<&str>,
+        more: &[&IrFunction],
+    ) -> Option<Decided> {
+        let hook = shape.f;
+        let any_keys: [(Box<str>, Option<Ty>); 1] =
+            [(Box::from(ANY_KEY), Some(Ty::Ref(ANY_KEY.to_owned())))];
+        let module_body = &self.ir.functions[self.ir.module_fn.0 as usize];
+        let called = loaded_functions(self.ir, hook);
+        let budget = Budget::of_functions(
+            "heki_effect::resolver::getattr_exports",
+            [hook, module_body]
+                .into_iter()
+                .chain(called)
+                .chain(more.iter().copied()),
+        );
+        let reads = Hook {
+            shape,
+            name,
+            decider: self,
+            table_cell: table_cell.map(|cell| (cell, &any_keys[..])),
+            budget: &budget,
+            dispatches: RefCell::default(),
+        };
+        let reaching = reads.names_reaching(&budget).map(Some).open_means(None)?;
+        let returns: Vec<(Option<VarId>, &Reaching<'_>)> = (shape.rpo().iter().enumerate())
+            .filter_map(|(i, b)| match hook.block(*b).terminator {
+                Terminator::Return(value) => Some((value, reaching.get(i)?)),
+                _ => None,
+            })
+            .collect();
+        // The names the hook decides: those a branch lets reach a `return`, and the keys of the
+        // tables a `return` any name reaches reads.
+        let mut names: BTreeSet<&str> = BTreeSet::new();
+        for (value, reach) in &returns {
+            match reach {
+                Reaching::Only(only) => names.extend(only.iter().copied()),
+                Reaching::AllBut(but) => names.extend(
+                    (value.and_then(|v| reads.keyed_return(v)).into_iter())
+                        .flat_map(|(keyed, _)| keyed.entries.iter().map(|(key, _)| &**key))
+                        .filter(|key| !but.contains(key)),
+                ),
+            }
+        }
+        let mut served: BTreeMap<&str, Served> = names
+            .into_iter()
+            .map(|key| (key, Served::Nothing))
+            .collect();
+        let inferred = self.cx.infer_types(hook);
+        for (value, reach) in &returns {
+            let keys: Vec<&str> = match reach {
+                Reaching::Only(only) => (only.iter().copied())
+                    .filter(|key| served.contains_key(key))
+                    .collect(),
+                Reaching::AllBut(but) => (served.keys().copied())
+                    .filter(|key| !but.contains(key))
+                    .collect(),
+            };
+            for key in keys {
+                budget.take(1).then_some(())?;
+                let given = match value {
+                    Some(v) => reads.value_for(*v, key, |v| inferred.ty(v).cloned()),
+                    // `return` alone, or the end of the body: `None`.
+                    None => Served::Open,
+                };
+                let slot = served.get_mut(key)?;
+                *slot = std::mem::replace(slot, Served::Nothing).join(given);
+            }
+        }
+        let mut out = Decided {
+            literals: reads.tested_literals(),
+            ..Decided::default()
+        };
+        for (key, served) in served {
+            if key == ANY_KEY {
+                out.keyed = match served {
+                    Served::Entry(serves) => Some(serves),
+                    _ => None,
+                };
+                continue;
+            }
+            out.literals.insert(key.to_owned());
+            if let Served::Gives(ty @ (Ty::Ref(_) | Ty::Class(_)), read) = served {
+                out.served.insert(key.to_owned(), (ty, read));
+            }
+        }
+        Some(out)
+    }
+}
+
+/// The functions of the module the hook `f` loads by name, which a walk of the hook may read.
+fn loaded_functions<'m>(ir: &'m ModuleIr, f: &IrFunction) -> Vec<&'m IrFunction> {
+    let mut out: Vec<&IrFunction> = (f.blocks.iter().flat_map(|b| &b.insts))
+        .filter_map(|i| match &i.kind {
+            InstKind::LoadGlobal { name, .. } => own_function(ir, name),
+            _ => None,
+        })
+        .collect();
+    out.sort_by_key(|g| g.id);
+    out.dedup_by_key(|g| g.id);
+    out
+}
+
+/// The module's only plain `def` of the name `name` at module level: undecorated, so the name
+/// holds what the statement made, unless something binds it again.
+fn own_function<'m>(ir: &'m ModuleIr, name: &str) -> Option<&'m IrFunction> {
+    let mut named = (ir.functions.iter())
+        .filter(|f| f.qualname == name && f.enclosing == Some(ir.module_fn) && !f.is_class_body);
+    let f = named.next()?;
+    let plain = f.kind == FunctionKind::Sync && f.decorators.is_empty();
+    (plain && named.next().is_none()).then_some(f)
 }
 
 /// Whether the hook may decide a name heki follows: it compares its name parameter `name` with
@@ -199,11 +427,13 @@ impl Join for Reaching<'_> {
 }
 
 /// What the hook serves under one name so far: nothing yet (every `return` it reached raises
-/// first), one object with the module globals deciding it, or anything.
+/// first), one object with the module globals deciding it, what a key of a factory's table gets
+/// ([`ANY_KEY`]), or anything.
 #[derive(Debug, Clone, PartialEq)]
 enum Served {
     Nothing,
     Gives(Ty, Vec<String>),
+    Entry(KeyServes),
     Open,
 }
 
@@ -215,6 +445,7 @@ impl Served {
                 read.extend(more);
                 Served::Gives(a, read)
             }
+            (Served::Entry(a), Served::Entry(b)) if a == b => Served::Entry(a),
             _ => Served::Open,
         }
     }
@@ -231,10 +462,12 @@ enum Lookup {
     GetOr,
 }
 
-/// A value read from a table of the module by the hook's name: the table's entries, and how.
+/// A value read from a table by the hook's name: the table's entries, and how. A factory's
+/// table holds one entry for any of its keys ([`ANY_KEY`]).
 struct Keyed<'t> {
     entries: &'t [(Box<str>, Option<Ty>)],
     lookup: Lookup,
+    any_keys: bool,
 }
 
 impl Keyed<'_> {
@@ -247,12 +480,16 @@ impl Keyed<'_> {
     }
 }
 
-/// The hook being read: its shape, its name parameter, and the declarations of its module.
+/// The hook being read: its shape, its name parameter, the declarations of its module, and the
+/// closure cell holding the table of a factory making it, with that table's one entry.
 struct Hook<'h> {
     shape: &'h FnShape<'h>,
     name: VarId,
-    module: &'h str,
-    project: &'h ProjectDecls,
+    decider: &'h Decider<'h>,
+    table_cell: Option<(&'h str, Entries<'h>)>,
+    budget: &'h Budget,
+    /// [`Hook::calls_its_param`] by function and parameter.
+    dispatches: RefCell<FxHashMap<(&'h str, usize), bool>>,
 }
 
 impl<'h> Hook<'h> {
@@ -268,10 +505,18 @@ impl<'h> Hook<'h> {
         }
     }
 
-    /// The entries of the table of the module the global `v` loads.
-    fn loaded_table(&self, v: VarId) -> Option<&'h [(Box<str>, Option<Ty>)]> {
+    /// The entries of the table `v` loads: a table of the module, or the one of a factory
+    /// (`true`).
+    fn loaded_table(&self, v: VarId) -> Option<(Entries<'h>, bool)> {
+        if let Some((cell, entries)) = self.table_cell
+            && matches!(self.shape.inst(self.shape.copy_root(v)).map(|i| &i.kind),
+                Some(InstKind::LoadDeref { name, .. }) if name == cell)
+        {
+            return Some((entries, true));
+        }
+        let d = self.decider;
         let global = self.global_loaded(v)?;
-        self.project.table(&format!("{}.{global}", self.module))
+        Some((d.project.table(&format!("{}.{global}", d.module))?, false))
     }
 
     /// The value `v` is (through copies) when it is read from a table by the hook's name.
@@ -297,17 +542,61 @@ impl<'h> Hook<'h> {
             },
             _ => return None,
         };
-        let entries = self.loaded_table(table)?;
-        Some(Keyed { entries, lookup })
+        let (entries, any_keys) = self.loaded_table(table)?;
+        Some(Keyed {
+            entries,
+            lookup,
+            any_keys,
+        })
     }
 
     /// The value read from a table by the name that the returned value `v` is, or whose call
-    /// it is (`true`).
+    /// it gives (`true`): calling it, or a function of the module calling what it is handed
+    /// ([`Self::dispatched`]).
     fn keyed_return(&self, v: VarId) -> Option<(Keyed<'h>, bool)> {
-        match self.callee(v).and_then(|c| self.keyed_value(c)) {
+        let called =
+            (self.callee(v).and_then(|c| self.keyed_value(c))).or_else(|| self.dispatched(v));
+        match called {
             Some(keyed) => Some((keyed, true)),
             None => Some((self.keyed_value(v)?, false)),
         }
+    }
+
+    /// The value read from a table by the name that the call `v` of a function of the module
+    /// passes by position, when calling the function with a function object there gives what
+    /// calling the object gives ([`Self::calls_its_param`]).
+    fn dispatched(&self, v: VarId) -> Option<Keyed<'h>> {
+        let InstKind::Call {
+            callee_var: Some(callee),
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } = &self.shape.inst(self.shape.copy_root(v))?.kind
+        else {
+            return None;
+        };
+        let function = self.global_loaded(*callee).filter(|_| kwargs.is_empty())?;
+        let (param, keyed) =
+            (args.iter().enumerate()).find_map(|(i, a)| Some((i, self.keyed_value(*a)?)))?;
+        self.calls_its_param(function, param).then_some(keyed)
+    }
+
+    /// Whether calling the module's function `function` with a function object at position
+    /// `param` returns what calling that object gives: every `return` reached is a call of the
+    /// parameter passing nothing, where a test `isinstance(param, C)` naming only classes of
+    /// data values (`str`, `tuple`, ...), which a function object is no instance of, takes its
+    /// false way. Any other test takes both.
+    fn calls_its_param(&self, function: &'h str, param: usize) -> bool {
+        let d = self.decider;
+        *(self.dispatches.borrow_mut().entry((function, param))).or_insert_with(|| {
+            let own = matches!(
+                d.project.symbol(&format!("{}.{function}", d.module)),
+                Symbol::Function(..)
+            );
+            own && own_function(d.ir, function)
+                .is_some_and(|f| calls_param(d, f, param, self.budget).is_some())
+        })
     }
 
     /// The value the call `v` is (through copies) calls.
@@ -420,8 +709,7 @@ impl<'h> Hook<'h> {
                 .map(|e| self.shape.str_const(self.shape.copy_root(*e)))
                 .collect(),
             _ => Some(
-                self.loaded_table(v)?
-                    .iter()
+                (self.loaded_table(v)?.0.iter())
                     .map(|(key, _)| &**key)
                     .collect(),
             ),
@@ -511,6 +799,8 @@ impl<'h> Hook<'h> {
                 // `None()` raises, and so does a missing key of a subscript.
                 (None, true) if keyed.lookup != Lookup::GetOr => Served::Nothing,
                 (None, false) if keyed.lookup == Lookup::Subscript => Served::Nothing,
+                (Some(_), true) if keyed.any_keys => Served::Entry(KeyServes::Called),
+                (Some(_), false) if keyed.any_keys => Served::Entry(KeyServes::Value),
                 (Some(Some(Ty::Ref(f))), true) => self.called(f),
                 (Some(Some(t)), false) => Served::Gives(t.clone(), Vec::new()),
                 _ => Served::Open,
@@ -525,35 +815,649 @@ impl<'h> Hook<'h> {
     /// What calling `f` gives by the declarations of its module, when it is one of its
     /// functions ([`super::FunctionDecl::declared_return_as_named`]).
     fn called(&self, f: &str) -> Served {
-        let declared = match self.project.symbol(f) {
-            Symbol::Function(_, decl) => (decl.declared_return_as_named())
-                .map(|(t, read)| Served::Gives(decl.call_type(t), read.to_vec())),
+        let given = match self.decider.project.symbol(f) {
+            Symbol::Function(_, decl) => call_gives(decl),
             _ => None,
         };
-        declared.unwrap_or(Served::Open)
+        given.map_or(Served::Open, |(t, read)| Served::Gives(t, read))
     }
 
     /// The function of the module the call `v` calls by its name, by fqn.
     fn own_callee(&self, v: VarId) -> Option<String> {
-        let fqn = format!("{}.{}", self.module, self.global_loaded(self.callee(v)?)?);
-        matches!(self.project.symbol(&fqn), Symbol::Function(..)).then_some(fqn)
+        let d = self.decider;
+        let fqn = format!("{}.{}", d.module, self.global_loaded(self.callee(v)?)?);
+        matches!(d.project.symbol(&fqn), Symbol::Function(..)).then_some(fqn)
     }
 
-    /// The module's own globals the hook reads (no imports, which name another module's
-    /// object), and the hook's own name ([`GetattrExport::globals`]).
-    fn own_globals(&self, decls: &ModuleDecls) -> Vec<String> {
-        let mut out: Vec<String> = (self.shape.f.blocks.iter())
-            .flat_map(|b| &b.insts)
-            .filter_map(|i| match &i.kind {
-                InstKind::LoadGlobal { name, .. } if !decls.imports.contains_key(name) => {
-                    Some(format!("{}.{name}", self.module))
-                }
-                _ => None,
-            })
-            .chain([format!("{}.__getattr__", self.module)])
-            .collect();
-        out.sort();
-        out.dedup();
+    /// The literal names the hook's tests name.
+    fn tested_literals(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for b in self.shape.rpo() {
+            let Terminator::Branch { cond, .. } = self.shape.f.block(*b).terminator else {
+                continue;
+            };
+            for reach in self.test(cond).into_iter().flat_map(|(a, b)| [a, b]) {
+                let (Reaching::Only(names) | Reaching::AllBut(names)) = reach;
+                out.extend(
+                    (names.iter())
+                        .filter(|n| **n != ANY_KEY)
+                        .map(|n| (*n).to_owned()),
+                );
+            }
+        }
         out
+    }
+}
+
+/// What calling the function `decl` declares gives by the declarations of its module
+/// ([`FunctionDecl::declared_return_as_named`]), with the globals it was inferred from.
+fn call_gives(decl: &FunctionDecl) -> Option<(Ty, Vec<String>)> {
+    (decl.declared_return_as_named()).map(|(t, read)| (decl.call_type(t), read.to_vec()))
+}
+
+/// The module's own globals the hook `shape` reads (no imports, which name another module's
+/// object) ([`GetattrExports::globals`]).
+fn own_globals(shape: &FnShape<'_>, decls: &ModuleDecls) -> Vec<String> {
+    let mut out: Vec<String> = (shape.f.blocks.iter())
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match &i.kind {
+            InstKind::LoadGlobal { name, .. } if !decls.imports.contains_key(name) => {
+                Some(format!("{}.{name}", decls.module_name))
+            }
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// [`Hook::calls_its_param`] of the function `f` and its parameter at `param`, walking the
+/// blocks a function object there may reach, each once, within `budget`: `None` when it does
+/// not hold.
+fn calls_param(d: &Decider<'_>, f: &IrFunction, param: usize, budget: &Budget) -> Option<()> {
+    let p = (f.params.get(param)).filter(|p| !p.is_vararg && !p.is_kwarg && !p.kw_only)?;
+    let shape = FnShape::new(f);
+    let is_param = |v: VarId| shape.copy_root(v) == p.var;
+    let inferred = d.cx.infer_types(f);
+    let classes = inferred.isinstance_args(f, d.project);
+    // The way of the branch on `cond` a function object at the parameter takes, when the test
+    // decides it: `Some(true)` for the true way.
+    let taken = |cond: VarId| {
+        let mut negated = false;
+        let mut v = shape.copy_root(cond);
+        loop {
+            match &shape.inst(v)?.kind {
+                InstKind::UnaryOp {
+                    op: UnaryOpKind::Not,
+                    operand,
+                    ..
+                } => {
+                    negated = !negated;
+                    v = shape.copy_root(*operand);
+                }
+                InstKind::Call {
+                    callee_var: Some(c),
+                    args,
+                    kwargs,
+                    star_from: None,
+                    ..
+                } if kwargs.is_empty()
+                    && matches!(inferred.ty(*c), Some(Ty::Ref(n)) if n == "builtins.isinstance") =>
+                {
+                    let (object, class) = (args.first()?, args.get(1)?);
+                    let data = (classes.get(class))
+                        .is_some_and(|cs| cs.iter().all(|c| DATA_CLASSES.contains(&c.as_str())));
+                    return (is_param(*object) && data).then_some(negated);
+                }
+                _ => return None,
+            }
+        }
+    };
+    let returns_call = |v: Option<VarId>| {
+        v.is_some_and(|v| {
+            matches!(
+                shape.inst(shape.copy_root(v)).map(|i| &i.kind),
+                Some(InstKind::Call { callee_var: Some(c), args, kwargs, star_from: None, .. })
+                    if is_param(*c) && args.is_empty() && kwargs.is_empty()
+            )
+        })
+    };
+    let mut returns = 0usize;
+    let next = |b: BlockId, out: &mut Vec<BlockId>| {
+        let block = f.block(b);
+        out.extend(block.exc_target);
+        match block.terminator {
+            Terminator::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } => match taken(cond) {
+                Some(true) => out.push(then_bb),
+                Some(false) => out.push(else_bb),
+                None => out.extend([then_bb, else_bb]),
+            },
+            ref other => out.extend(other.successors()),
+        }
+    };
+    // Stops at a `return` of anything else.
+    let other_return = reach(budget, [BlockId(0)], next, |b| {
+        match f.block(b).terminator {
+            Terminator::Return(v) => {
+                let calls = returns_call(v);
+                returns += usize::from(calls);
+                if calls {
+                    Visit::Expand
+                } else {
+                    Visit::Stop(())
+                }
+            }
+            _ => Visit::Expand,
+        }
+    });
+    matches!(other_return, Answer::Known(None)).then_some(())?;
+    (returns > 0).then_some(())
+}
+
+/// The builtin classes of data values, no instance of which is a function object.
+const DATA_CLASSES: &[&str] = &[
+    "builtins.str",
+    "builtins.bytes",
+    "builtins.bytearray",
+    "builtins.tuple",
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.frozenset",
+    "builtins.int",
+    "builtins.float",
+    "builtins.complex",
+    "builtins.bool",
+    "builtins.range",
+    "builtins.memoryview",
+];
+
+/// [`ModuleDecls::hook_factories`] of the module `input` declares as `decls`: its plain
+/// module-level functions every `return` of which gives the same functions that may take a
+/// name (a function nested in it or one of the module, also as items of a tuple display), with
+/// what each serves where heki follows it ([`made_hook`]).
+pub(super) fn hook_factories(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+    kb: &EffectiveEcosystemKb,
+) -> Option<BTreeMap<String, Box<[MadeHook]>>> {
+    let ir = input.ir;
+    if ir.constants.dynamic {
+        return None;
+    }
+    let fixed = |f: &IrFunction| {
+        own_function(ir, &f.qualname).is_some_and(|g| g.id == f.id)
+            && !decls.rebound_definitions.contains(&f.qualname)
+            && !decls.imports.contains_key(&f.qualname)
+    };
+    let factories: Vec<(&IrFunction, ReturnedHooks<'_>)> = (ir.functions)
+        .iter()
+        .filter(|f| f.enclosing == Some(ir.module_fn) && fixed(f))
+        .filter_map(|f| Some((f, returned_hooks(ir, f)?)))
+        .collect();
+    if factories.is_empty() {
+        return None;
+    }
+    let completed = own_completed(input, decls, kb);
+    let cx = TypeCtx::new(input, &completed, kb);
+    let decider = Decider {
+        ir,
+        cx: &cx,
+        project: &completed,
+        module: &decls.module_name,
+    };
+    let cells = ParamCells::of(ir);
+    let mut out = BTreeMap::new();
+    for (factory, hooks) in factories {
+        let made: Vec<MadeHook> = (hooks.into_iter())
+            .filter_map(|(item, hook, name)| {
+                made_hook(&decider, &cells, decls, factory, item, hook, name)
+            })
+            .collect();
+        if !made.is_empty() {
+            out.insert(factory.qualname.clone(), made.into());
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The functions that may take a name the factory `f` returns, by the item of the tuple it
+/// returns (`None`: the value itself), with the parameter the name arrives in: what every
+/// `return` of it gives alike.
+fn returned_hooks<'m>(ir: &'m ModuleIr, f: &IrFunction) -> Option<ReturnedHooks<'m>> {
+    let shape = FnShape::new(f);
+    let hook = |v: VarId| match &shape.inst(shape.copy_root(v))?.kind {
+        InstKind::MakeClosure {
+            func_id: Some(id), ..
+        } => {
+            let g = ir.function(*id);
+            let plain = g.kind == FunctionKind::Sync && !g.is_class_body;
+            (plain && g.enclosing == Some(f.id)).then_some(g)
+        }
+        InstKind::LoadGlobal { name, .. } => own_function(ir, name),
+        _ => None,
+    };
+    let mut returned: Option<Vec<(Option<u8>, &IrFunction)>> = None;
+    for b in shape.rpo() {
+        let Terminator::Return(v) = f.block(*b).terminator else {
+            continue;
+        };
+        let v = shape.copy_root(v?);
+        let hooks: Vec<(Option<u8>, &IrFunction)> = match &shape.inst(v)?.kind {
+            InstKind::AllocBuiltin {
+                kind: BuiltinKind::Tuple,
+                elems,
+                ..
+            } if shape.first_starred(v).is_none() => (elems.iter().enumerate())
+                .filter_map(|(i, e)| Some((Some(u8::try_from(i).ok()?), hook(*e)?)))
+                .collect(),
+            _ => vec![(None, hook(v)?)],
+        };
+        let same = |a: &[(Option<u8>, &IrFunction)], b: &[(Option<u8>, &IrFunction)]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && x.1.id == y.1.id)
+        };
+        (returned.as_deref())
+            .is_none_or(|r| same(r, &hooks))
+            .then_some(())?;
+        returned = Some(hooks);
+    }
+    let out: Vec<_> = (returned?.into_iter())
+        .filter_map(|(item, g)| {
+            let first = g.params.first()?;
+            let takes_name = !first.is_vararg && !first.is_kwarg && !first.kw_only;
+            let decides = takes_name && decides_names(&FnShape::new(g), first.var);
+            decides.then_some((item, g, first.var))
+        })
+        .collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// What the hook `hook` the factory `factory` returns serves ([`MadeHook`]), its name arriving
+/// in `name`: the table it reads by the name is one closure cell bound to a parameter of the
+/// factory, which neither the factory nor any function nested in it changes ([`only_read`]);
+/// the hook stores nothing but behind tests of the factory's parameters ([`store_guards`]).
+fn made_hook(
+    decider: &Decider<'_>,
+    cells: &ParamCells,
+    decls: &ModuleDecls,
+    factory: &IrFunction,
+    item: Option<u8>,
+    hook: &IrFunction,
+    name: VarId,
+) -> Option<MadeHook> {
+    let ir = decider.ir;
+    let shape = FnShape::new(hook);
+    let is_name = |v: VarId| shape.copy_root(v) == name;
+    let param_of = |cell: &str| {
+        (cells.param(ir, hook, cell))
+            .filter(|(owner, _)| owner.id == factory.id)
+            .map(|(_, p)| p)
+    };
+    let mut table: Option<(&str, u8)> = None;
+    for inst in hook.blocks.iter().flat_map(|b| &b.insts) {
+        let read = match &inst.kind {
+            InstKind::SubscriptLoad {
+                obj,
+                index,
+                is_slice: false,
+                ..
+            } if is_name(*index) => *obj,
+            InstKind::MethodCall {
+                recv, method, args, ..
+            } if method == "get" && args.first().is_some_and(|a| is_name(*a)) => *recv,
+            InstKind::Compare {
+                op: CompareOpKind::In | CompareOpKind::NotIn,
+                lhs,
+                rhs,
+                ..
+            } if is_name(*lhs) => *rhs,
+            _ => continue,
+        };
+        let Some(InstKind::LoadDeref { name: cell, .. }) =
+            shape.inst(shape.copy_root(read)).map(|i| &i.kind)
+        else {
+            continue;
+        };
+        let param = param_of(cell)?;
+        table.is_none_or(|(c, _)| c == cell).then_some(())?;
+        table = Some((cell, param));
+    }
+    if let Some((_, param)) = table
+        && !only_read(ir, cells, factory, param)
+    {
+        return None;
+    }
+    let (guards, storing) = store_guards(&shape, |cell| param_of(cell))?;
+    let decided = decider.hook_serves(&shape, name, table.map(|(cell, _)| cell), &[factory])?;
+    // Without what a key gets, which keys are among the literals is not known: nothing.
+    let table = match table {
+        Some((_, param)) => Some((hook_param(factory, param)?, decided.keyed?)),
+        None => None,
+    };
+    (table.is_some() || !decided.served.is_empty()).then_some(())?;
+    // The factory's own reads decide which hook it returns (`return _hook` loads a global).
+    let mut globals = own_globals(&shape, decls);
+    globals.extend(own_globals(&FnShape::new(factory), decls));
+    globals.push(format!("{}.{}", decls.module_name, factory.qualname));
+    let served = (decided.served.into_iter())
+        .map(|(key, (ty, read))| {
+            globals.extend(read);
+            (key, ty)
+        })
+        .collect();
+    globals.sort();
+    globals.dedup();
+    Some(MadeHook {
+        item,
+        table,
+        served,
+        literals: decided.literals.into_iter().collect(),
+        guards: (guards.into_iter())
+            .map(|p| hook_param(factory, p))
+            .collect::<Option<_>>()?,
+        storing: storing.into(),
+        globals: globals.into(),
+    })
+}
+
+/// The parameter of the factory `f` at `position`, as a call binds it.
+fn hook_param(f: &IrFunction, position: u8) -> Option<HookParam> {
+    let p = f.params.get(usize::from(position))?;
+    (!p.is_vararg && !p.is_kwarg).then(|| HookParam {
+        position,
+        name: p.name.clone(),
+        pos_only: p.pos_only,
+        kw_only: p.kw_only,
+        default: p.default.clone(),
+    })
+}
+
+/// Whether the factory `factory` and every function nested in it only read the object its
+/// parameter at `param` holds: test it, read an item, call `get`, `keys`, `values` or `items`
+/// on it, unpack it into a display, or hand it to `len`, `sorted`, `list`, `tuple`, `set`,
+/// `frozenset` or `iter`.
+fn only_read(ir: &ModuleIr, cells: &ParamCells, factory: &IrFunction, param: u8) -> bool {
+    let own = &factory.params[usize::from(param)];
+    let nested = |g: &IrFunction| ir.enclosing_functions(g).any(|e| e.id == factory.id);
+    (ir.functions.iter())
+        .filter(|g| g.id == factory.id || nested(g))
+        .all(|g| {
+            let shape = FnShape::new(g);
+            let holds = |v: VarId| {
+                let root = shape.copy_root(v);
+                (g.id == factory.id && root == own.var)
+                    || matches!(shape.inst(root).map(|i| &i.kind),
+                        Some(InstKind::LoadDeref { name, .. })
+                            if (g.id == factory.id && *name == own.name)
+                                || cells.param(ir, g, name)
+                                    .is_some_and(|(o, p)| o.id == factory.id && p == param))
+            };
+            g.blocks.iter().all(|b| {
+                let phis = (b.phis.iter()).all(|phi| phi.incoming.iter().all(|(_, x)| !holds(*x)));
+                let returned = matches!(b.terminator, Terminator::Return(Some(x)) if holds(x));
+                phis && !returned
+                    && b.insts
+                        .iter()
+                        .all(|i| reads_only(ir, &shape, &i.kind, &holds))
+            })
+        })
+}
+
+/// Whether the instruction `kind` only reads what the values `holds` names hold.
+fn reads_only(
+    ir: &ModuleIr,
+    shape: &FnShape<'_>,
+    kind: &InstKind,
+    holds: &impl Fn(VarId) -> bool,
+) -> bool {
+    let reads = kind.operands().into_iter().any(holds);
+    !reads
+        || match kind {
+            InstKind::SubscriptLoad { index, .. } => !holds(*index),
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } => {
+                holds(*recv)
+                    && matches!(method.as_str(), "get" | "keys" | "values" | "items")
+                    && !args
+                        .iter()
+                        .chain(kwargs.iter().map(|(_, a)| a))
+                        .any(|a| holds(*a))
+            }
+            InstKind::AllocBuiltin { dst, elems, .. } => {
+                (elems.iter().enumerate()).all(|(i, e)| !holds(*e) || shape.is_starred(*dst, i))
+            }
+            InstKind::Call {
+                callee_var,
+                callee,
+                args,
+                kwargs,
+                ..
+            } => {
+                matches!(
+                    callee.as_str(),
+                    "len" | "sorted" | "list" | "tuple" | "set" | "frozenset" | "iter"
+                ) && args.len() == 1
+                    && kwargs.is_empty()
+                    && is_builtin_load(ir, shape, *callee_var, callee)
+            }
+            other => matches!(
+                other,
+                InstKind::Copy { .. } | InstKind::Compare { .. } | InstKind::MakeClosure { .. }
+            ),
+        }
+}
+
+/// Whether the callee value `callee_var` of a call spelled `callee` is a global load of the real
+/// builtin of that name: not a parameter or a local of the name, nor a name the module rebinds.
+fn is_builtin_load(
+    ir: &ModuleIr,
+    shape: &FnShape<'_>,
+    callee_var: Option<VarId>,
+    callee: &str,
+) -> bool {
+    let constants = &ir.constants;
+    !constants.dynamic
+        && !constants.shadowed.contains(callee)
+        && matches!(
+            callee_var.and_then(|v| shape.inst(shape.copy_root(v))).map(|i| &i.kind),
+            Some(InstKind::LoadGlobal { name, is_lazy_import: false, .. }) if name == callee
+        )
+}
+
+/// The most factory parameters a hook's store guards may name: every combination of them is
+/// decided at the factory ([`MadeHook::storing`]).
+const MAX_GUARDS: usize = 6;
+
+/// The factory's parameters guarding a store of the hook `shape` ([`MadeHook::guards`]) and
+/// the combinations of them that reach a store ([`MadeHook::storing`]): a guard is a branch on
+/// the closure cell of a parameter (`if cache:`), whose true way is cut when the parameter is
+/// not among the open ones. `None` when the hook stores anything with every guard closed (a
+/// store of a name, an attribute, or an item, `setattr` or `delattr`, or a method putting
+/// entries into a mapping), or has more than [`MAX_GUARDS`] guards.
+fn store_guards(
+    shape: &FnShape<'_>,
+    param_of: impl Fn(&str) -> Option<u8>,
+) -> Option<(Vec<u8>, Vec<u32>)> {
+    let f = shape.f;
+    let guard = |b: BlockId| match f.block(b).terminator {
+        Terminator::Branch { cond, then_bb, .. } => {
+            match &shape.inst(shape.copy_root(cond))?.kind {
+                InstKind::LoadDeref { name, .. } => Some((param_of(name)?, then_bb)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let stores = |b: BlockId| {
+        f.block(b).insts.iter().any(|i| match &i.kind {
+            InstKind::Call { callee, .. } => matches!(callee.as_str(), "setattr" | "delattr"),
+            InstKind::MethodCall { method, .. } => matches!(
+                method.as_str(),
+                "update" | "setdefault" | "__setitem__" | "__setattr__" | "pop" | "clear"
+            ),
+            kind => kind.dst().is_none() && !matches!(kind, InstKind::ExitWith { .. }),
+        })
+    };
+    let mut params: Vec<u8> = (shape.rpo().iter())
+        .filter_map(|b| Some(guard(*b)?.0))
+        .collect();
+    params.sort_unstable();
+    params.dedup();
+    (params.len() <= MAX_GUARDS).then_some(())?;
+    // Whether the hook may store with the guards of the parameters in `open` taken.
+    let may_store = |open: u32| {
+        let budget = Budget::of_function("heki_effect::resolver::getattr_exports::store_guards", f);
+        let next = |b: BlockId, out: &mut Vec<BlockId>| {
+            let cut = guard(b)
+                .filter(|(p, _)| {
+                    let at = params.iter().position(|q| q == p);
+                    at.is_none_or(|at| open & (1 << at) == 0)
+                })
+                .map(|(_, then)| then);
+            out.extend(shape.succs(b).filter(|s| Some(*s) != cut));
+        };
+        let visit = |b: BlockId| {
+            if stores(b) {
+                Visit::Stop(())
+            } else {
+                Visit::Expand
+            }
+        };
+        !matches!(
+            reach(&budget, [BlockId(0)], next, visit),
+            Answer::Known(None)
+        )
+    };
+    if may_store(0) {
+        return None;
+    }
+    let storing = (0..1u32 << params.len())
+        .filter(|open| may_store(*open))
+        .collect();
+    Some((params, storing))
+}
+
+/// The hook a module's call of a factory makes ([`ProjectDecls::served_by_getattr`]): the
+/// factory's [`MadeHook`] with the call's arguments.
+pub(super) struct Instance<'p> {
+    module: &'p ModuleDecls,
+    hook: &'p MadeHook,
+    /// The module's table the call passes, by fqn, with its entries, and what a key gets.
+    table: Option<(String, Entries<'p>, KeyServes)>,
+}
+
+impl<'p> Instance<'p> {
+    /// The hook the call `made` of the module `m` makes from the factory's `hook`, when the
+    /// call binds the table parameter to a table of `m` and each store guard to a false
+    /// literal (or leaves it at such a default). Another module storing into the table is
+    /// [`ProjectDecls::getattr_open`]'s to see.
+    pub(super) fn of(m: &'p ModuleDecls, made: &'p MadeBy, hook: &'p MadeHook) -> Option<Self> {
+        let false_literal = |literal: &ConstLiteral| {
+            matches!(
+                literal,
+                ConstLiteral::None | ConstLiteral::Bool(false) | ConstLiteral::Int(0)
+            )
+        };
+        // The guards the call does not bind to a false literal are open: no combination of
+        // them may reach a store.
+        let open = (hook.guards.iter().enumerate())
+            .filter(|(_, p)| match bound(made, p) {
+                Bound::Arg(HookArg::Literal(literal)) | Bound::Default(Some(literal)) => {
+                    !false_literal(literal)
+                }
+                _ => true,
+            })
+            .fold(0u32, |mask, (i, _)| mask | (1 << i));
+        (hook
+            .storing
+            .iter()
+            .all(|combination| combination & open != *combination))
+        .then_some(())?;
+        let table = match &hook.table {
+            Some((param, serves)) => match bound(made, param) {
+                Bound::Arg(HookArg::Global(name)) => {
+                    let entries = m.tables.get(name)?;
+                    Some((format!("{}.{name}", m.module_name), &entries[..], *serves))
+                }
+                _ => return None,
+            },
+            None => None,
+        };
+        Some(Self {
+            module: m,
+            hook,
+            table,
+        })
+    }
+
+    /// What the hook serves under `name`, with the module globals deciding it: under a key of
+    /// the table, what its value is or calling it gives; under another literal name the hook
+    /// decides, what its code gives. A key among the literals gets nothing.
+    pub(super) fn serves(&self, name: &str) -> Option<(Ty, Vec<String>)> {
+        let entry = (self.table.as_ref()).and_then(|(_, entries, serves)| {
+            let (_, ty) = entries.iter().find(|(key, _)| &**key == name)?;
+            Some((ty.as_ref(), *serves))
+        });
+        let given = match entry {
+            Some(_) if self.hook.literals.iter().any(|l| l == name) => return None,
+            Some((Some(Ty::Ref(f)), KeyServes::Called)) => call_gives(self.own_function(f)?)?,
+            Some((Some(ty), KeyServes::Value)) => (ty.clone(), Vec::new()),
+            Some(_) => return None,
+            None => (self.hook.served.get(name)?.clone(), Vec::new()),
+        };
+        matches!(given.0, Ty::Ref(_) | Ty::Class(_)).then_some(given)
+    }
+
+    /// The module's function of the fqn `f`.
+    fn own_function(&self, f: &str) -> Option<&'p FunctionDecl> {
+        let qualname = f
+            .strip_prefix(self.module.module_name.as_str())?
+            .strip_prefix('.')?;
+        self.module.functions.get(qualname).map(|decl| &**decl)
+    }
+
+    /// The globals deciding what the hook serves ([`ProjectDecls::getattr_open`]): the
+    /// factory's, the table, and each value of the table with the globals what calling it
+    /// gives was inferred from.
+    pub(super) fn globals(&self) -> Vec<String> {
+        let mut out = self.hook.globals.to_vec();
+        if let Some((fqn, entries, _)) = &self.table {
+            out.push(fqn.clone());
+            for (key, ty) in entries.iter() {
+                if let Some(Ty::Ref(f)) = ty {
+                    out.push(f.clone());
+                }
+                out.extend(self.serves(key).into_iter().flat_map(|(_, read)| read));
+            }
+        }
+        out
+    }
+}
+
+/// What a call binds a parameter of a factory to.
+enum Bound<'a> {
+    Arg(&'a HookArg),
+    /// Nothing passed: the default, when it is a literal.
+    Default(Option<&'a ConstLiteral>),
+}
+
+fn bound<'a>(made: &'a MadeBy, param: &'a HookParam) -> Bound<'a> {
+    let at = usize::from(param.position);
+    if !param.kw_only && at < made.args.len() {
+        return Bound::Arg(&made.args[at]);
+    }
+    match (made.kwargs.iter()).find(|(key, _)| !param.pos_only && *key == param.name) {
+        Some((_, arg)) => Bound::Arg(arg),
+        None => Bound::Default(param.default.as_ref()),
     }
 }

@@ -7,19 +7,21 @@
 //! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
 //! invalidator reached through calls are known across files without IR.
 
-use crate::eff_rules::{forbidden_effects, names_function};
+use crate::eff_rules::{forbidden_effects, names_function, scope_entries};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
     Allowance, AllowanceKeys, ContractTarget, EXTERNAL, FunctionMatcher, FunctionMatchers,
-    MemberPattern, ReadOnlyProducers, References, names_every_callee, parse_read_targets,
-    parse_targets, patterns, project_classes, split_arguments, split_item,
+    MemberPattern, Overrides, ReadOnlyProducers, References, names_every_callee, overrides_in,
+    parse_read_targets, parse_targets, patterns, places, project_classes, split_arguments,
+    split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
 };
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    BLOCKING_EFFECTS, ContractClass, ContractSharing, Contracts, FuncKey, OptInFacts, TypedWrites,
+    BLOCKING_EFFECTS, ContractClass, ContractSharing, Contracts, FuncKey, OptInFacts,
+    OverrideRoles, ProjectDecls, TypedWrites,
 };
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
@@ -35,12 +37,14 @@ pub const MAX_INVALIDATIONS: usize = 64;
 pub(crate) struct InvalidationNames {
     /// `targets`: the configured text and its `(class, attr)` patterns.
     targets: Vec<(String, DottedPattern, DottedPattern)>,
-    invalidators: Vec<DottedPattern>,
-    exempt_writers: Vec<DottedPattern>,
+    /// `invalidators` and `exempt-writers`, whose `Class.method` entries name the overrides
+    /// with `include-overrides` ([`Overrides::ByBases`]).
+    invalidators: Vec<FunctionMatcher>,
+    exempt_writers: Vec<FunctionMatcher>,
 }
 
-fn names(patterns: &[DottedPattern], fqn: &str, qualname: &str) -> bool {
-    patterns.iter().any(|p| p.matches_def(fqn, qualname))
+fn names(entries: &[FunctionMatcher], fqn: &str, qualname: &str) -> bool {
+    entries.iter().any(|p| p.names_def(fqn, qualname))
 }
 
 impl InvalidationNames {
@@ -48,8 +52,24 @@ impl InvalidationNames {
         names(&self.invalidators, fqn, qualname)
     }
 
+    /// Whether `exempt-writers` names the function as written (`fqn`, and `qualname` for a
+    /// project function).
     pub(crate) fn names_exempt_writer(&self, fqn: &str, qualname: &str) -> bool {
         names(&self.exempt_writers, fqn, qualname)
+    }
+
+    /// Whether `invalidators` names the project function `key`, as written or as an override
+    /// (by the bases of its class in `project`).
+    pub(crate) fn invalidates(&self, project: &ProjectDecls, key: &FuncKey) -> bool {
+        self.names_invalidator(&key.fqn(), &key.qualname)
+            || overrides_in(&self.invalidators, project, key)
+    }
+
+    /// Whether `exempt-writers` names the project function `key`, as written or as an override
+    /// (by the bases of its class in `project`).
+    pub(crate) fn exempts(&self, project: &ProjectDecls, key: &FuncKey) -> bool {
+        self.names_exempt_writer(&key.fqn(), &key.qualname)
+            || overrides_in(&self.exempt_writers, project, key)
     }
 
     /// The first target naming attribute `attr` of an object of class `classes[0]` (`classes`:
@@ -93,6 +113,9 @@ pub(crate) struct ConfigContracts {
     writers: Vec<Allowance>,
     /// The masks of [`Contracts::writer_contexts`] by name.
     writer_contexts: NameMasks,
+    /// Whether an `invalidation` or `write-owners` contract has `include-overrides`: only then
+    /// may a function have [`Contracts::override_roles`].
+    include_overrides: bool,
     /// The attribute patterns of the `read-owners` targets with `unresolved = "report"`.
     unresolved_reads: Vec<MemberPattern>,
     /// The last names of the `call-owners` targets with `unresolved = "report"`.
@@ -242,15 +265,14 @@ impl ConfigContracts {
                     DottedPattern::new(attr, "invalidation.targets")?,
                 ));
             }
+            let overrides = Overrides::by_bases(rule.include_overrides);
             invalidations.push(InvalidationNames {
                 targets,
-                invalidators: crate::mut_rules::patterns(
-                    &rule.invalidators,
-                    "invalidation.invalidators",
-                )?,
-                exempt_writers: crate::mut_rules::patterns(
+                invalidators: places(&rule.invalidators, "invalidation.invalidators", overrides)?,
+                exempt_writers: places(
                     &rule.exempt_writers,
                     "invalidation.exempt-writers",
+                    overrides,
                 )?,
             });
         }
@@ -258,13 +280,25 @@ impl ConfigContracts {
             .write_owners
             .iter()
             .map(|rule| {
-                Allowance::new(&AllowanceKeys {
-                    allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
-                    forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
-                    exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
-                })
+                Allowance::new(
+                    &AllowanceKeys {
+                        allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+                        forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+                        exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+                    },
+                    Overrides::by_bases(rule.include_overrides),
+                )
             })
             .collect::<Result<_, _>>()?;
+        let includes = |include: Option<bool>| include == Some(true);
+        let include_overrides = config
+            .invalidation
+            .iter()
+            .any(|r| includes(r.include_overrides))
+            || config
+                .write_owners
+                .iter()
+                .any(|r| includes(r.include_overrides));
         let strict = |mode: &Option<String>| mode.as_deref() == Some("report");
         let reads = config.read_owners.iter().filter(|r| strict(&r.unresolved));
         let calls = config.call_owners.iter().filter(|r| strict(&r.unresolved));
@@ -282,6 +316,7 @@ impl ConfigContracts {
             invalidators: NameMasks::default(),
             writers,
             writer_contexts: NameMasks::default(),
+            include_overrides,
             unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
             unresolved_calls: call_last_names(calls.flat_map(|r| &r.targets))?,
             references: counts_references(config),
@@ -395,6 +430,31 @@ impl Contracts for ConfigContracts {
         mask(&self.invalidations, |c| {
             c.names_exempt_writer(fqn, qualname)
         })
+    }
+
+    fn overriding_invalidator(&self, func: &FuncKey, project: &ProjectDecls) -> u64 {
+        if !self.include_overrides {
+            return 0;
+        }
+        mask(&self.invalidations, |c| {
+            overrides_in(&c.invalidators, project, func)
+        })
+    }
+
+    fn override_roles(&self, func: &FuncKey, project: &ProjectDecls) -> OverrideRoles {
+        if !self.include_overrides {
+            return OverrideRoles::default();
+        }
+        OverrideRoles {
+            exempt_writer: mask(&self.invalidations, |c| {
+                overrides_in(&c.exempt_writers, project, func)
+            }),
+            writer_contexts: self.writers.iter().enumerate().fold(0, |acc, (k, a)| {
+                let bit = 2 * (k % 32);
+                let (allowed, forbidden) = a.overriding_context(project, func);
+                acc | u64::from(allowed) << bit | u64::from(forbidden) << (bit + 1)
+            }),
+        }
     }
 
     fn target_of(&self, classes: &[ContractClass], attr: &str) -> u64 {
@@ -654,7 +714,7 @@ pub(crate) struct Declared {
     write_targets: TargetsByClass,
     read_targets: TargetsByClass,
     /// The scopes of the effect boundaries forbidding every blocking effect.
-    blocking_scopes: Vec<DottedPattern>,
+    blocking_scopes: Vec<FunctionMatcher>,
 }
 
 /// `Class.attr` targets, looked up by the classes they cover.
@@ -703,7 +763,9 @@ impl Declared {
         for boundary in &config.effect_boundaries {
             let forbidden = forbidden_effects(boundary)?;
             if BLOCKING_EFFECTS.iter().all(|e| forbidden.contains(e)) {
-                blocking_scopes.extend(patterns(&boundary.scopes, "effect-boundaries.scopes")?);
+                let overrides = Overrides::of(boundary.include_overrides, cx, &all_classes);
+                let context = "effect-boundaries.scopes";
+                blocking_scopes.extend(scope_entries(&boundary.scopes, context, overrides)?);
             }
         }
         Ok(Self {
@@ -855,12 +917,13 @@ pub(crate) fn contract_table_of_rule(code: &str) -> Option<&'static str> {
 pub struct ContractRoles<'c> {
     config: &'c HekiConfig,
     kb: &'c EffectiveEcosystemKb,
+    decls: &'c ProjectDecls,
     write_owners: Vec<Allowance>,
     read_owners: Vec<Allowance>,
     /// Each `call-owners` contract's targets and callers.
     call_owners: Vec<(Vec<FunctionMatcher>, Allowance)>,
     /// Each `effect-boundaries` contract's scopes and allowed callees.
-    effect_boundaries: Vec<(Vec<DottedPattern>, Vec<DottedPattern>)>,
+    effect_boundaries: Vec<(Vec<FunctionMatcher>, Vec<FunctionMatcher>)>,
     /// Each `readonly-returns` contract's producers.
     readonly_returns: Vec<Vec<DottedPattern>>,
     /// The `invalidation` contracts' names.
@@ -870,38 +933,46 @@ pub struct ContractRoles<'c> {
 impl<'c> ContractRoles<'c> {
     pub(crate) fn new(cx: &CheckContext<'c>) -> Result<Self, RuleConfigError> {
         let config = cx.config;
+        let all_classes = crate::mut_rules::project_classes(cx);
         let write_owners = config
             .write_owners
             .iter()
             .map(|rule| {
-                Allowance::new(&AllowanceKeys {
-                    allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
-                    forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
-                    exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
-                })
+                Allowance::new(
+                    &AllowanceKeys {
+                        allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+                        forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+                        exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+                    },
+                    Overrides::of(rule.include_overrides, cx, &all_classes),
+                )
             })
             .collect::<Result<_, _>>()?;
         let read_owners = config
             .read_owners
             .iter()
             .map(|rule| {
-                Allowance::new(&AllowanceKeys {
-                    allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
-                    forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
-                    exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
-                })
+                Allowance::new(
+                    &AllowanceKeys {
+                        allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
+                        forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
+                        exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
+                    },
+                    Overrides::of(rule.include_overrides, cx, &all_classes),
+                )
             })
             .collect::<Result<_, _>>()?;
-        let all_classes = crate::mut_rules::project_classes(cx);
         let call_owners = config
             .call_owners
             .iter()
             .map(|rule| {
-                let callers = Allowance::new(&AllowanceKeys {
+                let keys = AllowanceKeys {
                     allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
                     forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
                     exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
-                })?;
+                };
+                let overrides = Overrides::of(rule.include_overrides, cx, &all_classes);
+                let callers = Allowance::new(&keys, overrides)?;
                 let targets = rule
                     .targets
                     .iter()
@@ -914,9 +985,11 @@ impl<'c> ContractRoles<'c> {
             .effect_boundaries
             .iter()
             .map(|rule| {
+                let overrides = Overrides::of(rule.include_overrides, cx, &all_classes);
+                let callees = "effect-boundaries.allowed-callees";
                 Ok((
-                    patterns(&rule.scopes, "effect-boundaries.scopes")?,
-                    patterns(&rule.allowed_callees, "effect-boundaries.allowed-callees")?,
+                    scope_entries(&rule.scopes, "effect-boundaries.scopes", overrides)?,
+                    scope_entries(&rule.allowed_callees, callees, overrides)?,
                 ))
             })
             .collect::<Result<_, RuleConfigError>>()?;
@@ -928,6 +1001,7 @@ impl<'c> ContractRoles<'c> {
         Ok(Self {
             config,
             kb: cx.kb,
+            decls: cx.decls,
             write_owners,
             read_owners,
             call_owners,
@@ -1035,10 +1109,10 @@ impl<'c> ContractRoles<'c> {
             .enumerate()
         {
             let mut roles = Vec::new();
-            if names.names_invalidator(&fqn, &key.qualname) {
+            if names.invalidates(self.decls, key) {
                 roles.push("invalidator");
             }
-            if names.names_exempt_writer(&fqn, &key.qualname) {
+            if names.exempts(self.decls, key) {
                 roles.push("exempt-writer");
             }
             add("invalidation", place, &rule.name, roles);

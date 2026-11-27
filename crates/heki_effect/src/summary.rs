@@ -43,10 +43,10 @@ use crate::{
     CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
     Contracts, Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
     Implementers, InputGuard, Items, KeptFacts, ListedCache, MayGiven, ModuleInput, MustExec,
-    NewArg, NewCond, NewFrom, NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind,
-    ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts, SiteRole, Slot,
-    TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff, Unresolved, UnresolvedAccessSite,
-    UnresolvedWriteSite, WriteKind,
+    NewArg, NewCond, NewFrom, NewKind, OnEveryReturn, OptInFacts, OverrideRoles, PerItem,
+    ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
+    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff, Unresolved,
+    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Join, KeySet, Or, Use};
@@ -1382,6 +1382,10 @@ impl<'a> Extractor<'a> {
             // `eval`, `exec`, `locals()`, frame introspection (Assumption A1): code heki cannot
             // follow runs here, or reads and changes this frame's state.
             unknown_calls: !f.a1_hazards.is_empty(),
+            override_roles: contracts
+                .map(|c| c.override_roles(key, cx.project))
+                .filter(|roles| *roles != OverrideRoles::default())
+                .map(Box::new),
             ..EffectSummary::default()
         };
         let live = ownership::Live::of(f, &defs);
@@ -6342,9 +6346,11 @@ impl<'a> Extractor<'a> {
             let mut mask = c.target_of(&ContractClass::lineage(c, self.cx.project, &class), attr);
             if mask != 0 {
                 let key = self.key;
+                let overriding =
+                    (self.summary.override_roles.as_deref()).map_or(0, |roles| roles.exempt_writer);
                 mask &= !*self
                     .exempt
-                    .get_or_insert_with(|| c.exempt_writer(&key.fqn(), &key.qualname));
+                    .get_or_insert_with(|| c.exempt_writer(&key.fqn(), &key.qualname) | overriding);
             }
             if mask != 0 && !own_init {
                 events.writes.push((
@@ -7585,6 +7591,7 @@ impl<'a> Extractor<'a> {
                             0
                         } else {
                             c.invalidator_of(&key.fqn(), &key.qualname)
+                                | c.overriding_invalidator(key, cx.project)
                         };
                         invalidates = Some(invalidates.map_or(here, |i| i & here));
                     }

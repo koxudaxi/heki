@@ -9,29 +9,32 @@
 //! only under `"error"`, as one that may name nothing. A name a copy takes from the namespace
 //! of an instance of the class family or from the fields it declares, or a deletion removes, is
 //! one the class has already.
-//! Only the keys whose entries name project code alone are judged: the read and call targets and
-//! the allowed callees of an effect boundary, and the producers of `readonly-returns`, may name
-//! symbols outside the project.
+//! Braces are taken first: an entry whose `{...}` group lists names is judged name by name, and
+//! a group with an empty alternative is one name with its extensions. The keys that may name
+//! code outside the project by its full name (an effect boundary's read and call targets and
+//! allowed callees, the producers of `readonly-returns`, and the module patterns of
+//! `import-boundaries`) are judged when an entry's first name is a module of the project.
 
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, FunctionMatcher, Subclasses, class_set, parse_targets,
+    Allowance, AllowanceKeys, FunctionMatcher, Overrides, Subclasses, class_set, parse_targets,
     project_classes, split_arguments, split_item,
 };
 use crate::selection::RuleSelection;
 use crate::{
-    CheckContext, DottedPattern, RuleConfigError, def_spellings, has_glob_syntax, last_name,
-    split_last_dot,
+    CheckContext, DottedPattern, GLOB_SYNTAX, NamePart, RuleConfigError, def_spellings,
+    has_glob_syntax, last_name, split_last_dot,
 };
 use heki_effect::{AccessKind, ContractClass, FuncKey, ReadKind, Unresolved};
-use heki_env::{HekiConfig, UnmatchedEntries};
+use heki_env::{EntryPlace, HekiConfig, UnmatchedEntries};
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::fmt::Write as _;
 
-/// The most contracts the message of an entry several contracts hold names.
-const MAX_NAMED_CONTRACTS: usize = 3;
+/// The most contracts, and the most names of a `{...}` group, the message of an entry names.
+const MAX_NAMED: usize = 3;
 
 /// A contract entry that matches nothing in the analyzed files, with every contract of its kind
 /// holding the same text under the same key.
@@ -52,39 +55,54 @@ pub struct UnmatchedEntry {
     /// Existing names like the entry, written as the entry is, the closest first (at most
     /// three).
     pub nearest: Vec<String>,
+    /// The names a `{...}` group of the entry lists that name nothing, written out
+    /// (`Base.c` of `Base.{a,c}`); empty when the entry is one name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
     /// The class family gets attributes named at run time, which may include the entry's:
     /// heki cannot tell whether it names one (judged only with
     /// `unmatched-contract-entries = "error"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub named_at_run_time: bool,
+    /// Where the entry is written when no contract table of the main configuration file holds
+    /// it: in a file `include` lists, or in a group (`@name`); each place once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub written_at: Vec<EntryPlace>,
 }
 
 impl UnmatchedEntry {
     /// The entry in one line, as `heki check` warns about it and `heki recommend` lists it.
     pub fn message(&self) -> String {
-        let named: Vec<String> = (self.contracts.iter())
-            .take(MAX_NAMED_CONTRACTS)
-            .map(|c| match c.strip_prefix('#') {
-                Some(_) => c.clone(),
-                None => format!("`{c}`"),
-            })
-            .collect();
-        let more = self.contracts.len() - named.len();
-        let contracts = match (named.as_slice(), more) {
-            ([one], 0) => one.clone(),
-            (all, 0) => format!(
-                "{} and {}",
-                all[..all.len() - 1].join(", "),
-                all[all.len() - 1]
-            ),
-            (all, more) => format!("{}, and {more} more", all.join(", ")),
+        let contracts = listed(&self.contracts, |c| match c.strip_prefix('#') {
+            Some(_) => c.to_owned(),
+            None => format!("`{c}`"),
+        });
+        let written_at = match self.written_at.as_slice() {
+            [] => String::new(),
+            places => {
+                let places: Vec<String> = places.iter().map(ToString::to_string).collect();
+                format!(" (from {})", places.join(", "))
+            }
         };
         let mut out = format!(
-            "`{}` entry `{}` of {} {contracts} names no {} in the analyzed files",
-            self.key, self.entry, self.kind, self.names_no
+            "`{}` entry `{}` of {} {contracts}{written_at} ",
+            self.key, self.entry, self.kind
         );
+        let (verb, they) = match self.alternatives.as_slice() {
+            [] => ("names", "it is one"),
+            [_] => ("which names", "it is one"),
+            _ => ("which name", "they are ones"),
+        };
+        if !self.alternatives.is_empty() {
+            let _ = write!(
+                out,
+                "lists {}, ",
+                listed(&self.alternatives, |a| format!("`{a}`"))
+            );
+        }
+        let _ = write!(out, "{verb} no {} in the analyzed files", self.names_no);
         if self.named_at_run_time {
-            out.push_str(", unless it is one the code names at run time");
+            let _ = write!(out, ", unless {they} the code names at run time");
         }
         let quoted: Vec<String> = self.nearest.iter().map(|n| format!("`{n}`")).collect();
         match quoted.as_slice() {
@@ -100,6 +118,20 @@ impl UnmatchedEntry {
     }
 }
 
+/// `items` in a message, quoted by `quote`: the first [`MAX_NAMED`], and how many more.
+fn listed(items: &[String], quote: impl Fn(&str) -> String) -> String {
+    let named: Vec<String> = items.iter().take(MAX_NAMED).map(|i| quote(i)).collect();
+    match (named.as_slice(), items.len() - named.len()) {
+        ([one], 0) => one.clone(),
+        (all, 0) => format!(
+            "{} and {}",
+            all[..all.len() - 1].join(", "),
+            all[all.len() - 1]
+        ),
+        (all, more) => format!("{}, and {more} more", all.join(", ")),
+    }
+}
+
 /// How the entries of a key are matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
@@ -108,7 +140,29 @@ enum Shape {
     Attribute,
     /// A name of a definition.
     Definition(Definition),
+    /// A `readonly-returns` producer: a function or method, or an attribute of a class.
+    Producer,
+    /// An `import-boundaries` module pattern, or a module and a name of it (`pkg.db:Session`).
+    Module,
+    /// An `ignored-imports` pair of module patterns (`pkg.cli -> pkg.db`).
+    ModulePair,
 }
+
+/// The keys whose entries may name code outside the project by its full dotted name
+/// (`os.getenv`, `sys.platform`, `<stdlib>`): an entry is judged when its first name is a
+/// module of the project, which says it names project code.
+const JUDGED_BY_FIRST_NAME: [&str; 10] = [
+    "effect-boundaries.read-targets",
+    "effect-boundaries.call-targets",
+    "effect-boundaries.allowed-callees",
+    "readonly-returns.producers",
+    "import-boundaries.importers",
+    "import-boundaries.exempt-importers",
+    "import-boundaries.allowed-imports",
+    "import-boundaries.forbidden-imports",
+    "import-boundaries.relative-imports",
+    "import-boundaries.ignored-imports",
+];
 
 /// How an entry naming a definition is matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +195,8 @@ impl Definition {
 struct Key<'c> {
     /// The contract's name, or `#<position>`.
     contract: String,
+    /// The contract's position among those of its kind.
+    index: usize,
     /// The key as the rules compile it: the contract's kind, a dot, and the key
     /// (`write-owners.targets`).
     context: &'static str,
@@ -162,12 +218,12 @@ impl Key<'_> {
     }
 }
 
-/// Every key of the contracts of `config` whose entries name project code alone, in
-/// configuration order, of the kinds whose rules `selection` runs: a contract whose rules do not
-/// run guards nothing either way, and is not validated.
+/// Every key of the contracts of `config` whose entries are judged, in configuration order, of
+/// the kinds whose rules `selection` runs: a contract whose rules do not run guards nothing
+/// either way, and is not validated.
 fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key<'c>> {
     use Definition::{CallTarget, Class, Exempt, Function, Scope};
-    use Shape::{Attribute, Definition as Def};
+    use Shape::{Attribute, Definition as Def, Module, ModulePair, Producer};
     fn push<'c>(
         out: &mut Vec<Key<'c>>,
         (index, name): (usize, &str),
@@ -181,6 +237,7 @@ fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key
         for &(context, entries, shape) in lists {
             out.push(Key {
                 contract: contract.clone(),
+                index,
                 context,
                 entries,
                 shape,
@@ -301,7 +358,27 @@ fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key
                 &r.allow_writes[..],
                 Attribute,
             ),
+            (
+                "effect-boundaries.read-targets",
+                &r.read_targets[..],
+                Attribute,
+            ),
+            (
+                "effect-boundaries.call-targets",
+                &r.call_targets[..],
+                Def(CallTarget),
+            ),
+            (
+                "effect-boundaries.allowed-callees",
+                &r.allowed_callees[..],
+                Def(Scope),
+            ),
         ];
+        push(&mut out, (i, &r.name), &lists);
+    }
+    let returns = running(&config.readonly_returns, &["MUT202"], selection);
+    for (i, r) in returns.iter().enumerate() {
+        let lists = [("readonly-returns.producers", &r.producers[..], Producer)];
         push(&mut out, (i, &r.name), &lists);
     }
     let invalidation = running(&config.invalidation, &["MUT208"], selection);
@@ -317,6 +394,42 @@ fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key
                 "invalidation.exempt-writers",
                 &r.exempt_writers[..],
                 Def(Function),
+            ),
+        ];
+        push(&mut out, (i, &r.name), &lists);
+    }
+    let imports = running(&config.import_boundaries, &["IMP201", "IMP202"], selection);
+    for (i, r) in imports.iter().enumerate() {
+        let lists = [
+            (
+                "import-boundaries.importers",
+                r.importers.as_deref().unwrap_or_default(),
+                Module,
+            ),
+            (
+                "import-boundaries.exempt-importers",
+                &r.exempt_importers[..],
+                Module,
+            ),
+            (
+                "import-boundaries.allowed-imports",
+                &r.allowed_imports[..],
+                Module,
+            ),
+            (
+                "import-boundaries.forbidden-imports",
+                &r.forbidden_imports[..],
+                Module,
+            ),
+            (
+                "import-boundaries.relative-imports",
+                &r.relative_imports[..],
+                Module,
+            ),
+            (
+                "import-boundaries.ignored-imports",
+                &r.ignored_imports[..],
+                ModulePair,
             ),
         ];
         push(&mut out, (i, &r.name), &lists);
@@ -357,6 +470,9 @@ struct ProjectNames<'a> {
     names: [FxHashMap<String, FxHashSet<&'a str>>; 2],
     /// The top-level modules of the analyzed files.
     project_modules: FxHashSet<&'a str>,
+    /// The modules of the analyzed files and the packages holding them, namespace packages
+    /// included: what a module pattern may name.
+    modules: FxHashSet<&'a str>,
     /// The top-level modules outside the project heki knows the analyzed files to use: those
     /// their module-level imports name.
     imported_outside: FxHashSet<&'a str>,
@@ -533,6 +649,11 @@ impl<'a> ProjectNames<'a> {
         let project_modules: FxHashSet<&str> = (cx.index.files.values())
             .map(|f| top_level(&f.module_name))
             .collect();
+        let mut modules: FxHashSet<&str> = FxHashSet::default();
+        for module in cx.index.files.values().map(|f| f.module_name.as_str()) {
+            modules.insert(module);
+            modules.extend(module.match_indices('.').map(|(at, _)| &module[..at]));
+        }
         let imported_outside = (cx.index.files.values())
             .flat_map(|f| f.decls.imports.values())
             .map(|fqn| top_level(fqn))
@@ -541,6 +662,7 @@ impl<'a> ProjectNames<'a> {
         let definitions = defined.len() + classes.len();
         Self {
             project_modules,
+            modules,
             imported_outside,
             outside_calls,
             outside_reads,
@@ -620,11 +742,17 @@ impl<'a> ProjectNames<'a> {
     /// one whose first name is a module of the standard library or a module the analyzed files
     /// import from outside the project (`sys._getframe`), is a rule about any use of that code,
     /// now or later. An entry whose first name is a module of the project names project code,
-    /// also where the analyzed files leave out the module defining it.
+    /// also where the analyzed files leave out the module defining it. An entry of the other
+    /// keys that may name code outside the project ([`JUDGED_BY_FIRST_NAME`]) names project
+    /// code only then.
     fn names_outside(&self, context: &'static str, entry: &str) -> Result<bool, RuleConfigError> {
         let used = match context {
             "call-owners.targets" => &self.outside_calls,
             "read-owners.targets" => &self.outside_reads,
+            _ if JUDGED_BY_FIRST_NAME.contains(&context) => {
+                let first = entry.split(['.', ':']).next().unwrap_or(entry);
+                return Ok(!self.project_modules.contains(first));
+            }
             _ => return Ok(false),
         };
         // A call target with an argument list names project functions only.
@@ -713,7 +841,8 @@ fn dotted_parts(path: Cow<'_, str>) -> Vec<Cow<'_, str>> {
 }
 
 /// The entries of the contracts that match nothing in the analyzed files, one per kind, key,
-/// and text, in configuration order.
+/// text, and what the names of a `{...}` group that match nothing name none of, in
+/// configuration order.
 pub(crate) fn unmatched_entries(
     cx: &CheckContext<'_>,
 ) -> Result<Vec<UnmatchedEntry>, RuleConfigError> {
@@ -723,38 +852,113 @@ pub(crate) fn unmatched_entries(
     }
     let mut names = ProjectNames::new(cx);
     let mut found: Vec<UnmatchedEntry> = Vec::new();
-    let mut judged: FxHashMap<(&str, &str), Option<usize>> = FxHashMap::default();
+    let mut judged: FxHashMap<(&str, &str), Vec<usize>> = FxHashMap::default();
     for key in keys {
         let (kind, name) = (key.kind(), key.key());
-        for entry in key.entries {
-            let at = match judged.get(&(key.context, entry.as_str())) {
-                Some(at) => *at,
-                None => {
-                    let unmatched = judge(cx, &mut names, key.shape, (kind, key.context), entry)?;
-                    let at = unmatched.map(|missing| {
-                        found.push(UnmatchedEntry {
-                            kind: kind.to_owned(),
-                            key: name.to_owned(),
-                            entry: entry.clone(),
-                            contracts: Vec::new(),
-                            names_no: missing.names_no,
-                            nearest: missing.nearest,
-                            named_at_run_time: missing.named_at_run_time,
-                        });
-                        found.len() - 1
-                    });
-                    judged.insert((key.context, entry.as_str()), at);
-                    at
+        for (position, entry) in key.entries.iter().enumerate() {
+            let at = match judged.entry((key.context, entry.as_str())) {
+                Entry::Occupied(at) => at.into_mut(),
+                Entry::Vacant(at) => {
+                    let unmatched =
+                        unmatched_names(cx, &mut names, key.shape, (kind, key.context), entry)?;
+                    at.insert(record(&mut found, (kind, name), entry, unmatched))
                 }
             };
-            if let Some(at) = at
-                && found[at].contracts.last() != Some(&key.contract)
-            {
-                found[at].contracts.push(key.contract.clone());
+            let place = (cx.config.sources).place(kind, key.index, name, position);
+            for &at in at.iter() {
+                let found = &mut found[at];
+                if found.contracts.last() != Some(&key.contract) {
+                    found.contracts.push(key.contract.clone());
+                }
+                if let Some(place) = place
+                    && !found.written_at.contains(place)
+                {
+                    found.written_at.push(place.clone());
+                }
             }
         }
     }
     Ok(found)
+}
+
+/// Add the names of `entry` (of `kind` under `key`) that name nothing to `found`, one entry for
+/// each thing they name none of; the positions of those entries.
+fn record(
+    found: &mut Vec<UnmatchedEntry>,
+    (kind, key): (&str, &str),
+    entry: &str,
+    unmatched: Vec<(Option<String>, Missing)>,
+) -> Vec<usize> {
+    let mut at: Vec<usize> = Vec::new();
+    for (alternative, missing) in unmatched {
+        let same = at.iter().copied().find(|&i| {
+            found[i].names_no == missing.names_no
+                && found[i].named_at_run_time == missing.named_at_run_time
+        });
+        let i = same.unwrap_or_else(|| {
+            found.push(UnmatchedEntry {
+                kind: kind.to_owned(),
+                key: key.to_owned(),
+                entry: entry.to_owned(),
+                contracts: Vec::new(),
+                names_no: missing.names_no,
+                nearest: Vec::new(),
+                alternatives: Vec::new(),
+                named_at_run_time: missing.named_at_run_time,
+                written_at: Vec::new(),
+            });
+            at.push(found.len() - 1);
+            found.len() - 1
+        });
+        let found = &mut found[i];
+        found.alternatives.extend(alternative);
+        for nearest in missing.nearest {
+            if found.nearest.len() < MAX_NAMED && !found.nearest.contains(&nearest) {
+                found.nearest.push(nearest);
+            }
+        }
+    }
+    at
+}
+
+/// The names `entry` stands for that name nothing, each with what it names none of. Braces are
+/// taken first ([`heki_env::glob::alternatives`]), in the text the rule matches as a pattern (a
+/// call target without its argument list, a `Class.attr` target without its key): a name
+/// names something when one of its forms does (`m:f` or `m:f.*` of `m:f{,.*}`). A name is
+/// written out (as its first form) only when the entry lists several.
+fn unmatched_names<'a>(
+    cx: &CheckContext<'a>,
+    names: &mut ProjectNames<'a>,
+    shape: Shape,
+    (section, context): (&'static str, &'static str),
+    entry: &str,
+) -> Result<Vec<(Option<String>, Missing)>, RuleConfigError> {
+    let pattern = match shape {
+        Shape::Definition(Definition::CallTarget) => split_arguments(entry, context)?.0,
+        Shape::Attribute => split_item(entry).map_or(entry, |(base, _)| base),
+        _ => entry,
+    };
+    let rest = &entry[pattern.len()..];
+    // Text the glob syntax rejects is the configuration error the rule reports.
+    let listed =
+        heki_env::glob::alternatives(pattern).unwrap_or_else(|| vec![vec![pattern.into()]]);
+    let several = listed.len() > 1;
+    let mut out = Vec::new();
+    'names: for forms in listed {
+        let mut missing: Option<Missing> = None;
+        for form in &forms {
+            let written = format!("{form}{rest}");
+            let Some(m) = judge(cx, names, shape, (section, context), &written)? else {
+                continue 'names;
+            };
+            match &mut missing {
+                Some(first) => first.named_at_run_time |= m.named_at_run_time,
+                None => missing = Some(m),
+            }
+        }
+        out.extend(missing.map(|m| (several.then(|| format!("{}{rest}", forms[0])), m)));
+    }
+    Ok(out)
 }
 
 /// What an entry that matches nothing names none of ([`UnmatchedEntry`]).
@@ -786,11 +990,21 @@ fn judge<'a>(
     (section, context): (&'static str, &'static str),
     entry: &str,
 ) -> Result<Option<Missing>, RuleConfigError> {
-    if names.names_outside(context, entry)? {
-        return Ok(None);
-    }
     let definition = match shape {
+        // Each side is a module pattern, whose first name says whether it is judged.
+        Shape::ModulePair => {
+            for side in entry.split("->") {
+                let missing = judge(cx, names, Shape::Module, (section, context), side.trim())?;
+                if missing.is_some() {
+                    return Ok(missing);
+                }
+            }
+            return Ok(None);
+        }
+        _ if names.names_outside(context, entry)? => return Ok(None),
         Shape::Attribute => return judge_attribute(cx, names, (section, context), entry),
+        Shape::Producer => return judge_producer(cx, names, (section, context), entry),
+        Shape::Module => return judge_module(names, entry, context),
         Shape::Definition(definition) => definition,
     };
     let (name, arguments) = match definition {
@@ -823,6 +1037,46 @@ fn judge<'a>(
     )))
 }
 
+/// [`judge`] of a `readonly-returns` producer, which names a function or method as a function
+/// pattern does, or an attribute read on an object of a class ([`judge_attribute`]).
+fn judge_producer<'a>(
+    cx: &CheckContext<'a>,
+    names: &mut ProjectNames<'a>,
+    (section, context): (&'static str, &'static str),
+    entry: &str,
+) -> Result<Option<Missing>, RuleConfigError> {
+    let function = Shape::Definition(Definition::Function);
+    let Some(missing) = judge(cx, names, function, (section, context), entry)? else {
+        return Ok(None);
+    };
+    let mut named_at_run_time = false;
+    if split_last_dot(entry).is_some() {
+        match judge_attribute(cx, names, (section, context), entry)? {
+            None => return Ok(None),
+            Some(attribute) => named_at_run_time = attribute.named_at_run_time,
+        }
+    }
+    Ok(Some(Missing {
+        names_no: "function, method, or attribute".to_owned(),
+        nearest: missing.nearest,
+        named_at_run_time,
+    }))
+}
+
+/// [`judge`] of an `import-boundaries` module pattern: its module part (`pkg.db` of
+/// `pkg.db:Session`) must match a module of the analyzed files or a package holding one, as
+/// `import` finds a namespace package too.
+fn judge_module(
+    names: &ProjectNames<'_>,
+    entry: &str,
+    context: &'static str,
+) -> Result<Option<Missing>, RuleConfigError> {
+    let module = entry.split_once(':').map_or(entry, |(module, _)| module);
+    let part = NamePart::new(module, entry, context)?;
+    let named = names.modules.iter().any(|m| part.is_match(m));
+    Ok((!named).then(|| Missing::new("module".to_owned(), Vec::new())))
+}
+
 /// Whether the matcher the rule of a `definition` entry compiles from `name` matches a project definition: a
 /// function or method (by the function patterns, exempt methods, call targets, and scopes),
 /// or a class (by every shape but exempt methods).
@@ -838,20 +1092,22 @@ fn names_definition<'a>(
     let classes = || names.candidate_classes(name);
     Ok(match definition {
         Definition::Function => {
-            let a = Allowance::new(&AllowanceKeys {
+            let keys = AllowanceKeys {
                 allowed: (&one, context),
                 forbidden: (&[], context),
                 exempt: (&[], context),
-            })?;
+            };
+            let a = Allowance::new(&keys, Overrides::Off)?;
             let p = DottedPattern::new(name, context)?;
             functions.iter().any(|k| a.names_allowed(k)) || classes().any(|c| p.matches_class(c))
         }
         Definition::Exempt => {
-            let a = Allowance::new(&AllowanceKeys {
+            let keys = AllowanceKeys {
                 allowed: (&[], context),
                 forbidden: (&[], context),
                 exempt: (&one, context),
-            })?;
+            };
+            let a = Allowance::new(&keys, Overrides::Off)?;
             functions.iter().any(|k| a.exempts(k))
         }
         Definition::CallTarget => {
@@ -938,10 +1194,11 @@ fn binds_imported_name(cx: &CheckContext<'_>, m: &FunctionMatcher) -> bool {
         .any(|name| m.names_def(&format!("{}.{name}", module.text()), name))
 }
 
-/// For `name` whose last part is a glob: whether what holds that part names a module, class, or
-/// function (`pkg.store` of `pkg.store.*`, `pkg:Store` of `pkg:Store.*`), or `true` when no
-/// literal holder is left to judge (`*_helper`, `pkg.*.run_*`). `None` when the last part is
-/// literal.
+/// For `name` whose last part is a glob: whether the parts written out before its first glob
+/// name a module, class, or function, which every name it matches is held by: what holds the
+/// last part (`pkg.store` of `pkg.store.*`, `pkg:Store` of `pkg:Store.*`), or the prefix of a
+/// glob holder (`pkg.zz` of `pkg.zz.*:*`, `pkg` of `pkg.*.run_*`). `true` when no part is
+/// written out (`*_helper`, `*.run_*`); `None` when the last part is literal.
 fn glob_holder_named(
     names: &ProjectNames<'_>,
     name: &str,
@@ -950,12 +1207,10 @@ fn glob_holder_named(
     if !has_glob_syntax(last_name(name)) {
         return Ok(None);
     }
-    let Some((holder, _)) = name.rsplit_once(['.', ':']) else {
+    let first_glob = name.find(GLOB_SYNTAX).unwrap_or(0);
+    let Some((holder, _)) = name[..first_glob].rsplit_once(['.', ':']) else {
         return Ok(Some(true));
     };
-    if has_glob_syntax(holder) {
-        return Ok(Some(true));
-    }
     let p = DottedPattern::new(holder, context)?;
     let last = last_name(holder);
     let functions = names
@@ -980,33 +1235,25 @@ fn judge_attribute<'a>(
     (section, context): (&'static str, &'static str),
     entry: &str,
 ) -> Result<Option<Missing>, RuleConfigError> {
-    // A read-owners target guards the reads of a key, so a key only read exists for it.
-    let with_dict_reads = context == "read-owners.targets";
+    // A read target guards the reads of a key, so a key only read exists for it.
+    let with_dict_reads = matches!(
+        context,
+        "read-owners.targets" | "effect-boundaries.read-targets"
+    );
     let (base, item) = match split_item(entry) {
         Some((base, _)) => (base, &entry[base.len()..]),
         None => (entry, ""),
     };
     // A target without a dot is the configuration error `parse_targets` reports.
     let (class_part, attr) = split_last_dot(base).unwrap_or(("", base));
-    let holders = holder_alternatives(class_part);
-    let mut classes: Vec<ContractClass> = holders
-        .iter()
-        .flat_map(|holder| names.candidate_classes(holder))
-        .cloned()
-        .collect();
-    classes.dedup_by(|a, b| a.fqn == b.fqn);
+    let classes: Vec<ContractClass> = names.candidate_classes(class_part).cloned().collect();
     let parsed = parse_targets(cx, &classes, &[entry.to_owned()], section, context)?;
     let target = &parsed[0];
     let mut family: Vec<&String> = target.classes.iter().collect();
     family.sort();
-    let glob_holder = family.is_empty() && {
-        let mut named = false;
-        for holder in &holders {
-            named |= glob_holder_named(names, holder, context)? == Some(true);
-        }
-        named
-    };
-    if glob_holder || !family.is_empty() && has_glob_syntax(attr) {
+    if family.is_empty() && glob_holder_named(names, class_part, context)? == Some(true)
+        || !family.is_empty() && has_glob_syntax(attr)
+    {
         return Ok(None);
     }
     if family.is_empty() {
@@ -1051,20 +1298,6 @@ fn judge_attribute<'a>(
         nearest,
         named_at_run_time,
     }))
-}
-
-/// The holders a `Class.attr` entry's class part stands for: the part itself, or, when a `{...}`
-/// group of it holds a dot or colon (`pkg.{a.Base,a.Sub}`), its alternatives as matching expands
-/// them ([`heki_env::glob::alternatives`]), each judged by its own last part.
-fn holder_alternatives(class_part: &str) -> Vec<String> {
-    let dotted_group = class_part.split('{').skip(1).any(|group| {
-        let inside = group.split('}').next().unwrap_or(group);
-        inside.contains(['.', ':'])
-    });
-    if !dotted_group {
-        return vec![class_part.to_owned()];
-    }
-    heki_env::glob::alternatives(class_part).unwrap_or_else(|| vec![class_part.to_owned()])
 }
 
 /// The forms a class may be written in: its qualname, its fqn, and `module:qualname`.

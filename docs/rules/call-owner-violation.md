@@ -346,3 +346,7 @@ No automatic fix.
     bases, is allowed, also through a class object typed `type[P]` of one (`MUT207`).
   - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
     names the subprotocols of the protocols it matches, or those protocols only.
+  - `include-overrides`: `true` or `false` (default): whether an entry naming a method
+    (`Class.method`, `module:Class.method`) in `allowed-callers`, `forbidden-callers`, and the `exempt-methods`
+    patterns also names the methods of that name in the
+    project subclasses of `Class` (a private name overrides nothing).

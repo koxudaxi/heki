@@ -6591,7 +6591,7 @@ fn open_premises_along_shared_chains_are_explained_once_per_call() {
     check_linear(SCALE, shape);
     let out = heki_json(
         &shape(SCALE),
-        &["dump-open-premises", "--select", "EFF101", "."],
+        &["dump-open-premises", "--extend-select", "EFF101", "."],
     );
     let reports = out["reports"].as_array().unwrap();
     assert_eq!(reports.len(), 4000);
@@ -6658,7 +6658,7 @@ fn open_premises_of_many_reports_in_one_function_are_explained_within_its_budget
         &shape(SCALE),
         &[
             "dump-open-premises",
-            "--select",
+            "--extend-select",
             "OPT113,DATA101,MUT114",
             ".",
         ],
@@ -7446,7 +7446,12 @@ fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
     let p = rewrite_candidates_project("bounds_opt_rewrites_premises", 400);
     let out = heki_json(
         &p,
-        &["dump-open-premises", "--select", "OPT103,OPT111", "."],
+        &[
+            "dump-open-premises",
+            "--extend-select",
+            "OPT103,OPT111",
+            ".",
+        ],
     );
     let reports = out["reports"].as_array().unwrap();
     assert_eq!(reports.len(), 2 * MIXED_ITERABLES.len(), "{out:#?}");
@@ -8819,6 +8824,57 @@ fn the_names_a_module_getattr_serves_take_linear_steps() {
     assert!(message.contains(&more), "{message}");
 }
 
+/// A module binding its `__getattr__` to the hook a factory of another module makes over a
+/// table of `n` factories, the hook handing the table's value to a function that tests it `n`
+/// times against a class of data values before calling it, and a module basing a class on each
+/// name it serves and calling its waiting method.
+fn made_served_names(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_getattr_made_{n}"));
+    p.write("pkg/__init__.py", "");
+    let tests: String = (0..n)
+        .map(|_| "    if isinstance(entry, str):\n        raise ImportError(name)\n")
+        .collect();
+    p.write(
+        "pkg/hooks.py",
+        &format!(
+            "def _load(name, entry):\n{tests}    return entry()\n\n\ndef make_hook(table):\n    def module_getattr(name):\n        if name not in table:\n            raise AttributeError(name)\n        return _load(name, table[name])\n\n    return module_getattr\n"
+        ),
+    );
+    let table: String = (0..n).map(|i| format!("\"T{i}\": _make, ")).collect();
+    p.write(
+        "pkg/lazy.py",
+        &format!(
+            "import time\n\nfrom pkg.hooks import make_hook\n\n\nclass Base:\n    def wait(self) -> None:\n        time.sleep(1)\n\n\ndef _make() -> type:\n    class _Made(Base):\n        pass\n\n    return _Made\n\n\n_TABLE = {{{table}}}\n__getattr__ = make_hook(_TABLE)\n"
+        ),
+    );
+    let uses: String = (0..n)
+        .map(|i| {
+            format!(
+                "\n\nclass OnT{i}(lazy.T{i}):\n    pass\n\n\nasync def wait_t{i}(obj: OnT{i}) -> None:\n    obj.wait()\n"
+            )
+        })
+        .collect();
+    p.write("pkg/use.py", &format!("from pkg import lazy\n{uses}"));
+    p
+}
+
+/// What the hook a factory makes serves is decided in the factory's module by the same walk,
+/// with one walk of the function the hook hands the value to: the steps grow linearly with the
+/// keys and the tests, and every class based on a key has the waiting method.
+#[test]
+fn the_names_a_factory_made_module_getattr_serves_take_linear_steps() {
+    let n = 8 * SCALE;
+    let found = check_linear(n, made_served_names);
+    let blocking: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .collect();
+    assert_eq!(blocking.len(), 1);
+    let message = blocking[0]["message"].as_str().unwrap();
+    let more = format!("(+{} more async call sites", n - 1);
+    assert!(message.contains(&more), "{message}");
+}
+
 /// A module `__getattr__` testing its name against a display of `n` literals, then making `n`
 /// tests of something else before it returns the class a factory of the module defines, and a
 /// module basing a class on the first name and calling its waiting method.
@@ -9125,4 +9181,67 @@ fn values_constructions_bind_to_frozen_fields_are_read_once_per_call() {
     };
     let changed = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "MUT108").count();
     assert_eq!(changed(check_linear(2000, shape)), 0);
+}
+
+/// A handler of a recursion with `returns` clauses, each reporting the error and returning an exit
+/// status through a chain of `links` copies of a module constant.
+fn status_through_copies(returns: usize, links: usize) -> String {
+    let mut out = vec![
+        "import sys".to_owned(),
+        String::new(),
+        "FAILED = 4".to_owned(),
+        String::new(),
+        String::new(),
+        "def visit(node):".to_owned(),
+        "    return sum(visit(child) for child in node)".to_owned(),
+        String::new(),
+        String::new(),
+        "def main(node, flag):".to_owned(),
+        "    s0 = FAILED".to_owned(),
+    ];
+    for k in 1..=links {
+        out.push(format!("    s{k} = s{}", k - 1));
+    }
+    out.push("    try:".to_owned());
+    out.push("        visit(node)".to_owned());
+    out.push("    except Exception as error:".to_owned());
+    out.push("        print(error, file=sys.stderr)".to_owned());
+    for _ in 0..returns {
+        out.push("        if flag:".to_owned());
+        out.push(format!("            return s{links}"));
+    }
+    out.push(format!("        return s{links}"));
+    out.push("    return 0".to_owned());
+    out.join("\n") + "\n"
+}
+
+/// The exit status of a handler's clause is read through the shape's table of copy roots: returns of
+/// a value behind a long chain of copies take steps linear in the function, and the
+/// clause stays a process boundary.
+#[test]
+fn exit_statuses_behind_copy_chains_are_read_from_a_table() {
+    let shape = |n: usize| {
+        let p = Project::new(&format!("bounds_status_{n}"));
+        p.write("m.py", &status_through_copies(8, n));
+        p
+    };
+    let counted = |p: &Project| {
+        let path = p.dir.join(".walk-steps.json");
+        let args = [
+            "check",
+            "--extend-select",
+            "EFF114",
+            "--output-format",
+            "json",
+            "--walk-steps",
+            path.to_str().unwrap(),
+            ".",
+        ];
+        let out = run(p, &args, &[0, 1]);
+        (
+            serde_json::from_slice::<Vec<Value>>(&out).unwrap(),
+            walk_steps(&path),
+        )
+    };
+    assert!(past_budgets(800, &[], shape, counted).is_empty());
 }

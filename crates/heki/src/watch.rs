@@ -417,6 +417,18 @@ pub(crate) fn run(args: &CheckArgs, styles: &Stylesheet) -> Result<ExitCode> {
                 }
                 Err(e) => {
                     ws = None;
+                    // The load failed, possibly on an `include` that was just added: watch the
+                    // files the main file lists as far as it parses, so creating or fixing one
+                    // reloads.
+                    let listed = (w.opts().config_file().as_deref())
+                        .map(heki_env::included_files)
+                        .unwrap_or_default();
+                    for included in listed {
+                        if !config_files.contains(&included) {
+                            config_files.push(included);
+                        }
+                    }
+                    config = stamps_of(&config_files, &config);
                     report = Report::failed(&e, w.opts().config_file().as_deref());
                 }
             }
