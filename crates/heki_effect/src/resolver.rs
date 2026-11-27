@@ -4926,6 +4926,13 @@ impl ProjectDecls {
             && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
     }
 
+    /// Whether a call of the class `class` may give an existing instance, or run a metaclass
+    /// `__call__` that returns anything (an instance of a subclass): what the call makes is not
+    /// decided by the class body.
+    pub(crate) fn construction_is_open(&self, class: &str) -> bool {
+        self.may_reuse_instances(class) || self.has_custom_metaclass(class)
+    }
+
     /// What a call constructing an instance of the project class `class` keeps of it
     /// ([`Constructor`]), from the `__init__` the call runs, that of the first class along the
     /// MRO defining one, and every one it reaches through `super().__init__(...)`:
@@ -4954,7 +4961,7 @@ impl ProjectDecls {
         class: &str,
         catalog_stores: impl Fn(&str) -> bool,
     ) -> Constructor<'_> {
-        if self.may_reuse_instances(class) || self.has_custom_metaclass(class) {
+        if self.construction_is_open(class) {
             return Constructor::Unknown;
         }
         let mro = self.mro(class);
@@ -6727,13 +6734,15 @@ impl ProjectDecls {
     }
 
     /// Whether calling the project class `class` by name makes an instance of exactly that class
-    /// (`Inferred::exact`): no project class along its MRO defines `__new__`, which may return an
-    /// instance of another class (a subclass picked by the arguments), and the project binds the
-    /// name to no other object ([`Self::call_rebound`]).
+    /// (`Inferred::exact`): no project class along its MRO defines `__new__` and no metaclass is
+    /// custom ([`Self::construction_is_open`]; either may return an instance of another class, a
+    /// subclass picked by the arguments), and the project binds the name to no other object
+    /// ([`Self::call_rebound`]).
     pub(crate) fn constructs_exactly(&self, class: &str) -> bool {
         let class = self.canonical(class);
         self.is_project_class(&class)
             && !self.call_rebound(&class)
+            && !self.construction_is_open(&class)
             && self.mro(&class).iter().all(|c| {
                 self.read(|k| note(&mut k.class_facts, c));
                 self.class(c)

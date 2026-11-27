@@ -1251,9 +1251,10 @@ async def through_module():
     core.prepare(core.Notes())
 "#;
 
-/// A class with a `__new__` of its own may hand out an instance of another class, and a class
-/// name the project binds to another class may construct that one: neither construction is
-/// exactly the class.
+/// A class with a `__new__` of its own, or a custom metaclass whose `__call__` returns another
+/// class's instance, may hand out an instance of another class, and a class name the project
+/// binds to another class may construct that one: none of these constructions is exactly the
+/// class.
 const NOT_EXACT: &str = r#"import time
 
 
@@ -1272,8 +1273,27 @@ class Pooled(Plain):
         return object.__new__(Slow)
 
 
+class Meta(type):
+    def __call__(cls, *args):
+        return object.__new__(Slower)
+
+
+class Based(metaclass=Meta):
+    def run(self):
+        return 1
+
+
+class Slower(Based):
+    def run(self):
+        time.sleep(1)
+
+
 def call(p: Plain):
     return p.run()
+
+
+def helper(b: Based):
+    return b.run()
 
 
 async def made():
@@ -1282,6 +1302,10 @@ async def made():
 
 async def pooled():
     call(Pooled())  # EFF101 [heuristic]
+
+
+async def metaclass():
+    helper(Based())  # EFF101 [heuristic]
 
 
 def patch():
