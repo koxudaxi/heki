@@ -217,7 +217,7 @@ in its instructions, but not a contract that `heki check` enforces:
 
 3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and a CI step, and record
    today's findings in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only new ones fail:
-   `uvx heki==0.9.0 check --baseline heki-baseline.toml --update-baseline`. The
+   `uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline`. The
    [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups ready to copy.
 
 !!! warning "Pre-release"
@@ -2320,7 +2320,7 @@ against them. Replace `app` with your package.
               fetch-depth: 0   # the base branch is compared below
           - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
           - name: Walls
-            run: uvx heki==0.9.0 check
+            run: uvx heki==0.10.0 check
           - name: Compare with the base branch
             shell: bash
             env:
@@ -2329,12 +2329,12 @@ against them. Replace `app` with your package.
             run: |
               git worktree add ../base "origin/$BASE"
               keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
-              uvx heki==0.9.0 check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
-              (cd ../base && uvx heki==0.9.0 check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
+              uvx heki==0.10.0 check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
+              (cd ../base && uvx heki==0.10.0 check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
               new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
               test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
-              (cd ../base && uvx heki==0.9.0 snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
-              uvx heki==0.9.0 check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
+              (cd ../base && uvx heki==0.10.0 snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
+              uvx heki==0.10.0 check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
                 --report-suppressed "$RUNNER_TEMP/mut103.json"
               hidden=$(keys "$RUNNER_TEMP/mut103.json")
               test -z "$hidden" || { echo "Effect changes hidden by inline suppressions:"; echo "$hidden"; exit 1; }
@@ -4149,7 +4149,7 @@ Record today's findings, so that only new ones fail, and commit `heki-baseline.t
 configuration, the hook, and the CI step:
 
 ```console
-$ uvx heki==0.9.0 check --baseline heki-baseline.toml --update-baseline
+$ uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline
 ```
 
 ```toml
@@ -4162,14 +4162,14 @@ baseline = "heki-baseline.toml"
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.9.0
+    rev: v0.10.0
     hooks:
       - id: heki   # heki check --touched on the staged files
 ```
 
 ```yaml
 # A step of the CI job, with uv installed
-- run: uvx heki==0.9.0 check
+- run: uvx heki==0.10.0 check
 ```
 
 The hook shows the reports in and through the staged files, and every regression of the
@@ -4298,7 +4298,7 @@ fail = true
 - `fail = true` makes the reports of that contract fail the run and leaves every other warning
   and heuristic report advisory. `fail-on = "warning"` would fail on all of them, which a project
   that wants that can still set. Record today's findings in the baseline first
-  (`uvx heki==0.9.0 check --update-baseline`), so that only new ones fail.
+  (`uvx heki==0.10.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
 - A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
   review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
@@ -4478,7 +4478,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.9.0
+    rev: v0.10.0
     hooks:
       - id: heki
 ```
@@ -4499,7 +4499,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki==0.9.0 check --touched
+            entry: uvx heki==0.10.0 check --touched
             language: system   # needs uv on PATH
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
@@ -4519,7 +4519,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: heki check --touched
             language: python
-            additional_dependencies: [heki==0.9.0]
+            additional_dependencies: [heki==0.10.0]
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
@@ -4564,14 +4564,14 @@ the run now.
 === "GitHub Actions annotations"
 
     ```yaml
-    - run: uvx heki==0.9.0 check --output-format github
+    - run: uvx heki==0.10.0 check --output-format github
     ```
 
 === "Code scanning (SARIF)"
 
     ```yaml
     # The job needs `permissions: security-events: write`.
-    - run: uvx heki==0.9.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
+    - run: uvx heki==0.10.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
     - uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: heki.sarif
@@ -4594,7 +4594,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.9.0 check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.10.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
