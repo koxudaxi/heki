@@ -525,6 +525,15 @@ def measured_walk(tree: dict) -> int:
         return walked_length(tree)
     except RecursionError:
         return -1
+
+
+def logged_by_a_logger_of_no_known_class(tree: dict, log) -> int:
+    try:
+        print(depth(tree))
+    except Exception as error:
+        log.error("cannot measure the tree: %s", error)
+        return 2
+    return 0
 "#;
 
 /// A cycle across two modules, through a generator expression in the second.

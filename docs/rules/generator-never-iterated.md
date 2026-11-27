@@ -2,17 +2,9 @@
 
 # generator-never-iterated (EFF116)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (a bug that is rarely harmful) · No automatic fix
 
-Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
-
-!!! warning "Experimental"
-
-    The development corpus has few reports of it, and its premises are not yet certified. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
+A call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.
 
 ## What it does
 Checks for a call of a generator function whose generator nothing iterates. Calling a function
@@ -61,7 +53,7 @@ It does not report:
 
 A report states that the named function is a generator function, so the call only creates a
 generator, and that nothing iterates that generator: the body of the function does not run
-there.
+there. A heuristic report states the same with some premise below open.
 
 Its premises:
 
@@ -73,8 +65,9 @@ Its premises:
   method, more than 64 classes to dispatch over, a member of a union that does not resolve, or a
   name the project binds to another object.
 - **Never iterated**: the generator is only the value of the call, with no name, and nothing
-  reads it but a truth test; or the library call that runs the function drops what it returns or
-  tests it for truth, as the catalog describes it (R3).
+  reads it but a truth test (a branch, `not`, the builtin `bool`); or the library call that runs
+  the function drops what it returns or tests it for truth, as the catalog describes it (R3).
+  Established for every report.
 
 Not part of the claim: whether the body would have had an effect, and whether the caller meant
 the generator to run.
@@ -84,6 +77,9 @@ The work the function does never happens, and nothing fails: rows are never load
 the next line reads, a fallback behind `if not gen():` never runs, a test helper with `yield`
 verifies nothing, a thread starts and ends at once. Adding a `yield` to a function (for a debug
 print, or to stream its results) silently breaks every caller that called it as a statement.
+
+A report is a warning, not an error: the first test that uses the function shows that its body
+did not run, so the bug rarely reaches a release.
 
 ## Example
 ```python
@@ -132,10 +128,6 @@ def check(text: str) -> None:
 
 ## Fix safety
 No automatic fix.
-
-## Options
-- `lint.extend-select = ["EFF116"]` (or `--extend-select EFF116`) enables the rule. It is
-  opt-in: selecting the `EFF` prefix does not enable it.
 
 ## Known limitations
 - A generator bound to a name that nothing reads (`rows = gen()`) is not reported.

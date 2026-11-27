@@ -152,8 +152,8 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass"]
-write-universe = ["Ticket.flag", "Part.flag"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass", "pkg.owned_flag_pass"]
+write-universe = ["Ticket.flag", "Part.flag", "Holder.flag"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -361,6 +361,9 @@ const OWNED_BASE: &str =
     "SHARED_STATE = {}\n\n\nclass Base:\n    def __init__(self):\n        self.ready = True\n";
 const OWNED_MODEL: &str = "from pkg.owned_base import Base\n\nSHARED = []\n\n\nclass Holder(Base):\n    def __init__(self):\n        super().__init__()\n        self.parts: list = []\n";
 const OWNED_PASS: &str = "from pkg.copy_ops import Ticket\nfrom pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    part = Ticket()\n    copied.parts.append(part)\n    part.flag = True\n    return copied\n";
+// A pass writing an instance it constructs: new while the constructors it runs keep nothing of
+// it, the base's in a third module included (`ProjectDecls::constructor`).
+const OWNED_FLAG_PASS: &str = "from pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    copied.flag = True\n    return copied\n";
 const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
@@ -638,6 +641,12 @@ const RO_STATS: &str = "from collections.abc import Sequence\n\nfrom pkg.ro.mid 
 const RO_INIT: &str = "from pkg.ro.impl import scale\n";
 const RO_IMPL: &str = "def scale(values):\n    return [v * 2 for v in values]\n\n\ndef scale_in_place(values):\n    values[0] = 0\n";
 const RO_PLOT: &str = "from collections.abc import Sequence\n\nfrom pkg.ro import scale\n\n\ndef plot(values: Sequence[float]) -> None:\n    scale(values)\n";
+// A function returning what a function of another module returns of its parameter, which the
+// caller hands its read-only parameter to before changing what comes back.
+const RO_SAME: &str = "def same(x):\n    return x\n";
+const RO_FORWARD: &str =
+    "from pkg.ro.same import same\n\n\ndef forwarded(x):\n    return same(x)\n";
+const RO_FORWARD_USE: &str = "from collections.abc import Sequence\n\nfrom pkg.ro.forward import forwarded\n\n\ndef change(x):\n    if isinstance(x, list):\n        x.reverse()\n\n\ndef two(xs: Sequence[int]) -> None:\n    change(forwarded(xs))\n";
 // Receiver typing: the class of a loop target comes from the element type of an attribute
 // annotation in another module.
 const SHELF: &str = r#"from typing import Self
@@ -1162,6 +1171,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/ro/mid.py", RO_MID),
         ("pkg/ro/stats.py", RO_STATS),
         ("pkg/ro/impl.py", RO_IMPL),
+        ("pkg/ro/same.py", RO_SAME),
+        ("pkg/ro/forward.py", RO_FORWARD),
+        ("pkg/ro/forward_use.py", RO_FORWARD_USE),
         ("pkg/own_prepare.py", OWN_PREPARE),
         ("pkg/own_wrap.py", OWN_WRAP),
         ("pkg/own_use.py", OWN_USE),
@@ -1344,6 +1356,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/owned_base.py", OWNED_BASE),
         ("pkg/owned_model.py", OWNED_MODEL),
         ("pkg/owned_pass.py", OWNED_PASS),
+        ("pkg/owned_flag_pass.py", OWNED_FLAG_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -4065,6 +4078,25 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .absent(&[("pkg/owned_pass.py", "EFF201")]),
         Step::new(
+            "the base constructor of a third module keeps the instance",
+            vec![Action::Save(
+                "pkg/owned_base.py",
+                OWNED_BASE.replace("self.ready = True", "SHARED_STATE[0] = self"),
+            )],
+        )
+        .present(&[
+            ("pkg/owned_flag_pass.py", "EFF201"),
+            ("pkg/owned_pass.py", "EFF201"),
+        ]),
+        Step::new(
+            "the base constructor keeps nothing again",
+            vec![save("pkg/owned_base.py", OWNED_BASE)],
+        )
+        .absent(&[
+            ("pkg/owned_flag_pass.py", "EFF201"),
+            ("pkg/owned_pass.py", "EFF201"),
+        ]),
+        Step::new(
             "the copy helper of another module defaults its table to a shared dict",
             vec![Action::Save(
                 "pkg/copy_ops.py",
@@ -4189,14 +4221,6 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
     ]
 }
 
-/// `MUT110` (default on): a `Sequence` / `Mapping` parameter handed to a helper in another
-/// module that changes it in place. What the helper changes is in its summary, how its
-/// parameter is annotated in its declarations (`FunctionDecl::readonly_params` /
-/// `mutable_params`), and the call chain of a report walks the own summaries and calls of the
-/// functions in other modules down to the first one whose body makes the change
-/// (`heki_rules::ChainFacts`): a helper that moves the change to or from a function it calls
-/// keeps its summary but changes the chain. The callers' annotations change in their own file
-/// only (Early Cutoff); a helper is also reached through a package re-export.
 fn steps_aliases_and_getters() -> Vec<Step> {
     vec![
         Step::new(
@@ -4360,6 +4384,19 @@ fn steps_protocol_reads() -> Vec<Step> {
     ]
 }
 
+/// `MUT110` (default on): a `Sequence` / `Mapping` parameter handed to a helper in another
+/// module that changes it in place. What the helper changes is in its summary, how its
+/// parameter is annotated in its declarations (`FunctionDecl::readonly_params` /
+/// `mutable_params`), and the call chain of a report walks the own summaries and calls of the
+/// functions in other modules down to the first one whose body makes the change
+/// (`heki_rules::ChainFacts`): a helper that moves the change to or from a function it calls
+/// keeps its summary but changes the chain. The callers' annotations change in their own file
+/// only (Early Cutoff); a helper is also reached through a package re-export. A function
+/// returning what a function of another module returns of its parameter hands the caller's
+/// object back as itself when both do (`FunctionDecl::returns_param`, which completing its
+/// module's declarations decides against the other module's): either one copying instead
+/// changes what the caller's call hands back, and so does either function becoming a name the
+/// project binds again (`ProjectDecls::call_rebound`).
 fn steps_mut110() -> Vec<Step> {
     let callers_mutable = RO_CALLERS
         .replace("items: Sequence[int]", "items: list[int]")
@@ -4516,6 +4553,55 @@ fn steps_mut110() -> Vec<Step> {
             vec![save("pkg/ro/__init__.py", RO_INIT)],
         )
         .absent(&[("pkg/plot.py", "MUT110")]),
+        Step::new(
+            "the function returning what another module's function returns copies instead",
+            vec![save(
+                "pkg/ro/forward.py",
+                &RO_FORWARD.replace("return same(x)", "return list(x)"),
+            )],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "it returns what the other module's function returns again",
+            vec![save("pkg/ro/forward.py", RO_FORWARD)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the function two modules below copies: what the call returns is a copy",
+            vec![save("pkg/ro/same.py", "def same(x):\n    return list(x)\n")],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the function two modules below returns its parameter again",
+            vec![save("pkg/ro/same.py", RO_SAME)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the module below binds that function again: the call may run another",
+            vec![save(
+                "pkg/ro/same.py",
+                &format!("{RO_SAME}\n\ndef swap():\n    global same\n    same = list\n"),
+            )],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "it binds the function once again",
+            vec![save("pkg/ro/same.py", RO_SAME)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the forwarding module stores another object into the function below",
+            vec![save(
+                "pkg/ro/forward.py",
+                &format!("import pkg.ro.same as m\n{RO_FORWARD}\n\ndef swap():\n    m.same = list\n"),
+            )],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "it stores nothing there again",
+            vec![save("pkg/ro/forward.py", RO_FORWARD)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
     ]
 }
 
@@ -5589,13 +5675,27 @@ fn steps_mut113() -> Vec<Step> {
 /// holds, and the holder of a module global starts passing the argument that leads another
 /// helper to it. It also follows the names they bind (`LockFacts::rebinds`) and the tests of
 /// state on the way to the lock (`CallSite::state_tests`), and the summaries carry the facts
-/// only while the rule is selected (`OptInFacts`).
+/// only while the rule is selected (`OptInFacts`). The exact tier follows whether the helper
+/// takes the lock on every return (`LockAcquire::on_every_return`), and a report goes when a
+/// method of the other module gives the lock back first (`LockFacts::gives_back`).
 fn steps_eff109() -> Vec<Step> {
     let more = LOCK_POOL.replace(
         "            return 1\n\n\ndef refill",
         "            return 1\n\n    def checked_size(self):\n        if self.closed:\n            return 0\n        return self.size()\n\n\ndef reset():\n    global LOCK\n    LOCK = threading.Lock()\n\n\ndef refill",
     );
     let resetting = "from pkg.lock_pool import LOCK, Pool, refill, reset\n\n\nclass Spool(Pool):\n    def grow(self):\n        return self.size()\n\n\ndef drain():\n    with LOCK:\n        reset()\n        return refill(force=True)\n";
+    let one_path = LOCK_POOL.replace(
+        "    def size(self):\n        with self._lock:\n            return 1\n",
+        "    def size(self):\n        if self.ready:\n            with self._lock:\n                return 1\n        return 0\n",
+    );
+    let pausing = LOCK_POOL.replace(
+        "\n\ndef refill",
+        "\n    def pause(self):\n        self._lock.release()\n\n\ndef refill",
+    );
+    let paused = LOCK_USE.replace(
+        "        with self._lock:\n            return self.size()\n",
+        "        with self._lock:\n            self.pause()\n            return self.size()\n",
+    );
     let wrapped = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        with self._lock:\n            self.closed = True\n            return self.checked_size()\n\n\ndef drain():\n    with LOCK:\n        return refill()\n";
     vec![
         Step::new(
@@ -5626,15 +5726,18 @@ fn steps_eff109() -> Vec<Step> {
         )
         .absent(&[("pkg/lock_use.py", "EFF109")]),
         Step::new(
-            "EFF109 is no longer selected, and the helper's module changes",
+            "EFF109 is ignored, and the helper's module changes",
             vec![
-                Action::Configure(CONFIG.replace(", \"EFF109\"", "")),
+                Action::Configure(CONFIG.replace(
+                    "[tool.heki.lint]\n",
+                    "[tool.heki.lint]\nignore = [\"EFF109\"]\n",
+                )),
                 Action::Save("pkg/lock_pool.py", format!("# Pools.\n{LOCK_POOL}")),
             ],
         )
         .absent(&[("pkg/lock_use.py", "EFF109")]),
         Step::new(
-            "EFF109 is selected again",
+            "EFF109 is no longer ignored",
             vec![Action::Configure(CONFIG.to_owned())],
         )
         .present(&[("pkg/lock_use.py", "EFF109")]),
@@ -5677,6 +5780,40 @@ fn steps_eff109() -> Vec<Step> {
         .present(&[("pkg/lock_use.py", "EFF109")]),
         Step::new(
             "both files as they were",
+            vec![
+                save("pkg/lock_pool.py", LOCK_POOL),
+                save("pkg/lock_use.py", LOCK_USE),
+            ],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper takes the lock on one path only: the report is heuristic",
+            vec![Action::Save("pkg/lock_pool.py", one_path)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper takes it on every return again: the report is exact",
+            vec![save("pkg/lock_pool.py", LOCK_POOL)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the subclass calls a method of the base class that gives the lock back first",
+            vec![
+                Action::Save("pkg/lock_pool.py", pausing.clone()),
+                Action::Save("pkg/lock_use.py", paused),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "that method no longer gives the lock back",
+            vec![Action::Save(
+                "pkg/lock_pool.py",
+                pausing.replace("        self._lock.release()\n", "        pass\n"),
+            )],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "both files as they were again",
             vec![
                 save("pkg/lock_pool.py", LOCK_POOL),
                 save("pkg/lock_use.py", LOCK_USE),

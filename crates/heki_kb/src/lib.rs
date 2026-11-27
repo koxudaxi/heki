@@ -486,6 +486,103 @@ pub struct EcosystemEntry {
     /// type argument names (`ContextVar[T].get()`), or the result a future was given
     /// (`concurrent.futures.Future.result`).
     pub returns_held: Option<HeldValue>,
+    /// The call opens a file as `io.open` does: the class of the file object it returns
+    /// follows the `mode` and `buffering` it passes ([`FileArgs::class`]). Boxed: three
+    /// entries have one, and every entry holds the field.
+    pub file_object: Option<Box<FileArgs>>,
+}
+
+/// Where a call opening a file as `io.open` does (`EcosystemEntry::file_object`) takes its
+/// `mode` and its `buffering`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileArgs {
+    /// The file argument. Unset: the file is the receiver (`pathlib.Path.open`), a path.
+    pub file: ArgSlot,
+    pub mode: ArgSlot,
+    pub buffering: ArgSlot,
+}
+
+/// The file classes `io.open` returns: text, binary read, binary write (also append and
+/// exclusive creation), binary read and write (`+`), and unbuffered binary.
+pub const FILE_CLASSES: &[&str] = &[
+    "io.TextIOWrapper",
+    "io.BufferedReader",
+    "io.BufferedWriter",
+    "io.BufferedRandom",
+    "io.FileIO",
+];
+
+/// The class of a file object `io.open` returns with a mode or a buffering heki does not
+/// know: its members are those every class of [`FILE_CLASSES`] has.
+pub const ANY_FILE_CLASS: &str = "io.open()";
+
+impl FileArgs {
+    /// The class of the file object the call returns, `arg` telling what it passes as for
+    /// [`EcosystemEntry::case_for`]. An argument it leaves out takes `io.open`'s default
+    /// (`mode="r"`, `buffering=-1`).
+    pub fn class(
+        &self,
+        mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> &'static str {
+        let mut at = |slot: &ArgSlot| arg(slot.arg, slot.param.as_deref());
+        let names_path = (self.file == ArgSlot::default())
+            || at(&self.file).is_some_and(|fact| fact.is_path_like());
+        let mode = match at(&self.mode) {
+            None => Some("r".to_owned()),
+            Some(fact) => match fact.literal {
+                Some(LiteralValue::Str(mode)) => Some(mode),
+                _ => None,
+            },
+        };
+        let buffering = match at(&self.buffering) {
+            None => Some(-1),
+            Some(fact) => match fact.literal {
+                Some(LiteralValue::Int(n)) => Some(n),
+                Some(LiteralValue::Bool(b)) => Some(i64::from(b)),
+                _ => None,
+            },
+        };
+        match file_class(mode.as_deref(), buffering) {
+            // `open` never sets `O_NONBLOCK` on a path it opens, so only an integer file
+            // descriptor can give a binary read that returns `None` instead of bytes.
+            "io.BufferedReader" | "io.BufferedRandom" if !names_path => ANY_FILE_CLASS,
+            class => class,
+        }
+    }
+}
+
+/// The class of the file object `io.open(file, mode, buffering)` returns, as CPython decides
+/// it (`None`: an argument heki does not know). Unbuffered I/O is binary only, so a call with
+/// `buffering=0` that returns gives a raw file whatever its mode; a mode CPython rejects
+/// raises, and one only an older version accepts (`"U"`) gives [`ANY_FILE_CLASS`].
+fn file_class(mode: Option<&str>, buffering: Option<i64>) -> &'static str {
+    if buffering == Some(0) {
+        return "io.FileIO";
+    }
+    let Some(mode) = mode.filter(|m| is_open_mode(m)) else {
+        return ANY_FILE_CLASS;
+    };
+    if !mode.contains('b') {
+        return "io.TextIOWrapper";
+    }
+    match buffering {
+        None => ANY_FILE_CLASS,
+        Some(_) if mode.contains('+') => "io.BufferedRandom",
+        Some(_) if mode.contains('r') => "io.BufferedReader",
+        Some(_) => "io.BufferedWriter",
+    }
+}
+
+/// Whether `io.open` accepts `mode`: each of `rwxab+t` at most once, exactly one of `rwxa`,
+/// and not both `t` and `b`.
+fn is_open_mode(mode: &str) -> bool {
+    let mut seen = BTreeSet::new();
+    let known = mode
+        .chars()
+        .all(|c| "rwxab+t".contains(c) && seen.insert(c));
+    let kinds = mode.chars().filter(|c| "rwxa".contains(*c)).count();
+    known && kinds == 1 && !(seen.contains(&'t') && seen.contains(&'b'))
 }
 
 /// What a method returning the value its receiver holds returns
@@ -700,6 +797,27 @@ pub struct ArgFact {
     pub truthy: Option<bool>,
 }
 
+impl ArgFact {
+    /// The value is known to be a path (a string, bytes, or a path object) and so no integer
+    /// file descriptor.
+    pub fn is_path_like(&self) -> bool {
+        self.names_file
+            || matches!(self.literal, Some(LiteralValue::Str(_)))
+            || self.class.as_deref().is_some_and(|c| {
+                matches!(
+                    c,
+                    "builtins.str"
+                        | "builtins.bytes"
+                        | "os.PathLike"
+                        | "pathlib.Path"
+                        | "pathlib.PurePath"
+                        | "pathlib.PosixPath"
+                        | "pathlib.WindowsPath"
+                )
+            })
+    }
+}
+
 /// A constant argument.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LiteralValue {
@@ -775,7 +893,8 @@ impl EcosystemEntry {
     }
 
     /// The first case the call's arguments select: `arg(position, keyword)` tells what the
-    /// call passes there (`None`: nothing known, or not passed).
+    /// call passes there (`None`: nothing; an argument `*` / `**` unpacking may pass is one
+    /// nothing is known of).
     pub fn case_for(
         &self,
         mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
@@ -813,6 +932,16 @@ impl EcosystemEntry {
         self.declared_return_in(case)
             .filter(|t| *t != SELF_RETURN_TYPE)
             .map(|t| split_receiver_items(t).0)
+    }
+
+    /// The class of what a call passing `arg` (as for [`Self::case_for`]) returns: its
+    /// case's or its own, or that of the file object a call opening a file returns.
+    pub fn result_class(
+        &self,
+        mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<&str> {
+        self.return_type_in(self.case_for(&mut arg))
+            .or_else(|| Some(self.file_object.as_ref()?.class(arg)))
     }
 
     /// Whether the items of what the call returns are instances of its receiver's class
@@ -2172,12 +2301,115 @@ mod tests {
         EcosystemEntry { cases, ..e }
     }
 
+    /// The `str` path classes a function of `os.path` makes a `str` of.
+    const STR_PATHS: &[&str] = &[
+        "builtins.str",
+        "pathlib.Path",
+        "pathlib.PurePath",
+        "pathlib.PosixPath",
+        "pathlib.WindowsPath",
+        "pathlib.PurePosixPath",
+        "pathlib.PureWindowsPath",
+    ];
+
+    /// The cases of a call returning a path of the kind of the one it is passed: `str` for one
+    /// of `strs`, `bytes` for `bytes`.
+    fn path_kind(arg: Option<u8>, param: Option<&str>, strs: &[&str]) -> Vec<ArgCase> {
+        [
+            (strs, "builtins.str"),
+            (&["builtins.bytes"][..], "builtins.bytes"),
+        ]
+        .into_iter()
+        .map(|(given, class)| ArgCase {
+            arg,
+            param: param.map(Into::into),
+            instance_of: s(given),
+            return_type: Some(class.into()),
+            ..ArgCase::default()
+        })
+        .collect()
+    }
+
     /// Every Layer 2 entry (docs/ANALYSIS_AND_KB_SPEC.md section 4.2), as `(symbols, expected
     /// entry without symbol)`.
+    /// The calls opening a file as `io.open` does, and the members of the classes of the file
+    /// objects they return.
+    fn file_objects() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let opening = |file: Option<u8>, mode: u8| EcosystemEntry {
+            file_object: Some(Box::new(FileArgs {
+                file: ArgSlot {
+                    arg: file,
+                    param: file.map(|_| "file".into()),
+                },
+                mode: ArgSlot {
+                    arg: Some(mode),
+                    param: Some("mode".into()),
+                },
+                buffering: ArgSlot {
+                    arg: Some(mode + 1),
+                    param: Some("buffering".into()),
+                },
+            })),
+            ..entry(&[BlockingFs])
+        };
+        let mut out = vec![
+            (s(&["builtins.open", "io.open"]), opening(Some(0), 1)),
+            (s(&["pathlib.Path.open"]), opening(None, 0)),
+        ];
+        for class in FILE_CLASSES.iter().copied().chain([ANY_FILE_CLASS]) {
+            let reads = class != "io.BufferedWriter";
+            let writes = class != "io.BufferedReader";
+            let flushes = !matches!(class, "io.BufferedReader" | "io.FileIO");
+            let tell_flushes = matches!(class, "io.TextIOWrapper" | ANY_FILE_CLASS);
+            let line = match class {
+                "io.TextIOWrapper" => Some("builtins.str"),
+                "io.BufferedWriter" | ANY_FILE_CLASS => None,
+                _ => Some("builtins.bytes"),
+            };
+            let int = Some("builtins.int");
+            let bool = Some("builtins.bool");
+            let members = [
+                ("read", reads, line.filter(|_| class != "io.FileIO")),
+                ("readline", reads, line),
+                ("readlines", reads, reads.then_some("builtins.list")),
+                (
+                    "write",
+                    writes,
+                    int.filter(|_| writes && !matches!(class, "io.FileIO" | ANY_FILE_CLASS)),
+                ),
+                ("writelines", writes, None),
+                ("seek", true, int),
+                ("tell", tell_flushes, int),
+                ("truncate", writes, int.filter(|_| writes)),
+                ("flush", flushes, None),
+                ("close", true, None),
+                ("fileno", false, int),
+                ("readable", false, bool),
+                ("writable", false, bool),
+                ("seekable", false, bool),
+                ("isatty", false, bool),
+                ("__iter__", reads, Some(SELF_RETURN_TYPE)),
+                ("__next__", reads, line),
+                ("__enter__", false, Some(SELF_RETURN_TYPE)),
+                ("__exit__", true, None),
+            ];
+            for (member, waits, returns) in members {
+                let effects: &[ExecEffectKind] = if waits { &[BlockingFs] } else { &[] };
+                let e = EcosystemEntry {
+                    return_type: returns.map(Into::into),
+                    ..entry(effects)
+                };
+                out.push((vec![format!("{class}.{member}")], e));
+            }
+        }
+        out
+    }
+
     fn layer2_required() -> Vec<(Vec<String>, EcosystemEntry)> {
         [
             one_at_a_time_apis(),
             standard_library(),
+            file_objects(),
             http_clients(),
             boto3_clients(),
             sync_databases(),
@@ -2438,7 +2670,6 @@ mod tests {
                     "os.lchown",
                     "os.link",
                     "os.listxattr",
-                    "os.lstat",
                     "os.makedirs",
                     "os.mkdir",
                     "os.mkfifo",
@@ -2481,7 +2712,6 @@ mod tests {
                     "pathlib.Path.is_socket",
                     "pathlib.Path.is_symlink",
                     "pathlib.Path.lchmod",
-                    "pathlib.Path.lstat",
                     "pathlib.Path.mkdir",
                     "pathlib.Path.move",
                     "pathlib.Path.move_into",
@@ -2705,17 +2935,31 @@ mod tests {
                 ),
             ),
             (
-                s(&[
-                    "os.getcwd",
-                    "os.getcwdb",
-                    "os.path.abspath",
-                    "os.path.expanduser",
-                    "os.path.expandvars",
-                    "os.path.relpath",
-                ]),
+                s(&["os.path.expandvars"]),
                 EcosystemEntry {
                     environment: Some(EnvironmentAccess::Call),
                     ..entry(&[])
+                },
+            ),
+            (
+                s(&["os.getcwd"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning("builtins.str", entry(&[]))
+                },
+            ),
+            (
+                s(&["os.getcwdb"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning("builtins.bytes", entry(&[]))
+                },
+            ),
+            (
+                s(&["os.path.abspath", "os.path.expanduser", "os.path.relpath"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..with_cases(path_kind(Some(0), Some("path"), STR_PATHS), entry(&[]))
                 },
             ),
             (
@@ -2950,19 +3194,21 @@ mod tests {
     /// `EFF112`: the calls writing an argument in the order of its elements, with no other fact
     /// (the file writes of `pathlib` are in [`ORDERED_OUTPUTS`] too).
     fn ordered_outputs() -> Vec<(Vec<String>, EcosystemEntry)> {
-        vec![(
-            s(&[
-                "builtins.print",
-                "json.dumps",
-                "json.dump",
-                "pprint.pprint",
-                "pprint.pformat",
-                "pprint.pp",
-                "yaml.dump",
-                "yaml.safe_dump",
-            ]),
-            entry(&[]),
-        )]
+        vec![
+            (
+                s(&[
+                    "builtins.print",
+                    "json.dump",
+                    "pprint.pprint",
+                    "pprint.pformat",
+                    "pprint.pp",
+                    "yaml.dump",
+                    "yaml.safe_dump",
+                ]),
+                entry(&[]),
+            ),
+            (s(&["json.dumps"]), returning("builtins.str", entry(&[]))),
+        ]
     }
 
     /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
@@ -3039,7 +3285,7 @@ mod tests {
                         package: Some(slot(1, "package")),
                         level: None,
                     })),
-                    ..tagged(EnvironmentAccess::Import)
+                    ..returning("types.ModuleType", tagged(EnvironmentAccess::Import))
                 },
             ),
             (
@@ -3115,15 +3361,17 @@ mod tests {
             (
                 with_prefix(
                     "subprocess",
-                    &[
-                        "run",
-                        "call",
-                        "check_call",
-                        "check_output",
-                        "Popen.communicate",
-                    ],
+                    &["call", "check_call", "check_output", "Popen.communicate"],
                 ),
                 entry(&[BlockingSubprocess]),
+            ),
+            (
+                s(&["subprocess.run"]),
+                returning("subprocess.CompletedProcess", entry(&[BlockingSubprocess])),
+            ),
+            (
+                s(&["subprocess.CompletedProcess.check_returncode"]),
+                entry(&[]),
             ),
             (
                 s(&["subprocess.Popen.wait"]),
@@ -3165,32 +3413,66 @@ mod tests {
             ),
             (
                 s(&[
-                    "builtins.open",
-                    "io.open",
-                    "pathlib.Path.read_text",
-                    "pathlib.Path.read_bytes",
                     "pathlib.Path.write_text",
                     "pathlib.Path.write_bytes",
-                    "pathlib.Path.open",
                     "os.listdir",
                     "os.scandir",
                     "os.walk().__iter__",
-                    "shutil.copy",
-                    "shutil.copy2",
-                    "shutil.copytree",
                     "shutil.rmtree",
-                    "os.stat",
                     "os.path.exists",
                     "os.path.isfile",
                     "os.path.isdir",
-                    "os.path.realpath",
                     "pathlib.Path.exists",
-                    "pathlib.Path.stat",
                     "pathlib.Path.is_file",
                     "pathlib.Path.is_dir",
                     "starlette.staticfiles.StaticFiles.lookup_path",
                 ]),
                 entry(&[BlockingFs]),
+            ),
+            (
+                s(&["pathlib.Path.read_text"]),
+                returning("builtins.str", entry(&[BlockingFs])),
+            ),
+            (
+                s(&["pathlib.Path.read_bytes"]),
+                returning("builtins.bytes", entry(&[BlockingFs])),
+            ),
+            (
+                s(&[
+                    "os.stat",
+                    "os.lstat",
+                    "pathlib.Path.stat",
+                    "pathlib.Path.lstat",
+                ]),
+                returning("os.stat_result", entry(&[BlockingFs])),
+            ),
+            (
+                s(&["os.path.realpath"]),
+                with_cases(path_kind(Some(0), None, STR_PATHS), entry(&[BlockingFs])),
+            ),
+            (
+                s(&["shutil.copy", "shutil.copy2"]),
+                with_cases(
+                    path_kind(Some(1), Some("dst"), &["builtins.str"]),
+                    entry(&[BlockingFs]),
+                ),
+            ),
+            (
+                s(&["shutil.copytree"]),
+                with_cases(
+                    [
+                        path_kind(Some(1), Some("dst"), &["builtins.str"]),
+                        vec![ArgCase {
+                            arg: Some(1),
+                            param: Some("dst".into()),
+                            instance_of: s(&["pathlib.Path"]),
+                            return_type: Some("pathlib.Path".into()),
+                            ..ArgCase::default()
+                        }],
+                    ]
+                    .concat(),
+                    entry(&[BlockingFs]),
+                ),
             ),
             (
                 s(&["pathlib.Path.resolve"]),
@@ -3355,6 +3637,50 @@ mod tests {
             (
                 s(&["importlib.util.module_from_spec"]),
                 returning("types.ModuleType", entry(&[])),
+            ),
+            (
+                s(&["logging.getLogger"]),
+                returning("logging.Logger", entry(&[])),
+            ),
+            (
+                s(&["threading.current_thread", "threading.main_thread"]),
+                returning("threading.Thread", entry(&[])),
+            ),
+            (s(&["re.compile"]), returning("re.Pattern", entry(&[]))),
+            (
+                with_prefix("re.Pattern", &["match", "search", "fullmatch", "finditer"]),
+                entry(&[]),
+            ),
+            (
+                with_prefix("re.Pattern", &["findall", "split"]),
+                returning("builtins.list", entry(&[])),
+            ),
+            (
+                s(&["urllib.parse.urlparse"]),
+                with_cases(
+                    [
+                        ("builtins.str", "urllib.parse.ParseResult"),
+                        ("builtins.bytes", "urllib.parse.ParseResultBytes"),
+                    ]
+                    .into_iter()
+                    .map(|(given, class)| ArgCase {
+                        arg: Some(0),
+                        param: Some("url".into()),
+                        instance_of: s(&[given]),
+                        return_type: Some(class.into()),
+                        ..ArgCase::default()
+                    })
+                    .collect(),
+                    entry(&[]),
+                ),
+            ),
+            (
+                s(&["urllib.parse.ParseResult.geturl"]),
+                returning("builtins.str", entry(&[])),
+            ),
+            (
+                s(&["urllib.parse.ParseResultBytes.geturl"]),
+                returning("builtins.bytes", entry(&[])),
             ),
             (
                 with_prefix(
@@ -4948,9 +5274,21 @@ mod tests {
         ),
         (
             ResultItems::Lines,
-            &["builtins.open", "io.open", "pathlib.Path.open"],
+            &[
+                "builtins.open",
+                "io.open",
+                "pathlib.Path.open",
+                "io.TextIOWrapper.readlines",
+                "io.BufferedReader.readlines",
+                "io.BufferedRandom.readlines",
+                "io.FileIO.readlines",
+                "io.open().readlines",
+            ],
         ),
-        (ResultItems::Text, &["pathlib.Path.read_text"]),
+        (
+            ResultItems::Text,
+            &["pathlib.Path.read_text", "io.TextIOWrapper.read"],
+        ),
         (
             ResultItems::Entries,
             &[
@@ -5246,6 +5584,115 @@ mod tests {
         assert_eq!(kb.api_class("sqlite3.Connection"), None);
     }
 
+    /// The class of the file object `io.open` returns, by its mode and its buffering as CPython
+    /// decides them; an argument left out takes its default, one heki does not know gives the
+    /// class of the members every file class has.
+    #[test]
+    fn a_file_class_follows_the_mode_and_the_buffering() {
+        const RAW: &str = "io.FileIO";
+        const TEXT: &str = "io.TextIOWrapper";
+        const READER: &str = "io.BufferedReader";
+        const WRITER: &str = "io.BufferedWriter";
+        const RANDOM: &str = "io.BufferedRandom";
+        for (mode, buffering, class) in [
+            (Some("r"), Some(-1), TEXT),
+            (Some("rt"), None, TEXT),
+            (Some("tr"), Some(1), TEXT),
+            (Some("w+"), Some(4096), TEXT),
+            (Some("a"), Some(-1), TEXT),
+            (Some("x"), Some(-1), TEXT),
+            (Some("rb"), Some(-1), READER),
+            (Some("br"), Some(8192), READER),
+            (Some("wb"), Some(-1), WRITER),
+            (Some("ab"), Some(1), WRITER),
+            (Some("xb"), Some(-1), WRITER),
+            (Some("r+b"), Some(-1), RANDOM),
+            (Some("wb+"), Some(-1), RANDOM),
+            (Some("+ab"), Some(-1), RANDOM),
+            (Some("rb"), Some(0), RAW),
+            (Some("w+b"), Some(0), RAW),
+            (None, Some(0), RAW),
+            (Some("rb"), None, ANY_FILE_CLASS),
+            (None, Some(-1), ANY_FILE_CLASS),
+            (Some("rU"), Some(-1), ANY_FILE_CLASS),
+            (Some("rw"), Some(-1), ANY_FILE_CLASS),
+            (Some("rbt"), Some(-1), ANY_FILE_CLASS),
+            (Some("rr"), Some(-1), ANY_FILE_CLASS),
+            (Some(""), Some(-1), ANY_FILE_CLASS),
+        ] {
+            assert_eq!(file_class(mode, buffering), class, "{mode:?} {buffering:?}");
+        }
+        let args = FileArgs {
+            file: ArgSlot {
+                arg: Some(0),
+                param: Some("file".into()),
+            },
+            mode: ArgSlot {
+                arg: Some(1),
+                param: Some("mode".into()),
+            },
+            buffering: ArgSlot {
+                arg: Some(2),
+                param: Some("buffering".into()),
+            },
+        };
+        let lit = |v| ArgFact {
+            literal: Some(v),
+            ..ArgFact::default()
+        };
+        let path = lit(LiteralValue::Str("x.bin".into()));
+        let call_on = |file: ArgFact, mode: Option<ArgFact>, buffering: Option<ArgFact>| {
+            args.class(|i, _| match i {
+                Some(0) => Some(file.clone()),
+                Some(1) => mode.clone(),
+                _ => buffering.clone(),
+            })
+        };
+        let call = |mode: Option<ArgFact>, buffering: Option<ArgFact>| {
+            call_on(path.clone(), mode, buffering)
+        };
+        let rb = || Some(lit(LiteralValue::Str("rb".into())));
+        assert_eq!(call_on(ArgFact::default(), rb(), None), ANY_FILE_CLASS);
+        assert_eq!(
+            call_on(lit(LiteralValue::Int(3)), rb(), None),
+            ANY_FILE_CLASS
+        );
+        assert_eq!(call_on(lit(LiteralValue::Int(3)), None, None), TEXT);
+        assert_eq!(
+            call_on(
+                lit(LiteralValue::Int(3)),
+                rb(),
+                Some(lit(LiteralValue::Int(0)))
+            ),
+            RAW
+        );
+        assert_eq!(call(None, None), TEXT);
+        assert_eq!(
+            call(Some(lit(LiteralValue::Str("rb".into()))), None),
+            READER
+        );
+        assert_eq!(
+            call(
+                Some(lit(LiteralValue::Str("rb".into()))),
+                Some(lit(LiteralValue::Bool(false)))
+            ),
+            RAW
+        );
+        assert_eq!(call(Some(ArgFact::default()), None), ANY_FILE_CLASS);
+        assert_eq!(
+            call(
+                Some(lit(LiteralValue::Str("wb".into()))),
+                Some(ArgFact::default())
+            ),
+            ANY_FILE_CLASS
+        );
+        assert_eq!(
+            call(None, Some(lit(LiteralValue::Float(0.0)))),
+            TEXT,
+            "a float buffering raises"
+        );
+    }
+
     /// No async API can fire `EFF101`: async APIs are often called without a direct `await`
     /// (`async with`, `asyncio.gather(...)`, `asyncio.wait_for(...)`), where the `is_awaited`
     /// filter does not apply, so an `async_safe` entry never carries a blocking effect and every
@@ -5286,6 +5733,20 @@ mod tests {
         assert_eq!(seen.len(), ASYNC_NAMESPACES.len(), "{seen:?}");
     }
 
+    /// Whether a result of `class` is typed: the class has catalogued members (methods, or
+    /// attributes it types), is itself the fact, or is a builtin type.
+    fn types_a_result(kb: &EffectiveEcosystemKb, class: &str) -> bool {
+        let members = format!("{class}.");
+        kb.entries.keys().any(|k| k.starts_with(&members))
+            || kb.attributes.keys().any(|k| k.starts_with(&members))
+            || FUTURE_CLASSES.contains(&class)
+            || THREAD_LOCAL_CLASSES.contains(&class)
+            || class.starts_with("builtins.")
+            // Any module: the class says nothing of the names a value binds, and a call on one
+            // is unresolved by design (`resolver::is_any_module`).
+            || class == "types.ModuleType"
+    }
+
     /// A `return_type` naming a class without catalogued members (methods, or attributes it
     /// types) would leave the factory's result unresolved without any sign (a typo, or a class
     /// spelled another way), unless the class itself is the fact ([`FUTURE_CLASSES`]) or a
@@ -5297,16 +5758,8 @@ mod tests {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         for (symbol, e) in &kb.entries {
             if let Some(class) = e.return_type_in(None) {
-                let methods = format!("{class}.");
                 assert!(
-                    kb.entries.keys().any(|k| k.starts_with(&methods))
-                        || kb.attributes.keys().any(|k| k.starts_with(&methods))
-                        || FUTURE_CLASSES.contains(&class)
-                        || THREAD_LOCAL_CLASSES.contains(&class)
-                        || class.starts_with("builtins.")
-                        // Any module: the class says nothing of the names a value binds, and a
-                        // call on one is unresolved by design (`resolver::is_any_module`).
-                        || class == "types.ModuleType"
+                    types_a_result(&kb, class)
                         || (e.returns_receiver_items_in(None) && class.starts_with("typing.")),
                     "{symbol} -> {class}"
                 );
@@ -5369,11 +5822,7 @@ mod tests {
                     "{symbol}"
                 );
                 if let Some(class) = &case.return_type {
-                    let methods = format!("{class}.");
-                    assert!(
-                        kb.entries.keys().any(|k| k.starts_with(&methods)),
-                        "{symbol} -> {class}"
-                    );
+                    assert!(types_a_result(&kb, class), "{symbol} -> {class}");
                 }
             }
         }

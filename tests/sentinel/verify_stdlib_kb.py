@@ -15,6 +15,10 @@ The receiver typing reads these rows as the class of what a call or an attribute
      receiver's items (`"shallow"`).
   4. `returns_held`: the method gives the very object its receiver holds, and with `default`, the
      default it is passed where the receiver holds none.
+  5. The `return_type` of an argument case: the call gives an instance of exactly that class when
+     it is passed an instance of each class the case names.
+A function whose result may be an instance of a subclass (`SUBCLASSES`) gives an instance of the
+class or of one of its subclasses.
 Every row of kinds 1, 4, and `"Self"` has receivers here, or the check fails; a row of kinds 2 and
 3 is checked where its class has them.
 
@@ -25,13 +29,23 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import importlib.machinery
 import importlib.util
 import inspect
+import itertools
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
+import urllib.parse
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -60,11 +74,41 @@ def tokens() -> list[Any]:
     return [contextvars.ContextVar("sentinel").set(1)]
 
 
+# Closes the files this script opens, then removes their directories, whatever `main` ends with.
+CLEANUP = contextlib.ExitStack()
+
+
+def scratch_directory() -> Path:
+    """A new directory, removed when `CLEANUP` closes (after the files opened in it)."""
+    folder = CLEANUP.enter_context(tempfile.TemporaryDirectory(prefix="heki-sentinel-"))
+    return Path(folder)
+
+
 def paths() -> list[Any]:
     """A directory holding one file, kept for the life of the script."""
-    folder = Path(tempfile.mkdtemp(prefix="heki-sentinel-"))
+    folder = scratch_directory()
     (folder / "f.txt").write_text("x")
     return [folder]
+
+
+def files(*modes: str) -> Callable[[], list[Any]]:
+    """New files holding two lines, opened in each of `modes` (`"r+b0"`: with `buffering=0`)."""
+
+    def make() -> list[Any]:
+        folder = scratch_directory()
+        opened = []
+        for i, mode in enumerate(modes):
+            path = folder / f"f{i}.txt"
+            path.write_text("a\nb\n")
+            unbuffered = mode.endswith("0")
+            opened.append(
+                CLEANUP.enter_context(
+                    open(path, mode.removesuffix("0"), buffering=0 if unbuffered else -1)
+                )
+            )
+        return opened
+
+    return make
 
 
 # Instances of each class whose rows are checked, by the symbol the rows name it with.
@@ -73,17 +117,83 @@ RECEIVERS: dict[str, Callable[[], list[Any]]] = {
     "contextvars.ContextVar": context_variables,
     "contextvars.Token": tokens,
     "pathlib.Path": paths,
+    "io.TextIOWrapper": files("r+"),
+    "io.BufferedReader": files("rb"),
+    "io.BufferedWriter": files("ab"),
+    "io.BufferedRandom": files("r+b"),
+    "io.FileIO": files("r+b0"),
+    # A file object of a mode heki does not know: one of each class whose members all work.
+    "io.open()": files("r+", "r+b", "r+b0"),
+    "os.stat_result": lambda: [os.stat(KB)],
+    "subprocess.CompletedProcess": lambda: [subprocess.run([sys.executable, "-c", ""], check=True)],
+    "re.Pattern": lambda: [re.compile("a")],
+    "urllib.parse.ParseResult": lambda: [urllib.parse.urlparse("http://h/p")],
+    "urllib.parse.ParseResultBytes": lambda: [urllib.parse.urlparse(b"http://h/p")],
 }
 
-# Calls of the functions of a module whose `return_type` is checked, by symbol.
+def text_file() -> Path:
+    """A file holding one line, kept for the life of the script."""
+    path = scratch_directory() / "f.txt"
+    path.write_text("x\n")
+    return path
+
+
+# Calls whose `return_type` is checked, by symbol: of the functions of a module, and of the
+# methods whose receivers here are of no use to them.
 FUNCTIONS: dict[str, Callable[[], Any]] = {
     "importlib.util.module_from_spec": lambda: importlib.util.module_from_spec(
         importlib.machinery.ModuleSpec("sentinel", None)
     ),
+    "importlib.import_module": lambda: importlib.import_module("json"),
+    "subprocess.run": lambda: subprocess.run([sys.executable, "-c", ""], check=True),
+    "os.stat": lambda: os.stat(KB),
+    "os.lstat": lambda: os.lstat(KB),
+    "pathlib.Path.stat": lambda: KB.stat(),
+    "pathlib.Path.lstat": lambda: KB.lstat(),
+    "pathlib.Path.read_text": lambda: text_file().read_text(),
+    "pathlib.Path.read_bytes": lambda: text_file().read_bytes(),
+    "os.getcwd": os.getcwd,
+    "os.getcwdb": os.getcwdb,
+    "json.dumps": lambda: json.dumps({"a": [1]}),
+    "logging.getLogger": lambda: logging.getLogger("heki.sentinel"),
+    "threading.current_thread": threading.current_thread,
+    "threading.main_thread": threading.main_thread,
+    "re.compile": lambda: re.compile("a"),
+}
+
+# The functions whose result may be an instance of a subclass of their `return_type`.
+SUBCLASSES = {"logging.getLogger", "threading.current_thread", "threading.main_thread"}
+
+COUNTER = itertools.count()
+
+
+def fresh() -> str:
+    """A path nothing is at yet, in a directory removed when `CLEANUP` closes."""
+    return str(scratch_directory() / f"n{next(COUNTER)}")
+
+
+def tree() -> str:
+    """A directory holding one file."""
+    return str(text_file().parent)
+
+
+# Calls of the functions whose argument cases name the class of the result: each passes the
+# argument the cases test as `made` makes it of the class a case names.
+CASE_CALLS: dict[str, Callable[[Callable[[str], Any]], Any]] = {
+    "os.path.abspath": lambda made: os.path.abspath(made("x")),
+    "os.path.realpath": lambda made: os.path.realpath(made("x")),
+    "os.path.relpath": lambda made: os.path.relpath(made("x")),
+    "os.path.expanduser": lambda made: os.path.expanduser(made("~/x")),
+    "shutil.copy": lambda made: shutil.copy(str(text_file()), made(fresh())),
+    "shutil.copy2": lambda made: shutil.copy2(str(text_file()), made(fresh())),
+    "shutil.copytree": lambda made: shutil.copytree(made(tree()), made(fresh())),
+    "urllib.parse.urlparse": lambda made: urllib.parse.urlparse(made("http://h/p")),
 }
 
 # The arguments a method is called with, when it takes some.
 ARGUMENTS: dict[str, tuple[Any, ...]] = {
+    "re.Pattern.findall": ("a",),
+    "re.Pattern.split": ("a",),
     "typing.NamedTuple._make": ([3, 4],),
     "contextvars.ContextVar.set": (object(),),
     "pathlib.Path.joinpath": ("x",),
@@ -95,6 +205,15 @@ ARGUMENTS: dict[str, tuple[Any, ...]] = {
     "pathlib.Path.__rtruediv__": ("x",),
     "pathlib.Path.glob": ("*",),
     "pathlib.Path.rglob": ("*",),
+    "io.TextIOWrapper.write": ("x",),
+    "io.BufferedWriter.write": (b"x",),
+    "io.BufferedRandom.write": (b"x",),
+    "io.TextIOWrapper.seek": (0,),
+    "io.BufferedReader.seek": (0,),
+    "io.BufferedWriter.seek": (0,),
+    "io.BufferedRandom.seek": (0,),
+    "io.FileIO.seek": (0,),
+    "io.open().seek": (0,),
 }
 
 
@@ -212,9 +331,45 @@ def check_return(symbol: str, entry: dict) -> list[str]:
 
 def check_function(symbol: str, expected: str, call: Callable[[], Any]) -> list[str]:
     result = call()
-    if type(result) is not resolve(expected):
+    cls = resolve(expected)
+    if not (isinstance(result, cls) if symbol in SUBCLASSES else type(result) is cls):
         return [f"{symbol}: gives {type(result).__qualname__}, not {expected}"]
     return []
+
+
+def made_of(cls: str) -> Callable[[str], Any] | None:
+    """What makes a path or a URL of the text it is given an instance of `cls`; `None` where
+    this system makes none (a `WindowsPath` elsewhere)."""
+    if cls == "builtins.str":
+        return str
+    if cls == "builtins.bytes":
+        return os.fsencode
+    try:
+        resolve(cls)("x")
+    except Exception:
+        return None
+    return resolve(cls)
+
+
+def check_cases(symbol: str, entry: dict) -> list[str]:
+    call = CASE_CALLS.get(symbol)
+    if call is None:
+        return [f"{symbol}: no calls for its cases"]
+    failures = []
+    for case in entry["cases"]:
+        expected = case.get("return_type")
+        if expected is None:
+            continue
+        for given in case["instance_of"]:
+            made = made_of(given)
+            if made is None:
+                continue
+            result = call(made)
+            if type(result) is not resolve(expected):
+                failures.append(
+                    f"{symbol}: of a {given} gives {type(result).__qualname__}, not {expected}"
+                )
+    return failures
 
 
 def check_held(symbol: str, held_row: dict) -> list[str]:
@@ -245,6 +400,11 @@ def checked(symbol: str, check: Callable[[], list[str]]) -> list[str]:
 
 
 def main() -> int:
+    with CLEANUP:
+        return run()
+
+
+def run() -> int:
     data = tomllib.loads(KB.read_text())
     failures: list[str] = []
     for row in data.get("attributes", []):
@@ -261,6 +421,10 @@ def main() -> int:
         elif entry.get("return_type") or (entry.get("copy_sanitizer") and owner in RECEIVERS):
             failures += checked(symbol, lambda: check_return(symbol, entry))
             entries += owner in RECEIVERS
+        cases = [c for c in entry.get("cases", []) if "(" not in c.get("return_type", "(")]
+        if cases:
+            failures += checked(symbol, lambda: check_cases(symbol, {"cases": cases}))
+            entries += 1
         if "returns_held" in entry:
             failures += checked(symbol, lambda: check_held(symbol, entry["returns_held"]))
             entries += 1

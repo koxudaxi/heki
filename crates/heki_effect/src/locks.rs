@@ -18,6 +18,12 @@
 //! such a function, no longer holds what the name reaches. The tests of state on every path to
 //! an acquisition ([`StateTests`]) are those of the acquiring function and of every function on
 //! the way from the holder's call: each call site keeps the tests on every path to it.
+//!
+//! The exact tier asks for more (`heki_rules::premises`): an acquisition the function attempts
+//! whenever it returns normally ([`LockAcquire::on_every_return`]), itself or through calls
+//! whose every implementation does ([`crate::ProjectIndex::site_must_take`]), and no lock given
+//! back under its name where the function did not take it ([`LockFacts::gives_back`]): a helper
+//! that releases its caller's lock, or another thread's signal.
 
 use crate::guards;
 use crate::held::{Acquisitions, Change};
@@ -109,6 +115,12 @@ pub struct LockAcquire {
     /// the functions on the way to it; open past the most tests kept, where every test may be
     /// one.
     pub tests: Answer<OwnerTests>,
+    /// The function attempts the acquisition whenever it returns normally: its own at a point
+    /// every normal return has passed, or through a call it has made whenever it returns, whose
+    /// every implementation attempts it whenever it returns (`chain` is then that way). Never
+    /// for a name the function may give back ([`LockFacts::gives_back`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_every_return: bool,
 }
 
 /// The tests of state on the way to the acquisitions of one lock. Code changing one of them
@@ -150,11 +162,19 @@ pub struct LockFacts {
     /// `EffectSummary::mutated_param_paths`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebinds: BTreeSet<ObjRef>,
+    /// The locks the function may give back where it has not taken them, itself or through the
+    /// calls it makes on its thread or task, in its own names ([`unheld_releases`]): a helper
+    /// releasing its caller's lock, or a signal to another thread. A caller holding one of them
+    /// no longer certainly holds it after the call, and the function takes none of them on
+    /// every return.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub gives_back: BTreeSet<ObjRef>,
 }
 
 pub(crate) static NO_LOCK_FACTS: LockFacts = LockFacts {
     acquires: BTreeMap::new(),
     rebinds: BTreeSet::new(),
+    gives_back: BTreeSet::new(),
 };
 
 impl LockFacts {
@@ -165,15 +185,23 @@ impl LockFacts {
                 .map(|(lock, acq)| (lock.clone(), acq.without_locations()))
                 .collect(),
             rebinds: self.rebinds.clone(),
+            gives_back: self.gives_back.clone(),
         }
     }
 
-    /// Add the facts of `other`: its acquisitions ([`add_acquisition`]) and what it binds.
+    /// Add the facts of `other`: its acquisitions ([`add_acquisition`]), what it binds, and
+    /// what it gives back, under whose names no lock is taken on every return any more.
     pub(crate) fn absorb(&mut self, other: LockFacts) {
         for (lock, acq) in other.acquires {
             add_acquisition(&mut self.acquires, lock, acq);
         }
         self.rebinds.extend(other.rebinds);
+        self.gives_back.extend(other.gives_back);
+        for lock in &self.gives_back {
+            if let Some(acq) = self.acquires.get_mut(lock) {
+                acq.on_every_return = false;
+            }
+        }
     }
 }
 
@@ -194,8 +222,47 @@ pub fn may_rebind(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
     }
 }
 
+/// Whether the function with facts `facts` may give back a lock under the name `lock` (its own
+/// names) where it has not taken it ([`LockFacts::gives_back`]).
+pub fn may_give_back(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
+    facts.lock_facts().gives_back.contains(lock)
+}
+
+/// Whether `f` calls a method `release`: without one it gives no lock back
+/// ([`unheld_releases`]).
+pub(crate) fn calls_release(f: &IrFunction) -> bool {
+    (f.blocks.iter().flat_map(|b| &b.insts))
+        .any(|i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == "release"))
+}
+
+/// The locks `steps` (of a function of shape `shape`) give back where the function does not
+/// hold them by its own acquisitions, at each `release()` a run reaches.
+pub fn unheld_releases(shape: &FnShape<'_>, steps: &LockSteps) -> Vec<ObjRef> {
+    let mut out = Vec::new();
+    if steps.releases.is_empty() {
+        return out;
+    }
+    let entry = crate::held::at_entry(shape, steps.taken.len(), |b, i| steps.changes.get(&(b, i)));
+    let reached = entry
+        .into_iter()
+        .enumerate()
+        .filter_map(|(b, s)| Some((BlockId(b as u32), s?)));
+    for (bb, mut state) in reached {
+        for i in 0..shape.f.block(bb).insts.len() {
+            if let Some(lock) = steps.releases.get(&(bb, i))
+                && !state.ones().any(|k| steps.taken.item(k).lock == *lock)
+                && !out.contains(lock)
+            {
+                out.push(lock.clone());
+            }
+            state.apply(steps.changes.get(&(bb, i)));
+        }
+    }
+    out
+}
+
 /// Add one more acquisition of `lock`: the guards, tests, and calls every acquisition needs,
-/// and the shortest chain.
+/// whether one is attempted on every return, and the shortest chain of those that are, if any.
 pub(crate) fn add_acquisition(
     acquires: &mut BTreeMap<ObjRef, LockAcquire>,
     lock: ObjRef,
@@ -219,10 +286,12 @@ pub(crate) fn add_acquisition(
                 }
                 (Answer::Open, other) | (other, Answer::Open) => other,
             };
-            if acq.chain.len() < cur.chain.len() {
+            let shorter = acq.chain.len() < cur.chain.len();
+            if (acq.on_every_return, shorter) > (cur.on_every_return, false) {
                 cur.chain = acq.chain;
                 cur.class = acq.class;
             }
+            cur.on_every_return |= acq.on_every_return;
         }
     }
 }
@@ -257,6 +326,9 @@ pub(crate) fn through_call(
             chain: callgraph::extend_chain(lead, &acq.chain, rewrite),
             guards: through.guards,
             tests: acq.tests.clone(),
+            // Whether every implementation of the call attempts it is the site's question
+            // (`ProjectIndex::site_must_take`).
+            on_every_return: false,
         },
     ))
 }
@@ -285,7 +357,7 @@ pub struct SiteLock {
 impl crate::ProjectIndex {
     /// The locks the project callees of `site` (in file `path`) take in its caller's body, on
     /// the caller's thread or task ([`Self::delivery`]), in the caller's names; not one taken
-    /// under a name the callee may bind first ([`may_rebind`]).
+    /// under a name the callee may bind first ([`may_rebind`]) or give back ([`may_give_back`]).
     pub fn site_locks(&self, path: &Path, site: &CallSite) -> Vec<SiteLock> {
         let mut out = Vec::new();
         for bc in site.project_callees() {
@@ -300,7 +372,7 @@ impl crate::ProjectIndex {
             let lead = callgraph::lead_hops(site, path, &bc.callee, d.via);
             let rewrite = callgraph::rewrites(callee, d.from);
             for (lock, acq) in &facts.lock_facts().acquires {
-                if may_rebind(facts, lock) {
+                if may_rebind(facts, lock) || may_give_back(facts, lock) {
                     continue;
                 }
                 let Some((lock, acq)) = through_call(
@@ -326,8 +398,62 @@ impl crate::ProjectIndex {
         out
     }
 
-    /// The names of the caller of `site` that its project callees may bind ([`may_rebind`]),
-    /// in the caller's names: an attribute of a parameter, a module global, a closure variable.
+    /// The acquisition of `lock` (in the caller's names) that every implementation the call at
+    /// `site` (in file `path`) can run attempts whenever it returns normally: the steps of
+    /// "Every implementation" that [`callgraph::site_must_chain`] takes for an effect. The call
+    /// runs its targets there, on the caller's thread or task; they are every implementation it
+    /// can run ([`CallSite::complete`]); each but an abstract method (which never runs) runs its
+    /// body at the call, as written (no decorator that may replace it, its name bound once);
+    /// and each attempts the acquisition under that name whenever it returns
+    /// ([`LockAcquire::on_every_return`]), under no name it may bind or give back. The first
+    /// target's acquisition, with the call in front of its chain; `None` when a step fails or
+    /// no target runs.
+    pub fn site_must_take(
+        &self,
+        path: &Path,
+        site: &CallSite,
+        lock: &ObjRef,
+    ) -> Option<LockAcquire> {
+        if !site.runs_targets_here() || !site.complete {
+            return None;
+        }
+        let mut first = None;
+        for bc in site.project_callees() {
+            let callee = self.summary(&bc.callee)?;
+            if callee.is_abstract() {
+                continue;
+            }
+            let as_written = callgraph::runs_at_call(callee, site)
+                && !callee.decorator_may_replace
+                && !callee.must_exec.as_ref().is_some_and(|m| m.bound_twice);
+            if !as_written {
+                return None;
+            }
+            let d = (self.delivery(site, callee)).filter(|d| d.into == crate::Facts::Body)?;
+            let facts = callee.facts(d.from)?;
+            let lead = callgraph::lead_hops(site, path, &bc.callee, d.via);
+            let rewrite = callgraph::rewrites(callee, d.from);
+            let taken = (facts.lock_facts().acquires.iter())
+                .filter(|(name, acq)| {
+                    acq.on_every_return && !may_rebind(facts, name) && !may_give_back(facts, name)
+                })
+                .find_map(|(name, acq)| {
+                    let caps = &self.param_capacities;
+                    through_call(site, bc, name, acq, &lead, rewrite, &BTreeMap::new(), caps)
+                        .filter(|(mapped, _)| mapped == lock)
+                })?;
+            first.get_or_insert(taken.1);
+        }
+        first.map(|acq| LockAcquire {
+            on_every_return: true,
+            ..acq
+        })
+    }
+
+    /// The names of the caller of `site` that its project callees may bind ([`may_rebind`]) or
+    /// give a lock back under ([`may_give_back`]), in the caller's names: an attribute of a
+    /// parameter, a module global, a closure variable. A lock held under one of them may not be
+    /// held after the call.
     pub fn site_rebinds(&self, site: &CallSite) -> Vec<ObjRef> {
         let callees = site
             .project_callees()
@@ -347,7 +473,8 @@ impl crate::ProjectIndex {
                             attr: Some(a.clone()),
                         })
                     });
-                let names = attrs.chain(callee.lock_facts().rebinds.iter().cloned());
+                let facts = callee.lock_facts();
+                let names = attrs.chain(facts.rebinds.iter().chain(&facts.gives_back).cloned());
                 names
                     .filter_map(|name| name.through(bc))
                     .collect::<Vec<_>>()
@@ -864,13 +991,13 @@ fn kept<T>(tests: T, count: usize) -> Answer<T> {
 
 /// The acquisition [`LockAcquire`] for a lock of class `class` taken by the function `caller`
 /// at `span`, with its guards (the tests of state on the way are set once every acquisition is
-/// known, [`owner_tests`]).
+/// known, [`owner_tests`]); `on_every_return`: every normal return has passed it.
 pub(crate) fn own_acquisition(
     caller: &FuncKey,
     path: &Path,
-    class: String,
-    span: Span,
+    (class, span): (String, Span),
     guards: EffectGuards,
+    on_every_return: bool,
 ) -> LockAcquire {
     let hop = CallHop {
         caller: caller.clone(),
@@ -886,5 +1013,6 @@ pub(crate) fn own_acquisition(
             ..guards
         },
         tests: Answer::Known(OwnerTests::default()),
+        on_every_return,
     }
 }

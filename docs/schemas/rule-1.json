@@ -117,7 +117,7 @@
         },
         {
           "const": "minor-bug",
-          "description": "A bug that is rarely harmful: a promise the code makes is broken, such as a read-only\nannotation, where the callers seldom notice.",
+          "description": "A bug that is rarely harmful: a promise the code makes is broken, such as a read-only\nannotation, where the callers seldom notice; or a bug the first test that runs the code\nshows, such as a generator whose body never runs.",
           "type": "string"
         },
         {

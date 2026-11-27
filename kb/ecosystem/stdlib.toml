@@ -7,7 +7,7 @@ opaque_packages = [
     "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
-    "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html", "json",
+    "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html", "json", "re",
     "pprint", "atexit", "signal", "weakref", "typing", "contextvars", "tempfile", "glob", "ftplib", "unittest",
 ]
 
@@ -29,6 +29,12 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "subprocess.run"
 effects = ["blocking_subprocess"]
+return_type = "subprocess.CompletedProcess"
+opaque_to_layer3 = true
+
+# Raises `CalledProcessError` for a non-zero exit status; the process has ended.
+[[entries]]
+symbol = "subprocess.CompletedProcess.check_returncode"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -69,23 +75,27 @@ symbol = "builtins.open"
 effects = ["blocking_fs"]
 exit_suppresses = false
 items = "lines"
+file_object = { file = { arg = 0, param = "file" }, mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.open"
 effects = ["blocking_fs"]
 items = "lines"
+file_object = { file = { arg = 0, param = "file" }, mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.read_text"
 effects = ["blocking_fs"]
 items = "text"
+return_type = "builtins.str"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.read_bytes"
 effects = ["blocking_fs"]
+return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -104,6 +114,623 @@ opaque_to_layer3 = true
 symbol = "pathlib.Path.open"
 effects = ["blocking_fs"]
 items = "lines"
+file_object = { mode = { arg = 0, param = "mode" }, buffering = { arg = 1, param = "buffering" } }
+opaque_to_layer3 = true
+
+# --- File objects ---
+# The classes `io.open` returns (`file_object`: a text mode gives `io.TextIOWrapper`, a binary
+# one the buffered class of its kind, `buffering=0` `io.FileIO`), and `io.open()`, the class
+# of a file object of a mode or a buffering heki does not know: the members every one of them
+# has. A member waits on the file system when it can read, write, flush, or move on an
+# instance of the class; one that always raises `io.UnsupportedOperation` there (`write` of a
+# binary reader) or only asks the kernel (`fileno`, `isatty`, `tell` of a binary file) does
+# not. `FileIO.read` and `FileIO.write` return `None` in non-blocking mode, and so do the
+# binary reads of a file opened from an integer file descriptor (`open` sets `O_NONBLOCK` on no
+# path): `file_object` gives `io.open()` for a binary read of a file that is not known to be a
+# path.
+
+[[entries]]
+symbol = "io.TextIOWrapper.read"
+effects = ["blocking_fs"]
+return_type = "builtins.str"
+items = "text"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.str"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.write"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.tell"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.flush"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.str"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.read"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.write"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.writelines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.truncate"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.flush"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.readline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.readlines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.write"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.flush"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__iter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__next__"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.read"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.write"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.flush"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.read"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.write"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.flush"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().read'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().readline'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().readlines'
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().write'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().writelines'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().seek'
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().tell'
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().truncate'
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().flush'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().close'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().fileno'
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().readable'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().writable'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().seekable'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().isatty'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__iter__'
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__next__'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__enter__'
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__exit__'
+effects = ["blocking_fs"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -129,19 +756,35 @@ symbol = "os.walk().__iter__"
 effects = ["blocking_fs"]
 opaque_to_layer3 = true
 
+# A copy returns its destination, joined with the name of the source when it is a directory:
+# a `str` or `bytes` destination gives one of its kind, a path object itself or a `str`.
 [[entries]]
 symbol = "shutil.copy"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 1, param = "dst", instance_of = ["builtins.str"], return_type = "builtins.str" },
+    { arg = 1, param = "dst", instance_of = ["builtins.bytes"], return_type = "builtins.bytes" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "shutil.copy2"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 1, param = "dst", instance_of = ["builtins.str"], return_type = "builtins.str" },
+    { arg = 1, param = "dst", instance_of = ["builtins.bytes"], return_type = "builtins.bytes" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "shutil.copytree"
 effects = ["blocking_fs"]
+# It returns `dst` as it is passed.
+cases = [
+    { arg = 1, param = "dst", instance_of = ["builtins.str"], return_type = "builtins.str" },
+    { arg = 1, param = "dst", instance_of = ["builtins.bytes"], return_type = "builtins.bytes" },
+    { arg = 1, param = "dst", instance_of = ["pathlib.Path"], return_type = "pathlib.Path" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -151,10 +794,13 @@ opaque_to_layer3 = true
 
 # File metadata: `stat` and the existence and type tests ask the file system; `realpath` and
 # `Path.resolve` also read every symbolic link on the way.
+# A function of `os.path` gives a path of the kind it is given: `os.fspath` makes a `str` of a
+# `pathlib` path, so a `str` or a `pathlib` path gives a `str`, and `bytes` gives `bytes`.
 
 [[entries]]
 symbol = "os.stat"
 effects = ["blocking_fs"]
+return_type = "os.stat_result"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -175,6 +821,10 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "os.path.realpath"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, instance_of = ["builtins.str", "pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.WindowsPath", "pathlib.PurePosixPath", "pathlib.PureWindowsPath"], return_type = "builtins.str" },
+    { arg = 0, instance_of = ["builtins.bytes"], return_type = "builtins.bytes" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -185,6 +835,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pathlib.Path.stat"
 effects = ["blocking_fs"]
+return_type = "os.stat_result"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -331,6 +982,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "os.lstat"
 effects = ["blocking_fs"]
+return_type = "os.stat_result"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -496,6 +1148,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pathlib.Path.lstat"
 effects = ["blocking_fs"]
+return_type = "os.stat_result"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1621,6 +2274,19 @@ opaque_to_layer3 = true
 symbol = "threading.Timer"
 opaque_to_layer3 = true
 
+# The thread running the call, or the main thread: a `threading.Thread`, or one of its
+# private subclasses for the main thread and for a thread `threading` did not start, which
+# have the members of `threading.Thread`.
+[[entries]]
+symbol = "threading.current_thread"
+return_type = "threading.Thread"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.main_thread"
+return_type = "threading.Thread"
+opaque_to_layer3 = true
+
 [[entries]]
 symbol = "os.register_at_fork"
 opaque_to_layer3 = true
@@ -1726,6 +2392,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "json.dumps"
+return_type = "builtins.str"
 writes_in_order = { arg = 0, param = "obj", sorted_by = "sort_keys" }
 opaque_to_layer3 = true
 
@@ -1819,6 +2486,69 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "logging.log"
 excluded = true
+opaque_to_layer3 = true
+
+# The logger of a name, made of the class `setLoggerClass` installed, which must derive from
+# `logging.Logger` (the root logger is a `RootLogger`): the members of `logging.Logger` are
+# its members.
+[[entries]]
+symbol = "logging.getLogger"
+return_type = "logging.Logger"
+opaque_to_layer3 = true
+
+# --- Regular expressions and URLs ---
+# `re.compile` returns a `re.Pattern`, the one it is passed or a new one. Matching runs no
+# code of the project and waits for nothing; `match`, `search`, and `fullmatch` return a
+# match or `None`. `sub` and `subn` are left out: their replacement may be a function.
+# `urlparse` gives the result class of the kind of URL it is given (`str` or `bytes`).
+
+[[entries]]
+symbol = "re.compile"
+return_type = "re.Pattern"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "re.Pattern.match"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "re.Pattern.search"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "re.Pattern.fullmatch"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "re.Pattern.findall"
+return_type = "builtins.list"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "re.Pattern.finditer"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "re.Pattern.split"
+return_type = "builtins.list"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib.parse.urlparse"
+cases = [
+    { arg = 0, param = "url", instance_of = ["builtins.str"], return_type = "urllib.parse.ParseResult" },
+    { arg = 0, param = "url", instance_of = ["builtins.bytes"], return_type = "urllib.parse.ParseResultBytes" },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib.parse.ParseResult.geturl"
+return_type = "builtins.str"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib.parse.ParseResultBytes.geturl"
+return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 # --- Copy sanitizers (MUT202) ---
@@ -2370,8 +3100,11 @@ symbol = "importlib.util.module_from_spec"
 return_type = "types.ModuleType"
 opaque_to_layer3 = true
 
+# What `sys.modules` holds under the name, a module by the import protocol, typed as the
+# declaration says as `module_from_spec` is: `types.ModuleType` says nothing of its names.
 [[entries]]
 symbol = "importlib.import_module"
+return_type = "types.ModuleType"
 environment = "import"
 loads_module = { name = { arg = 0, param = "name" }, package = { arg = 1, param = "package" } }
 opaque_to_layer3 = true
@@ -2406,26 +3139,40 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "os.getcwd"
 environment = "call"
+return_type = "builtins.str"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.getcwdb"
 environment = "call"
+return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.path.abspath"
 environment = "call"
+cases = [
+    { arg = 0, param = "path", instance_of = ["builtins.str", "pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.WindowsPath", "pathlib.PurePosixPath", "pathlib.PureWindowsPath"], return_type = "builtins.str" },
+    { arg = 0, param = "path", instance_of = ["builtins.bytes"], return_type = "builtins.bytes" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.path.relpath"
 environment = "call"
+cases = [
+    { arg = 0, param = "path", instance_of = ["builtins.str", "pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.WindowsPath", "pathlib.PurePosixPath", "pathlib.PureWindowsPath"], return_type = "builtins.str" },
+    { arg = 0, param = "path", instance_of = ["builtins.bytes"], return_type = "builtins.bytes" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.path.expanduser"
 environment = "call"
+cases = [
+    { arg = 0, param = "path", instance_of = ["builtins.str", "pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.WindowsPath", "pathlib.PurePosixPath", "pathlib.PureWindowsPath"], return_type = "builtins.str" },
+    { arg = 0, param = "path", instance_of = ["builtins.bytes"], return_type = "builtins.bytes" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2527,6 +3274,65 @@ type = "Self"
 [[attributes]]
 symbol = "pathlib.Path.parents"
 type = "typing.Sequence[Self]"
+
+# A `stat_result` has these fields on every platform; `CompletedProcess.returncode` is the
+# exit status of the ended process.
+
+[[attributes]]
+symbol = "os.stat_result.st_mode"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_ino"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_dev"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_nlink"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_uid"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_gid"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_size"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_atime"
+type = "builtins.float"
+
+[[attributes]]
+symbol = "os.stat_result.st_mtime"
+type = "builtins.float"
+
+[[attributes]]
+symbol = "os.stat_result.st_ctime"
+type = "builtins.float"
+
+[[attributes]]
+symbol = "os.stat_result.st_atime_ns"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_mtime_ns"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "os.stat_result.st_ctime_ns"
+type = "builtins.int"
+
+[[attributes]]
+symbol = "subprocess.CompletedProcess.returncode"
+type = "builtins.int"
 
 # --- unittest (the members of TestCase and IsolatedAsyncioTestCase) ---
 # The assertion methods and `fail` and `skipTest` raise or return and do nothing else. `setUp`, `tearDown`,

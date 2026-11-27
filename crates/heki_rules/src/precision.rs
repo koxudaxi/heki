@@ -192,6 +192,8 @@ const CERTIFIED: &[(&str, &str, [u32; 2], [u32; 2])] = &[
     ("MUT101", "0.2.4", [26, 0], [1, 0]),
     ("MUT111", "0.2.4", [60, 0], [2, 0]),
     ("MUT119", "0.2.5", [23, 0], [2, 0]),
+    ("EFF109", "0.10.0", [6, 0], [1, 0]),
+    ("EFF116", "0.10.0", [10, 0], [0, 0]),
 ];
 
 /// The harm of the exact reports of a certification's census and holdout run, for the rules whose
@@ -207,11 +209,13 @@ const CERTIFIED_HARM: &[(&str, [u32; 4], [u32; 4])] = &[
     ("OPT121", [0, 0, 10, 2], [0, 0, 5, 0]),
     ("OPT130", [0, 0, 1, 0], [0, 0, 0, 0]),
     ("OPT113", [0, 2, 6, 0], [0, 0, 6, 0]),
+    ("EFF109", [3, 3, 0, 0], [1, 0, 0, 0]),
+    ("EFF116", [1, 4, 5, 0], [0, 0, 0, 0]),
 ];
 
 /// The real bugs a rule with fewer than 10 exact reports found, as the number of bugs two
 /// reviewers class as confirmed (docs/precision.md, "Rare failures").
-const REAL_BUGS: &[(&str, u32)] = &[];
+const REAL_BUGS: &[(&str, u32)] = &[("EFF109", 7)];
 
 /// The latest measurement of each measured rule, in the order the table lists them: the round,
 /// the date of the build it measured, and the sampled reports as confirmed, plausible, benign,

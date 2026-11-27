@@ -81,6 +81,9 @@ pygments_lang_class = true
 base_path = "."
 
 [project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
 
 [project.markdown_extensions.pymdownx.tabbed]
 alternate_style = true

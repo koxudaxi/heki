@@ -97,7 +97,8 @@ pub enum Consequence {
     /// event loop held up for every other task, or a broken contract.
     Bug,
     /// A bug that is rarely harmful: a promise the code makes is broken, such as a read-only
-    /// annotation, where the callers seldom notice.
+    /// annotation, where the callers seldom notice; or a bug the first test that runs the code
+    /// shows, such as a generator whose body never runs.
     MinorBug,
     /// Slower code that computes the right result.
     Slowdown,
@@ -594,13 +595,13 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF109",
         slug: "lock-reacquired-while-held",
         family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
-        activation: Activation::OptIn,
+        certainty: Certainty::Exact,
+        activation: Activation::Default,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
         unsafe_fix: false,
         auto_fix_default: false,
-        summary: "Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).",
+        summary: "A non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).",
         doc: include_str!("../rule-docs/EFF109.md"),
     },
     RuleMeta {
@@ -659,13 +660,13 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF116",
         slug: "generator-never-iterated",
         family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
-        activation: Activation::OptIn,
-        consequence: Consequence::Bug,
+        certainty: Certainty::Exact,
+        activation: Activation::Default,
+        consequence: Consequence::MinorBug,
         size_dependent_fix: false,
         unsafe_fix: false,
         auto_fix_default: false,
-        summary: "Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.",
+        summary: "A call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.",
         doc: include_str!("../rule-docs/EFF116.md"),
     },
     RuleMeta {

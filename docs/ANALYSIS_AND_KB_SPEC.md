@@ -965,7 +965,15 @@ outside the project but builtin types may, allocate an instance of `C` without r
 `__init__`: a construction of `C`.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
-`sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`); `"Self"` types
+`sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`, `subprocess.run()`
+→ `subprocess.CompletedProcess`, `os.stat()` → `os.stat_result`, `re.compile()` → `re.Pattern`,
+`logging.getLogger()` → `logging.Logger`, or the subclass of it that `setLoggerClass`
+installs). An argument case names the class where the argument decides it: a function of
+`os.path` gives a path of the kind it is given (`str` for a `str` or a `pathlib` path, `bytes`
+for `bytes`), `shutil.copy` one of the kind of its destination, `shutil.copytree` its
+destination itself, and `urllib.parse.urlparse` a `ParseResult` or a `ParseResultBytes`; an
+argument heki knows nothing of gives no class, and so does a function that may return `None`
+(`shutil.which`, `shutil.move`). `"Self"` types
 a builder's result as its receiver (`client.with_options(...)`, an instance of a project subclass
 included), and `"C[Self]"` types a result `C` whose items are instances of the receiver's class
 (`Path.iterdir()`, `Path.glob()`). The operators run the special methods the same rows type:
@@ -2109,17 +2117,28 @@ message = "write model state through GenerationStore instead"
        `obj.a`, and so does a call or property read whose every project callee returns
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param`: `node.members().append(1)` and
-       `node.view.append(1)` with `return self.items`; never a `cached_property`), when every
-       class the receiver may be takes the name from one of those callees: along its MRO, the
-       first class binding the name defines one (`ProjectDecls::function_taken`). A call
+       `node.view.append(1)` with `return self.items`; never a `cached_property`, nor a
+       function storing or deleting the attribute, or running a call or an `await` between
+       the read and the return, which may store it: `old = self.items; self.reset(); return
+       old`), when every class the receiver may be
+       takes the name from one of those callees: along its MRO, the first class binding the
+       name defines one (`ProjectDecls::function_taken`), and a function called by name or read
+       on a module or a class object is no name the project may bind again
+       (`ProjectDecls::call_rebound`). A call
        handing back what it is handed is that object itself (`Extractor::build_same_objects`,
        one answer for every reader of the alias facts, and for the project calls the
        construction recorder follows, `Recorder::handed_back`): `typing.cast(T, value)`
        (`ownership::handed_back`, which `ownership::source` reads too), and a call whose every
        project callee returns, on every `return`, the parameter the argument binds
        (`FunctionDecl::returns_param` with no attribute: `return x`, `return cast(T, x)`),
-       by position or by a keyword naming it in every callee; a
-       function returning another call's result is open. Such a value is `retyped`: a type
+       by position or by a keyword naming it in every callee. A function returning the result
+       of a call of a module global, or of an attribute of an import, passing it parameters
+       (`return same(x)`, `FunctionDecl::forwards`), returns what that callee returns of the
+       parameter the call binds there: completing a module's declarations decides it against
+       pass 1, along the calls through every module, as a fixpoint from no fact over the
+       functions the calls reach (a cycle of calls decides nothing), within a budget
+       proportional to the module; a function returning any other call's result, or a call of
+       a name the project may bind again (`ProjectDecls::call_rebound`), is open. Such a value is `retyped`: a type
        checker types it by the call, so `MUT110` does not leave its changes to one.
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed
@@ -2383,7 +2402,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    that no decorator replaces, `FunctionDecl::called_as_defined`; never a class's `__init__`),
    or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
    `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
-8. **`EFF109`** (opt-in): a non-reentrant lock taken again while it is held.
+8. **`EFF109`** (exact, default): a non-reentrant lock taken again while it is held.
    - A lock is an instance of a Layer 2 class flagged `non_reentrant_lock` (`threading.Lock`,
      `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`), named by where the function
      reaches it (`heki_effect::locks::ObjRef`): parameter `i` or its attribute (`self._lock`), a
@@ -2551,8 +2570,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      that is no async generator, worded as certain when every one is an `async def` no decorator
      replaces, and as possible otherwise. Only catalog APIs count: a project function taking a
      callable resolves to the project and is never one, whatever it does with the coroutine.
-13. **`EFF116`** (opt-in): a call of a project generator function whose generator nothing
-   iterates, so its body does not run.
+13. **`EFF116`** (exact, default, `warning`): a call of a project generator function whose
+   generator nothing iterates, so its body does not run.
    - The rule (`eff_rules::never_iterated`) reads each function's IR: a call (not awaited)
      whose result has no name and whose every reader is a truth test (a branch's condition,
      `not`, or a call of the builtin `bool` the resolver confirms) is a candidate, one with no
@@ -3101,7 +3120,14 @@ where `only_from_dict` says so: `pydantic.BaseModel.model_construct`, `model_val
 instance built without a field starts from the field's default itself when it is hashable, and
 from a deep copy of an unhashable one, then holds what validating the default returns where the
 field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
-`sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
+`sqlite3.connect`), `file_object` (the call opens a file as `io.open` does: the positions and
+keywords of its `file`, `mode`, and `buffering`, which select the class of the file object it returns
+(`heki_kb::FileArgs::class`): `io.TextIOWrapper` for a text mode, `io.BufferedReader`,
+`io.BufferedWriter`, or `io.BufferedRandom` for a binary one, `io.FileIO` for `buffering=0`,
+and `io.open()`, the class of the members every one of them has, for a mode or a buffering heki
+does not know, or for a binary read of a file that is not known to be a path, which an integer
+file descriptor may make non-blocking so that `read` returns `None`; `open`, `io.open`,
+`pathlib.Path.open`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
@@ -3215,7 +3241,8 @@ receiver's class (`pathlib.Path.parents`). A row of the standard library
 (`typing.NamedTuple._fields`, `contextvars.Token.var`, `pathlib.Path.parent`) holds on every interpreter heki supports,
 which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
 the standard library that type a value (a method's `return_type`, a copy of its receiver,
-`returns_held`) on instances of each class it builds. The synchronous and asynchronous
+`returns_held`) on instances of each class it builds, and an argument case's `return_type` on
+arguments of each class the case names. The synchronous and asynchronous
 clients of a library have rows of their own at every step, and a row whose meaning changes
 across the verified releases under one name is left out. `[[distributions]]`
 (`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows

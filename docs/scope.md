@@ -183,6 +183,8 @@ directions; a heuristic report makes it only for some premises:
 | What heki cannot see | counts as shared and blocks the fix | stops the report | stops it for an unresolved call; does not stop it for the premises its rule page marks open |
 | What you get | the diagnostic names the failed obligation: `[not auto-fixable: ...]` | no report: a missed finding, never a guess | a report labelled `heuristic`, which can be wrong about the code |
 
+[Rule Precision](precision.md#at-a-glance) shows the three outcomes (exact, heuristic, no report) with a run of each.
+
 Each rule page lists the premises of its claim under "What a report states", and which of them
 a heuristic report may not have established ([Rule Precision](precision.md)).
 
@@ -302,8 +304,10 @@ Missed findings close as heki learns more:
 - Typed: builtin classes, the builtin exception and warning classes among them
   (`error: ValueError`; not `IOError` or `EnvironmentError`, and not a name the module or the
   function binds itself), what a standard library call the catalog types gives, by its declared
-  return type (`importlib.util.module_from_spec(spec)` is a `types.ModuleType`, though a custom
-  loader's `create_module` may return another object), an annotation of a local that names an
+  return type (`importlib.util.module_from_spec(spec)` and `importlib.import_module(name)` are a
+  `types.ModuleType`, though a custom loader's `create_module` may return another object and a
+  module may put another object in `sys.modules`), or by the kind of path or URL it is passed
+  (`os.path.abspath(path)`, `urllib.parse.urlparse(url)`), an annotation of a local that names an
   import of its own function (not a name the function binds more than once or otherwise), a
   call of a value declared `type[C]` wherever the value is held (a parameter, a local, or an
   attribute annotated in `__init__` or the class body, read in a subclass too), and, in a

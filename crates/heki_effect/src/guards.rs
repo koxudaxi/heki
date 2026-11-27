@@ -183,9 +183,19 @@ pub(crate) fn literal_fact(literal: &ConstLiteral) -> Option<ArgFact> {
     })
 }
 
-/// The outcome of `test` on a value `fact` describes, when the value decides it.
-pub(crate) fn fact_outcome(fact: &ArgFact, test: &GuardTest) -> Option<bool> {
+/// The outcome of `test` on a value `fact` describes, when the value decides it. A value the
+/// caller's own parameter holds (`of_param`) and that passes no case of a test of cases leaves the
+/// test to the caller's callers, which may pass one selecting a case (R6), as [`given`] does: its
+/// class says nothing of the literal a case may test.
+pub(crate) fn fact_outcome(fact: &ArgFact, test: &GuardTest, of_param: bool) -> Option<bool> {
     match test {
+        GuardTest::Value(t)
+            if of_param
+                && matches!(&**t, ValueTest::Cases { cases, .. }
+                    if !cases.iter().any(|(case, _)| case.holds(fact))) =>
+        {
+            None
+        }
         GuardTest::Value(t) => t.outcome(fact),
         _ => ConstArg::of_fact(fact)?.decide(test),
     }
@@ -601,9 +611,10 @@ pub(crate) fn through_call(
         let Some(b) = binding(usize::from(g.subject.param)) else {
             continue;
         };
+        let of_param = matches!(b.input, Some(GuardSubject { attr: None, .. }));
         let outcome = (b.fact.as_deref())
             .filter(|_| g.subject.attr.is_none())
-            .and_then(|f| fact_outcome(f, &g.test));
+            .and_then(|f| fact_outcome(f, &g.test, of_param));
         match test_at_call(g, outcome, b.input.as_ref(), b.input_changed, &site.guards) {
             TestAtCall::Fails => return None,
             TestAtCall::Caller(t) => {

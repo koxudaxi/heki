@@ -585,10 +585,11 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         set_order: selection.is_enabled("EFF112"),
         exclusive: selection.is_enabled("EFF110"),
         // `EFF114` reads which project functions never return normally
-        // (`MustExec::never_returns`).
+        // (`MustExec::never_returns`), and `EFF109`'s exact tier which calls are made on every
+        // return to every implementation (`CallSite::complete`, `CallSite::on_every_return`).
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()
-            .chain(&["EFF114"])
+            .chain(&["EFF114", "EFF109"])
             .any(|code| selection.is_enabled(code)),
         kept_values: crate::mut_rules::KEPT_VALUE_RULES
             .iter()

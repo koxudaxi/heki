@@ -34,7 +34,7 @@ use crate::readonly::{
 };
 use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
-    self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
+    self, Callee, Constructor, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
 };
 use crate::types::{Held, Ty};
@@ -243,7 +243,7 @@ fn extract_module(
                 &cell_aliases,
             )
             .run();
-            absorb_class_body(&mut summary, facts.summary, &key);
+            absorb_class_body(&mut summary, facts.summary, &key, ran);
             external.extend(facts.external);
             blind.extend(facts.blind);
             unbound.extend(facts.unbound);
@@ -379,6 +379,15 @@ fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFun
     out
 }
 
+/// Whether `kind` may take a lock: a `with` item or an `acquire()` (`locks::lock_step` decides).
+fn may_take_lock(kind: &InstKind) -> bool {
+    match kind {
+        InstKind::EnterWith { .. } => true,
+        InstKind::MethodCall { method, .. } => method == "acquire",
+        _ => false,
+    }
+}
+
 /// The class body the instruction runs, when it is a `class` statement.
 fn class_body_made(ir: &ModuleIr, kind: &InstKind) -> Option<FunctionId> {
     match kind {
@@ -413,8 +422,16 @@ where
 }
 
 /// Add the facts of a class body the function runs (`body`) to the function's own: its
-/// execution effects and the project attributes it writes and reads.
-fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncKey) {
+/// execution effects, the project attributes it writes and reads, and the locks it takes. `ran`
+/// are the function's flags of the `class` statement ([`Extractor::class_runs`]): a lock the
+/// body attempts to take whenever it returns is one the function attempts whenever it returns
+/// only when the body has returned then too, as for its calls ([`run_through`]).
+fn absorb_class_body(
+    into: &mut EffectSummary,
+    body: EffectSummary,
+    func: &FuncKey,
+    ran: OnEveryReturn,
+) {
     into.only_read_params &= body.only_read_params;
     into.join_read_kinds(&body);
     for e in &body.direct_exec_effects {
@@ -438,7 +455,11 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncK
     into.unknown_calls |= body.unknown_calls;
     add_state_changes(into, body.shared_state.as_deref());
     into.capacity_waits.extend(body.capacity_waits);
-    into.absorb_lock_facts(body.locks);
+    let mut locks = body.locks;
+    for acq in locks.iter_mut().flat_map(|l| l.acquires.values_mut()) {
+        acq.on_every_return &= ran.returned;
+    }
+    into.absorb_lock_facts(locks);
     into.absorb_exclusive_uses(body.exclusive.into_iter().flat_map(|uses| *uses));
     into.refresh_typed_field_writes(func);
 }
@@ -945,6 +966,9 @@ struct Extractor<'a> {
     redelivery_budget: OnceCell<Budget>,
     /// The blocks acquiring each lock (`locks::BlockTests::common`).
     lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
+    /// The points that may take a lock (a `with`, an `acquire()`) every normal return has
+    /// passed (filled with [`Self::must_run`], `LockAcquire::on_every_return`).
+    takes_on_every_return: FxHashSet<(BlockId, usize)>,
     /// The tests of state on every path to each block (`EFF109`).
     state_tests: OnceCell<locks::BlockTests>,
     guards: LocalGuards,
@@ -1028,6 +1052,9 @@ struct Extractor<'a> {
     /// position, for the check after the visit of whether they hand the value to code of the
     /// project.
     added: FxHashMap<crate::construction::Pos, AddedBy>,
+    /// What a construction of each project class keeps of its instance, decided once per class
+    /// for the function ([`Self::constructor`]).
+    constructors: RefCell<FxHashMap<Box<str>, Constructor<'a>>>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
     /// The opt-in facts the enabled rules read.
@@ -1395,6 +1422,7 @@ impl<'a> Extractor<'a> {
             capacity_walks: RefCell::default(),
             around: OnceCell::new(),
             lock_blocks: std::collections::BTreeMap::new(),
+            takes_on_every_return: FxHashSet::default(),
             lock_held: OnceCell::new(),
             thread_locks: OnceCell::new(),
             shields: OnceCell::new(),
@@ -1433,6 +1461,7 @@ impl<'a> Extractor<'a> {
             unpacked: FxHashMap::default(),
             unpacked_displays: FxHashSet::default(),
             added: FxHashMap::default(),
+            constructors: RefCell::default(),
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
@@ -2415,17 +2444,17 @@ impl<'a> Extractor<'a> {
             }
             _ => return None,
         };
-        let Callee::Project(keys, binds_recv) = callee else {
+        let Callee::Project(keys, binds_recv) = &callee else {
             return None;
         };
         // The argument each callee returns the attribute of: `None` for the receiver, else
         // the position among the call's arguments (a static method binds no receiver).
         let mut returned: Option<(Option<usize>, Option<&str>)> = None;
         let mut decls = Vec::with_capacity(keys.len());
-        for key in &keys {
+        for key in keys {
             let decl = self.cx.project.function_decl(key)?;
             let (param, attr) = decl.returns_param.as_ref()?;
-            let binds = binds_recv && !decl.is_staticmethod;
+            let binds = *binds_recv && !decl.is_staticmethod;
             let this = (
                 usize::from(*param).checked_sub(usize::from(binds)),
                 attr.as_deref(),
@@ -2437,7 +2466,7 @@ impl<'a> Extractor<'a> {
         }
         let (position, attr) = returned?;
         let (value, name) = dispatch;
-        if !self.cx.runs_on_every_class(self.val(value), name, &keys) {
+        if !self.cx.runs_on_every_class(self.val(value), name, &callee) {
             return None;
         }
         // A keyword binds the parameter where no position does, if it names it in every callee
@@ -3196,6 +3225,9 @@ impl<'a> Extractor<'a> {
             self.kept_value_points();
         }
         self.self_container_changes();
+        if self.opt_in.locks {
+            self.lock_gives_back();
+        }
         self.lock_owner_tests();
         if self.opt_in.guarded {
             self.guarded_facts();
@@ -5017,26 +5049,15 @@ impl<'a> Extractor<'a> {
                 self.specials_run_project_code(&specials)
             }
         });
-        let kb = self.cx.kb;
-        let catalog_stores = |base: &str| {
-            kb.lookup(&format!("{base}.__setattr__"))
-                .is_some_and(|e| e.stores_on_instance)
-        };
-        let project = self.cx.project;
-        // What a construction of each class makes is decided once, for every read of it.
-        let constructions: RefCell<FxHashMap<Box<str>, &[_]>> = RefCell::default();
         let made = |class: &str, attr: &str| {
-            let known = constructions.borrow().get(class).copied();
-            let containers = known.unwrap_or_else(|| {
-                let made = project.constructor_containers(class, catalog_stores);
-                constructions.borrow_mut().insert(class.into(), made);
-                made
-            });
+            let Constructor::KeepsNothing { containers } = self.constructor(class) else {
+                return None;
+            };
             let kind = containers
                 .iter()
                 .find_map(|(a, k)| (&**a == attr).then_some(*k))?;
-            project
-                .attr_read_finds_stored(class, attr, catalog_stores)
+            (self.cx.project)
+                .attr_read_finds_stored(class, attr, |base| self.catalog_stores(base))
                 .then_some(kind)
         };
         let (answers, returned) = rec.resolve(
@@ -5341,6 +5362,23 @@ impl<'a> Extractor<'a> {
         true
     }
 
+    /// What a construction of the project class `class` keeps of its instance
+    /// ([`resolver::ProjectDecls::constructor`]).
+    fn constructor(&self, class: &str) -> Constructor<'a> {
+        if let Some(known) = self.constructors.borrow().get(class) {
+            return *known;
+        }
+        let found = (self.cx.project).constructor(class, |base| self.catalog_stores(base));
+        self.constructors.borrow_mut().insert(class.into(), found);
+        found
+    }
+
+    /// Whether the catalog says storing an attribute on an instance of the library class `base`
+    /// stores it in the instance (R3, `pydantic.BaseModel`).
+    fn catalog_stores(&self, base: &str) -> bool {
+        (self.cx.kb.lookup(&format!("{base}.__setattr__"))).is_some_and(|e| e.stores_on_instance)
+    }
+
     /// The holder of an attribute store of `attr` into the object `obj` holds, when that store
     /// may link a new object into another one ([`Escape::Into`]): `obj` may be new and is an
     /// instance of a project class whose write of `attr` stores the value itself and runs no
@@ -5349,16 +5387,9 @@ impl<'a> Extractor<'a> {
         let Some(Val::Inst(class)) = self.types.get(&obj) else {
             return None;
         };
-        let kb = self.cx.kb;
-        let catalog_stores = |base: &str| {
-            kb.lookup(&format!("{base}.__setattr__"))
-                .is_some_and(|e| e.stores_on_instance)
-        };
         (self.may_be_new(obj)
-            && self
-                .cx
-                .project
-                .attr_write_stores_value(class, &[attr], catalog_stores))
+            && (self.cx.project)
+                .attr_write_stores_value(class, &[attr], |base| self.catalog_stores(base)))
         .then_some(obj)
     }
 
@@ -5419,10 +5450,16 @@ impl<'a> Extractor<'a> {
             | InstKind::Yield {
                 value: Some(value), ..
             } => self.escape(*value, Escape::Definite),
+            // A slice store iterates the value, which may run code of the project that keeps it.
             InstKind::SubscriptStore {
-                obj, index, value, ..
+                obj,
+                index,
+                value,
+                is_slice,
+                ..
             } => {
                 let kind = (self.types.get(obj).map(Val::instance_classes))
+                    .filter(|_| !*is_slice)
                     .and_then(|classes| classes.first().filter(|_| classes.len() == 1))
                     .and_then(|class| ContainerKind::of_class(class))
                     .filter(|k| matches!(k, ContainerKind::List | ContainerKind::Dict));
@@ -5468,7 +5505,7 @@ impl<'a> Extractor<'a> {
         let index_in_block = index;
         self.store_escapes(kind);
         if self.opt_in.locks {
-            self.lock_acquired(bb, kind, span);
+            self.lock_acquired((bb, index), kind, span);
         }
         if self.opt_in.locks || self.opt_in.exclusive {
             self.name_rebound(kind);
@@ -5585,6 +5622,7 @@ impl<'a> Extractor<'a> {
                 index,
                 key_const,
                 value,
+                ..
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, false, span);
                 // A store under a key the container holds changes no iterator's step.
@@ -5873,7 +5911,7 @@ impl<'a> Extractor<'a> {
     /// A non-reentrant lock `kind` takes (`LockFacts::acquires`), with the guards on the
     /// function's inputs (the tests of state on every path to it are added once every
     /// acquisition is known, [`Self::lock_owner_tests`]).
-    fn lock_acquired(&mut self, bb: BlockId, kind: &InstKind, span: Span) {
+    fn lock_acquired(&mut self, (bb, index): (BlockId, usize), kind: &InstKind, span: Span) {
         // A branch on a constant never takes the lock its dead side would.
         if !matches!(
             kind,
@@ -5895,8 +5933,38 @@ impl<'a> Extractor<'a> {
         };
         let guards = self.guards.occurrence(&self.guard_inputs(), bb);
         self.lock_blocks.entry(lock.clone()).or_default().insert(bb);
-        let acq = locks::own_acquisition(self.key, self.path, class, span, guards);
+        let every = self.takes_on_every_return.contains(&(bb, index));
+        let acq = locks::own_acquisition(self.key, self.path, (class, span), guards, every);
         locks::add_acquisition(&mut self.summary.lock_facts_mut().acquires, lock, acq);
+    }
+
+    /// The locks the function gives back where its own acquisitions do not hold them
+    /// (`LockFacts::gives_back`), which it then takes on no return.
+    fn lock_gives_back(&mut self) {
+        if !locks::calls_release(self.f) {
+            return;
+        }
+        let def = |v| self.defs.get(&v).copied();
+        let steps = locks::lock_steps(
+            self.cx,
+            self.f,
+            self.key,
+            &self.types,
+            &def,
+            &self.live,
+            &|_| Vec::new(),
+        );
+        let given = locks::unheld_releases(self.shape, &steps);
+        if given.is_empty() {
+            return;
+        }
+        let facts = self.summary.lock_facts_mut();
+        for lock in given {
+            if let Some(acq) = facts.acquires.get_mut(&lock) {
+                acq.on_every_return = false;
+            }
+            facts.gives_back.insert(lock);
+        }
     }
 
     /// A module global or a closure variable `kind` binds or deletes (`LockFacts::rebinds`;
@@ -7676,7 +7744,8 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.param_origins = buffer;
-                self.project_alloc(call, returns);
+                let inits: Vec<usize> = handovers.iter().map(|(_, i, _)| *i).collect();
+                self.project_alloc(call, returns, &inits);
                 if !handed_state.is_empty() {
                     self.summary.shared_state_mut().handed.extend(handed_state);
                 }
@@ -8369,9 +8438,10 @@ impl<'a> Extractor<'a> {
         self.f.params.iter().any(|p| p.var == v)
     }
 
-    /// [`Self::must_run`], [`Self::class_runs`], and [`MustExec::never_returns`], from the path
-    /// facts of the function with what the catalog and the project's declarations know: the
-    /// members of modules and the context managers whose exit never suppresses an exception.
+    /// [`Self::must_run`], [`Self::class_runs`], [`Self::takes_on_every_return`], and
+    /// [`MustExec::never_returns`], from the path facts of the function with what the catalog
+    /// and the project's declarations know: the members of modules and the context managers
+    /// whose exit never suppresses an exception.
     fn path_facts(&mut self) {
         let f = self.f;
         let ir = self.cx.ir();
@@ -8382,17 +8452,25 @@ impl<'a> Extractor<'a> {
         } else {
             BTreeMap::new()
         };
+        let locks = self.opt_in.locks;
+        let mut takes = FxHashSet::default();
         let (must_run, class_runs, never_returns, must_reads) =
             crate::with_paths(self.cx, f, &self.types, owner, |paths, _| {
                 let mut must_run = FxHashMap::default();
                 let mut class_runs: FxHashMap<FunctionId, OnEveryReturn> = FxHashMap::default();
                 for bb in &f.blocks {
                     for (index, inst) in bb.insts.iter().enumerate() {
+                        let at = (bb.id, index);
+                        if locks
+                            && may_take_lock(&inst.kind)
+                            && every(paths.on_every_return(at, Progress::Called))
+                        {
+                            takes.insert(at);
+                        }
                         let class_body = class_body_made(ir, &inst.kind);
                         if class_body.is_none() && !crate::anchors_call_site(&inst.kind) {
                             continue;
                         }
-                        let at = (bb.id, index);
                         let called = paths.on_every_return(at, Progress::Called);
                         let run = OnEveryReturn {
                             called: every(called),
@@ -8449,6 +8527,7 @@ impl<'a> Extractor<'a> {
         }
         self.must_run = must_run;
         self.class_runs = class_runs;
+        self.takes_on_every_return = takes;
         if never_returns && self.opt_in.must_effects {
             self.summary.must_exec = Some(Box::new(MustExec {
                 never_returns,
@@ -8548,10 +8627,11 @@ impl<'a> Extractor<'a> {
         match callee {
             Callee::External(symbol) if self.adds_to_container(symbol, call) => {}
             Callee::External(symbol) => {
-                let new_instance = call
-                    .constructs
-                    .as_ref()
-                    .is_some_and(|c| !self.cx.project.may_reuse_instances(c));
+                // A bare allocation runs no `__init__`: it stays new whatever one keeps.
+                let bare = symbol.ends_with(".__new__");
+                let new_instance = (call.constructs.as_deref()).is_some_and(|c| {
+                    bare || matches!(self.constructor(c), Constructor::KeepsNothing { .. })
+                });
                 self.external_escapes(
                     symbol,
                     call.dst,
@@ -8609,7 +8689,7 @@ impl<'a> Extractor<'a> {
     /// call handing back an argument as itself ([`Self::same_objects`]) gives that argument's
     /// object, and a project function returning an instance of a project class a new object
     /// when every candidate returns one.
-    fn project_alloc(&mut self, call: &Call<'_>, returns: Vec<NewFrom>) {
+    fn project_alloc(&mut self, call: &Call<'_>, returns: Vec<NewFrom>, inits: &[usize]) {
         if !self.ownership {
             return;
         }
@@ -8617,9 +8697,21 @@ impl<'a> Extractor<'a> {
             return;
         };
         if let Some(class) = &call.constructs {
-            if !self.cx.project.may_reuse_instances(class) {
-                let made = (NewKind::Own, Some(class.as_str()));
-                self.rec.alloc(self.at(), dst, made, Vec::new());
+            let hands = match self.constructor(class) {
+                Constructor::KeepsNothing { .. } => false,
+                Constructor::HandsToInit if !inits.is_empty() => true,
+                Constructor::HandsToInit | Constructor::Unknown => return,
+            };
+            // The `__init__`s the call may run, each handed the object as its `self`.
+            let site = u32::try_from(self.sites.len()).ok();
+            let handed: Option<Vec<Escape>> = (inits.iter().filter(|_| hands))
+                .map(|&init| Some(Escape::Initialized(site?, u16::try_from(init).ok()?)))
+                .collect();
+            let Some(handed) = handed else { return };
+            let made = (NewKind::Own, Some(class.as_str()));
+            self.rec.alloc(self.at(), dst, made, Vec::new());
+            for how in handed {
+                self.escape(dst, how);
             }
         } else if let Some(&arg) = self.same_objects.get(&dst) {
             self.rec.handed_back(dst, arg);
@@ -8681,24 +8773,31 @@ impl<'a> Extractor<'a> {
         constructs: bool,
     ) {
         // The object an attribute write by name writes (the receiver of a bound
-        // `obj.__setattr__`), and the name.
-        let written = match recv {
+        // `obj.__setattr__`, the first argument of `object.__setattr__(obj, ...)` called on the
+        // class), and the name.
+        let bound = recv.filter(|r| !matches!(self.val(*r), Some(Val::Ref(_))));
+        let written = match bound {
             Some(obj) => Some((obj, args.first())),
             None => args.first().map(|obj| (*obj, args.get(1))),
         };
-        if let Some((obj, name)) = written
-            && let Some(named) = match symbol {
+        if let Some((obj, name)) = written {
+            let name = || name.and_then(|a| self.shape.str_const(*a));
+            let attr = match symbol {
                 "builtins.setattr"
                 | "builtins.object.__setattr__"
                 | "builtins.delattr"
-                | "builtins.object.__delattr__" => Some(true),
-                "builtins.vars" => Some(false),
+                | "builtins.object.__delattr__" => Some(name()),
+                "builtins.vars" => Some(None),
+                // Reading the namespace by name, as `obj.__dict__` does, or under a name heki
+                // cannot read.
+                "builtins.getattr" | "builtins.object.__getattribute__" => name()
+                    .is_none_or(|a| NAMESPACE_ATTRS.contains(&a))
+                    .then_some(None),
                 _ => None,
+            };
+            if let Some(attr) = attr {
+                self.attr_written(obj, attr);
             }
-        {
-            let attr = name.filter(|_| named);
-            let attr = attr.and_then(|a| self.shape.str_const(*a));
-            self.attr_written(obj, attr);
         }
         let method = symbol.rsplit('.').next().unwrap_or(symbol);
         let deep_kwarg = || {

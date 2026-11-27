@@ -1267,6 +1267,265 @@ fn file_metadata_and_name_lookups_block() {
     );
 }
 
+const FILES: &str = r#"import io
+from pathlib import Path
+
+
+async def tp_text(p: str):
+    f = open(p)
+    f.readable()
+    f.fileno()
+    text = f.read()
+    f.close()
+    return text.upper()
+
+
+async def tp_binary_read(p: str):
+    f = open(p, "rb")
+    f.seekable()
+    data = f.read()
+    f.close()
+    return data.hex()
+
+
+async def tp_binary_write(p: str, data: bytes):
+    f = open(p, mode="ab")
+    f.writable()
+    f.write(data)
+    f.flush()
+    f.close()
+
+
+async def tp_unbuffered(p: str):
+    f = io.open(p, "rb", 0)
+    f.isatty()
+    f.tell()
+    f.readline()
+
+
+async def tp_unknown_mode(p: str, mode: str, size: int, options: dict):
+    f = open(p, mode)
+    f.fileno()
+    f.write("x")
+    g = open(p, "wb", buffering=size)
+    g.tell()
+    h = open(p, "rb", **options)
+    h.flush()
+
+
+async def tp_with(p: Path, q: str):
+    with p.open("r+b") as f:
+        f.readable()
+        for line in f:
+            f.seek(0)
+    with open(q, "w") as out:
+        out.writelines(["a"])
+
+
+def tn_sync(p: str):
+    with open(p) as f:
+        return f.read()
+"#;
+
+/// `open`, `io.open` and `Path.open` give the file class their mode and buffering select
+/// (text, binary read, binary write, unbuffered binary, binary read and write), and a mode or
+/// a buffering heki does not know gives the members every file class has (`io.open()`). The
+/// members that read, write, flush, seek, or close wait on the file system (`EFF105`, opt-in)
+/// as `open` does; those that only ask the kernel (`readable`, `fileno`, `isatty`, `tell` of a
+/// binary file) do not. `with` binds the file itself.
+#[test]
+fn file_objects_wait_on_the_file_system_by_the_mode_they_are_opened_in() {
+    assert_eq!(
+        check("cat_files", "app/files.py", FILES, "EFF101,EFF105"),
+        vec![
+            d(6, "EFF105", "tp_text", "builtins.open"),
+            d(9, "EFF105", "tp_text", "io.TextIOWrapper.read"),
+            d(10, "EFF105", "tp_text", "io.TextIOWrapper.close"),
+            d(15, "EFF105", "tp_binary_read", "builtins.open"),
+            d(17, "EFF105", "tp_binary_read", "io.BufferedReader.read"),
+            d(18, "EFF105", "tp_binary_read", "io.BufferedReader.close"),
+            d(23, "EFF105", "tp_binary_write", "builtins.open"),
+            d(25, "EFF105", "tp_binary_write", "io.BufferedWriter.write"),
+            d(26, "EFF105", "tp_binary_write", "io.BufferedWriter.flush"),
+            d(27, "EFF105", "tp_binary_write", "io.BufferedWriter.close"),
+            d(31, "EFF105", "tp_unbuffered", "io.open"),
+            d(34, "EFF105", "tp_unbuffered", "io.FileIO.readline"),
+            d(38, "EFF105", "tp_unknown_mode", "builtins.open"),
+            d(40, "EFF105", "tp_unknown_mode", "io.open().write"),
+            d(41, "EFF105", "tp_unknown_mode", "builtins.open"),
+            d(42, "EFF105", "tp_unknown_mode", "io.open().tell"),
+            d(43, "EFF105", "tp_unknown_mode", "builtins.open"),
+            d(44, "EFF105", "tp_unknown_mode", "io.open().flush"),
+            d(48, "EFF105", "tp_with", "pathlib.Path.open"),
+            d(50, "EFF105", "tp_with", "io.BufferedRandom.__iter__"),
+            d(51, "EFF105", "tp_with", "io.BufferedRandom.seek"),
+            d(52, "EFF105", "tp_with", "builtins.open"),
+            d(53, "EFF105", "tp_with", "io.TextIOWrapper.writelines"),
+        ]
+    );
+}
+
+/// A binary read returns `None` from a non-blocking file descriptor, and `open` sets
+/// `O_NONBLOCK` on no path: only a path argument gives the buffered class, whose `read` is
+/// `bytes`. An integer or unknown file gives the members every file class has.
+#[test]
+fn a_binary_read_of_a_file_that_may_be_a_descriptor_has_no_class() {
+    const SRC: &str = r#"from pathlib import Path
+
+
+async def from_path():
+    f = open("x.bin", "rb")
+    return f.read()
+
+
+async def from_path_object(p: Path):
+    f = open(p, "rb")
+    return f.read()
+
+
+async def from_descriptor(fd: int):
+    f = open(fd, "rb")
+    return f.read()
+
+
+async def from_unknown(x):
+    f = open(x, "rb")
+    return f.read()
+
+
+"#;
+    assert_eq!(
+        check("cat_files_fd", "app/fd.py", SRC, "EFF101,EFF105"),
+        vec![
+            d(5, "EFF105", "from_path", "builtins.open"),
+            d(6, "EFF105", "from_path", "io.BufferedReader.read"),
+            d(10, "EFF105", "from_path_object", "builtins.open"),
+            d(11, "EFF105", "from_path_object", "io.BufferedReader.read"),
+            d(15, "EFF105", "from_descriptor", "builtins.open"),
+            d(16, "EFF105", "from_descriptor", "io.open().read"),
+            d(20, "EFF105", "from_unknown", "builtins.open"),
+            d(21, "EFF105", "from_unknown", "io.open().read"),
+        ]
+    );
+}
+
+/// The calls on those file objects, and on what `read` returns, are all resolved: `heki
+/// recommend` counts no call it cannot see.
+#[test]
+fn file_object_calls_are_resolved() {
+    let p = Project::new("cat_files_resolved");
+    p.write("app/files.py", FILES);
+    let (code, out, err) = p.heki(&["dump-recommend-facts"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let facts: Value = serde_json::from_str(&out).unwrap();
+    let spots = &facts["blind_spots"];
+    assert_eq!(spots["unresolved"], serde_json::json!([]), "{spots:#}");
+    assert_eq!(spots["totals"]["unresolved"]["calls"], 0, "{spots:#}");
+}
+
+const RESULTS: &str = r#"import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import threading
+from importlib import import_module
+from pathlib import Path
+from urllib.parse import urlparse
+
+
+def processes():
+    done = subprocess.run(["true"])
+    done.check_returncode()
+    return done.returncode.bit_length()
+
+
+def stats(p: Path):
+    os.stat("x").st_mtime.is_integer()
+    os.lstat("x").st_size.bit_length()
+    p.stat().st_mode.bit_length()
+    p.lstat().st_mtime_ns.bit_length()
+
+
+def texts(p: Path):
+    os.getcwd().upper()
+    os.getcwdb().upper()
+    json.dumps({}).upper()
+    p.read_text().upper()
+    p.read_bytes().upper()
+
+
+def paths(p: Path, s: str, b: bytes):
+    os.path.abspath(p).upper()
+    os.path.realpath(s).upper()
+    os.path.relpath(b).upper()
+    os.path.expanduser("~").upper()
+    shutil.copy(p, s).upper()
+    shutil.copy2(b, b).upper()
+    shutil.copytree(s, p).exists()
+
+
+def unknown_paths(x, p: Path):
+    os.path.abspath(x).upper()
+    shutil.copy(x, p).upper()
+
+
+def objects(name: str):
+    logging.getLogger(name).info("x")
+    threading.current_thread().is_alive()
+    threading.main_thread().is_alive()
+    re.compile("a").findall("a").copy()
+    urlparse("http://h").geturl().upper()
+    urlparse(b"http://h").geturl().upper()
+
+
+def unknown_objects(x):
+    urlparse(x).geturl()
+    import_module(x).run()
+"#;
+
+/// The calls on what these standard library functions return are resolved, by the class of
+/// their result: a path function's follows the kind of path it is given, and `urlparse`'s the
+/// kind of URL. An argument heki knows nothing of gives no class (a destination path object
+/// may give a `str` or itself to `shutil.copy`), and a module `import_module` returns says
+/// nothing of the names it binds.
+#[test]
+fn calls_on_standard_library_results_are_resolved() {
+    let p = Project::new("cat_stdlib_results");
+    p.write("app/results.py", RESULTS);
+    let (code, out, err) = p.heki(&["dump-recommend-facts"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let facts: Value = serde_json::from_str(&out).unwrap();
+    let unresolved: Vec<(String, String, Value)> = facts["blind_spots"]["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| {
+            (
+                u["function"].as_str().unwrap().to_owned(),
+                u["reason"].as_str().unwrap().to_owned(),
+                u["names"].clone(),
+            )
+        })
+        .collect();
+    let at = |function: &str, reason: &str, names: &[&str]| {
+        (
+            format!("app.results.{function}"),
+            reason.to_owned(),
+            serde_json::json!(names),
+        )
+    };
+    assert_eq!(
+        unresolved,
+        vec![
+            at("unknown_objects", "call-result", &["geturl"]),
+            at("unknown_objects", "unknown-member", &["run"]),
+            at("unknown_paths", "call-result", &["upper"]),
+        ]
+    );
+}
+
 #[test]
 fn a_numeric_host_is_parsed_not_resolved() {
     // `AI_NUMERICHOST` (alone, through a local, or among other flags) never asks a resolver.

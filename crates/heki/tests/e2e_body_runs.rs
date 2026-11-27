@@ -289,6 +289,8 @@ fn consumers_wrappers_and_escapes() {
             d(g, 68, 6, "EFF101 [heuristic]", "alias_and_unpacking"),
             // A sync helper materializing a generator runs its body.
             d(g, 73, 12, "EFF101 [heuristic]", "sync_helper_materializes"),
+            // A generator created and dropped never runs its body (`EFF116`, a default rule).
+            d(g, 93, 5, "EFF116", "created_and_dropped"),
         ],
         "{diags:#?}"
     );
@@ -522,6 +524,8 @@ fn contract_reports_follow_where_the_body_runs() {
             // dropped: nothing runs.
             d(m, 35, 14, "MUT201", "consume_outside"),
             d(m, 40, 14, "MUT203", "read_outside"),
+            // The generator created and dropped is itself a report (`EFF116`).
+            d(m, 45, 5, "EFF116", "created_only"),
             // A coroutine handed to `asyncio` never runs at a project call: it reports its own
             // write. An awaited one hands its report to the caller.
             d(m, 49, 5, "MUT201", "_write_later"),

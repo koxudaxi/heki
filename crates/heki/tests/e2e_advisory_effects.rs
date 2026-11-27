@@ -938,6 +938,11 @@ fn each_effect_has_its_own_help() {
                 &format!("{offload} use an async file API")
             ),
             (
+                33,
+                "`reads` reaches the blocking filesystem call `io.TextIOWrapper.read` on the event loop",
+                &format!("{offload} use an async file API")
+            ),
+            (
                 42,
                 "`requests.get` allocates an unpooled client on every loop iteration",
                 client

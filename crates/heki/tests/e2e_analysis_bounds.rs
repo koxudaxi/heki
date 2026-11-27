@@ -16,7 +16,8 @@
 //! the import graph (`heki inspect --imports`), the ends of the handler bodies around imports, the
 //! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
 //! for many parameters, or from many implementations of one call, and the type expressions aliases
-//! and casts spell, and the names a module `__getattr__` serves.
+//! and casts spell, the names a module `__getattr__` serves, and the parameters functions return
+//! through calls of each other, down a long chain, around a cycle, or across many modules.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -6423,6 +6424,55 @@ fn stores_into_containers_a_constructor_made_are_decided_once() {
     assert_eq!(writes(&check_linear(2_048, shape)), 1);
 }
 
+/// Constructions of a class whose `__init__`, through a base's that `super().__init__()`
+/// reaches, hands the instance to a helper, under each of thousands of branches: what a
+/// construction of the class keeps of its instance is decided once for the function, and each
+/// construction hands its object to the one `__init__`, so the work grows with the function; the
+/// write before the object is kept constructs it and is allowed, the one after it is reported.
+#[test]
+fn constructions_handing_their_instance_on_are_decided_once() {
+    let shape = |branches: usize| {
+        let mut lines: Vec<String> = [
+            "class Base:",
+            "    def __init__(self):",
+            "        self.attr = 0",
+            "        self.setup()",
+            "    def setup(self):",
+            "        self.ready = True",
+            "class Model(Base):",
+            "    def __init__(self):",
+            "        super().__init__()",
+            "KEPT = []",
+            "def build(flags):",
+            "    m = Model()",
+        ]
+        .map(str::to_owned)
+        .into();
+        for i in 0..branches {
+            lines.push(format!("    if flags[{i}]:"));
+            lines.push(format!("        m.y{i} = Model()"));
+        }
+        lines.extend([
+            "    m.attr = 1".to_owned(),
+            "    KEPT.append(m)".to_owned(),
+            "    m.attr = 2".to_owned(),
+            "    return m".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_construction_hands_on_{branches}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Base.attr\"]\n\
+             allowed-writers = [\"m.Base.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 1);
+    assert_eq!(writes(&check_linear(2_048, shape)), 1);
+}
+
 /// A constructor binding a list to an attribute through a chain of thousands of names, each
 /// bound to the one before: the walk from the store back to the list visits each copy once, on
 /// the constructor's budget, so the list is still the instance's own and the write before it is
@@ -8804,5 +8854,231 @@ fn a_module_getattr_past_its_budget_serves_no_name() {
     assert_eq!(
         blocking_callers(&check(&served_past_tests(n / SCALE))),
         ["wait_b0"]
+    );
+}
+
+/// `change(f{n-1}(xs))` of a read-only parameter, the functions `f{k}` returning `f{next(k)}(x)`,
+/// and `f0` returning `x` unless `next` leads it on too.
+fn forwarding_functions(n: usize, next: impl Fn(usize) -> Option<usize>) -> String {
+    let mut out = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def change(x):".to_owned(),
+        "    if isinstance(x, list):".to_owned(),
+        "        x.reverse()".to_owned(),
+    ];
+    for k in 0..n {
+        out.push(String::new());
+        out.push(String::new());
+        out.push(format!("def f{k}(x):"));
+        out.push(next(k).map_or_else(
+            || "    return x".to_owned(),
+            |j| format!("    return f{j}(x)"),
+        ));
+    }
+    out.extend([
+        String::new(),
+        String::new(),
+        "def use(xs: Sequence[int]) -> None:".to_owned(),
+        format!("    change(f{}(xs))", n - 1),
+    ]);
+    out.join("\n") + "\n"
+}
+
+fn mut110_callers(found: &[Value]) -> Vec<(String, String)> {
+    (found.iter())
+        .filter(|d| d["rule_code"] == "MUT110")
+        .map(|d| {
+            let text = |key: &str| d[key].as_str().unwrap().to_owned();
+            (text("qualname"), text("certainty"))
+        })
+        .collect()
+}
+
+/// A long chain of functions each returning what the one before returns of its parameter: the
+/// fixpoint deciding them visits each function a bounded number of times.
+#[test]
+fn a_parameter_returned_down_a_long_chain_of_calls_is_decided_in_linear_time() {
+    let found = check_linear(4000, |n| {
+        let p = Project::new(&format!("bounds_forwarding_chain_{n}"));
+        p.write("m.py", &forwarding_functions(n, |k| k.checked_sub(1)));
+        p
+    });
+    assert_eq!(
+        mut110_callers(&found),
+        [("use".to_owned(), "exact".to_owned())]
+    );
+}
+
+/// The functions return what the next one returns, around a cycle: none returns its parameter,
+/// and each is visited once.
+#[test]
+fn a_cycle_of_calls_returning_each_other_decides_nothing_in_linear_time() {
+    let found = check_linear(4000, |n| {
+        let p = Project::new(&format!("bounds_forwarding_cycle_{n}"));
+        p.write("m.py", &forwarding_functions(n, |k| Some((k + 1) % n)));
+        p
+    });
+    assert_eq!(mut110_callers(&found), []);
+}
+
+/// A function returning one of `branches` distinct calls, each of a function returning
+/// `identity(x)`: the function reads each callee's fact, and is read again for each that resolves.
+fn forwarding_fan_out(branches: usize) -> String {
+    let mut lines = vec![
+        "def identity(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "def a(x, flag):".to_owned(),
+    ];
+    lines.extend((0..branches).map(|i| format!("    if flag == {i}:\n        return g{i}(x)")));
+    lines.push("    return x".to_owned());
+    for i in 0..branches {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def g{i}(x):"),
+            "    return identity(x)".to_owned(),
+        ]);
+    }
+    lines.join("\n") + "\n"
+}
+
+/// Every visit of a function is charged its calls, so a fan-out of forwarding calls past the
+/// module's budget answers open instead of reading the calls once per resolving callee.
+#[test]
+fn a_fan_out_of_forwarding_calls_is_charged_for_each_visit() {
+    check_past_budgets(
+        3000,
+        &[
+            "heki_effect::resolver::forwarded",
+            "heki_effect::summary::Extractor::path_facts",
+        ],
+        |n| {
+            let p = Project::new(&format!("bounds_forwarding_fan_out_{n}"));
+            p.write("m.py", &forwarding_fan_out(n));
+            p
+        },
+    );
+}
+
+/// `a1` and `a2`, each returning one of `branches` calls of functions returning their
+/// parameter, and in another module `use` handing a read-only parameter to `change` through
+/// `b`, which returns what `a1` or `a2` returns.
+fn forwarding_fan_outs(branches: usize) -> Project {
+    let p = Project::new(&format!("bounds_forwarding_fan_outs_{branches}"));
+    let mut lines = Vec::new();
+    for a in ["a1", "a2"] {
+        lines.push(format!("def {a}(x, flag):"));
+        lines.extend((0..branches).map(|i| format!("    if flag == {i}:\n        return g{i}(x)")));
+        lines.extend(["    return x".to_owned(), String::new(), String::new()]);
+    }
+    for i in 0..branches {
+        lines.extend([
+            format!("def g{i}(x):"),
+            "    return x".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    p.write("m.py", &(lines.join("\n") + "\n")).write(
+        "n.py",
+        "from collections.abc import Sequence\n\nfrom m import a1, a2\n\n\ndef b(x, flag):\n    if flag:\n        return a1(x, flag)\n    return a2(x, flag)\n\n\ndef change(x):\n    if isinstance(x, list):\n        x.reverse()\n\n\ndef use(xs: Sequence[int]) -> None:\n    change(b(xs, 0))\n",
+    );
+    p
+}
+
+/// A function's calls are charged before they are read: the module calling two fan-outs of
+/// another module, whose calls together exceed its budget, reads none of the second's calls and
+/// decides nothing (`b` returns no parameter). A shape a size smaller is decided.
+#[test]
+fn a_module_reading_calls_past_its_budget_stops_reading_them() {
+    let found = check_past_budgets(
+        3000,
+        &[
+            "heki_effect::resolver::forwarded",
+            "heki_effect::summary::Extractor::path_facts",
+        ],
+        forwarding_fan_outs,
+    );
+    assert_eq!(mut110_callers(&found), []);
+    assert_eq!(
+        mut110_callers(&check(&forwarding_fan_outs(3000 / SCALE))),
+        [("use".to_owned(), "exact".to_owned())]
+    );
+}
+
+/// `n` returns of one attribute read, past a call on a path to none of them
+/// (`if flag < 0: log(flag); raise ...`): the returns share one walk back to the read.
+fn returns_of_one_read(n: usize) -> String {
+    let mut lines = vec![
+        "def log(flag):".to_owned(),
+        "    print(flag)".to_owned(),
+        String::new(),
+        String::new(),
+        "def pick(s, flag):".to_owned(),
+        "    items = s.items".to_owned(),
+        "    if flag < 0:".to_owned(),
+        "        log(flag)".to_owned(),
+        "        raise ValueError".to_owned(),
+    ];
+    lines.extend((0..n).map(|i| format!("    if flag == {i}:\n        return items")));
+    lines.push("    return items".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// Whether a call may rebind the attribute between its read and each return is one walk of the
+/// blocks between them, whatever the number of returns. (The paths of so many branches spend
+/// the summary's path budget.)
+#[test]
+fn many_returns_of_one_attribute_read_share_one_walk() {
+    check_past_budgets(
+        3000,
+        &["heki_effect::summary::Extractor::path_facts"],
+        |n| {
+            let p = Project::new(&format!("bounds_returns_of_one_read_{n}"));
+            p.write("m.py", &returns_of_one_read(n));
+            p
+        },
+    );
+}
+
+/// A chain of modules, each function returning what the one of the module before returns: each
+/// module's completion walks the rest of the chain, within a budget proportional to the module,
+/// past which it decides nothing. A chain a size smaller is decided.
+fn forwarding_modules(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_forwarding_modules_{n}"));
+    p.write("c/__init__.py", "")
+        .write("c/m0.py", "def f0(x):\n    return x\n");
+    for k in 1..n {
+        p.write(
+            &format!("c/m{k}.py"),
+            &format!(
+                "from c.m{j} import f{j}\n\n\ndef f{k}(x):\n    return f{j}(x)\n",
+                j = k - 1
+            ),
+        );
+    }
+    p.write(
+        "c/use.py",
+        &format!(
+            "from collections.abc import Sequence\n\nfrom c.m{last} import f{last}\n\n\ndef change(x):\n    if isinstance(x, list):\n        x.reverse()\n\n\ndef use(xs: Sequence[int]) -> None:\n    change(f{last}(xs))\n",
+            last = n - 1
+        ),
+    );
+    p
+}
+
+#[test]
+fn a_parameter_returned_across_a_long_chain_of_modules_stays_within_the_budgets() {
+    let owner = "heki_effect::resolver::forwarded";
+    let n = 2000;
+    let found = check_past_budgets(n, &[owner], forwarding_modules);
+    assert_eq!(mut110_callers(&found), []);
+    assert_eq!(
+        mut110_callers(&check(&forwarding_modules(n / SCALE))),
+        [("use".to_owned(), "exact".to_owned())]
     );
 }

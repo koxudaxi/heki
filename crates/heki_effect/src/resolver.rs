@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod fields;
+mod forwarded;
 mod getattr_exports;
 mod init_containers;
 mod package_paths;
@@ -55,6 +56,7 @@ mod type_names;
 mod workspace;
 
 pub use fields::{FieldDefault, InitField, InitFields};
+pub use forwarded::{ForwardedReturn, ForwardingCall};
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
 pub use sentinels::object_sentinel_calls;
 pub(crate) use type_names::type_expression_text;
@@ -679,7 +681,7 @@ pub enum StoreTarget {
 /// A class's own `__init__` that uses the instance only as the object of attribute stores (none
 /// of `__dict__` or `__class__`) and as `super()` for a call of the next `__init__` along the
 /// MRO handed nothing that may hold the instance (`init_containers`). Whether the stores run
-/// code depends on the class constructed ([`ProjectDecls::constructor_containers`]).
+/// code depends on the class constructed ([`ProjectDecls::constructor`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlainInit {
     /// The attributes it stores through the instance, sorted, each once.
@@ -689,6 +691,28 @@ pub struct PlainInit {
     /// The attributes it binds to a builtin container it makes there, with the container's
     /// kind, sorted: when it returns, the attribute holds that container and nothing else does.
     pub containers: Box<[(Box<str>, ContainerKind)]>,
+    /// The global names it reads as builtins, since its module binds them no other way
+    /// (`super`, the container classes it calls), sorted: a star import may still bind one.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub builtins: Box<[Box<str>]>,
+}
+
+/// What a construction of a project class keeps of the instance it makes
+/// ([`ProjectDecls::constructor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Constructor<'d> {
+    /// Nothing beyond stores into the instance's own attributes: the object is new when the
+    /// call returns. `containers`: the builtin containers it holds by attribute that the call
+    /// made and nothing else holds ([`PlainInit::containers`]).
+    KeepsNothing {
+        containers: &'d [(Box<str>, ContainerKind)],
+    },
+    /// The `__init__` the call runs uses the instance otherwise: the call hands the instance to
+    /// that `__init__`'s first parameter, which keeps it when the `__init__` keeps that
+    /// parameter (`EffectSummary::retains_params`).
+    HandsToInit,
+    /// The call may give an object something else holds, or heki cannot tell what it runs.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1047,10 +1071,17 @@ pub struct FunctionDecl {
     pub property_type: Option<Ty>,
     /// `(i, None)` when every `return` of every definition returns parameter `i` as itself
     /// (`return x`, `return cast(list[int], x)`), `(i, Some(attr))` when each returns attribute
-    /// `attr` of it (`return self.items`) ([`returned_param`]): calling the function, or reading
-    /// the property, gives the argument, or that object of it.
+    /// `attr` of it (`return self.items`) ([`returned_param`]), or what a call returning it
+    /// returns, which completing the declarations decides ([`Self::forwards`]): calling the
+    /// function, or reading the property, gives the argument, or that object of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param: Option<(u8, Option<String>)>,
+    /// What every `return` of every definition gives when some return gives the result of a
+    /// call (`return same(x)`) and the others a parameter or an attribute of one
+    /// ([`returned_param`]): the calls, from which completing the declarations decides
+    /// [`Self::returns_param`] against what the callees return ([`forwarded::complete`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwards: Option<Box<ForwardedReturn>>,
     /// The fqn an import binds when every `return` of every definition returns what that import
     /// binds, a module or an object of one ([`returned_import`]): an import in the function
     /// (`from pkg import ops` then `return ops`, which breaks an import cycle) or one of the
@@ -1641,6 +1672,9 @@ impl ModuleDecls {
         for function in out.functions.values_mut() {
             function.offloaded_by = None;
             function.state_of_self = false;
+            if function.forwards.is_some() {
+                function.returns_param = None;
+            }
         }
         out.global_types.clear();
         out.tables.clear();
@@ -2438,7 +2472,8 @@ pub struct DeclKeys {
     /// Attribute names looked up among the project's property getter names.
     pub property_names: BTreeSet<String>,
     /// Names looked up among the names of the project functions returning a parameter or an
-    /// attribute of one (`FunctionDecl::returns_param`).
+    /// attribute of one (`FunctionDecl::returns_param`), or what calls return
+    /// (`FunctionDecl::forwards`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub returning_names: BTreeSet<String>,
     /// Attribute names looked up among the names class bodies bind to a module-level name
@@ -2623,8 +2658,8 @@ pub struct ProjectDecls {
     /// attribute read with another name runs no getter, without walking any class hierarchy.
     property_names: FxHashSet<String>,
     /// Names of the functions, methods, and getters returning a parameter or an attribute of
-    /// one (`FunctionDecl::returns_param`): a call or a read with another name hands out no
-    /// such object, without resolving it.
+    /// one (`FunctionDecl::returns_param`), or what calls return (`FunctionDecl::forwards`): a
+    /// call or a read with another name hands out no such object, without resolving it.
     returning_names: FxHashSet<String>,
     /// Names class bodies bind to a module-level name outside a field
     /// (`ClassDecl::named_attrs`): an attribute with another name is no class alias
@@ -3104,7 +3139,10 @@ impl ProjectDecls {
                 if f.reads_as_property() {
                     property_names.insert(name.clone().into_owned());
                 }
-                if f.returns_param.is_some() {
+                // A function returning what calls return is listed in pass 1 too, before its
+                // completion decides what it returns: a name the completion adds to the index
+                // would change no key pass 1's changes name.
+                if f.returns_param.is_some() || f.forwards.is_some() {
                     returning_names.insert(name.into_owned());
                 }
             }
@@ -4769,26 +4807,37 @@ impl ProjectDecls {
             && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
     }
 
-    /// The containers a new instance of the project class `class` holds when the call
-    /// constructing it returns, each one the call made and nothing else holds, by attribute
-    /// ([`PlainInit::containers`]): those of the `__init__` the call runs, that of the first class
-    /// along the MRO defining one. Nothing else may run or change the construction: no class
-    /// along the MRO has a class decorator (which may generate another `__init__`),
-    /// `__init_subclass__`, a `dataclass_transform`, or a metaclass other than `type` or
-    /// `abc.ABCMeta` (whose `__call__` may run anything); that `__init__` and every one it
-    /// reaches through `super().__init__(...)` is a [`PlainInit`] (one along the MRO outside the
-    /// project is `object`'s), no `__init__` it reaches stores an attribute it makes a container
-    /// for, and every attribute they store is stored on the instance without running code of the
-    /// project ([`Self::attr_write_stores_value`]). A store running a property's setter or a
-    /// descriptor may hand the instance anywhere, and a base's `__init__` replacing the
-    /// instance's namespace makes every attribute shared. Empty for any other class. A read of
-    /// one of the attributes finds its container when reading it finds what the instance stores
-    /// ([`Self::attr_read_finds_stored`]).
-    pub(crate) fn constructor_containers(
+    /// What a call constructing an instance of the project class `class` keeps of it
+    /// ([`Constructor`]), from the `__init__` the call runs, that of the first class along the
+    /// MRO defining one, and every one it reaches through `super().__init__(...)`:
+    /// - [`Constructor::Unknown`] when the class may give an existing instance
+    ///   ([`Self::may_reuse_instances`]) or has a metaclass other than `type` or `abc.ABCMeta`, or
+    ///   a base heki names no class for ([`Self::has_custom_metaclass`], whose `__call__` may run
+    ///   anything); when the classes along the MRO up to one whose `__init__` the call runs may
+    ///   bind another `__init__` than their bodies do ([`Self::lookup_rebound`]); when such an
+    ///   `__init__` is a project function a decorator replaces; or when a star import of the
+    ///   module of a [`PlainInit`] may bind a builtin it reads (`super`, `list`).
+    /// - [`Constructor::HandsToInit`] when one of them is a project `__init__` that is no
+    ///   [`PlainInit`], or a store of theirs may run code of the project (a property's setter, a
+    ///   descriptor, `__setattr__`, [`Self::attr_write_stores_value`]): what keeps the instance
+    ///   is what the first one does with its first parameter.
+    /// - [`Constructor::KeepsNothing`] otherwise: every one is a [`PlainInit`], `object`'s, or
+    ///   that of a class outside the project, which keeps nothing of the instance (a dataclass's
+    ///   or a pydantic model's construction runs only such an `__init__`). Its containers are
+    ///   those of the first one, when every one is a [`PlainInit`], no later one stores an
+    ///   attribute the first makes a container for (it may rebind it), and no class along the MRO
+    ///   has a class decorator (which may generate another `__init__`), `__init_subclass__`, or a
+    ///   `dataclass_transform`. A base's `__init__` replacing the instance's namespace makes every
+    ///   attribute shared. A read of one of the attributes finds its container when reading it
+    ///   finds what the instance stores ([`Self::attr_read_finds_stored`]).
+    pub(crate) fn constructor(
         &self,
         class: &str,
         catalog_stores: impl Fn(&str) -> bool,
-    ) -> &[(Box<str>, ContainerKind)] {
+    ) -> Constructor<'_> {
+        if self.may_reuse_instances(class) || self.has_custom_metaclass(class) {
+            return Constructor::Unknown;
+        }
         let mro = self.mro(class);
         let decls: Vec<Option<&ClassDecl>> = (mro.iter())
             .map(|c| {
@@ -4796,56 +4845,92 @@ impl ProjectDecls {
                 self.class(c)
             })
             .collect();
+        // From the class at `from` on, the first class defining `__init__`: a project class's
+        // own, or one outside the project other than a plain base; `None` when only
+        // `object.__init__` is left.
+        let next_init = |from: usize| {
+            (from..decls.len()).find(|&i| match decls[i] {
+                Some(d) => d.members.contains("__init__"),
+                None => !PLAIN_BASES.contains(&mro[i].as_str()),
+            })
+        };
+        let star_bound = |c: &str, init: &PlainInit| {
+            let module = self.split_module(c).map(|(m, _)| m);
+            (init.builtins.iter()).any(|name| {
+                module.is_some_and(|m| {
+                    !m.binds(name)
+                        && (m.star_imports.iter().flatten())
+                            .any(|source| self.star_import_may_bind(&m.module_name, source, name))
+                })
+            })
+        };
+        let mut from = 0;
+        let mut first: Option<&PlainInit> = None;
+        let mut stores: Vec<&str> = Vec::new();
+        // Every `__init__` the call runs is a project one, and none rebinds a container of the
+        // first.
+        let mut all_plain = true;
+        loop {
+            let found = next_init(from);
+            let reached = found.map_or(mro.len(), |i| i + 1);
+            if self.lookup_rebound(&mro[from..reached], "__init__") {
+                return Constructor::Unknown;
+            }
+            let Some(i) = found else { break };
+            let Some(d) = decls[i] else {
+                all_plain = false;
+                break;
+            };
+            let Some(init) = d.plain_init.as_deref() else {
+                let decl =
+                    (self.own_method(&mro[i], "__init__")).and_then(|k| self.function_decl(&k));
+                // A static or class method `__init__` is not handed the instance, and its
+                // call ends the chain.
+                if decl
+                    .as_ref()
+                    .is_some_and(|f| f.called_as_defined && (f.is_staticmethod || f.is_classmethod))
+                {
+                    all_plain = false;
+                    break;
+                }
+                let as_defined = decl.is_some_and(|f| f.called_as_defined);
+                return if as_defined {
+                    Constructor::HandsToInit
+                } else {
+                    Constructor::Unknown
+                };
+            };
+            if star_bound(&mro[i], init) {
+                return Constructor::Unknown;
+            }
+            if let Some(first) = first {
+                let rebinds = |(a, _): &(Box<str>, _)| init.stores.binary_search(a).is_ok();
+                all_plain &= !first.containers.iter().any(rebinds);
+            }
+            first = first.or(Some(init));
+            stores.extend(init.stores.iter().map(|a| &**a));
+            if !init.calls_next {
+                break;
+            }
+            from = i + 1;
+        }
+        if !stores.is_empty() && !self.attr_write_stores_value(class, &stores, &catalog_stores) {
+            return Constructor::HandsToInit;
+        }
         let changes_construction = |d: &ClassDecl| {
             !d.decorators.is_empty()
                 || d.transform.is_some()
                 || d.members.contains("__init_subclass__")
         };
-        if self.has_custom_metaclass(class)
-            || decls.iter().flatten().any(|d| changes_construction(d))
-        {
-            return &[];
-        }
-        // From the class at `from` on, the first class defining `__init__`: a project class's
-        // own, or `None` for one outside the project other than a plain base, which may define
-        // its own; `Some(None)` when only `object.__init__` is left.
-        let next_init = |from: usize| -> Option<Option<(usize, &PlainInit)>> {
-            let found = (from..decls.len()).find(|&i| match decls[i] {
-                Some(d) => d.members.contains("__init__"),
-                None => !PLAIN_BASES.contains(&mro[i].as_str()),
-            });
-            let Some(i) = found else {
-                return Some(None);
-            };
-            decls[i]
-                .and_then(|d| d.plain_init.as_deref())
-                .map(|init| Some((i, init)))
-        };
-        let Some(Some((mut at, first))) = next_init(0) else {
-            return &[];
-        };
-        let mut stores: Vec<&str> = first.stores.iter().map(|a| &**a).collect();
-        let mut init = first;
-        while init.calls_next {
-            match next_init(at + 1) {
-                Some(Some((i, next))) => {
-                    // A base's `__init__` storing the attribute may rebind it after the store.
-                    let rebinds = |(a, _): &(Box<str>, _)| next.stores.binary_search(a).is_ok();
-                    if first.containers.iter().any(rebinds) {
-                        return &[];
-                    }
-                    stores.extend(next.stores.iter().map(|a| &**a));
-                    (at, init) = (i, next);
-                }
-                Some(None) => break,
-                None => return &[],
+        let containers = match first {
+            Some(first)
+                if all_plain && !decls.iter().flatten().any(|d| changes_construction(d)) =>
+            {
+                &*first.containers
             }
-        }
-        if self.attr_write_stores_value(class, &stores, &catalog_stores) {
-            &first.containers
-        } else {
-            &[]
-        }
+            _ => &[],
+        };
+        Constructor::KeepsNothing { containers }
     }
 
     /// The project classes whose bodies may supply an attribute of a value of the class `class`
@@ -7276,7 +7361,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         *slot = (*slot).max(t);
     }
     // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
-    let mut returned_params: FxHashMap<&str, Option<(u8, Option<String>)>> = FxHashMap::default();
+    let mut returned_params: FxHashMap<&str, Option<HandedBack>> = FxHashMap::default();
     let mut returned_imports: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
     let import_targets: FxHashMap<Span, String> = semantic
         .imports
@@ -7380,7 +7465,14 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             offloaded_by: None,
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
-            returns_param: returned_params[f.qualname.as_str()].clone(),
+            returns_param: match &returned_params[f.qualname.as_str()] {
+                Some(HandedBack::Param(param, attr)) => Some((*param, attr.clone())),
+                _ => None,
+            },
+            forwards: match &returned_params[f.qualname.as_str()] {
+                Some(HandedBack::Forwarded(forwards)) => Some(forwards.clone()),
+                _ => None,
+            },
             returned_import: returned_imports[f.qualname.as_str()].clone(),
             returns: None,
             state_of_self: false,
@@ -7970,17 +8062,27 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
     special || builtin_method || kb.lookup(&format!("{base}.{name}")).is_some()
 }
 
-/// [`FunctionDecl::returns_param`] of one definition: a function (not a generator or a
-/// coroutine, decorated by nothing but the decorators that return what the body returns on
-/// every call, [`decorators::keeps_returned_value`]: `property` and those that keep the call)
-/// whose every `return` returns the same positional parameter, or the same attribute of it, read
-/// directly or through what hands a value back as itself (local copies, `typing.cast`,
-/// [`ownership::handed_back`]), and which stores or deletes no attribute of that name. A
+/// What every `return` of one definition hands back of its parameters ([`handed_back`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandedBack {
+    /// The same parameter, or the same attribute of it ([`FunctionDecl::returns_param`]).
+    Param(u8, Option<String>),
+    /// That, or the result of calls ([`FunctionDecl::forwards`]).
+    Forwarded(Box<ForwardedReturn>),
+}
+
+/// [`FunctionDecl::returns_param`] and [`FunctionDecl::forwards`] of one definition: a function
+/// (not a generator or a coroutine, decorated by nothing but the decorators that return what the
+/// body returns on every call, [`decorators::keeps_returned_value`]: `property` and those that
+/// keep the call) whose every `return` returns the same positional parameter, or the same
+/// attribute of it, read directly or through what hands a value back as itself (local copies,
+/// `typing.cast`, [`ownership::handed_back`]), and which stores or deletes no attribute of that
+/// name; or some return the result of a call passing parameters ([`ForwardingCall`]). A
 /// `cached_property` is none: a read after the first returns what the instance holds, which an
 /// assignment can replace.
-fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
+fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<HandedBack> {
     (f.kind == FunctionKind::Sync)
-        .then(|| handed_back_param(f, decls))
+        .then(|| handed_back(f, decls))
         .flatten()
 }
 
@@ -7988,6 +8090,14 @@ fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<Str
 /// parameters, as [`returned_param`] decides it without excluding a coroutine: awaiting the
 /// coroutine gives what the body returns (`ReturnFact::self_attr`).
 fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
+    match handed_back(f, decls)? {
+        HandedBack::Param(param, attr) => Some((param, attr)),
+        HandedBack::Forwarded(_) => None,
+    }
+}
+
+/// [`handed_back_param`], with the returns giving a call's result ([`HandedBack::Forwarded`]).
+fn handed_back(f: &IrFunction, decls: &ModuleDecls) -> Option<HandedBack> {
     if !matches!(f.kind, FunctionKind::Sync | FunctionKind::Async)
         || !decorators::keeps_returned_value(&f.decorators, decls)
     {
@@ -8033,14 +8143,28 @@ fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<
         u8::try_from(i).ok()
     };
     let mut returned = None;
+    let mut calls = BTreeSet::new();
+    // The values a return gives that may be an attribute (an attribute's load, a call's result),
+    // with the block of the return.
+    let mut attr_reads: Vec<(VarId, BlockId)> = Vec::new();
     for bb in &f.blocks {
         let Terminator::Return(value) = &bb.terminator else {
             continue;
         };
         let root = handed_back_from((*value)?);
-        let this = match defs.get(&root) {
+        let def = defs.get(&root).copied();
+        let mut param = |var: VarId| param_of(handed_back_from(var));
+        if let Some(call) = def.and_then(|kind| ForwardingCall::of(kind, &defs, decls, &mut param))
+        {
+            calls.insert(call);
+            attr_reads.push((root, bb.id));
+            continue;
+        }
+        let this = match def {
             Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                (param_of(handed_back_from(*obj))?, Some(attr.clone()))
+                let param = param_of(handed_back_from(*obj))?;
+                attr_reads.push((root, bb.id));
+                (param, Some(attr.clone()))
             }
             _ => (param_of(root)?, None),
         };
@@ -8050,12 +8174,101 @@ fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<
     }
     // A function storing or deleting the attribute (`items = self.items; self.items = [];
     // return items`) may return what the attribute held before: no longer the attribute.
-    let stores = |attr: &str| {
-        f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
-            matches!(&i.kind, InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } if a == attr)
-        })
+    let stores = |attr: Option<&str>| {
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| match &i.kind {
+                InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } => {
+                    attr.is_none_or(|attr| a == attr)
+                }
+                _ => false,
+            })
     };
-    returned.filter(|(_, attr)| attr.as_deref().is_none_or(|a| !stores(a)))
+    // So may a function running code between the read and the return (`old = items_of(s);
+    // reset(s); return old`), which may store it; `return items_of(s)` runs none.
+    attr_reads.sort_unstable();
+    let after_read = OnceCell::new();
+    let rebinds_after_read =
+        || *after_read.get_or_init(|| rebinds_after_reads(f, &defs, decls, &attr_reads));
+    let returned_attr = returned.as_ref().and_then(|(_, attr)| attr.as_deref());
+    if returned_attr.is_some_and(|a| stores(Some(a)) || rebinds_after_read()) {
+        return None;
+    }
+    if calls.is_empty() {
+        let (param, attr) = returned?;
+        return Some(HandedBack::Param(param, attr));
+    }
+    let rebinds_attrs = stores(None) || rebinds_after_read();
+    Some(HandedBack::Forwarded(Box::new(ForwardedReturn {
+        direct: returned,
+        calls: calls.into_iter().collect(),
+        rebinds_attrs,
+    })))
+}
+
+/// The owner of the budget of [`rebinds_after_reads`].
+const AFTER_READS_OWNER: &str = "heki_effect::resolver::rebinds_after_reads";
+
+/// Whether `f` may rebind an attribute ([`may_rebind_attrs`]) on some path from one of `reads`
+/// (a value and the block returning it, in the order of the values) to that return: after the
+/// value's instruction in its
+/// block, and in the blocks walked back from the return up to that block, which a value's
+/// definition dominates. The returns of one value share a walk; past a budget proportional to
+/// `f`, it may.
+fn rebinds_after_reads(
+    f: &IrFunction,
+    defs: &FxHashMap<VarId, &InstKind>,
+    decls: &ModuleDecls,
+    reads: &[(VarId, BlockId)],
+) -> bool {
+    let rebinds = |insts: &[Inst]| (insts.iter()).any(|i| may_rebind_attrs(&i.kind, defs, decls));
+    if !f.blocks.iter().any(|b| rebinds(&b.insts)) {
+        return false;
+    }
+    let shape = FnShape::new(f);
+    let budget = Budget::of_function(AFTER_READS_OWNER, f);
+    // Each value is an instruction's result (an attribute load, a call).
+    let read_at: FxHashMap<VarId, (BlockId, usize)> = (f.blocks.iter())
+        .flat_map(|b| (b.insts.iter().enumerate()).map(move |(i, inst)| (b.id, i, inst)))
+        .filter_map(|(b, i, inst)| Some((inst.kind.dst()?, (b, i))))
+        .filter(|(v, _)| reads.binary_search_by_key(v, |(read, _)| *read).is_ok())
+        .collect();
+    (reads.chunk_by(|a, b| a.0 == b.0)).any(|returns| {
+        let (read_block, i) = read_at[&returns[0].0];
+        let insts = &f.block(read_block).insts;
+        if !budget.take(insts.len()) || rebinds(&insts[i + 1..]) {
+            return true;
+        }
+        let starts = (returns.iter()).filter_map(|(_, ret)| (*ret != read_block).then_some(*ret));
+        let next = |b: BlockId, out: &mut Vec<BlockId>| out.extend_from_slice(shape.preds(b));
+        let walked = reach(&budget, starts, next, |b| {
+            let insts = &f.block(b).insts;
+            if b == read_block {
+                Visit::Prune
+            } else if !budget.take(insts.len()) || rebinds(insts) {
+                Visit::Stop(())
+            } else {
+                Visit::Expand
+            }
+        });
+        walked != Answer::Known(None)
+    })
+}
+
+/// Whether the instruction `kind` of a function of the module `decls` may rebind an attribute of
+/// an object it does not name: a call (but one handing its argument back,
+/// [`decl_same_object`]), which may store one, directly or through what it calls, or an
+/// `await`, while which other code runs.
+fn may_rebind_attrs(
+    kind: &InstKind,
+    defs: &FxHashMap<VarId, &InstKind>,
+    decls: &ModuleDecls,
+) -> bool {
+    matches!(
+        kind,
+        InstKind::Call { .. } | InstKind::MethodCall { .. } | InstKind::Await { .. }
+    ) && decl_same_object(kind, defs, decls).is_none()
 }
 
 /// The value whose object the instruction `kind` of a function of the module `decls` describes
@@ -9331,6 +9544,7 @@ fn complete_decls(
         }
     }
     crate::capacity::record(input, &cx, &mut decls);
+    forwarded::complete(input, &mut decls, project);
     decls
 }
 
@@ -9500,8 +9714,9 @@ pub fn aliases_of(f: &IrFunction, roots: impl IntoIterator<Item = VarId>) -> FxH
 // ------------------------------------------------------------------------------ type inference
 
 /// What a call passes at position `index` (the receiver not counted) or by `keyword`, for the
-/// catalog's argument cases (`heki_kb::EcosystemEntry::case_for`), as `fact` describes it.
-/// Nothing is known of an argument `*` / `**` unpacking may pass.
+/// catalog's argument cases (`heki_kb::EcosystemEntry::case_for`), as `fact` describes it;
+/// `None` when it passes nothing there. Nothing is known of an argument `*` / `**` unpacking
+/// may pass.
 pub(crate) fn passed_arg(
     args: &[VarId],
     kwargs: &[(Option<String>, VarId)],
@@ -9509,7 +9724,11 @@ pub(crate) fn passed_arg(
     at: (Option<u8>, Option<&str>),
     fact: impl Fn(VarId) -> ArgFact,
 ) -> Option<ArgFact> {
-    passed_var(args, kwargs, star_from, at).map(fact)
+    match bound_arg(args, kwargs, star_from, at) {
+        BoundArg::Var(v) => Some(fact(v)),
+        BoundArg::Unpacked => Some(ArgFact::default()),
+        BoundArg::Unbound => None,
+    }
 }
 
 /// The variable a call passes at position `index` or by `keyword` ([`passed_arg`]).
@@ -10462,11 +10681,12 @@ impl<'a> TypeCtx<'a> {
             Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => return None,
             Symbol::External => {}
         }
-        if let Some(b) = fqn.strip_prefix("builtins.") {
-            return is_builtin_type(b).then(|| Ty::inst(fqn));
+        let builtin = fqn.strip_prefix("builtins.");
+        if builtin.is_some_and(is_builtin_type) {
+            return Some(Ty::inst(fqn));
         }
         let last = fqn.rsplit('.').next().unwrap_or(fqn);
-        if last.chars().next().is_some_and(char::is_uppercase) {
+        if builtin.is_none() && last.chars().next().is_some_and(char::is_uppercase) {
             // A class whose instances behave differently for an argument is typed as the
             // catalog's class of that case (`anyio.Lock(fast_acquire=True)`).
             let case = self.catalog(fqn).and_then(|e| e.case_for(arg));
@@ -10474,9 +10694,10 @@ impl<'a> TypeCtx<'a> {
                 case.and_then(|c| c.return_type.as_deref()).unwrap_or(fqn),
             ));
         }
-        // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
+        // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`,
+        // `boto3.client`, `open`).
         let entry = self.catalog(fqn)?;
-        if let Some(rt) = entry.return_type_in(entry.case_for(arg)) {
+        if let Some(rt) = entry.result_class(arg) {
             return Some(Ty::inst(rt));
         }
         (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
@@ -11014,23 +11235,32 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Whether a read or call of `name` on `recv` runs one of `keys` whatever class `recv` is:
-    /// every class of a union or implementation of a protocol, as a class of its own, takes
-    /// `name` from one of them ([`ProjectDecls::function_taken`]). A module function, a class
-    /// object, and `super()` dispatch on no instance: they run what they name.
+    /// Whether a read or call of `name` on `recv` runs one of the project functions `callee`
+    /// resolves it to whatever class `recv` is: every class of a union or implementation of a
+    /// protocol, as a class of its own, takes `name` from one of them
+    /// ([`ProjectDecls::function_taken`]). A named object (a function called by name, which
+    /// dispatches on `__call__`, or one read on a module or a class object) runs what it names
+    /// unless the project may bind it again ([`Self::call_targets_complete`],
+    /// [`Self::method_targets_complete`]). `cls` and `super()` dispatch on no instance: they run
+    /// what they name.
     pub(crate) fn runs_on_every_class(
         &self,
         recv: Option<&Val>,
         name: &str,
-        keys: &[FuncKey],
+        callee: &Callee,
     ) -> bool {
+        let runs = |key: &FuncKey| matches!(callee, Callee::Project(keys, _) if keys.contains(key));
         let classes = match recv {
             Some(Val::Union(classes)) => classes.as_slice(),
             Some(Val::Inst(class)) => self
                 .project
                 .protocol_implementers(class)
                 .unwrap_or(std::slice::from_ref(class)),
-            Some(Val::Ref(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_)) | None => {
+            Some(Val::Ref(_)) if name == "__call__" => {
+                return self.call_targets_complete(recv, callee);
+            }
+            Some(Val::Ref(_)) => return self.method_targets_complete(recv, name, callee),
+            Some(Val::Class(_) | Val::Super(_) | Val::OneOf(_)) | None => {
                 return true;
             }
         };
@@ -11042,7 +11272,7 @@ impl<'a> TypeCtx<'a> {
                 self.taken.borrow_mut().insert(key, taken.clone());
                 taken
             });
-            taken.is_some_and(|k| keys.contains(&k))
+            taken.is_some_and(|k| runs(&k))
         })
     }
 
@@ -11077,8 +11307,7 @@ impl<'a> TypeCtx<'a> {
         fqn: &str,
         arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
-        let entry = self.kb.declared(fqn)?;
-        entry.return_type_in(entry.case_for(arg)).map(Ty::inst)
+        self.kb.declared(fqn)?.result_class(arg).map(Ty::inst)
     }
 
     /// Value returned by a resolved call target (`arg` as for [`Self::call_result`]).
