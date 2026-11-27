@@ -828,3 +828,82 @@ fn a_nested_scope_writes_the_attribute_an_enclosing_alias_holds() {
         );
     }
 }
+
+const STARRED_MODEL: &str = "\
+import time
+
+
+def fetch() -> None:
+    time.sleep(1)
+
+
+class Base:
+    def __init__(self) -> None:
+        time.sleep(1)
+
+
+from pkg.compat import *
+
+
+def pull() -> None:
+    time.sleep(1)
+
+
+async def call() -> None:
+    fetch()
+    pull()
+    Base()
+";
+
+/// A star import after a definition binds the names its module exports again: a call of `fetch`
+/// or `Base`, which `pkg.compat` also defines, may run that module's object, so no claim about
+/// the definitions is exact. `pull`, defined after the star import, is the definition. A module
+/// exporting neither name (`__all__`) leaves every call exact.
+#[test]
+fn a_star_import_after_a_definition_binds_its_name_again() {
+    let certainty = |compat: &str| -> Vec<(u64, String)> {
+        let p = Project::new("star_import_after_a_definition");
+        p.write("pkg/__init__.py", "")
+            .write("pkg/compat.py", compat)
+            .write("pkg/model.py", STARRED_MODEL);
+        let diags = diagnostics(&p, &["--select", "EFF101"]);
+        (diags.iter())
+            .map(|d| {
+                let certainty = d["certainty"].as_str().unwrap().to_owned();
+                (d["line"].as_u64().unwrap(), certainty)
+            })
+            .collect()
+    };
+    let rebinding = "def fetch() -> None:\n    return None\n\n\nclass Base:\n    pass\n";
+    // Defined after the star import on a branch only: the other path keeps what it binds.
+    let p = Project::new("star_import_before_a_definition_on_a_branch");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/compat.py", rebinding)
+        .write(
+            "pkg/model.py",
+            "import os\nimport time\n\nfrom pkg.compat import *\n\nif os.environ.get(\"SLOW\"):\n\n    def fetch() -> None:\n        time.sleep(1)\n\n\nasync def call() -> None:\n    fetch()\n",
+        );
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
+    assert_eq!(
+        found(&diags),
+        [d("pkg/model.py", 13, "EFF101", "time.sleep")]
+    );
+    assert_eq!(diags[0]["certainty"], "heuristic");
+    assert_eq!(
+        certainty(rebinding),
+        [
+            (21, "heuristic".to_owned()),
+            (22, "exact".to_owned()),
+            (23, "heuristic".to_owned()),
+        ]
+    );
+    let exporting_neither = format!("__all__ = [\"other\"]\n\nother = 1\n\n\n{rebinding}");
+    assert_eq!(
+        certainty(&exporting_neither),
+        [
+            (21, "exact".to_owned()),
+            (22, "exact".to_owned()),
+            (23, "exact".to_owned()),
+        ]
+    );
+}

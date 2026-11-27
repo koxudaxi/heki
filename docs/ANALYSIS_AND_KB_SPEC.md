@@ -235,7 +235,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     carries it), so a comprehension or a list filled in a fixed loop is small. A module
     constant's object gains none (every call shares it). Tuples and strings are fixed whatever
     their uses, also in other modules, unless another module rebinds or deletes the name
-    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
+    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`), through an import of
+    the module body or of a function alike.
   - The builtins these facts read (`range`, `len`, `sorted`, `min`, `enumerate`, ...) count only
     where a load of the name finds the real one (`ModuleConstants::trusts_builtin`, which
     `ModuleBindings` reads too): not in a module that stores or deletes the name, or that binds
@@ -891,7 +892,12 @@ body may not run that binding (no call, a call on a branch, a function nested in
 of the name may find it unbound, so a call through it may run another object than the definition
 (`ModuleDecls::rebound_definitions`); a later binding on some paths makes it one of the objects
 (`ModuleDecls::alias_paths`). The code of the definition's class body is that function's for
-`attribution = "lexical"`.
+`attribution = "lexical"`. A star import that runs after a definition's statement, or on a path
+where the module body leaves the name unbound, binds the name again when the module it imports
+may bind it (its `__all__`, or its public names, through its own star imports; any name for a
+module heki does not read): a call through the name may then run that module's object
+(`ModuleDecls::late_stars`, `ProjectDecls::star_rebound`), and an instance made by calling it is
+still taken for one of the definition's class.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
@@ -2208,9 +2214,9 @@ message = "write model state through GenerationStore instead"
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param`: `node.members().append(1)` and
        `node.view.append(1)` with `return self.items`; never a `cached_property`, nor a
-       function storing or deleting the attribute, or running a call or an `await` between
-       the read and the return, which may store it: `old = self.items; self.reset(); return
-       old`), when every class the receiver may be
+       function storing or deleting the attribute, or running a call, the entry or exit of a
+       `with` block, or an `await` between the read and the return, which may store it: `old =
+       self.items; self.reset(); return old`), when every class the receiver may be
        takes the name from one of those callees: along its MRO, the first class binding the
        name defines one (`ProjectDecls::function_taken`), and a function called by name or read
        on a module or a class object is no name the project may bind again

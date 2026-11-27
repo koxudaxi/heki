@@ -1443,6 +1443,13 @@ pub struct ModuleDecls {
     /// order: they bind the names the module binds no other way (`ProjectDecls::star_binding`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub star_imports: Option<Box<[String]>>,
+    /// The module's own module-level classes and functions that one of its star imports may bind
+    /// again after their statement has run, each with the index in `star_imports` of the first
+    /// such import: the first after the name's first binding in the module body, or the first of
+    /// all when the body does not bind the name on every path ([`ProjectDecls::star_rebound`]).
+    /// Boxed: few modules star-import after a definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late_stars: Option<Box<BTreeMap<String, u32>>>,
     /// The names no statement of the module binds that its `__getattr__` (PEP 562) serves,
     /// where heki follows the hook for that literal name ([`getattr_exports::getattr_exports`]):
     /// another module's `from module import name` or `module.name` reads that
@@ -2826,6 +2833,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::star_binding`] so far, by module and name; cleared with the
     /// indexes.
     star_bindings: KeptAnswers<(String, String), StarBinding>,
+    /// The answers of [`Self::star_rebound`] so far, by module and name; cleared with the
+    /// indexes.
+    star_rebinds: KeptAnswers<(String, String), bool>,
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
@@ -3195,6 +3205,7 @@ impl ProjectDecls {
         self.held_attrs.clear();
         self.capacities.clear();
         self.star_bindings.clear();
+        self.star_rebinds.clear();
         self.catalog_attributes.clear();
         self.object_attr_reads.clear();
         // What other modules change, which deciding what a module's `__getattr__` serves reads
@@ -3407,6 +3418,7 @@ impl ProjectDecls {
             return self.is_project_class(&class) && self.lookup_rebound(&self.mro(&class), name);
         }
         m.rebound_definitions.contains(rest)
+            || self.star_rebound(m, rest)
             || self.rebound_elsewhere_canonical(&fqn)
             || self.rebound_elsewhere_canonical(&format!("{fqn}.__code__"))
             || self.global_stored_elsewhere(m, &fqn)
@@ -3798,6 +3810,21 @@ impl ProjectDecls {
             let mut held = FxHashMap::default();
             held.insert(m.module_name.clone(), Holds::No);
             self.stars_bind(m, name, &mut held, 0)
+        })
+    }
+
+    /// Whether a star import of `m` that runs after the statement of its module-level definition
+    /// `name` may bind the name to another object ([`ModuleDecls::late_stars`],
+    /// [`Self::star_import_may_bind`]). The answer is kept for the life of the indexes.
+    fn star_rebound(&self, m: &ModuleDecls, name: &str) -> bool {
+        let Some(&from) = m.late_stars.as_deref().and_then(|late| late.get(name)) else {
+            return false;
+        };
+        let key = (m.module_name.clone(), name.to_owned());
+        self.kept(&self.star_rebinds, key, || {
+            let stars = m.star_imports.as_deref().unwrap_or_default();
+            (stars.iter().skip(from as usize))
+                .any(|source| self.star_import_may_bind(&m.module_name, source, name))
         })
     }
 
@@ -7333,6 +7360,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     decls.rebound_definitions = rebound_definitions(input, &stores, &decls, &bindings);
+    let stars = runtime_star_imports(input);
+    decls.late_stars = late_stars(&decls, &bindings, &stars);
     decls.private_members = (decls.classes.keys())
         .chain(decls.functions.keys())
         .any(|qualname| mangling::member_path(qualname).is_some());
@@ -7560,12 +7589,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
     let mut returned_params: FxHashMap<&str, Option<HandedBack>> = FxHashMap::default();
     let mut returned_imports: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
-    let import_targets: FxHashMap<Span, String> = semantic
-        .imports
-        .iter()
-        .filter(|imp| !imp.in_type_checking)
-        .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
-        .collect();
+    let import_targets = import_statement_targets(input);
     for f in input
         .ir
         .functions
@@ -7683,26 +7707,25 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.small_globals = input.ir.constants.displays.clone();
     decls.calls_setstate = stores::calls_setstate(input);
     decls.exports = stores::exported_names(input);
-    let star_imports: Box<[String]> = input
-        .semantic
-        .star_imports
-        .iter()
-        .filter(|star| !star.in_type_checking)
-        .filter_map(|star| star_import_module(input, star))
-        .collect();
+    let star_imports: Box<[String]> = stars.into_iter().map(|(_, module)| module).collect();
     decls.star_imports = (!star_imports.is_empty()).then_some(star_imports);
+    let names = ImportNames {
+        globals: &decls.imports,
+        statements: &import_targets,
+    };
+    let (grown, rebound, getattr_loads) = foreign_grown_globals(input, &names);
+    let path_changes = package_paths::path_changes(input, &decls, &names);
     (
         decls.grown_globals,
         decls.rebound_globals,
         decls.getattr_loads,
-    ) = foreign_grown_globals(input, &decls.imports);
+    ) = (grown, rebound, getattr_loads);
     decls.getattr_rebinds = input.ir.constants.getattr_rebinds;
-    let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
     init_containers::init_containers(input, &mut decls);
     code_attrs(input, &mut decls);
-    for (class, attr) in class_attrs_rebound(input, &decls) {
+    for (class, attr) in class_attrs_rebound(input, &decls, &import_targets) {
         if let Some(c) = decls.classes.get_mut(&class) {
             c.rebound_attrs.insert(attr);
         }
@@ -7729,12 +7752,12 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
 /// module's `__getattr__` (`ModuleDecls::getattr_loads`).
 fn foreign_grown_globals(
     input: &ModuleInput<'_>,
-    imports: &BTreeMap<String, String>,
+    imports: &ImportNames<'_>,
 ) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
     let mut out = BTreeSet::new();
     let mut rebound = BTreeSet::new();
     let mut getattr_loads = BTreeSet::new();
-    if imports.is_empty() {
+    if imports.globals.is_empty() && imports.statements.is_empty() {
         return (out, rebound, getattr_loads);
     }
     for f in &input.ir.functions {
@@ -7800,7 +7823,7 @@ fn foreign_grown_globals(
 fn attr_calls<'f>(
     input: &ModuleInput<'_>,
     ix: &FnIndex<'f>,
-    imports: &BTreeMap<String, String>,
+    imports: &ImportNames<'_>,
 ) -> Vec<(VarId, String)> {
     const SPELLINGS: &[&str] = &["setattr", "delattr", "__setattr__", "__delattr__"];
     let calls: Vec<(&InstKind, VarId)> = ix
@@ -7826,14 +7849,18 @@ fn attr_calls<'f>(
         return Vec::new();
     }
     let constants = &input.ir.constants;
-    let mut names = imports.clone();
+    let mut globals = imports.globals.clone();
     for builtin in ["setattr", "delattr", "object"] {
         if !constants.dynamic && !constants.shadowed.contains(builtin) {
-            names
+            globals
                 .entry(builtin.to_owned())
                 .or_insert_with(|| format!("builtins.{builtin}"));
         }
     }
+    let names = ImportNames {
+        globals: &globals,
+        statements: imports.statements,
+    };
     let vals: FxHashMap<VarId, Val> = calls
         .iter()
         .filter_map(|(_, v)| Some((*v, Val::Ref(imported_fqn(ix, &names, *v, 0)?))))
@@ -7864,23 +7891,43 @@ fn attr_calls<'f>(
         .collect()
 }
 
+/// What a module's runtime imports bind, for [`imported_fqn`].
+struct ImportNames<'d> {
+    /// The module-level names they bind once the module has run ([`ModuleDecls::imports`]).
+    globals: &'d BTreeMap<String, String>,
+    /// What each import statement binds, by its span: those of a function too, whose names are
+    /// the function's own.
+    statements: &'d FxHashMap<Span, String>,
+}
+
+/// What each runtime import statement of the module binds, by its span ([`import_target`]).
+fn import_statement_targets(input: &ModuleInput<'_>) -> FxHashMap<Span, String> {
+    (input.semantic.imports.iter())
+        .filter(|imp| !imp.in_type_checking)
+        .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
+        .collect()
+}
+
 /// The fqn `v` names through this module's runtime imports (`cfg`, `cfg.QUEUE`), through
-/// copies and attribute loads.
+/// copies and attribute loads: a global read by the module-level name an import binds, and the
+/// value of an import statement, of the module body or of a function (`import cfg` in a
+/// function), by what that statement binds.
 fn imported_fqn(
     ix: &FnIndex<'_>,
-    imports: &BTreeMap<String, String>,
+    imports: &ImportNames<'_>,
     v: VarId,
     depth: u32,
 ) -> Option<String> {
     if depth > 8 {
         return None;
     }
-    match &ix.shape.inst(v)?.kind {
+    let inst = ix.shape.inst(v)?;
+    match &inst.kind {
         InstKind::Copy { src, .. } => imported_fqn(ix, imports, *src, depth + 1),
         InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-            imports.get(name).cloned()
+            imports.globals.get(name).cloned()
         }
-        InstKind::Import { dst, .. } => ix.f.var_name(*dst).and_then(|n| imports.get(n)).cloned(),
+        InstKind::Import { .. } => imports.statements.get(&inst.span).cloned(),
         InstKind::AttrLoad { obj, attr, .. } => {
             imported_fqn(ix, imports, *obj, depth + 1).map(|m| format!("{m}.{attr}"))
         }
@@ -8456,8 +8503,9 @@ fn rebinds_after_reads(
 
 /// Whether the instruction `kind` of a function of the module `decls` may rebind an attribute of
 /// an object it does not name: a call (but one handing its argument back,
-/// [`decl_same_object`]), which may store one, directly or through what it calls, or an
-/// `await`, while which other code runs.
+/// [`decl_same_object`]), which may store one, directly or through what it calls; the entry or
+/// the exit of a `with` block, which calls the manager's `__enter__` or `__exit__` (`__aenter__`
+/// or `__aexit__`, awaited); or an `await`, while which other code runs.
 fn may_rebind_attrs(
     kind: &InstKind,
     defs: &FxHashMap<VarId, &InstKind>,
@@ -8465,7 +8513,11 @@ fn may_rebind_attrs(
 ) -> bool {
     matches!(
         kind,
-        InstKind::Call { .. } | InstKind::MethodCall { .. } | InstKind::Await { .. }
+        InstKind::Call { .. }
+            | InstKind::MethodCall { .. }
+            | InstKind::EnterWith { .. }
+            | InstKind::ExitWith { .. }
+            | InstKind::Await { .. }
     ) && decl_same_object(kind, defs, decls).is_none()
 }
 
@@ -8890,6 +8942,13 @@ impl<'i> BodyBindings<'i> {
         self.last.get_or_init(|| LastBindings::of(&self.shape))
     }
 
+    /// Where the module body's first binding of `name` starts, in source order.
+    fn first_binding(&self, name: &str) -> Option<u32> {
+        (self.by_name.get(name)?.at.iter())
+            .map(|&(_, start)| start)
+            .min()
+    }
+
     /// Whether the module body binds `name` on every path ([`LastBindings::always_runs`]).
     fn always_binds(&self, name: &str) -> bool {
         self.by_name.get(name).is_some_and(|binds| {
@@ -9076,6 +9135,43 @@ impl Named<'_> {
     }
 }
 
+/// The runtime star imports of the module, in source order: each statement's span and the module
+/// it names ([`ModuleDecls::star_imports`]).
+fn runtime_star_imports(input: &ModuleInput<'_>) -> Vec<(Span, String)> {
+    (input.semantic.star_imports.iter())
+        .filter(|star| !star.in_type_checking)
+        .filter_map(|star| Some((star.span, star_import_module(input, star)?)))
+        .collect()
+}
+
+/// [`ModuleDecls::late_stars`]: a star import binds the names it imports when it runs, so it
+/// binds a definition's name again when it runs after the definition's statement (later in the
+/// module body), or on a path where the body leaves the name unbound.
+fn late_stars(
+    decls: &ModuleDecls,
+    bindings: &BodyBindings<'_>,
+    stars: &[(Span, String)],
+) -> Option<Box<BTreeMap<String, u32>>> {
+    if stars.is_empty() {
+        return None;
+    }
+    let late: BTreeMap<String, u32> = (decls.classes.keys())
+        .chain(decls.functions.keys())
+        .filter(|q| !q.contains('.'))
+        .filter_map(|q| {
+            let first = bindings
+                .first_binding(q)
+                .filter(|_| bindings.always_binds(q));
+            let from = match first {
+                Some(start) => stars.iter().position(|(span, _)| span.start > start)?,
+                None => 0,
+            };
+            Some((q.clone(), u32::try_from(from).ok()?))
+        })
+        .collect();
+    (!late.is_empty()).then(|| Box::new(late))
+}
+
 /// [`ModuleDecls::rebound_definitions`]. A `def` or `class` statement binds its name to the
 /// object it makes (`MakeClosure` of a function of that name), at module level by a store
 /// (`stores` counts every store of a module global), in a class body by the value itself; any
@@ -9204,7 +9300,12 @@ fn code_replaced(input: &ModuleInput<'_>, f: &IrFunction, decls: &ModuleDecls) -
 fn class_attrs_rebound(
     input: &ModuleInput<'_>,
     decls: &ModuleDecls,
+    import_targets: &FxHashMap<Span, String>,
 ) -> FxHashSet<(String, String)> {
+    let imports = ImportNames {
+        globals: &decls.imports,
+        statements: import_targets,
+    };
     let mut out = FxHashSet::default();
     for f in &input.ir.functions {
         let insts = || f.blocks.iter().flat_map(|b| &b.insts);
@@ -9245,7 +9346,7 @@ fn class_attrs_rebound(
                 out.insert((class, attr.clone()));
             }
         }
-        for (obj, attr) in attr_calls(input, &ix, &decls.imports) {
+        for (obj, attr) in attr_calls(input, &ix, &imports) {
             if let Some(class) = class_of(obj) {
                 out.insert((class, attr));
             }
@@ -10597,6 +10698,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     calls_setstate: false,
     exports: None,
     star_imports: None,
+    late_stars: None,
     getattr_exports: None,
     hook_factories: None,
     path_changes: None,
