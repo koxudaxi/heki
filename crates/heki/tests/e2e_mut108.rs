@@ -809,8 +809,7 @@ fn mut108_set_abc_fields_hold_containers() {
 
 /// Fields with the same read-only annotation: one every construction fills with an object that
 /// rejects changes, others with a mutable or unknown one.
-const HELD_MODEL: &str = r#"import copy
-from collections.abc import Mapping, Sequence
+const HELD_MODEL: &str = r#"from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, NamedTuple
@@ -897,7 +896,7 @@ class Defaulted:
 
 def defaulted(changes: dict[str, Any]) -> list[Defaulted]:
     made = Defaulted(MappingProxyType({}))
-    return [Defaulted(), copy.replace(made, **changes), replace(made, meta=MappingProxyType({}))]
+    return [Defaulted(), replace(made, **changes), replace(made, meta=MappingProxyType({}))]
 
 
 def untyped(original):
