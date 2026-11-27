@@ -304,8 +304,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   included.
 - A `{...}` group may hold dotted alternatives, in the holder of a `Class.attr` target too:
   `pkg.{a.Base,a.Sub}.only_sub` is `pkg.a.Base.only_sub` and `pkg.a.Sub.only_sub`, and
-  `heki check` judges the entry by the alternatives, so it names no class only when none of
-  them does ([Entries that match nothing](#entries-that-match-nothing)).
+  `heki check` judges each of them ([Entries that match nothing](#entries-that-match-nothing)).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
@@ -1445,9 +1444,17 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   `exempt-methods`, `allowed-protocols`, and `forbid-cached-property-on` of `write-owners`,
   `read-owners`, and `call-owners`; the `scopes`, `write-targets`, `write-universe`, and
   `allow-writes` of `effect-boundaries`; and the `targets`, `invalidators`, and
-  `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
-  `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
-  symbols outside the project, and are not judged.
+  `exempt-writers` of `invalidation`.
+- The `read-targets`, `call-targets`, and `allowed-callees` of an effect boundary, the
+  `producers` of `readonly-returns`, and the keys of `import-boundaries` (`importers`,
+  `exempt-importers`, `allowed-imports`, `forbidden-imports`, `relative-imports`, and both sides
+  of an `ignored-imports` pair) may name code outside the project by its full name
+  (`os.getenv`, `sys.platform`, `<stdlib>`). Their entries are judged when the first name is a
+  module of the project (`pkg` of `pkg.store:run` or `pkg.db:Session`), and are not judged
+  otherwise (`sys.platform`, `Store.save`, `<stdlib>`, `tests.*` where `tests` is not
+  analyzed). A producer names a function, a method, or an attribute of a class. A module
+  pattern names a module of the analyzed files or a package holding one, a namespace package
+  without `__init__.py` included; with a name (`pkg.db:Session`) it needs the module.
 - A `call-owners` or `read-owners` target whose first name is no module of the project may name
   code outside it. It is matched when the analyzed files call or read a symbol outside the
   project it names, and it is not judged when it is an `<external>` entry or its first name is a
@@ -1456,6 +1463,14 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   cannot list what such a module has. Any other entry is judged as above, so a misspelled class
   (`Feild.removed`) is still reported, and so is an entry naming project code a run over some
   files leaves out.
+- Braces are taken first. A `{...}` group without an empty alternative lists names, each judged
+  on its own: `pkg.store:Base.{a,c}` is `pkg.store:Base.a` and `pkg.store:Base.c`, and the
+  warning lists those that name nothing (`pkg.store:Base.c` when the class has no `c`), in one
+  line for each kind of name they name none of (no class, no attribute of a class). A group
+  with an empty alternative is one name with its extensions, which names something when
+  one of them does: `pkg.run:outer{,.*}` when `outer` or a scope inside it does, and
+  `pkg.zz{,.*}:*` when `pkg.zz` or a module below it does, so a namespace package without
+  `__init__.py` is not reported.
 - Each entry is matched as its rule matches it, against the definitions of the analyzed files:
   a function pattern names a function, method, class, or module body; a call target a function,
   method, or class (or, with a module part, a name the module imports), and one with an
@@ -1491,8 +1506,10 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
 - An entry whose last part is a glob is a rule about every name it may match, later ones
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
-  `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
-  not judged.
+  `Field._*`, the function of `run.*`). A holder that is a glob itself is judged by the parts
+  written out before it: `pkg.zz.*:*` needs a module `pkg.zz` or one below it, and
+  `pkg.*.run_*` needs `pkg`. A glob with no part written out before it (`*_helper`, `__*__`,
+  `*.run_*`) is not judged.
 - The names offered are found by comparing an entry with the names that share its holder or its
   last part. A run makes at most 64 such comparisons per function and class of the project (at
   least 4,096) for all its entries, so of thousands of entries that name nothing in a large
@@ -1504,7 +1521,9 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   files below the project root (`heki check pkg/stores`) would find unmatched the entries naming
   code in the others. A file given is checked in its project, so its run judges. With the key
   set, every run judges the files it analyzes.
-- An entry written in a file `include` lists, or in a group, is named with where it is written:
+- An entry written in a file `include` lists, or in a group, is judged as one written in the
+  contract (braces first, a glob holder by its written-out prefix), and is named with where it
+  is written:
   ``warning: `allowed-writers` entry `pkg.store.gone` of write-owners `fields` (from group `store`
   at contracts/store.toml:3) names no function or method in the analyzed files``. A group that no
   contract uses is reported under the same setting:
