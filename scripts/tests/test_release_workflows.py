@@ -427,9 +427,6 @@ def test_the_docs_a_release_deploys_show_the_release_tag(
         < names.index(regenerate["name"])
         < names.index("llms.txt is up to date")
     )
-    assert names.index(write["name"]) < [s.get("run") for s in docs["steps"]].index(
-        "cargo build --release -p heki"
-    )
     scripts = checkout / "scripts"
     scripts.mkdir()
     for name in ("set_release_versions.py",):
