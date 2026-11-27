@@ -1689,6 +1689,13 @@
     "SubclassChain": {
       "additionalProperties": false,
       "properties": {
+        "also": {
+          "description": "The other parameters that must be instances of subclasses for the chain to run: a\nsubclass's method reaching the method another subclass gives a call on a second\nparameter.",
+          "items": {
+            "$ref": "#/$defs/SubclassOf"
+          },
+          "type": "array"
+        },
         "chain": {
           "description": "The calls from the function to the effect through it.",
           "items": {
@@ -1708,7 +1715,26 @@
       "required": [
         "param",
         "class",
+        "also",
         "chain"
+      ],
+      "type": "object"
+    },
+    "SubclassOf": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "description": "The subclass.",
+          "type": "string"
+        },
+        "param": {
+          "description": "The parameter the subclass's method is called on.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "param",
+        "class"
       ],
       "type": "object"
     },

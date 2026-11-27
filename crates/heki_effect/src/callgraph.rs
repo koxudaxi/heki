@@ -14,10 +14,10 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
     CellChange, Construction, ContractSharing, Delivery, EffectSummary, EntryKey, Facts, FuncKey,
-    KeptBy, LocalOrigins, MayGiven, NewArg, NewCond, NewFrom, NewKind, Origins,
+    KeptBy, LocalOrigins, MayGiven, Need, NewArg, NewCond, NewFrom, NewKind, Origins,
     PROVIDED_CHAIN_LIMIT, PROVIDED_LIMIT, ProjectIndex, ProtectedReturn, Provided, ReturnsNew,
-    Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole, Slot, TypedFieldWrite,
-    TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
+    Runner, Shared, SharedChain, SharedState, SiteRole, Slot, TypedFieldWrite, TypedFieldWriteSite,
+    UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -1983,9 +1983,10 @@ pub(crate) enum Arrival<'f> {
     Never,
     /// Whatever the caller's parameters are, by this chain of the callee.
     Always(&'f [Arc<CallHop>]),
-    /// Only when a parameter of the caller is an instance of a class: each parameter and class,
-    /// with the callee's chain through the class's implementation.
-    Provided(Vec<(u8, SharedLine, &'f [Arc<CallHop>])>),
+    /// Only when parameters of the caller are instances of classes: each way's parameters and
+    /// classes ([`Provided::needs`]), with the callee's chain through the classes'
+    /// implementations.
+    Provided(Vec<(Vec<Need>, &'f [Arc<CallHop>])>),
 }
 
 impl<'f> Arrival<'f> {
@@ -1994,7 +1995,7 @@ impl<'f> Arrival<'f> {
         match self {
             Self::Never => None,
             Self::Always(tail) => Some(tail),
-            Self::Provided(ways) => ways.iter().map(|(_, _, c)| *c).min_by_key(|c| c.len()),
+            Self::Provided(ways) => ways.iter().map(|(_, c)| *c).min_by_key(|c| c.len()),
         }
     }
 }
@@ -2003,10 +2004,12 @@ impl<'f> Arrival<'f> {
 /// arrives at the caller through `bc` at `site` ([`EffectSummary::provided_effects`]). An
 /// implementation a subclass `P` provides for the callee's parameter `k` runs when the argument
 /// bound to `k` may be a `P`: not when it is an instance of exactly a class without `P` on its
-/// MRO, nor, for the receiver of a call binding it to `self`, when the receiver's class and `P`
-/// derive not one from the other; when it is a parameter of the caller as itself, the caller's
-/// callers decide. A callee that is itself a subclass's override of a call on a parameter of
-/// the caller runs only when that parameter is an instance of the subclass.
+/// MRO (a subclass inheriting `P`'s implementation has `P` on its MRO), nor, for the receiver of
+/// a call binding it to `self`, when the receiver's class and `P` derive not one from the other;
+/// when it is a parameter of the caller as itself, the caller's callers decide. A way runs when
+/// every implementation it needs may run. A callee that is itself a subclass's override of a
+/// call on a parameter of the caller runs only when that parameter is an instance of the
+/// subclass, so each of its ways needs that too.
 pub(crate) fn arrival<'f>(
     facts: &'f EffectSummary,
     callee: &EffectSummary,
@@ -2014,9 +2017,13 @@ pub(crate) fn arrival<'f>(
     site: &CallSite,
     bc: &BoundCallee,
 ) -> Arrival<'f> {
+    let own = site.provider(bc).map(|(param, line)| Need {
+        param,
+        provider: Arc::clone(line),
+    });
     // What runs whatever the callee's parameters are runs at the call when the callee runs.
-    let runs_with_callee = |tail| match site.provider(bc) {
-        Some((param, line)) => Arrival::Provided(vec![(param, Arc::clone(line), tail)]),
+    let runs_with_callee = |tail| match &own {
+        Some(need) => Arrival::Provided(vec![(vec![need.clone()], tail)]),
         None => Arrival::Always(tail),
     };
     let Some(ways) = facts.provided_effects.as_ref().and_then(|p| p.get(&e)) else {
@@ -2027,21 +2034,33 @@ pub(crate) fn arrival<'f>(
         .filter(|_| site.binds_recv && callee.binds_self());
     let mut always: Option<&'f [Arc<CallHop>]> = None;
     let mut forwarded = Vec::new();
-    for way in ways {
-        let arg = bc.params.get(usize::from(way.param));
-        if let Some(exact) = arg.and_then(|a| a.exact.as_deref()) {
-            if !exact.derives_from(&way.provider) {
-                continue;
+    'ways: for way in ways {
+        let mut needs: Vec<Need> = Vec::new();
+        for need in &way.needs {
+            let arg = bc.params.get(usize::from(need.param));
+            if let Some(exact) = arg.and_then(|a| a.exact.as_deref()) {
+                if !exact.derives_from(&need.provider) {
+                    continue 'ways;
+                }
+            } else if need.param == 0 && receiver.is_some_and(|r| !need.provider.related(r)) {
+                continue 'ways;
+            } else if let Some(&(param, None)) = arg.and_then(|a| a.param.as_ref()) {
+                needs.push(Need {
+                    param,
+                    provider: Arc::clone(&need.provider),
+                });
             }
-        } else if way.param == 0 && receiver.is_some_and(|r| !way.provider.related(r)) {
-            continue;
-        } else if let Some(&(param, None)) = arg.and_then(|a| a.param.as_ref()) {
-            forwarded.push((param, Arc::clone(&way.provider), way.chain.as_slice()));
+        }
+        if needs.is_empty() {
+            if always.is_none_or(|kept| way.chain.len() < kept.len()) {
+                always = Some(&way.chain);
+            }
             continue;
         }
-        if always.is_none_or(|kept| way.chain.len() < kept.len()) {
-            always = Some(&way.chain);
-        }
+        needs.extend(own.iter().cloned());
+        needs.sort();
+        needs.dedup();
+        forwarded.push((needs, way.chain.as_slice()));
     }
     match always {
         Some(tail) => runs_with_callee(tail),
@@ -2050,7 +2069,8 @@ pub(crate) fn arrival<'f>(
     }
 }
 
-/// Record in `t` whether effect `e`, arriving as `arrival` (the caller `had` it already), runs only when some parameter of the caller is an instance of some class
+/// Record in `t` whether effect `e`, arriving as `arrival` (the caller `had` it already), runs
+/// only when parameters of the caller are instances of some classes
 /// (`EffectSummary::provided_effects`): an arrival that runs whatever the parameters are clears
 /// those ways. Past [`PROVIDED_LIMIT`] ways, or a way past [`PROVIDED_CHAIN_LIMIT`] calls, the
 /// effect is taken to run whatever they are. Returns how the arrival's chain joins the kept one.
@@ -2084,17 +2104,13 @@ fn add_provided_effect(
         .get_or_insert_with(Box::default)
         .entry(e)
         .or_default();
-    for (param, provider, tail) in ways {
+    for (needs, tail) in ways {
         let c = extend_chain(lead, tail, rewrite);
-        match slot
-            .iter_mut()
-            .find(|w| w.param == *param && w.provider == *provider)
-        {
+        match slot.iter_mut().find(|w| w.needs == *needs) {
             Some(kept) if kept.chain.len() <= c.len() => {}
             Some(kept) => kept.chain = c,
             None => slot.push(Provided {
-                param: *param,
-                provider: Arc::clone(provider),
+                needs: needs.clone(),
                 chain: c,
             }),
         }

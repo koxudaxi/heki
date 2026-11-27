@@ -663,9 +663,15 @@ named class is exactly that class: constructing it runs the `__init__` its MRO f
 `Base.method(obj)` the `method` it finds; so is the instance a function makes by calling a
 project class by name (read as a global, imported, or as a member of its module), and the copies
 of it (`Val::Inst(class, true)`, `Inferred::exact`): a call on it runs what the MRO finds, and no
-subclass's override. A class with a `__new__` of its own along the MRO, or a name the project
-binds to another object, makes no exact instance, and exactness never leaves the function (a
-store, a return, an item of a container, or a join over paths is typed again where it is read); `cls` in a class method may be any subclass, so
+subclass's override. No exact instance is made by a class that may return another class's
+instance (`ProjectDecls::construction_is_open`: a project class along the MRO binds `__new__`,
+in its body or after it, by a store on the class object, a class decorator, or an
+`__init_subclass__` storing on the class it is handed; a custom metaclass; an enumeration), by a
+class the project binds to another object (`ProjectDecls::call_rebound`), or through a name a
+module on the way may bind again (`ProjectDecls::canonical_value`: `global Base; Base = Sub` in
+a function of the reading module, another module-level store, a star import of the module).
+Exactness never leaves the function (a store, a return, an item of a container, or a join over
+paths is typed again where it is read); `cls` in a class method may be any subclass, so
 `cls()` and `cls.method()` dispatch like a call on an instance, and so do `type(obj)` of an
 instance of a project class that is not a protocol (`obj.__class__` is not: a class or a
 subclass may rebind it) and a value annotated `type[C]` or `typing.Type[C]` (`Ty::Class`; the
@@ -676,13 +682,14 @@ getter's return annotation (`self.data_type(is_dict=True)` of a property returni
 `type[DataType]` constructs `DataType`). A method's calls on its own
 `self`, and a function's calls on a parameter as itself, run the overrides of every subclass, so
 a mixin's summary holds the effects of every class sharing it; an execution effect reached only
-through the override of a subclass records the parameter and that class
-(`EffectSummary::provided_effects`, `self` being parameter 0; at most `PROVIDED_LIMIT` per
-effect, past which it runs whatever the parameters are). A call passing an instance of exactly a
-class runs it only when the class has the subclass on its MRO, a call on a receiver of known
-class only when that class and the receiver's derive one from the other, and a call passing its
-own parameter as itself leaves it to its callers under that parameter (any other argument runs
-them all). An async client sharing a command mixin with a sync one runs the async implementation.
+through overrides of subclasses records, for each way, every parameter and the class providing
+the override run on it (`EffectSummary::provided_effects`, `self` being parameter 0; an override
+on one parameter reaching another subclass's override on a second needs both; at most
+`PROVIDED_LIMIT` ways per effect, past which it runs whatever the parameters are). A call passing
+an instance of exactly a class runs a way only when the class has the subclass on its MRO
+(inheriting the override counts), a call on a receiver of known class only when that class and
+the receiver's derive one from the other, and a call passing its own parameter as itself leaves
+that need to its callers under that parameter (any other argument meets it). An async client sharing a command mixin with a sync one runs the async implementation.
 Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Coroutine`): its return
 annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
 future or a task gives an untracked result. The catalog types an external awaitable by what

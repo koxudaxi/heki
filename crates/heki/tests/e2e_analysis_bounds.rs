@@ -9242,6 +9242,68 @@ fn subclass_effects_kept_per_parameter_stay_bounded_down_a_long_chain() {
     );
 }
 
+/// Overrides that each call a method on a second parameter and hand their own receiver on
+/// (`D{k}.go(self, x)` calling `x.go(self)`): a way through them needs one more parameter and
+/// subclass at each call, until past `PROVIDED_CHAIN_LIMIT` calls the effect is taken to run
+/// whatever the arguments are, so what each override keeps stays bounded and the propagation
+/// linear in the chain. A caller passing its parameters may run the overrides; one calling an
+/// exact instance runs none.
+#[test]
+fn subclass_needs_on_two_parameters_stay_bounded_down_a_long_chain() {
+    let class = |lines: &mut Vec<String>, head: String, param: String, body: &str| {
+        lines.extend([
+            String::new(),
+            String::new(),
+            head,
+            format!("    def go(self, {param}):"),
+            format!("        {body}"),
+        ]);
+    };
+    let shape = |n: usize| {
+        let mut lines = vec!["import time".to_owned()];
+        class(&mut lines, "class C0:".into(), "x".into(), "return 1");
+        class(
+            &mut lines,
+            "class D0(C0):".into(),
+            "x".into(),
+            "time.sleep(1)",
+        );
+        for k in 1..n {
+            class(&mut lines, format!("class C{k}:"), "x".into(), "return 1");
+            let typed = format!("x: C{}", k - 1);
+            class(
+                &mut lines,
+                format!("class D{k}(C{k}):"),
+                typed,
+                "return x.go(self)",
+            );
+        }
+        let (top, below) = (n - 1, n - 2);
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("async def open_top(a: C{top}, b: C{below}):"),
+            "    a.go(b)".to_owned(),
+            String::new(),
+            String::new(),
+            "async def exact_top():".to_owned(),
+            format!("    C{top}().go(C{below}())"),
+        ]);
+        let p = Project::new(&format!("bounds_provided_needs_{n}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(2000, shape);
+    assert_eq!(
+        eff101_callers(&found),
+        [("open_top".to_owned(), "heuristic".to_owned())]
+    );
+}
+
 /// The values constructions bind to the read-only container fields of a frozen class
 /// (`ModuleDecls::field_values`): `n` functions, each making an instance of a frozen dataclass of
 /// eight fields with a read-only view in each, and replacing one; a function in another module

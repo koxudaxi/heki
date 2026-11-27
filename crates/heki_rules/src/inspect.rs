@@ -14,8 +14,8 @@ use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     AttrKeyPath, CallHop, CallsByCaller, CellChange, EffectSummary, EntryKey, FuncKey, GuardTest,
-    ParamChange, ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot, TypedFieldWriteSite,
-    func_qualname, is_stub,
+    Need, ParamChange, ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot,
+    TypedFieldWriteSite, func_qualname, is_stub,
 };
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb, ExecEffectKind};
@@ -555,8 +555,21 @@ pub struct SubclassChain {
     pub param: String,
     /// The subclass.
     pub class: String,
+    /// The other parameters that must be instances of subclasses for the chain to run: a
+    /// subclass's method reaching the method another subclass gives a call on a second
+    /// parameter.
+    pub also: Vec<SubclassOf>,
     /// The calls from the function to the effect through it.
     pub chain: Vec<Hop>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct SubclassOf {
+    /// The parameter the subclass's method is called on.
+    pub param: String,
+    /// The subclass.
+    pub class: String,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -1307,10 +1320,19 @@ fn effects(b: &Builder<'_, '_>, s: &EffectSummary, params: &[String]) -> Vec<Eff
                     .iter()
                     .flat_map(|r| r.get(&e))
                     .flatten()
-                    .map(|way| SubclassChain {
-                        param: param_name(way.param, params),
-                        class: way.provider.class().to_owned(),
-                        chain: b.hops(way.chain.iter().map(|h| &**h)),
+                    .filter_map(|way| {
+                        let subclass_of = |need: &Need| SubclassOf {
+                            param: param_name(need.param, params),
+                            class: need.provider.class().to_owned(),
+                        };
+                        let (first, also) = way.needs.split_first()?;
+                        let SubclassOf { param, class } = subclass_of(first);
+                        Some(SubclassChain {
+                            param,
+                            class,
+                            also: also.iter().map(subclass_of).collect(),
+                            chain: b.hops(way.chain.iter().map(|h| &**h)),
+                        })
                     })
                     .collect(),
             });

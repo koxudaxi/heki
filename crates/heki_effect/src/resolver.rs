@@ -5874,9 +5874,11 @@ impl ProjectDecls {
         (out, multiple)
     }
 
-    /// Whether calling the class `class` may return an existing instance instead of a new one: a
-    /// project class along its MRO defines `__new__`, or it is an enumeration (`Color("red")`
-    /// returns a member).
+    /// Whether calling the class `class` may return an existing instance, or one of another
+    /// class, instead of a new one of it: a project class along its MRO binds `__new__`, in its
+    /// body or after it ([`Self::lookup_rebound`]; [`Self::bound_after_body`], also a class
+    /// decorator's or an `__init_subclass__`'s store on the class it is handed), or it is an
+    /// enumeration (`Color("red")` returns a member).
     pub fn may_reuse_instances(&self, class: &str) -> bool {
         const ENUMS: &[&str] = &[
             "enum.Enum",
@@ -5886,9 +5888,14 @@ impl ProjectDecls {
             "enum.IntFlag",
             "enum.ReprEnum",
         ];
-        self.mro(class)
-            .iter()
-            .any(|c| ENUMS.contains(&c.as_str()) || self.own_method(c, "__new__").is_some())
+        let mro = self.mro(class);
+        mro.iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            ENUMS.contains(&c.as_str())
+                || self.own_method(c, "__new__").is_some()
+                || (self.class(c)).is_some_and(|decl| decl.members.contains("__new__"))
+        }) || self.lookup_rebound(&mro, "__new__")
+            || self.bound_after_body(&["__new__"])
     }
 
     /// The MRO of `class` as a [`crate::ClassLine`], one copy shared by every site and fact
@@ -6749,20 +6756,15 @@ impl ProjectDecls {
     }
 
     /// Whether calling the project class `class` by name makes an instance of exactly that class
-    /// (`Inferred::exact`): no project class along its MRO defines `__new__` and no metaclass is
-    /// custom ([`Self::construction_is_open`]; either may return an instance of another class, a
-    /// subclass picked by the arguments), and the project binds the name to no other object
-    /// ([`Self::call_rebound`]).
+    /// (`Inferred::exact`): no project class along its MRO binds `__new__`, in its body or after
+    /// it, and no metaclass is custom ([`Self::construction_is_open`]; either may return an
+    /// instance of another class, a subclass picked by the arguments), and the project binds the
+    /// name to no other object ([`Self::call_rebound`]).
     pub(crate) fn constructs_exactly(&self, class: &str) -> bool {
         let class = self.canonical(class);
         self.is_project_class(&class)
             && !self.call_rebound(&class)
             && !self.construction_is_open(&class)
-            && self.mro(&class).iter().all(|c| {
-                self.read(|k| note(&mut k.class_facts, c));
-                self.class(c)
-                    .is_none_or(|decl| !decl.members.contains("__new__"))
-            })
     }
 
     /// Whether reading `attr` on every instance of the project class `class` or of a project

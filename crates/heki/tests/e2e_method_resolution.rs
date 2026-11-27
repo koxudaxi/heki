@@ -1247,8 +1247,22 @@ async def subclass():
     prepare(g)  # EFF101 [heuristic]
 
 
+class Child(Gate):
+    pass
+
+
+async def inherited():
+    c = Child()  # EFF101 [heuristic]
+    prepare(c)  # EFF101 [heuristic]
+
+
 async def through_module():
     core.prepare(core.Notes())
+
+
+async def named_through_module():
+    made = core.Notes
+    prepare(made())
 "#;
 
 /// A class with a `__new__` of its own, or a custom metaclass whose `__call__` returns another
@@ -1321,6 +1335,266 @@ fn an_exact_instance_runs_only_its_classs_implementations() {
         &["EFF101"],
     );
     check_marks("not_exact", &[("pkg/plain.py", NOT_EXACT)], &["EFF101"]);
+}
+
+/// A subclass's override of a call on one parameter (`Rack.put` on `tray`) reaching the override
+/// another subclass gives a call on a second parameter (`Gate.preview` on `card`) runs only when
+/// both arguments may be instances of their subclasses: an exact `Tray` or an exact `Card` runs
+/// neither. A subclass inheriting the override (`Child` of `Gate`) runs it, also called on an
+/// exact instance, which reaches it surely.
+const FORWARD_CORE: &str = r#"class Card:
+    def preview(self):
+        return 1
+
+
+class Tray:
+    def put(self, card: Card):
+        return 1
+
+
+def forward(tray: Tray, card: Card):
+    return tray.put(card)
+
+
+def forward_on(tray: Tray, card: Card):
+    return forward(tray, card)
+"#;
+
+const FORWARD_SUB: &str = r#"import time
+
+from pkg.core import Card, Tray, forward, forward_on
+
+
+class Gate(Card):
+    def preview(self):
+        time.sleep(1)
+
+
+class Child(Gate):
+    pass
+
+
+class Rack(Tray):
+    def put(self, card: Card):
+        return card.preview()
+
+
+async def exact_tray():
+    forward(Tray(), Gate())
+
+
+async def exact_card():
+    forward(Rack(), Card())
+
+
+async def both():
+    forward(Rack(), Gate())  # EFF101 [heuristic]
+
+
+async def inherited():
+    forward(Rack(), Child())  # EFF101 [heuristic]
+
+
+async def inherited_direct():
+    Child().preview()  # EFF101
+
+
+async def open_tray(tray: Tray):
+    forward(tray, Gate())  # EFF101 [heuristic]
+
+
+async def open_tray_exact_card(tray: Tray):
+    forward_on(tray, Card())
+
+
+async def open_card(card: Card):
+    forward_on(Rack(), card)  # EFF101 [heuristic]
+
+
+async def open_both(tray: Tray, card: Card):
+    forward_on(tray, card)  # EFF101 [heuristic]
+"#;
+
+/// A class name that a module on the way binds again may hold another class when it is called:
+/// `global Base; Base = Sub` in a function of the module reading it or of a module it is read
+/// through, or a star import of the reading module, which may bind any name it reads. Calling it
+/// makes no exact instance. A name nothing binds again does.
+const REBOUND_MODEL: &str = r#"import time
+
+
+class Base:
+    def run(self):
+        return 1
+
+
+class Sub(Base):
+    def run(self):
+        time.sleep(1)
+
+
+def call(b: Base):
+    return b.run()
+"#;
+
+const REBOUND_GLOBAL: &str = r#"from pkg.model import Base, Sub, call
+
+
+def use_sub():
+    global Base
+    Base = Sub
+
+
+async def caller():
+    call(Base())  # EFF101 [heuristic]
+"#;
+
+const REBOUND_EXPORTS: &str = "from pkg.model import Sub as Base\n";
+
+const REBOUND_STARRED: &str = r#"from pkg.model import Base, call
+from pkg.exports import *
+
+
+async def caller():
+    call(Base())  # EFF101 [heuristic]
+"#;
+
+const REBOUND_HUB: &str = r#"from pkg.model import Base, Sub, call
+
+
+def use_sub():
+    global Base
+    Base = Sub
+"#;
+
+const REBOUND_VIA_HUB: &str = r#"from pkg import hub
+
+
+async def caller():
+    hub.call(hub.Base())  # EFF101 [heuristic]
+"#;
+
+const REBOUND_FIXED: &str = r#"from pkg import model
+from pkg.model import Base, call
+
+
+async def caller():
+    call(Base())
+
+
+async def through_module():
+    model.call(model.Base())
+"#;
+
+/// A `__new__` bound on a class after its body, by a store on the class object or by an
+/// `__init_subclass__` storing on the classes it is handed, or bound in the body by an
+/// assignment, may return an instance of another class: calling the class makes no exact
+/// instance.
+const NEW_MODEL: &str = r#"import time
+
+
+class Base:
+    def run(self):
+        return 1
+
+
+class Sub(Base):
+    def run(self):
+        time.sleep(1)
+
+
+def call(b: Base):
+    return b.run()
+
+
+def make_sub(cls):
+    return object.__new__(Sub)
+
+
+class Assigned(Base):
+    __new__ = staticmethod(make_sub)
+
+
+async def assigned():
+    call(Assigned())  # EFF101 [heuristic]
+"#;
+
+const NEW_STORED_USE: &str = r#"from pkg.model import Base, call
+
+
+async def made():
+    call(Base())  # EFF101 [heuristic]
+"#;
+
+const NEW_STORED: &str = r#"from pkg.model import Base, make_sub
+
+Base.__new__ = staticmethod(make_sub)
+"#;
+
+const NEW_HOOK: &str = r#"from pkg.model import make_sub
+
+
+class Hooked:
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.__new__ = staticmethod(make_sub)
+"#;
+
+#[test]
+fn an_override_on_one_parameter_reaching_one_on_another_needs_both() {
+    check_marks(
+        "exact_forwarded",
+        &[("pkg/core.py", FORWARD_CORE), ("pkg/sub.py", FORWARD_SUB)],
+        &["EFF101"],
+    );
+}
+
+#[test]
+fn a_class_name_bound_again_makes_no_exact_instance() {
+    let model = ("pkg/model.py", REBOUND_MODEL);
+    check_marks(
+        "exact_rebound_global",
+        &[model, ("pkg/app.py", REBOUND_GLOBAL)],
+        &["EFF101"],
+    );
+    check_marks(
+        "exact_rebound_star",
+        &[
+            model,
+            ("pkg/exports.py", REBOUND_EXPORTS),
+            ("pkg/starred.py", REBOUND_STARRED),
+        ],
+        &["EFF101"],
+    );
+    check_marks(
+        "exact_rebound_on_the_way",
+        &[
+            model,
+            ("pkg/hub.py", REBOUND_HUB),
+            ("pkg/via_hub.py", REBOUND_VIA_HUB),
+        ],
+        &["EFF101"],
+    );
+    check_marks(
+        "exact_rebound_fixed",
+        &[model, ("pkg/fixed.py", REBOUND_FIXED)],
+        &["EFF101"],
+    );
+}
+
+#[test]
+fn a_new_bound_on_a_class_makes_no_exact_instance() {
+    let model = ("pkg/model.py", NEW_MODEL);
+    let used = ("pkg/use.py", NEW_STORED_USE);
+    check_marks(
+        "exact_new_stored",
+        &[model, used, ("pkg/stored.py", NEW_STORED)],
+        &["EFF101"],
+    );
+    check_marks(
+        "exact_new_hook",
+        &[model, used, ("pkg/hook.py", NEW_HOOK)],
+        &["EFF101"],
+    );
 }
 
 /// A class whose bases C3 cannot linearize keeps the depth-first, left-to-right order: a base

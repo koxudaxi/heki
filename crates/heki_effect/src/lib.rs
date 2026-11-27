@@ -226,16 +226,25 @@ impl ClassLine {
 
 pub type SharedLine = Arc<ClassLine>;
 
-/// One way a function reaches an execution effect only through the implementation that a
-/// subclass of a parameter's class gives a call on that parameter
-/// ([`EffectSummary::provided_effects`]): it runs only when the parameter is an instance of
-/// `provider`.
+/// A parameter being an instance of `provider`, a subclass of its class that gives a call on it
+/// the implementation a way of [`EffectSummary::provided_effects`] runs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Provided {
+pub struct Need {
     /// The parameter (a method's `self` is 0).
     pub param: u8,
     pub provider: SharedLine,
-    /// The shortest chain through the provider's implementation.
+}
+
+/// One way a function reaches an execution effect only through implementations that subclasses
+/// of parameters' classes give calls on those parameters ([`EffectSummary::provided_effects`]):
+/// it runs only when every parameter of `needs` is an instance of its provider. A subclass's
+/// override of a call on one parameter that reaches the override another subclass gives a call
+/// on a second parameter needs both.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Provided {
+    /// Sorted, without repeats, never empty.
+    pub needs: Vec<Need>,
+    /// The shortest chain through the providers' implementations.
     pub chain: SharedChain,
 }
 
@@ -1160,10 +1169,10 @@ pub struct EffectSummary {
     /// The execution effects reached only through implementations that subclasses of a
     /// parameter's class give a call on the parameter (a mixin method's
     /// `self.execute_command()`, `helper(notes: Notes)` calling `notes.preview()`): per effect,
-    /// each parameter and class providing one, with the shortest chain through it. A call
-    /// passing an instance of exactly a class runs only those of the classes on its MRO, a call
-    /// on a receiver of known class only those of the classes related to it
-    /// ([`callgraph::arrival`]).
+    /// each way's parameters and the classes providing the implementations it runs, with the
+    /// shortest chain through them ([`Provided`]). A call passing an instance of exactly a class
+    /// runs only the ways of the classes on its MRO, a call on a receiver of known class only
+    /// those of the classes related to it ([`callgraph::arrival`]).
     pub provided_effects: Option<Box<ProvidedEffects>>,
     /// What the function has run whenever it returns normally ([`MustExec`]); `None` when it
     /// established nothing, or when no enabled rule reads it ([`OptInFacts::must_effects`]).

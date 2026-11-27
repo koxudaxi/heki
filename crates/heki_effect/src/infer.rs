@@ -157,22 +157,27 @@ fn isinstance_classes(project: &ProjectDecls, t: &Ty) -> Option<Vec<String>> {
 /// project class by the name it is defined under (read as a global, imported, or as a member of
 /// its module), which makes one of that class and of no subclass when the class constructs
 /// exactly ([`ProjectDecls::constructs_exactly`]), and the copies of that result typed with the
-/// same class. A class object that may be a subclass (`cls(...)`, an attribute holding a class)
-/// constructs no exact instance, nor does a function returning one; a value that leaves the
-/// function (a store, a return, an item of a container, a phi) is typed again where it is read.
+/// same class. The name read must hold the class whenever it is read
+/// ([`ProjectDecls::canonical_value`]): not when a module on the way binds it again (`global
+/// Base; Base = Sub` in a function, a module-level store, a star import that may bind it). A
+/// class object that may be a subclass (`cls(...)`, an attribute holding a class) constructs no
+/// exact instance, nor does a function returning one; a value that leaves the function (a
+/// store, a return, an item of a container, a phi) is typed again where it is read.
 fn exact_instances(
     f: &IrFunction,
     shape: &FnShape<'_>,
     facts: &[Fact],
-    project: &ProjectDecls,
+    cx: &TypeCtx<'_>,
 ) -> FxHashSet<VarId> {
+    let project = cx.project;
     let fact = |v: VarId| &facts[v.0 as usize];
     let instance_class = |v: VarId| match fact(v) {
         Fact::Known(Ty::Inst(o)) => Some(o.class.as_str()),
         _ => None,
     };
-    let named_class =
-        |fqn: &str, made: &str| project.canonical(fqn) == made && project.constructs_exactly(made);
+    let named_class = |read: &str, made: &str| {
+        project.canonical_value(read).as_deref() == Some(made) && project.constructs_exactly(made)
+    };
     let module_named = |v: VarId| match fact(v) {
         Fact::Known(Ty::Ref(m)) if project.module(m).is_some() => Some(m.as_str()),
         _ => None,
@@ -186,19 +191,26 @@ fn exact_instances(
                 is_awaited: false,
                 ..
             } => {
-                let read_by_name = match shape.inst(shape.copy_root(*c)).map(|i| &i.kind) {
-                    Some(InstKind::LoadGlobal { .. } | InstKind::LoadName { .. }) => true,
-                    Some(InstKind::Import { .. }) => true,
-                    Some(InstKind::AttrLoad { obj, .. }) => module_named(*obj).is_some(),
-                    _ => false,
-                };
                 let Fact::Known(Ty::Ref(fqn)) = fact(*c) else {
                     continue;
+                };
+                // The name the callee is read under: a global of the function's module, what
+                // an import in the function binds, or a member of a module.
+                let read = match shape.inst(shape.copy_root(*c)).map(|i| &i.kind) {
+                    Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }) => {
+                        format!("{}.{name}", cx.module_name())
+                    }
+                    Some(InstKind::Import { .. }) => fqn.clone(),
+                    Some(InstKind::AttrLoad { obj, attr, .. }) => match module_named(*obj) {
+                        Some(module) => format!("{module}.{attr}"),
+                        None => continue,
+                    },
+                    _ => continue,
                 };
                 let Some(class) = instance_class(*dst) else {
                     continue;
                 };
-                if !read_by_name || !named_class(fqn, class) {
+                if project.canonical(fqn) != class || !named_class(&read, class) {
                     continue;
                 }
                 (*dst, class)
@@ -1916,7 +1928,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 value_of = n.value_of;
             }
         }
-        let exact = exact_instances(self.f, shape, &facts, self.cx.project);
+        let exact = exact_instances(self.f, shape, &facts, self.cx);
         Inferred {
             facts,
             declared: self.names,
