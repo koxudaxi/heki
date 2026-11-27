@@ -1780,10 +1780,12 @@ impl<'a> CheckContext<'a> {
     }
 }
 
-/// Whether a configured name uses glob syntax (`*`, `?`, `[...]`, `{a,b}`) rather than naming
-/// one thing literally.
+/// The characters that start glob syntax (`*`, `?`, `[...]`, `{a,b}`).
+pub(crate) const GLOB_SYNTAX: [char; 4] = ['*', '?', '[', '{'];
+
+/// Whether a configured name uses glob syntax rather than naming one thing literally.
 pub(crate) fn has_glob_syntax(text: &str) -> bool {
-    text.contains(['*', '?', '[', '{'])
+    text.contains(GLOB_SYNTAX)
 }
 
 /// The characters glob syntax gives a meaning: a name part holding one is compiled as a glob.

@@ -12,7 +12,8 @@ name: Docs
 #   Without the token the preview is skipped;
 # - pushes to main and pull requests from forks or Dependabot only build and check.
 # The build job holds no secret; the deploy jobs check nothing out and run no code of the
-# build: they upload the static site it produced.
+# build: they upload the static site it produced. A production build compiles nothing: it
+# deploys pages the pull request and the push to main checked.
 
 on:
   pull_request:
@@ -45,15 +46,52 @@ jobs:
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
       || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-24.04
+    env:
+      # A production deploy (a release, or a manual run on main) publishes a commit whose pages
+      # the pull request and the push to main already checked (a release tag is a commit of
+      # main), so it builds no heki and checks nothing: it rewrites the release's pins and builds
+      # the site.
+      PRODUCTION: >-
+        ${{ github.event_name == 'release'
+        || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
-      # A production build (release, manual run) publishes what it builds, so it never restores
-      # a cache; zizmor does not read the step condition.
-      - if: github.event_name == 'pull_request' || github.event_name == 'push'
+      # `build_docs.py --check` runs a `heki` built from the same code, which a push to main
+      # caches: a documentation pull request restores it and builds nothing. The key hashes every
+      # file the build reads (the crates, the catalogs and the files they embed, the manifests)
+      # and this workflow (the toolchain pin and the profile); `test_ci_workflow.py` checks that
+      # it covers what the crates embed and no page but CHANGELOG.md, which `heki version`
+      # embeds. Only pushes to main save it, and this job holds no secret.
+      - id: heki
+        if: env.PRODUCTION != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/ci/heki
+          key: >-
+            heki-ci-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**',
+            'kb/**', 'skills/**', 'tests/**', 'CHANGELOG.md', 'pyproject.toml',
+            '.github/workflows/docs.yml') }}
+      - if: env.PRODUCTION != 'true' && steps.heki.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      # The dependencies of a build that misses the cache, in the `ci` profile (`key`: the
+      # job's cache of release builds holds none). zizmor does not read the step condition, and
+      # a production run never gets here.
+      - if: env.PRODUCTION != 'true' && steps.heki.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
+        with:
+          key: ci-profile
+          save-if: ${{ github.event_name == 'push' }}
+      # The `ci` profile (see Cargo.toml) optimizes the workspace crates less than a release
+      # build, which the pages do not depend on.
+      - if: env.PRODUCTION != 'true' && steps.heki.outputs.cache-hit != 'true'
+        run: cargo build --locked --profile ci -p heki
+      - if: github.event_name == 'push' && steps.heki.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/ci/heki
+          key: ${{ steps.heki.outputs.cache-primary-key }}
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: "0.13.4"
@@ -86,10 +124,11 @@ jobs:
       - name: Regenerate llms.txt from the release's pages
         if: github.event_name == 'release'
         run: python scripts/build_llms_txt.py
-      - run: cargo build --release -p heki
       - name: Generated pages are up to date (rules, CLI reference, experimental features)
-        run: python scripts/build_docs.py --heki target/release/heki --check
+        if: env.PRODUCTION != 'true'
+        run: python scripts/build_docs.py --heki target/ci/heki --check
       - name: llms.txt is up to date
+        if: env.PRODUCTION != 'true'
         run: python scripts/build_llms_txt.py --check
       - name: Build the site
         run: uv run --only-group docs --isolated zensical build --clean

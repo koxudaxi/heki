@@ -67,6 +67,8 @@ docs_pages! {
     ReadonlyReturns => "configuration/#readonly-returns",
     Invalidation => "configuration/#invalidation",
     ImportBoundaries => "configuration/#import-boundaries",
+    Groups => "configuration/#named-groups",
+    Include => "configuration/#several-configuration-files",
     Imports => "configuration/#imports-toolhekiimports",
     Ecosystem => "configuration/#ecosystem-knowledge-toolhekiecosystem",
     Rules => "rules/",
@@ -106,6 +108,8 @@ impl Docs {
             "import-boundaries" => Self::ImportBoundaries,
             "imports" => Self::Imports,
             "ecosystem" => Self::Ecosystem,
+            "groups" => Self::Groups,
+            "include" => Self::Include,
             _ => Self::TopLevel,
         }
     }
@@ -318,18 +322,26 @@ impl Problem {
         self
     }
 
-    /// The location of its configuration value in `config_file`, the file the run read its
-    /// configuration from.
-    pub fn locate(mut self, config_file: Option<&Path>) -> Self {
-        if self.location.is_none()
-            && let (Some(setting), Some(path)) = (&self.setting, config_file)
-            && let Ok(text) = std::fs::read_to_string(path)
-            && let Some(at) = locate_setting(&text, ConfigLayout::of(path), setting)
-        {
-            let (line, column) = line_column(&text, at.start);
-            self = self.at(path, line, column);
+    /// The location of its configuration value: where `config_file`, the file the run read its
+    /// configuration from, or a file its `include` lists writes it, else the group a list took
+    /// it from.
+    pub fn locate(self, config_file: Option<&Path>) -> Self {
+        let wanted = self.setting.as_ref().filter(|_| self.location.is_none());
+        let found = wanted.zip(config_file).and_then(|(setting, main)| {
+            let included = crate::included_files(main);
+            (std::iter::once((main.to_path_buf(), ConfigLayout::of(main))))
+                .chain(included.into_iter().map(|p| (p, ConfigLayout::TopLevel)))
+                .find_map(|(path, layout)| {
+                    let text = std::fs::read_to_string(&path).ok()?;
+                    let at = locate_setting(&text, layout, setting)?;
+                    Some((path, line_column(&text, at.start)))
+                })
+                .or_else(|| crate::fold::group_origin(main, setting))
+        });
+        match found {
+            Some((path, (line, column))) => self.at(&path, line, column),
+            None => self,
         }
-        self
     }
 }
 

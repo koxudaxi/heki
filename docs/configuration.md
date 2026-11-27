@@ -159,6 +159,8 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](#module-names-follow-the-source-roots). |
+| `include` | `[]` | Further TOML files of contract tables, their defaults tables, and groups, relative to this file. See [Several configuration files](#several-configuration-files). |
+| `groups` | none | Named lists of entries that a list uses as `@name`. See [Named groups](#named-groups). |
 | `baseline` | none | Ratchet baseline file, relative to the project root, used when `--baseline` is not given: by `heki check`, `--watch`, and the language server. See [Ratchet baselines](adoption.md#ratchet-baselines). |
 
 ### The default target version
@@ -302,8 +304,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   included.
 - A `{...}` group may hold dotted alternatives, in the holder of a `Class.attr` target too:
   `pkg.{a.Base,a.Sub}.only_sub` is `pkg.a.Base.only_sub` and `pkg.a.Sub.only_sub`, and
-  `heki check` judges the entry by the alternatives, so it names no class only when none of
-  them does ([Entries that match nothing](#entries-that-match-nothing)).
+  `heki check` judges each of them ([Entries that match nothing](#entries-that-match-nothing)).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
@@ -403,6 +404,93 @@ references = "ignore"
 - A table you add to the file from `heki recommend` takes the defaults like any other, and the
   recommender tries it with them.
 - An error about a value of a defaults table is reported at the defaults table.
+
+### Named groups
+
+A list that several contracts repeat can be named once in `[tool.heki.groups]` (`[groups]` in a
+`heki.toml`). An entry `@name` in a list of a contract table, of a defaults table, or of another
+group stands for the entries of the group, in order, at its place:
+
+```toml
+[tool.heki.groups]
+parser = ["pkg.parser.*", "pkg.cli:parse"]
+writers = ["@parser", "pkg.store.*"]
+
+[[tool.heki.write-owners]]
+name = "fields"
+targets = ["pkg.model:Model.fields"]
+allowed-writers = ["@writers"]
+
+[[tool.heki.call-owners]]
+name = "parse"
+targets = ["pkg.parser:Parser.parse"]
+allowed-callers = ["@parser", "tests.*"]
+```
+
+- The entries are written out before the tables are read, as the defaults are, so each key reads
+  them in its own grammar (module patterns in `import-boundaries`, dotted patterns elsewhere). The
+  configuration reports, and keys a baseline, exactly as the lists written out do:
+  `allowed-writers` above is `["pkg.parser.*", "pkg.cli:parse", "pkg.store.*"]`.
+- A group is a list of strings. Its entries are neither sorted nor merged: an entry listed twice
+  stays twice.
+- Only a whole entry that starts with `@` names a group. An `@` anywhere else is part of the
+  entry, as in the item key of `'pkg.model:Model.fields["user@example.com"]'`.
+- The groups of one list write at most 10,000 entries into it. A group that names another twice
+  doubles it, so a few lines could otherwise write out more entries than memory holds.
+- Group names are shared by the main configuration file and the files it
+  [includes](#several-configuration-files).
+- A group that no contract uses is reported as an
+  [entry that matches nothing](#entries-that-match-nothing) is.
+- Errors (exit code 2), each at its file and line: an `@name` that names no group, with the
+  chain of groups that leads to it (`@a` -> `@b` -> `@missing`); a cycle between groups (`@a` in
+  `b` and `@b` in `a`, or a group that names itself), with the chain of names; an empty group,
+  which would empty every key that uses it (and an empty `forbidden-*` key means every
+  function); groups that write more than 10,000 entries into one list; and a group name defined
+  twice.
+
+### Several configuration files
+
+`include` in the main configuration file (`[tool.heki]` of a `pyproject.toml`, the top level of
+a `heki.toml`) lists further TOML files of contracts, read in order:
+
+```toml
+[tool.heki]
+include = ["contracts/store.toml", "contracts/layers.toml"]
+```
+
+```toml
+# contracts/store.toml
+[groups]
+store = ["pkg.store.*"]
+
+[write-owners-defaults]
+message = "write it through the store"
+
+[[write-owners]]
+name = "fields"
+targets = ["pkg.model:Model.fields"]
+allowed-writers = ["@store"]
+```
+
+- A path is relative to the file that holds `include`. It is a plain path, not a glob, so adding
+  a file is an edit of the main file, and not a rooted or drive-prefixed one (`/etc/c.toml`,
+  `C:\c.toml`), so the configuration reads the same in every checkout.
+- An included file holds contract tables, their `<kind>-defaults` tables, and `[groups]`, at its
+  top level. Every other setting (`lint`, `src`, `baseline`, `required-version`, ...) stays in
+  the main file, and an included file includes nothing.
+- The tables of a kind are the main file's, then each included file's, in the order of
+  `include`. The configuration reports, and keys a baseline, as one file holding the tables in
+  that order. A table takes its own key, else the defaults table of its file, else the main
+  file's.
+- An included file is part of the configuration: `heki check`, `heki inspect`, `heki recommend`,
+  `--watch`, and the language server read it, and a change to it reloads them as a change to the
+  main file does. The pre-commit hook passes it when it is staged, and naming it in `--touched`
+  shows every report. Protect it in review as you protect the main file, for example with its
+  own `CODEOWNERS` line: a contract it drops or an entry it adds changes what heki allows.
+- Errors (exit code 2), each at its file and line: a file that cannot be read, a glob, a path
+  that is not relative, a file listed twice, the main file listed, `include` in an included file, and any setting but the
+  tables above in an included file. An error in the TOML or a value of an included file names
+  that file.
 
 ### `write-owners`
 
@@ -1382,9 +1470,17 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   `exempt-methods`, `allowed-protocols`, and `forbid-cached-property-on` of `write-owners`,
   `read-owners`, and `call-owners`; the `scopes`, `write-targets`, `write-universe`, and
   `allow-writes` of `effect-boundaries`; and the `targets`, `invalidators`, and
-  `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
-  `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
-  symbols outside the project, and are not judged.
+  `exempt-writers` of `invalidation`.
+- The `read-targets`, `call-targets`, and `allowed-callees` of an effect boundary, the
+  `producers` of `readonly-returns`, and the keys of `import-boundaries` (`importers`,
+  `exempt-importers`, `allowed-imports`, `forbidden-imports`, `relative-imports`, and both sides
+  of an `ignored-imports` pair) may name code outside the project by its full name
+  (`os.getenv`, `sys.platform`, `<stdlib>`). Their entries are judged when the first name is a
+  module of the project (`pkg` of `pkg.store:run` or `pkg.db:Session`), and are not judged
+  otherwise (`sys.platform`, `Store.save`, `<stdlib>`, `tests.*` where `tests` is not
+  analyzed). A producer names a function, a method, or an attribute of a class. A module
+  pattern names a module of the analyzed files or a package holding one, a namespace package
+  without `__init__.py` included; with a name (`pkg.db:Session`) it needs the module.
 - A `call-owners` or `read-owners` target whose first name is no module of the project may name
   code outside it. It is matched when the analyzed files call or read a symbol outside the
   project it names, and it is not judged when it is an `<external>` entry or its first name is a
@@ -1393,6 +1489,14 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   cannot list what such a module has. Any other entry is judged as above, so a misspelled class
   (`Feild.removed`) is still reported, and so is an entry naming project code a run over some
   files leaves out.
+- Braces are taken first. A `{...}` group without an empty alternative lists names, each judged
+  on its own: `pkg.store:Base.{a,c}` is `pkg.store:Base.a` and `pkg.store:Base.c`, and the
+  warning lists those that name nothing (`pkg.store:Base.c` when the class has no `c`), in one
+  line for each kind of name they name none of (no class, no attribute of a class). A group
+  with an empty alternative is one name with its extensions, which names something when
+  one of them does: `pkg.run:outer{,.*}` when `outer` or a scope inside it does, and
+  `pkg.zz{,.*}:*` when `pkg.zz` or a module below it does, so a namespace package without
+  `__init__.py` is not reported.
 - Each entry is matched as its rule matches it, against the definitions of the analyzed files:
   a function pattern names a function, method, class, or module body; a call target a function,
   method, or class (or, with a module part, a name the module imports), and one with an
@@ -1428,8 +1532,10 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
 - An entry whose last part is a glob is a rule about every name it may match, later ones
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
-  `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
-  not judged.
+  `Field._*`, the function of `run.*`). A holder that is a glob itself is judged by the parts
+  written out before it: `pkg.zz.*:*` needs a module `pkg.zz` or one below it, and
+  `pkg.*.run_*` needs `pkg`. A glob with no part written out before it (`*_helper`, `__*__`,
+  `*.run_*`) is not judged.
 - The names offered are found by comparing an entry with the names that share its holder or its
   last part. A run makes at most 64 such comparisons per function and class of the project (at
   least 4,096) for all its entries, so of thousands of entries that name nothing in a large
@@ -1441,6 +1547,13 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   files below the project root (`heki check pkg/stores`) would find unmatched the entries naming
   code in the others. A file given is checked in its project, so its run judges. With the key
   set, every run judges the files it analyzes.
+- An entry written in a file `include` lists, or in a group, is judged as one written in the
+  contract (braces first, a glob holder by its written-out prefix), and is named with where it
+  is written:
+  ``warning: `allowed-writers` entry `pkg.store.gone` of write-owners `fields` (from group `store`
+  at contracts/store.toml:3) names no function or method in the analyzed files``. A group that no
+  contract uses is reported under the same setting:
+  ``warning: the group `old` (pyproject.toml:12) is used by no contract``.
 - `--watch` and the language server do not report them.
 
 ## Imports: `[tool.heki.imports]`
