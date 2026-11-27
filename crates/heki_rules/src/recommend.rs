@@ -16,13 +16,16 @@ pub mod block;
 pub mod contracts;
 pub mod premises;
 pub mod rules;
+mod takeaways;
 pub mod types;
 
 use crate::project::{
     Facts, Indexed, ParsedFile, Project, ProjectError, paths_leave_out, regressed,
 };
 use crate::selection::{RuleSelection, SelectionError, Selectors, not_failing_note};
-use crate::{CORE_RULES, Certainty, RuleConfigError, SummarySnapshot, fold_root_causes};
+use crate::{
+    CORE_RULES, Certainty, Consequence, RuleConfigError, SummarySnapshot, fold_root_causes,
+};
 use heki_diagnostics::{Diagnostic, RatchetBaseline};
 use heki_env::{ConfigLayout, HekiConfig, LintConfig, Severity};
 use rustc_hash::FxHashSet;
@@ -257,6 +260,46 @@ pub struct ReportsNow {
     /// make it fail (exit code 1) at the configuration's `fail-on`: the exact errors, or every
     /// one at `fail-on = "warning"`.
     pub failing: usize,
+    /// Of the exact reports of a bug `heki check` judges now, the one naming the fewest other
+    /// places, which the text names.
+    #[serde(skip)]
+    pub easiest_exact: Option<ExactReport>,
+}
+
+/// One report `heki check` prints, as the text names it.
+#[derive(Debug, Clone)]
+pub struct ExactReport {
+    pub code: String,
+    pub path: String,
+    pub line: u32,
+    /// The function the report is in; empty at module level.
+    pub function: String,
+    /// The report's own place and the others it names: the hops of a call chain, a definition.
+    pub places: usize,
+    /// The exact reports of a bug `heki check` judges now, this one among them.
+    pub among: usize,
+}
+
+impl ExactReport {
+    /// Of the exact reports of a bug in `judged`, the one naming the fewest other places, the
+    /// first `heki check` prints on a tie.
+    fn easiest(judged: &[Diagnostic], shown: &dyn Fn(&Path) -> String) -> Option<Self> {
+        let bug = |d: &&Diagnostic| {
+            d.certainty == Certainty::Exact
+                && crate::find_rule(&d.rule_code).is_some_and(|r| r.consequence == Consequence::Bug)
+        };
+        let bugs: Vec<&Diagnostic> = judged.iter().filter(bug).collect();
+        let d = (bugs.iter())
+            .min_by_key(|d| (d.related.len(), &d.path, d.line, d.column, &d.rule_code))?;
+        Some(Self {
+            code: d.rule_code.clone(),
+            path: shown(&d.path),
+            line: d.line,
+            function: d.qualname.clone(),
+            places: 1 + d.related.len(),
+            among: bugs.len(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -316,7 +359,13 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         discovery: &diags,
     });
     let fail_on = discovery.project.env.cfg.lint.fail_on_severity();
-    let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags, fail_on);
+    let reports_now = reports_now(
+        &current,
+        baseline.as_ref(),
+        files_analyzed,
+        &diags,
+        (fail_on, shown),
+    );
     let configured_now = contracts::configured_reports(&discovery.project.env.cfg, &diags);
     let env = &discovery.project.env;
     let declared = crate::declared_contracts(env, &discovery.index, &current)?;
@@ -499,6 +548,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         TextOptions {
             all,
             snapshot_saved,
+            ask_fail: fail_on == Severity::Error,
         },
     );
     Ok(report)
@@ -591,7 +641,7 @@ fn reports_now(
     baseline: Option<&RatchetBaseline>,
     files: &[ParsedFile],
     diags: &[Diagnostic],
-    fail_on: Severity,
+    (fail_on, shown_path): (Severity, &dyn Fn(&Path) -> String),
 ) -> ReportsNow {
     let mut now: Vec<Diagnostic> = diags
         .iter()
@@ -614,12 +664,17 @@ fn reports_now(
             allowed: printed(allowed).len(),
             regressions: regressions.len(),
         };
-        (split, failing(&regressions))
+        let easiest = ExactReport::easiest(&regressions, shown_path);
+        (split, failing(&regressions), easiest)
     });
     let shown = printed(now);
-    let (baseline, failing) = match split {
-        Some((split, failing)) => (Some(split), failing),
-        None => (None, failing(&shown)),
+    let (baseline, failing, easiest_exact) = match split {
+        Some((split, failing, easiest)) => (Some(split), failing, easiest),
+        None => (
+            None,
+            failing(&shown),
+            ExactReport::easiest(&shown, shown_path),
+        ),
     };
     let exact = shown
         .iter()
@@ -633,6 +688,7 @@ fn reports_now(
         heuristic_rules_off: current.heuristic_off().len(),
         baseline,
         failing,
+        easiest_exact,
     }
 }
 
@@ -742,63 +798,6 @@ fn left_out_note(left_out: &LeftOut) -> String {
     )
 }
 
-/// The most steps "Start here" lists.
-const MAX_STEPS: usize = 3;
-
-/// The first steps the report points to, each a field it already has, the first
-/// [`MAX_STEPS`] of: the reports that fail `heki check` now, a source root the block adds (the
-/// contract candidates wait for a run with it), the command showing the reports the rules count,
-/// the exact types, and the contract blocks.
-fn start_here(report: &RecommendReport) -> Vec<String> {
-    let mut steps = Vec::new();
-    let now = &report.reports_now;
-    if now.failing > 0 && now.baseline.is_none() {
-        steps.push(format!(
-            "heki check fails on {} report(s) now: a Ratchet baseline records them, so that it \
-             fails only on new ones (Notes)",
-            now.failing
-        ));
-    }
-    if let Some(src) = (report.config_toml.lines()).find(|l| l.starts_with("src = ")) {
-        steps.push(format!(
-            "add {src} (keys at the end), then run heki recommend again: it renames modules, and \
-             the contract candidates come from that run"
-        ));
-    }
-    if let Some(shown) = rules::shown_by_check(&report.rules, &report.analyzed) {
-        let counted = format!(
-            "{} exact, {} heuristic (heuristic reports can be wrong)",
-            shown.exact, shown.heuristic
-        );
-        steps.push(if now.baseline.is_some() {
-            format!(
-                "{} shows {} regression(s) among {} report(s) not shown now: {counted}",
-                shown.command, shown.regressions, shown.reports
-            )
-        } else {
-            format!(
-                "{} shows {} report(s) not shown now: {counted}",
-                shown.command, shown.reports
-            )
-        });
-    }
-    let exact: usize = report.suggestions.counts.iter().map(|c| c.exact).sum();
-    if exact > 0 {
-        steps.push(format!(
-            "{exact} exact read-only parameter type(s) to write (Types the code already keeps)"
-        ));
-    }
-    if !report.contracts.is_empty() {
-        steps.push(format!(
-            "{} contract block(s) in the keys at the end: the code keeps them today; adopt only \
-             the boundaries you intend to keep (Notes)",
-            report.contracts.len()
-        ));
-    }
-    steps.truncate(MAX_STEPS);
-    steps
-}
-
 /// What the text shows beyond the JSON object.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TextOptions {
@@ -807,6 +806,9 @@ pub struct TextOptions {
     pub all: bool,
     /// Whether the project root holds a saved summary snapshot, which `MUT103` compares with.
     pub snapshot_saved: bool,
+    /// Whether a contract's reports need `fail = true` to fail `heki check`: they do at
+    /// `fail-on = "error"`, not at `"warning"`.
+    pub ask_fail: bool,
 }
 
 /// The report as the text output prints it.
@@ -818,6 +820,13 @@ pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
         "heki recommend (experimental) on {}: {} file(s), {} function(s)\n",
         report.root, analyzed.files, analyzed.functions
     );
+    let takeaways = takeaways::lines(report, text);
+    for (n, line) in takeaways.iter().enumerate() {
+        let _ = writeln!(out, "{}. {line}", n + 1);
+    }
+    if !takeaways.is_empty() {
+        out.push('\n');
+    }
     let now = &report.reports_now;
     let _ = writeln!(
         out,
@@ -831,13 +840,6 @@ pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
             "  with the baseline: {} allowed, {} regression(s)",
             split.allowed, split.regressions
         );
-    }
-    let steps = start_here(report);
-    if !steps.is_empty() {
-        out.push_str("\nStart here\n");
-        for step in steps {
-            let _ = writeln!(out, "  - {step}");
-        }
     }
     types::render(&mut out, &report.suggestions, text.all);
     rules::render(
