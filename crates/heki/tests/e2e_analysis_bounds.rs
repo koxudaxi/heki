@@ -8923,6 +8923,47 @@ fn a_cycle_of_calls_returning_each_other_decides_nothing_in_linear_time() {
     assert_eq!(mut110_callers(&found), []);
 }
 
+/// A function returning one of `branches` distinct calls, each of a function returning
+/// `identity(x)`: the function reads each callee's fact, and is read again for each that resolves.
+fn forwarding_fan_out(branches: usize) -> String {
+    let mut lines = vec![
+        "def identity(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "def a(x, flag):".to_owned(),
+    ];
+    lines.extend((0..branches).map(|i| format!("    if flag == {i}:\n        return g{i}(x)")));
+    lines.push("    return x".to_owned());
+    for i in 0..branches {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def g{i}(x):"),
+            "    return identity(x)".to_owned(),
+        ]);
+    }
+    lines.join("\n") + "\n"
+}
+
+/// Every visit of a function is charged its calls, so a fan-out of forwarding calls past the
+/// module's budget answers open instead of reading the calls once per resolving callee.
+#[test]
+fn a_fan_out_of_forwarding_calls_is_charged_for_each_visit() {
+    check_past_budgets(
+        3000,
+        &[
+            "heki_effect::resolver::forwarded",
+            "heki_effect::summary::Extractor::path_facts",
+        ],
+        |n| {
+            let p = Project::new(&format!("bounds_forwarding_fan_out_{n}"));
+            p.write("m.py", &forwarding_fan_out(n));
+            p
+        },
+    );
+}
+
 /// A chain of modules, each function returning what the one of the module before returns: each
 /// module's completion walks the rest of the chain, within a budget proportional to the module,
 /// past which it decides nothing. A chain a size smaller is decided.

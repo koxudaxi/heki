@@ -163,7 +163,8 @@ struct Node {
 /// when each call calls a project function returning its parameter `k`, itself or through calls
 /// of its own, and binds `k` to `i`. The functions along the calls read each other's facts: a
 /// fixpoint from no fact, so a cycle of calls (`a(x)` returning `b(x)`, which returns `a(x)`)
-/// decides nothing, and past the visit limit or the module's budget nothing is decided.
+/// decides nothing, and past the visit limit or the module's budget (each visit of a function is
+/// charged its calls) nothing is decided.
 pub(super) fn complete(input: &ModuleInput<'_>, decls: &mut ModuleDecls, project: &ProjectDecls) {
     for (qualname, returned) in decided(input, decls, project) {
         if let Some(decl) = decls.functions.get_mut(&qualname) {
@@ -279,9 +280,16 @@ fn decide<'d>(
         readers: &|i, out| out.extend_from_slice(&readers[i]),
         max_visits: u32::try_from(1 + 2 * most_calls).unwrap_or(u32::MAX),
     };
-    fixpoint(budget, spec, |i, facts| returned(&nodes[i], facts))
+    // Each visit inspects every call of the node, so a node with many calls that is visited
+    // again for each callee resolving pays for them all: the calls are charged on each visit.
+    let walked = fixpoint(budget, spec, |i, facts| {
+        budget.take(nodes[i].calls.len());
+        returned(&nodes[i], facts)
+    });
+    walked
         .map(Some)
         .open_means(None)
+        .filter(|_| !budget.spent())
 }
 
 /// The declaration of `key`: the module's own functions are those of its file, since pass 1
