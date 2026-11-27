@@ -2118,8 +2118,13 @@ message = "write model state through GenerationStore instead"
        (`ownership::handed_back`, which `ownership::source` reads too), and a call whose every
        project callee returns, on every `return`, the parameter the argument binds
        (`FunctionDecl::returns_param` with no attribute: `return x`, `return cast(T, x)`),
-       by position or by a keyword naming it in every callee; a
-       function returning another call's result is open. Such a value is `retyped`: a type
+       by position or by a keyword naming it in every callee. A function returning the result
+       of a call of a module global, or of an attribute of an import, passing it parameters
+       (`return same(x)`, `FunctionDecl::forwards`), returns what that callee returns of the
+       parameter the call binds there: completing a module's declarations decides it against
+       pass 1, along the calls through every module, as a fixpoint from no fact over the
+       functions the calls reach (a cycle of calls decides nothing), within a budget
+       proportional to the module; a function returning any other call's result is open. Such a value is `retyped`: a type
        checker types it by the call, so `MUT110` does not leave its changes to one.
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed

@@ -12,7 +12,8 @@ it in place: a parameter annotated `Sequence[...]`, `Mapping[...]`, `AbstractSet
 (`typing.AbstractSet` or `collections.abc.Set`, not `typing.Set`, which is `set`), or
 `ReadOnly[...]` (also inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself,
 through a local alias (`alias = items`), or through a call that hands it back as itself
-(`typing.cast(list[int], items)`, a project function returning its parameter on every path) to
+(`typing.cast(list[int], items)`, a project function returning its parameter on every path,
+itself or through calls of other such functions) to
 a function that changes its argument in place
 (`items.sort()`, `items.append(...)`, `table[key] = ...`, `tags.add(...)`), itself or through
 further helpers, any number of calls deep.
@@ -57,8 +58,11 @@ Its premises:
 - **Passed as itself**: on every path to the call (or to the change in the function itself),
   the value is the parameter, a local alias of it, or what a call hands back of it as itself:
   `typing.cast`, or a call binding only project functions that return that parameter on every
-  path. Not a copy or another value. Established. A function returning another call's result
-  (`return same(x)`) is open, and its call hands nothing back.
+  path, directly or as what a call of another such function returns of it (`return same(x)`,
+  any number of calls deep). Not a copy or another value. Established. A function returning
+  the result of any other call (a class, a method, a function outside the project), or one
+  that may return it only by calling itself again (`a(x)` returning `b(x)`, which returns
+  `a(x)`), is open, and its call hands nothing back.
 - **Changed at the line**: the named line changes in place the object bound to the parameter of
   the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
   `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and

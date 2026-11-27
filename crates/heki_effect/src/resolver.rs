@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod fields;
+mod forwarded;
 mod getattr_exports;
 mod init_containers;
 mod package_paths;
@@ -55,6 +56,7 @@ mod type_names;
 mod workspace;
 
 pub use fields::{FieldDefault, InitField, InitFields};
+pub use forwarded::{ForwardedReturn, ForwardingCall};
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
 pub use sentinels::object_sentinel_calls;
 pub(crate) use type_names::type_expression_text;
@@ -1069,10 +1071,17 @@ pub struct FunctionDecl {
     pub property_type: Option<Ty>,
     /// `(i, None)` when every `return` of every definition returns parameter `i` as itself
     /// (`return x`, `return cast(list[int], x)`), `(i, Some(attr))` when each returns attribute
-    /// `attr` of it (`return self.items`) ([`returned_param`]): calling the function, or reading
-    /// the property, gives the argument, or that object of it.
+    /// `attr` of it (`return self.items`) ([`returned_param`]), or what a call returning it
+    /// returns, which completing the declarations decides ([`Self::forwards`]): calling the
+    /// function, or reading the property, gives the argument, or that object of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param: Option<(u8, Option<String>)>,
+    /// What every `return` of every definition gives when some return gives the result of a
+    /// call (`return same(x)`) and the others a parameter or an attribute of one
+    /// ([`returned_param`]): the calls, from which completing the declarations decides
+    /// [`Self::returns_param`] against what the callees return ([`forwarded::complete`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwards: Option<Box<ForwardedReturn>>,
     /// The fqn an import binds when every `return` of every definition returns what that import
     /// binds, a module or an object of one ([`returned_import`]): an import in the function
     /// (`from pkg import ops` then `return ops`, which breaks an import cycle) or one of the
@@ -1663,6 +1672,9 @@ impl ModuleDecls {
         for function in out.functions.values_mut() {
             function.offloaded_by = None;
             function.state_of_self = false;
+            if function.forwards.is_some() {
+                function.returns_param = None;
+            }
         }
         out.global_types.clear();
         out.tables.clear();
@@ -2460,7 +2472,8 @@ pub struct DeclKeys {
     /// Attribute names looked up among the project's property getter names.
     pub property_names: BTreeSet<String>,
     /// Names looked up among the names of the project functions returning a parameter or an
-    /// attribute of one (`FunctionDecl::returns_param`).
+    /// attribute of one (`FunctionDecl::returns_param`), or what calls return
+    /// (`FunctionDecl::forwards`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub returning_names: BTreeSet<String>,
     /// Attribute names looked up among the names class bodies bind to a module-level name
@@ -2645,8 +2658,8 @@ pub struct ProjectDecls {
     /// attribute read with another name runs no getter, without walking any class hierarchy.
     property_names: FxHashSet<String>,
     /// Names of the functions, methods, and getters returning a parameter or an attribute of
-    /// one (`FunctionDecl::returns_param`): a call or a read with another name hands out no
-    /// such object, without resolving it.
+    /// one (`FunctionDecl::returns_param`), or what calls return (`FunctionDecl::forwards`): a
+    /// call or a read with another name hands out no such object, without resolving it.
     returning_names: FxHashSet<String>,
     /// Names class bodies bind to a module-level name outside a field
     /// (`ClassDecl::named_attrs`): an attribute with another name is no class alias
@@ -3126,7 +3139,10 @@ impl ProjectDecls {
                 if f.reads_as_property() {
                     property_names.insert(name.clone().into_owned());
                 }
-                if f.returns_param.is_some() {
+                // A function returning what calls return is listed in pass 1 too, before its
+                // completion decides what it returns: a name the completion adds to the index
+                // would change no key pass 1's changes name.
+                if f.returns_param.is_some() || f.forwards.is_some() {
                     returning_names.insert(name.into_owned());
                 }
             }
@@ -7345,7 +7361,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         *slot = (*slot).max(t);
     }
     // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
-    let mut returned_params: FxHashMap<&str, Option<(u8, Option<String>)>> = FxHashMap::default();
+    let mut returned_params: FxHashMap<&str, Option<HandedBack>> = FxHashMap::default();
     let mut returned_imports: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
     let import_targets: FxHashMap<Span, String> = semantic
         .imports
@@ -7449,7 +7465,14 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             offloaded_by: None,
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
-            returns_param: returned_params[f.qualname.as_str()].clone(),
+            returns_param: match &returned_params[f.qualname.as_str()] {
+                Some(HandedBack::Param(param, attr)) => Some((*param, attr.clone())),
+                _ => None,
+            },
+            forwards: match &returned_params[f.qualname.as_str()] {
+                Some(HandedBack::Forwarded(forwards)) => Some(forwards.clone()),
+                _ => None,
+            },
             returned_import: returned_imports[f.qualname.as_str()].clone(),
             returns: None,
             state_of_self: false,
@@ -8039,17 +8062,27 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
     special || builtin_method || kb.lookup(&format!("{base}.{name}")).is_some()
 }
 
-/// [`FunctionDecl::returns_param`] of one definition: a function (not a generator or a
-/// coroutine, decorated by nothing but the decorators that return what the body returns on
-/// every call, [`decorators::keeps_returned_value`]: `property` and those that keep the call)
-/// whose every `return` returns the same positional parameter, or the same attribute of it, read
-/// directly or through what hands a value back as itself (local copies, `typing.cast`,
-/// [`ownership::handed_back`]), and which stores or deletes no attribute of that name. A
+/// What every `return` of one definition hands back of its parameters ([`handed_back`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandedBack {
+    /// The same parameter, or the same attribute of it ([`FunctionDecl::returns_param`]).
+    Param(u8, Option<String>),
+    /// That, or the result of calls ([`FunctionDecl::forwards`]).
+    Forwarded(Box<ForwardedReturn>),
+}
+
+/// [`FunctionDecl::returns_param`] and [`FunctionDecl::forwards`] of one definition: a function
+/// (not a generator or a coroutine, decorated by nothing but the decorators that return what the
+/// body returns on every call, [`decorators::keeps_returned_value`]: `property` and those that
+/// keep the call) whose every `return` returns the same positional parameter, or the same
+/// attribute of it, read directly or through what hands a value back as itself (local copies,
+/// `typing.cast`, [`ownership::handed_back`]), and which stores or deletes no attribute of that
+/// name; or some return the result of a call passing parameters ([`ForwardingCall`]). A
 /// `cached_property` is none: a read after the first returns what the instance holds, which an
 /// assignment can replace.
-fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
+fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<HandedBack> {
     (f.kind == FunctionKind::Sync)
-        .then(|| handed_back_param(f, decls))
+        .then(|| handed_back(f, decls))
         .flatten()
 }
 
@@ -8057,6 +8090,14 @@ fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<Str
 /// parameters, as [`returned_param`] decides it without excluding a coroutine: awaiting the
 /// coroutine gives what the body returns (`ReturnFact::self_attr`).
 fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
+    match handed_back(f, decls)? {
+        HandedBack::Param(param, attr) => Some((param, attr)),
+        HandedBack::Forwarded(_) => None,
+    }
+}
+
+/// [`handed_back_param`], with the returns giving a call's result ([`HandedBack::Forwarded`]).
+fn handed_back(f: &IrFunction, decls: &ModuleDecls) -> Option<HandedBack> {
     if !matches!(f.kind, FunctionKind::Sync | FunctionKind::Async)
         || !decorators::keeps_returned_value(&f.decorators, decls)
     {
@@ -8102,12 +8143,20 @@ fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<
         u8::try_from(i).ok()
     };
     let mut returned = None;
+    let mut calls = BTreeSet::new();
     for bb in &f.blocks {
         let Terminator::Return(value) = &bb.terminator else {
             continue;
         };
         let root = handed_back_from((*value)?);
-        let this = match defs.get(&root) {
+        let def = defs.get(&root).copied();
+        let mut param = |var: VarId| param_of(handed_back_from(var));
+        if let Some(call) = def.and_then(|kind| ForwardingCall::of(kind, &defs, decls, &mut param))
+        {
+            calls.insert(call);
+            continue;
+        }
+        let this = match def {
             Some(InstKind::AttrLoad { obj, attr, .. }) => {
                 (param_of(handed_back_from(*obj))?, Some(attr.clone()))
             }
@@ -8119,12 +8168,30 @@ fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<
     }
     // A function storing or deleting the attribute (`items = self.items; self.items = [];
     // return items`) may return what the attribute held before: no longer the attribute.
-    let stores = |attr: &str| {
-        f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
-            matches!(&i.kind, InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } if a == attr)
-        })
+    let stores = |attr: Option<&str>| {
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| match &i.kind {
+                InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } => {
+                    attr.is_none_or(|attr| a == attr)
+                }
+                _ => false,
+            })
     };
-    returned.filter(|(_, attr)| attr.as_deref().is_none_or(|a| !stores(a)))
+    if (returned.as_ref()).is_some_and(|(_, attr)| attr.as_deref().is_some_and(|a| stores(Some(a))))
+    {
+        return None;
+    }
+    if calls.is_empty() {
+        let (param, attr) = returned?;
+        return Some(HandedBack::Param(param, attr));
+    }
+    Some(HandedBack::Forwarded(Box::new(ForwardedReturn {
+        direct: returned,
+        calls: calls.into_iter().collect(),
+        stores_attrs: stores(None),
+    })))
 }
 
 /// The value whose object the instruction `kind` of a function of the module `decls` describes
@@ -9400,6 +9467,7 @@ fn complete_decls(
         }
     }
     crate::capacity::record(input, &cx, &mut decls);
+    forwarded::complete(input, &mut decls, project);
     decls
 }
 

@@ -16,7 +16,8 @@
 //! the import graph (`heki inspect --imports`), the ends of the handler bodies around imports, the
 //! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
 //! for many parameters, or from many implementations of one call, and the type expressions aliases
-//! and casts spell, and the names a module `__getattr__` serves.
+//! and casts spell, the names a module `__getattr__` serves, and the parameters functions return
+//! through calls of each other, down a long chain, around a cycle, or across many modules.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -8853,5 +8854,109 @@ fn a_module_getattr_past_its_budget_serves_no_name() {
     assert_eq!(
         blocking_callers(&check(&served_past_tests(n / SCALE))),
         ["wait_b0"]
+    );
+}
+
+/// `change(f{n-1}(xs))` of a read-only parameter, the functions `f{k}` returning `f{next(k)}(x)`,
+/// and `f0` returning `x` unless `next` leads it on too.
+fn forwarding_functions(n: usize, next: impl Fn(usize) -> Option<usize>) -> String {
+    let mut out = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def change(x):".to_owned(),
+        "    if isinstance(x, list):".to_owned(),
+        "        x.reverse()".to_owned(),
+    ];
+    for k in 0..n {
+        out.push(String::new());
+        out.push(String::new());
+        out.push(format!("def f{k}(x):"));
+        out.push(next(k).map_or_else(
+            || "    return x".to_owned(),
+            |j| format!("    return f{j}(x)"),
+        ));
+    }
+    out.extend([
+        String::new(),
+        String::new(),
+        "def use(xs: Sequence[int]) -> None:".to_owned(),
+        format!("    change(f{}(xs))", n - 1),
+    ]);
+    out.join("\n") + "\n"
+}
+
+fn mut110_callers(found: &[Value]) -> Vec<(String, String)> {
+    (found.iter())
+        .filter(|d| d["rule_code"] == "MUT110")
+        .map(|d| {
+            let text = |key: &str| d[key].as_str().unwrap().to_owned();
+            (text("qualname"), text("certainty"))
+        })
+        .collect()
+}
+
+/// A long chain of functions each returning what the one before returns of its parameter: the
+/// fixpoint deciding them visits each function a bounded number of times.
+#[test]
+fn a_parameter_returned_down_a_long_chain_of_calls_is_decided_in_linear_time() {
+    let found = check_linear(4000, |n| {
+        let p = Project::new(&format!("bounds_forwarding_chain_{n}"));
+        p.write("m.py", &forwarding_functions(n, |k| k.checked_sub(1)));
+        p
+    });
+    assert_eq!(
+        mut110_callers(&found),
+        [("use".to_owned(), "exact".to_owned())]
+    );
+}
+
+/// The functions return what the next one returns, around a cycle: none returns its parameter,
+/// and each is visited once.
+#[test]
+fn a_cycle_of_calls_returning_each_other_decides_nothing_in_linear_time() {
+    let found = check_linear(4000, |n| {
+        let p = Project::new(&format!("bounds_forwarding_cycle_{n}"));
+        p.write("m.py", &forwarding_functions(n, |k| Some((k + 1) % n)));
+        p
+    });
+    assert_eq!(mut110_callers(&found), []);
+}
+
+/// A chain of modules, each function returning what the one of the module before returns: each
+/// module's completion walks the rest of the chain, within a budget proportional to the module,
+/// past which it decides nothing. A chain a size smaller is decided.
+fn forwarding_modules(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_forwarding_modules_{n}"));
+    p.write("c/__init__.py", "")
+        .write("c/m0.py", "def f0(x):\n    return x\n");
+    for k in 1..n {
+        p.write(
+            &format!("c/m{k}.py"),
+            &format!(
+                "from c.m{j} import f{j}\n\n\ndef f{k}(x):\n    return f{j}(x)\n",
+                j = k - 1
+            ),
+        );
+    }
+    p.write(
+        "c/use.py",
+        &format!(
+            "from collections.abc import Sequence\n\nfrom c.m{last} import f{last}\n\n\ndef change(x):\n    if isinstance(x, list):\n        x.reverse()\n\n\ndef use(xs: Sequence[int]) -> None:\n    change(f{last}(xs))\n",
+            last = n - 1
+        ),
+    );
+    p
+}
+
+#[test]
+fn a_parameter_returned_across_a_long_chain_of_modules_stays_within_the_budgets() {
+    let owner = "heki_effect::resolver::forwarded";
+    let n = 2000;
+    let found = check_past_budgets(n, &[owner], forwarding_modules);
+    assert_eq!(mut110_callers(&found), []);
+    assert_eq!(
+        mut110_callers(&check(&forwarding_modules(n / SCALE))),
+        [("use".to_owned(), "exact".to_owned())]
     );
 }

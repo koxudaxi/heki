@@ -1,7 +1,7 @@
 //! A value a call hands back as itself is the object it was handed, for every reader of the
 //! alias facts: `typing.cast(T, value)` (also `typing_extensions.cast`, and `t.cast` through a
 //! module alias), a project function that returns its parameter on every path, one that returns
-//! a cast of it, and chains of them. Each row of [`ROWS`] changes a value written in every form
+//! a cast of it, one that returns what such a function returns, and chains of them. Each row of [`ROWS`] changes a value written in every form
 //! of [`SAME`], and every form reports what the plain form reports, with the same certainty.
 //! The forms of [`OTHER`] hand back another object (a copy, another value, the argument on one
 //! path only) and report nothing. A form that should report and does not is a gap of
@@ -73,6 +73,7 @@ const SAME: &[Form] = &[
     ("pass_through_bound", "xs = same({p})\n    ", "xs"),
     ("returns_a_cast", "", "same_cast({p})"),
     ("chain", "", "same(cast(list, same({p})))"),
+    ("pass_through_of_a_pass_through", "", "via_same({p})"),
 ];
 
 /// The forms that hand back another object, or the row's value on some paths only.
@@ -83,10 +84,8 @@ const OTHER: &[Form] = &[
     ("copy_in_a_cast", "", "cast(list, list({p}))"),
 ];
 
-/// Forms that hand back the row's value but report nothing in any row. A function returning
-/// what another pass-through function returns: a module's declarations do not read the
-/// declarations of the functions it calls, so its result stays open.
-const GAPS: &[Form] = &[("pass_through_of_a_pass_through", "", "via_same({p})")];
+/// Forms that hand back the row's value but report nothing in any row.
+const GAPS: &[Form] = &[];
 
 const HELPERS: &str = "\
 from typing import cast
@@ -431,6 +430,53 @@ class Box:
             "{method}"
         );
     }
+}
+
+/// An attribute of a parameter that a function returns through a call of another function
+/// returning it (`items_via`) is that attribute: a change of what the call returns changes the
+/// argument's attribute. A function storing an attribute after the call (`take_items`) may
+/// return what the attribute held before, so its result is an object of unknown origin.
+#[test]
+fn an_attribute_returned_through_a_call_is_the_attribute() {
+    let p = project("same_object_attribute_through_a_call");
+    p.write(
+        "app/attrs.py",
+        "\
+def items_of(s):
+    return s.items
+
+
+def items_via(s):
+    return items_of(s)
+
+
+def take_items(s, other):
+    items = items_of(s)
+    other.items = []
+    return items
+
+
+def touch_via(s, other):
+    items_via(s).append(1)
+
+
+def touch_taken(s, other):
+    take_items(s, other).append(1)
+",
+    );
+    let changed = |name: &str| -> Vec<(String, Value)> {
+        let (_, out, err) = p.heki(&["inspect", "--output-format", "json", name]);
+        let got: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {err}"));
+        (got["changes"]["params"].as_array().unwrap().iter())
+            .map(|c| (c["param"].as_str().unwrap().to_owned(), c["what"].clone()))
+            .collect()
+    };
+    let items = || serde_json::json!(["items"]);
+    assert_eq!(changed("app.attrs.touch_via"), [("s".to_owned(), items())]);
+    assert_eq!(
+        changed("app.attrs.touch_taken"),
+        [("other".to_owned(), items())]
+    );
 }
 
 /// A function a cast hands back is the function itself to `references = "calls"`: handing the

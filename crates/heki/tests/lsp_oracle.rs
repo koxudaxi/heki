@@ -641,6 +641,12 @@ const RO_STATS: &str = "from collections.abc import Sequence\n\nfrom pkg.ro.mid 
 const RO_INIT: &str = "from pkg.ro.impl import scale\n";
 const RO_IMPL: &str = "def scale(values):\n    return [v * 2 for v in values]\n\n\ndef scale_in_place(values):\n    values[0] = 0\n";
 const RO_PLOT: &str = "from collections.abc import Sequence\n\nfrom pkg.ro import scale\n\n\ndef plot(values: Sequence[float]) -> None:\n    scale(values)\n";
+// A function returning what a function of another module returns of its parameter, which the
+// caller hands its read-only parameter to before changing what comes back.
+const RO_SAME: &str = "def same(x):\n    return x\n";
+const RO_FORWARD: &str =
+    "from pkg.ro.same import same\n\n\ndef forwarded(x):\n    return same(x)\n";
+const RO_FORWARD_USE: &str = "from collections.abc import Sequence\n\nfrom pkg.ro.forward import forwarded\n\n\ndef change(x):\n    if isinstance(x, list):\n        x.reverse()\n\n\ndef two(xs: Sequence[int]) -> None:\n    change(forwarded(xs))\n";
 // Receiver typing: the class of a loop target comes from the element type of an attribute
 // annotation in another module.
 const SHELF: &str = r#"from typing import Self
@@ -1165,6 +1171,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/ro/mid.py", RO_MID),
         ("pkg/ro/stats.py", RO_STATS),
         ("pkg/ro/impl.py", RO_IMPL),
+        ("pkg/ro/same.py", RO_SAME),
+        ("pkg/ro/forward.py", RO_FORWARD),
+        ("pkg/ro/forward_use.py", RO_FORWARD_USE),
         ("pkg/own_prepare.py", OWN_PREPARE),
         ("pkg/own_wrap.py", OWN_WRAP),
         ("pkg/own_use.py", OWN_USE),
@@ -4212,14 +4221,6 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
     ]
 }
 
-/// `MUT110` (default on): a `Sequence` / `Mapping` parameter handed to a helper in another
-/// module that changes it in place. What the helper changes is in its summary, how its
-/// parameter is annotated in its declarations (`FunctionDecl::readonly_params` /
-/// `mutable_params`), and the call chain of a report walks the own summaries and calls of the
-/// functions in other modules down to the first one whose body makes the change
-/// (`heki_rules::ChainFacts`): a helper that moves the change to or from a function it calls
-/// keeps its summary but changes the chain. The callers' annotations change in their own file
-/// only (Early Cutoff); a helper is also reached through a package re-export.
 fn steps_aliases_and_getters() -> Vec<Step> {
     vec![
         Step::new(
@@ -4383,6 +4384,18 @@ fn steps_protocol_reads() -> Vec<Step> {
     ]
 }
 
+/// `MUT110` (default on): a `Sequence` / `Mapping` parameter handed to a helper in another
+/// module that changes it in place. What the helper changes is in its summary, how its
+/// parameter is annotated in its declarations (`FunctionDecl::readonly_params` /
+/// `mutable_params`), and the call chain of a report walks the own summaries and calls of the
+/// functions in other modules down to the first one whose body makes the change
+/// (`heki_rules::ChainFacts`): a helper that moves the change to or from a function it calls
+/// keeps its summary but changes the chain. The callers' annotations change in their own file
+/// only (Early Cutoff); a helper is also reached through a package re-export. A function
+/// returning what a function of another module returns of its parameter hands the caller's
+/// object back as itself when both do (`FunctionDecl::returns_param`, which completing its
+/// module's declarations decides against the other module's): either one copying instead
+/// changes what the caller's call hands back.
 fn steps_mut110() -> Vec<Step> {
     let callers_mutable = RO_CALLERS
         .replace("items: Sequence[int]", "items: list[int]")
@@ -4539,6 +4552,29 @@ fn steps_mut110() -> Vec<Step> {
             vec![save("pkg/ro/__init__.py", RO_INIT)],
         )
         .absent(&[("pkg/plot.py", "MUT110")]),
+        Step::new(
+            "the function returning what another module's function returns copies instead",
+            vec![save(
+                "pkg/ro/forward.py",
+                &RO_FORWARD.replace("return same(x)", "return list(x)"),
+            )],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "it returns what the other module's function returns again",
+            vec![save("pkg/ro/forward.py", RO_FORWARD)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the function two modules below copies: what the call returns is a copy",
+            vec![save("pkg/ro/same.py", "def same(x):\n    return list(x)\n")],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the function two modules below returns its parameter again",
+            vec![save("pkg/ro/same.py", RO_SAME)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
     ]
 }
 

@@ -945,3 +945,223 @@ fn mut110_set_abc_reports_hold_every_premise() {
     // `|=` calls `__ior__`, which `Quiet` keeps.
     assert_eq!(at(&diags, s, 43)["certainty"], "exact");
 }
+
+/// Functions returning what a call returns: `forwarded` returns what `identity` (another
+/// module) returns of its argument, and `three_deep` what `forwarded` returns, by name, through
+/// a module, by keyword, and with positions before an unpacking.
+const SAME: &str = r#"def identity(x):
+    return x
+
+
+class Holder:
+    @staticmethod
+    def keep(x):
+        return x
+"#;
+
+const FORWARD: &str = r#"import copy
+import sys
+
+from pkg import same
+from pkg.same import Holder, identity
+from pkg.same import identity as rebound
+
+
+def forwarded(x):
+    return identity(x)
+
+
+def three_deep(x):
+    y = forwarded(x)
+    return y
+
+
+def through_module(x):
+    return same.identity(x)
+
+
+def by_keyword(x):
+    return identity(x=x)
+
+
+def pick_first(p, *rest):
+    return p
+
+
+def before_unpacking(x, *rest):
+    return pick_first(x, *rest)
+
+
+def after_unpacking(x, *rest):
+    return pick_first(*rest, x)
+
+
+def swapped(first, second):
+    return pick_first(second, first)
+
+
+def swapped_constant(x):
+    return swapped(x, [1])
+
+
+def copy_values(x):
+    return list(x)
+
+
+def copied(x):
+    return copy.copy(x)
+
+
+def forwards_a_copy(x):
+    return copied(x)
+
+
+def copy_or_forwarded(x, flag):
+    if flag:
+        return forwarded(x)
+    return copy.copy(x)
+
+
+def other_on_one_path(x, y, flag):
+    if flag:
+        return identity(x)
+    return y
+
+
+def a(x):
+    return b(x)
+
+
+def b(x):
+    return a(x)
+
+
+def through_a_method(x):
+    return Holder.keep(x)
+
+
+def pick(x):
+    return x
+
+
+if sys.version_info >= (3, 12):
+    pick = copy_values
+
+
+def through_an_alias(x):
+    return pick(x)
+
+
+def through_a_rebound_import(x):
+    return rebound(x)
+
+
+rebound = list
+"#;
+
+/// The calls handing a read-only parameter to `change` through the functions of [`FORWARD`]:
+/// those returning it on every path report, the others (a copy, a copy one call further, a copy
+/// on one path, another parameter on one path, a cycle that never returns, a constant where the callee's returned
+/// parameter is bound, a method, a name bound on two paths, an import the module binds again, a
+/// position past an unpacking) do not.
+const FORWARD_USE: &str = r#"from collections.abc import Sequence
+
+from pkg import forward
+from pkg.forward import forwarded
+
+
+def change(x):
+    if isinstance(x, list):
+        x.reverse()
+
+
+def two(xs: Sequence[int]):
+    change(forwarded(xs))
+
+
+def three(xs: Sequence[int]):
+    change(forward.three_deep(xs))
+
+
+def module_attribute(xs: Sequence[int]):
+    change(forward.through_module(xs))
+
+
+def keyword(xs: Sequence[int]):
+    change(forward.by_keyword(xs))
+
+
+def before_unpacking(xs: Sequence[int]):
+    change(forward.before_unpacking(xs))
+
+
+def after_unpacking(xs: Sequence[int]):
+    change(forward.after_unpacking(xs))
+
+
+def swapped(xs: Sequence[int], ys: list[int]):
+    change(forward.swapped(ys, xs))
+
+
+def swapped_constant(xs: Sequence[int]):
+    change(forward.swapped_constant(xs))
+
+
+def copy(xs: Sequence[int]):
+    change(forward.copy_values(xs))
+
+
+def copied(xs: Sequence[int]):
+    change(forward.forwards_a_copy(xs))
+
+
+def copy_or_forwarded(xs: Sequence[int]):
+    change(forward.copy_or_forwarded(xs, True))
+
+
+def other_on_one_path(xs: Sequence[int], ys: list[int]):
+    change(forward.other_on_one_path(xs, ys, True))
+
+
+def cycle(xs: Sequence[int]):
+    change(forward.a(xs))
+
+
+def method(xs: Sequence[int]):
+    change(forward.through_a_method(xs))
+
+
+def alias(xs: Sequence[int]):
+    change(forward.through_an_alias(xs))
+
+
+def rebound(xs: Sequence[int]):
+    change(forward.through_a_rebound_import(xs))
+"#;
+
+#[test]
+fn mut110_follows_parameters_returned_through_calls() {
+    let p = Project::new("mut110_forwarded");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/same.py", SAME)
+        .write("pkg/forward.py", FORWARD)
+        .write("pkg/use.py", FORWARD_USE);
+    let diags = diagnostics(&p, &[]);
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 13, "two", "xs"),
+            d(u, 17, "three", "xs"),
+            d(u, 21, "module_attribute", "xs"),
+            d(u, 25, "keyword", "xs"),
+            d(u, 29, "before_unpacking", "xs"),
+            d(u, 37, "swapped", "xs"),
+        ]
+    );
+    assert!(
+        diags.iter().all(|d| d["certainty"] == "exact"),
+        "{diags:#?}"
+    );
+    assert_eq!(chain(&diags[0]), vec![(u.into(), 13), (u.into(), 9)]);
+}

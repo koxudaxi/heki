@@ -90,10 +90,10 @@ pub use readonly::{
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, CapturedParams, ClassDecl, CopyMade, DeclKeys, DeclPasses, FamilyMembers, FamilyOpen,
-    FunctionDecl, HeldSentinel, ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val, aliases_of, detect_source_roots,
-    func_qualname, is_source_dir, module_name_for_path, module_prefix, resolve_relative_module,
-    self_aliases,
+    ForwardedReturn, ForwardingCall, FunctionDecl, HeldSentinel, ModuleDecls, ModuleLayout,
+    NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val,
+    aliases_of, detect_source_roots, func_qualname, is_source_dir, module_name_for_path,
+    module_prefix, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
 
