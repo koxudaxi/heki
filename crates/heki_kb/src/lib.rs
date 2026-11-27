@@ -2130,6 +2130,13 @@ mod tests {
     ];
     /// Django `QuerySet` and pymongo `Collection` bulk APIs: many rows in one statement.
     const QUERYSET_BULK: &[&str] = &["bulk_create", "in_bulk"];
+    const DJANGO_MANAGER: &str = "django.db.models.Manager";
+    /// What a Django manager copies of [`QUERYSET_RUNS`]: all but the `queryset_only` `delete`.
+    fn manager_runs() -> Vec<&'static str> {
+        (QUERYSET_RUNS.iter().copied())
+            .filter(|m| *m != "delete")
+            .collect()
+    }
     const MONGO_BULK: &[&str] = &["insert_many", "bulk_write"];
     const REDIS_COMMANDS: &[&str] = &[
         "get",
@@ -4050,6 +4057,7 @@ mod tests {
                     with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
                     with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
                     with_prefix(DJANGO_QUERYSET, QUERYSET_RUNS),
+                    with_prefix(DJANGO_MANAGER, &manager_runs()),
                     s(&[
                         "redis.client.Pipeline.execute",
                         "redis.client.Pipeline.watch",
@@ -4073,6 +4081,7 @@ mod tests {
                     // A cursor loop or a bulk API by design: blocking, but no N+1 query.
                     s(&["redis.Redis.scan", "pandas.DataFrame.to_sql"]),
                     with_prefix(DJANGO_QUERYSET, QUERYSET_BULK),
+                    with_prefix(DJANGO_MANAGER, QUERYSET_BULK),
                     with_prefix("pymongo.collection.Collection", MONGO_BULK),
                 ]
                 .concat(),
@@ -4185,8 +4194,18 @@ mod tests {
             ),
             (
                 // Lazy: they only build another QuerySet.
-                with_prefix(DJANGO_QUERYSET, &["filter", "exclude", "all", "order_by"]),
+                with_prefix_all(
+                    &[DJANGO_QUERYSET, DJANGO_MANAGER],
+                    &["filter", "exclude", "all", "order_by"],
+                ),
                 returning(DJANGO_QUERYSET, entry(&[])),
+            ),
+            (
+                s(&["django.db.models.Model"]),
+                EcosystemEntry {
+                    plain_attributes_except: Some(vec!["pk".to_owned()]),
+                    ..entry(&[])
+                },
             ),
             (
                 s(&["redis.from_url", "redis.Redis.from_url"]),
@@ -4232,6 +4251,11 @@ mod tests {
         let async_queryset_runs: Vec<String> = QUERYSET_RUNS
             .iter()
             .map(|m| format!("{DJANGO_QUERYSET}.a{m}"))
+            .chain(
+                manager_runs()
+                    .iter()
+                    .map(|m| format!("{DJANGO_MANAGER}.a{m}")),
+            )
             .collect();
         vec![
             (
@@ -4259,9 +4283,9 @@ mod tests {
             ),
             (
                 [
-                    QUERYSET_BULK
+                    [DJANGO_QUERYSET, DJANGO_MANAGER]
                         .iter()
-                        .map(|m| format!("{DJANGO_QUERYSET}.a{m}"))
+                        .flat_map(|c| QUERYSET_BULK.iter().map(move |m| format!("{c}.a{m}")))
                         .collect(),
                     with_prefix(
                         "pymongo.asynchronous.collection.AsyncCollection",
