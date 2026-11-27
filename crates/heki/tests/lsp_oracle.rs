@@ -9343,7 +9343,8 @@ const CUTS_CONFIG: &str = "[project]\nname = \"acme\"\ndependencies = []\n\n[pro
 /// The help of `IMP101` and `IMP302` names the one import every cycle or every chain goes
 /// through, which the imports of other modules decide: a second cycle, or a second chain, that
 /// an edit of another module adds takes the name away, and the edit undone brings it back. So
-/// do the reads of what the imports bind while the modules load.
+/// do the reads of what the imports bind while the modules load, in the module and in another
+/// one that takes the name from it.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_through_import_cuts() {
     let files = vec![
@@ -9402,6 +9403,43 @@ fn lsp_diagnostics_equal_a_full_check_through_import_cuts() {
                 "acme/ra.py",
                 "import acme.rb\n\n\ndef owner():\n    return acme.rb\n",
             )],
+        )
+        .present(both),
+        Step::new(
+            "the third module takes a name of the second and reads it only in a function",
+            vec![save(
+                "acme/ra.py",
+                "from acme.rb import OWNER\n\n\ndef owner():\n    return OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "another module takes that name from the third while it loads",
+            vec![Action::Create(
+                "acme/rx.py",
+                "from acme.ra import OWNER\n\nCOPY = OWNER\n".to_owned(),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it takes the name only in a function",
+            vec![save(
+                "acme/rx.py",
+                "def owner():\n    from acme.ra import OWNER\n\n    return OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it reads the name off the module while it loads",
+            vec![save(
+                "acme/rx.py",
+                "import acme.ra\n\nCOPY = acme.ra.OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the module that read the name is gone",
+            vec![Action::Delete("acme/rx.py")],
         )
         .present(both),
     ];

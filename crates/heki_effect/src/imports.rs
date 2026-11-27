@@ -190,6 +190,14 @@ pub struct ImportSite {
     /// Established only for an `import` or `from` statement the module body runs, not lazy.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_while_loading: bool,
+    /// The name the statement binds in its module, for one whose binding code of the module
+    /// reads only after the module has loaded and other modules see once it has: an `import`
+    /// or `from` statement the module body runs, not lazy, not [`Self::read_while_loading`],
+    /// and not rebound by a later statement that always runs (`from time import sleep`, then
+    /// `def sleep(n): ...`), after which the name no longer holds the import. Another module
+    /// may read it ([`ImportGraph::read_elsewhere`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binds: Option<String>,
 }
 
 impl ImportSite {
@@ -251,6 +259,21 @@ pub struct ModuleImports {
     /// does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_before: Option<u32>,
+    /// What the module reads of the namespaces of the modules its statements import, by dotted
+    /// name (`m.Name`; `m.*` for every public name; `*` alone for any public name of any
+    /// module), each with the earliest time it does ([`loading::LoadReads::names_read`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub names_read: BTreeMap<String, ReadTime>,
+}
+
+/// When a module reads a name of another module's namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReadTime {
+    /// While the reading module loads.
+    Loading,
+    /// Only after it has: in a function its loading does not run.
+    Later,
 }
 
 impl ModuleImports {
@@ -262,6 +285,7 @@ impl ModuleImports {
             && self.bound_before == other.bound_before
             && self.any_bound_before == other.any_bound_before
             && self.code_before == other.code_before
+            && self.names_read == other.names_read
     }
 
     /// Whether the module may have bound `name` before its site `k` runs: it binds the name
@@ -725,7 +749,8 @@ pub(crate) fn module_imports(
         .map(|imp| (imp.span, Statement::Import(imp)))
         .chain((input.semantic.star_imports.iter()).map(|star| (star.span, Statement::Star(star))));
     let reads = OnceCell::new();
-    let mut sites: Vec<ImportSite> = statements
+    let reads = || reads.get_or_init(|| LoadReads::of(input, calls));
+    let placed: Vec<(Statement<'_>, ImportSite)> = statements
         .filter_map(|(span, statement)| {
             let at = placements.placed.get(&span)?;
             let mut site = statement_site(input, &placements, span, statement, at);
@@ -733,12 +758,23 @@ pub(crate) fn module_imports(
                 && site.timing == Answer::Known(Timing::Body)
                 && !site.lazy
             {
-                let reads = reads.get_or_init(|| LoadReads::of(input, calls));
-                site.read_while_loading = reads.reads(imp);
+                site.read_while_loading = reads().reads(imp);
+                site.binds = (!site.read_while_loading && imp.rebound_at.is_none())
+                    .then(|| imp.bound_name.clone());
             }
-            Some(site)
+            Some((statement, site))
         })
         .collect();
+    let names_read = if placed.is_empty() {
+        BTreeMap::new()
+    } else {
+        let statements: Vec<(Statement<'_>, &ImportSite)> = placed
+            .iter()
+            .map(|(statement, site)| (*statement, site))
+            .collect();
+        reads().names_read(input.ir, &statements)
+    };
+    let mut sites: Vec<ImportSite> = placed.into_iter().map(|(_, site)| site).collect();
     for site in &mut by_name {
         for (class, handled) in &placements.handled_classes {
             if class.start <= site.span.start && site.span.end <= class.end {
@@ -754,6 +790,7 @@ pub(crate) fn module_imports(
         any_bound_before: order.any_bound_before,
         code_before: order.code_before,
         sites,
+        names_read,
     })
 }
 
@@ -953,6 +990,7 @@ fn statement_site(
         lazy: is_lazy,
         lazy_allowed,
         read_while_loading: false,
+        binds: None,
     }
 }
 
@@ -970,6 +1008,16 @@ enum Statement<'s> {
 pub enum ModuleRef {
     Project(u32),
     External(u32),
+}
+
+/// What the project modules read of each other ([`ImportGraph::read_elsewhere`]).
+#[derive(Default)]
+struct ReadIndex<'i> {
+    /// Per project module and name of it (`*`: every public name), the earliest time another
+    /// module reads it.
+    names: FxHashMap<(u32, &'i str), ReadTime>,
+    /// The modules that may read any public name of any module, each with the earliest time.
+    anything: Vec<(u32, ReadTime)>,
 }
 
 /// What one import site loads ([`ImportGraph::target`]).
@@ -1048,6 +1096,9 @@ pub struct ImportGraph<'i> {
     loads: Vec<Vec<ModuleRef>>,
     /// The nodes and edges, the size the walks over the graph are budgeted by.
     size: usize,
+    /// What the project modules read of each other ([`Self::read_elsewhere`]); made at the
+    /// first question.
+    reads: OnceCell<ReadIndex<'i>>,
 }
 
 impl<'i> ImportGraph<'i> {
@@ -1093,6 +1144,7 @@ impl<'i> ImportGraph<'i> {
             facts: Vec::new(),
             loads: Vec::new(),
             size: 0,
+            reads: OnceCell::new(),
         };
         for i in 0..graph.modules.len() {
             let name = graph.modules[i].as_str();
@@ -1400,6 +1452,41 @@ impl<'i> ImportGraph<'i> {
     /// A budget for the walks over the graph: [`Budget::STEPS_PER_UNIT`] per module and site.
     pub fn budget(&self, owner: &'static str) -> Budget {
         Budget::of_graph(owner, self.size)
+    }
+
+    /// The earliest time a project module other than `m` reads the name `name` of `m`: by a
+    /// `from` import, a star import if the name is public, or an attribute read off what an
+    /// import binds ([`ModuleImports::names_read`]). Code of `m` itself reads its globals by
+    /// name ([`ImportSite::read_while_loading`]).
+    pub fn read_elsewhere(&self, m: u32, name: &str) -> Option<ReadTime> {
+        let reads = self.reads.get_or_init(|| {
+            let mut reads = ReadIndex::default();
+            for (reader, facts) in self.facts.iter().enumerate() {
+                let reader = reader as u32;
+                let read = (facts.iter()).flat_map(|f| &f.names_read);
+                for (dotted, &time) in read {
+                    let Some((module, name)) = dotted.rsplit_once('.') else {
+                        reads.anything.push((reader, time));
+                        continue;
+                    };
+                    let Some(&of) = self.module_ids.get(module) else {
+                        continue;
+                    };
+                    if of != reader {
+                        let earliest = reads.names.entry((of, name)).or_insert(time);
+                        *earliest = (*earliest).min(time);
+                    }
+                }
+            }
+            reads
+        });
+        let of = |name: &str| reads.names.get(&(m, name)).copied();
+        let public = !name.starts_with('_');
+        let anything = (reads.anything.iter()).filter(|&&(reader, _)| reader != m && public);
+        (of(name).into_iter())
+            .chain(of("*").filter(|_| public))
+            .chain(anything.map(|&(_, time)| time))
+            .min()
     }
 
     /// What loading the project module `m` loads in one step: the module each of its sites

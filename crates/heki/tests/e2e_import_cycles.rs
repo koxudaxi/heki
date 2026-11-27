@@ -1098,3 +1098,67 @@ fn a_lazy_import_is_not_offered_for_a_name_read_while_the_module_loads() {
          move it into the functions of `pkg.a` that use it, or make it `lazy`"
     );
 }
+
+/// Another module that takes the name an import binds while it loads needs the import where
+/// it is: moved into a function, the module no longer has the name, and made lazy, it loads at
+/// that read. So for a package that re-exports the name for its modules, a star import, and a
+/// read off the module object; a name of the same module that no import binds is no such read,
+/// nor is a name the module rebinds after the import, which other modules see once it has
+/// loaded.
+#[test]
+fn an_import_whose_name_another_module_takes_while_it_loads_is_not_named() {
+    let py315 = ["--target-version", "py315"];
+    let p = cycle_through("from pkg.b import Base\n\n\ndef make() -> object:\n    return Base()\n");
+    p.write("pkg/__init__.py", "from pkg.a import Base\n");
+    p.write("pkg/c.py", "from pkg import Base\n\nDEFAULT = Base()\n");
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/c.py", "from pkg.a import *\n");
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    p.write("pkg/c.py", "import pkg.a\n\nDEFAULT = pkg.a.Base()\n");
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    let named = "every import cycle of these modules goes through the import of `pkg.b` in \
+                 `pkg.a`: move it into the functions of `pkg.a` that use it, or make it `lazy`";
+    p.write("pkg/c.py", "import pkg.a as a\n\nDEFAULT = a.make()\n");
+    assert_eq!(the_help(&p, &py315), named);
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import Base\n\n\ndef Base() -> object:\n    return object()\n",
+    );
+    p.write("pkg/c.py", "from pkg.a import Base\n\nDEFAULT = Base()\n");
+    assert_eq!(the_help(&p, &py315), named);
+}
+
+/// A module that takes the name only in a function leaves the import free to be made lazy: it
+/// loads at that read, after the modules have loaded. Moved into a function, the module no
+/// longer has the name, so that change is not offered. A star import takes no private name.
+#[test]
+fn an_import_whose_name_another_module_takes_in_a_function_may_be_made_lazy() {
+    let py315 = ["--target-version", "py315"];
+    let lazy = "every import cycle of these modules goes through the import of `pkg.b` in \
+                `pkg.a`: make it `lazy`";
+    let p = cycle_through("from pkg.b import Base\n\n\ndef make() -> object:\n    return Base()\n");
+    p.write(
+        "pkg/__init__.py",
+        "def base() -> type:\n    from pkg.a import Base\n\n    return Base\n",
+    );
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(the_help(&p, &py315), lazy);
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/c.py",
+        "import pkg.a\n\n\ndef make() -> object:\n    return pkg.a.Base()\n",
+    );
+    assert_eq!(the_help(&p, &py315), lazy);
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import Base as _Base\n\n\ndef make() -> object:\n    return _Base()\n",
+    );
+    p.write("pkg/c.py", "from pkg.a import *\n");
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through the import of `pkg.b` in `pkg.a`: \
+         move it into the functions of `pkg.a` that use it, or make it `lazy`"
+    );
+}

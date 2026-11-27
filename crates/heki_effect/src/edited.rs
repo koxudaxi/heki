@@ -333,9 +333,13 @@ impl Changes {
         // Whether code running while the module loads reads what a site binds changes only by
         // the names of the heads, which the annotations read where the target version evaluates
         // them (`Restated::head_names`): the edit's own reads.
-        let sites_then = (then.imports.iter_mut()).flat_map(|i| &mut i.sites);
-        for (was, is) in (now.imports.iter().flat_map(|i| &i.sites)).zip(sites_then) {
-            is.read_while_loading = was.read_while_loading;
+        // So do the attributes they read off what the imports bind.
+        for (was, is) in now.imports.iter().zip(&mut then.imports) {
+            is.names_read.clone_from(&was.names_read);
+            for (was, is) in was.sites.iter().zip(&mut is.sites) {
+                is.read_while_loading = was.read_while_loading;
+                is.binds.clone_from(&was.binds);
+            }
         }
         let fields = differing_fields(&now, &then, map);
         self.add(None, fields);
@@ -787,6 +791,8 @@ impl ModuleImports {
             sites,
             any_bound_before: self.any_bound_before.map(before),
             code_before: self.code_before.map(before),
+            // What the edit's annotations read off the imports is restated by the caller.
+            names_read: self.names_read.clone(),
         }
     }
 }

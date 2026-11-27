@@ -1,13 +1,15 @@
 //! What the code that runs while a module loads may read of what its imports bind
 //! ([`super::ImportSite::read_while_loading`]).
 
-use super::class_bodies;
+use super::{ImportForm, ImportSite, Named, ReadTime, Statement, Timing, class_bodies};
 use crate::resolver::stores::exported_names;
 use crate::{CallSite, CallTarget, ModuleInput};
-use heki_ir::walk::{Budget, Visit, reach};
-use heki_ir::{InstKind, ModuleIr};
+use heki_ast::Span;
+use heki_ir::walk::{Answer, Budget, Visit, reach};
+use heki_ir::{FunctionId, InstKind, IrFunction, ModuleIr, Terminator, VarId};
 use heki_semantic::{ModuleImport, NameResolution, Scope, ScopeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The module globals that code running while the module loads may read: the module body with
 /// the class bodies, comprehensions and type-parameter scopes it runs, where its decorators,
@@ -24,11 +26,16 @@ pub(super) struct LoadReads<'s> {
     any: bool,
     /// An import of another scope binds a class attribute.
     module_scope: Option<heki_semantic::ScopeId>,
+    /// The functions of the module that may run while it loads ([`called_while_loading`]).
+    called: FxHashSet<&'s str>,
+    /// The IR functions that may run while the module loads: the module body, the functions
+    /// of `called`, and the class bodies these run.
+    loading: FxHashSet<FunctionId>,
 }
 
 impl<'s> LoadReads<'s> {
     /// Of `input`, whose call sites are `calls`.
-    pub(super) fn of(input: &'s ModuleInput<'_>, calls: &[CallSite]) -> Self {
+    pub(super) fn of(input: &'s ModuleInput<'_>, calls: &'s [CallSite]) -> Self {
         let scopes = &input.semantic.scopes;
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); scopes.len()];
         for (i, scope) in scopes.iter().enumerate() {
@@ -56,15 +63,22 @@ impl<'s> LoadReads<'s> {
         // does not bind by `LoadGlobal` or `LoadName`.
         let ir = input.ir;
         let called = called_while_loading(ir, &input.module_name, calls);
-        let functions = (ir.functions.iter())
-            .filter(|f| !f.is_class_body && called.contains(f.qualname.as_str()));
-        for f in functions {
+        let mut loading = FxHashSet::default();
+        for f in (ir.functions.iter()).filter(|f| !f.is_class_body) {
+            let called_here = called.contains(f.qualname.as_str());
+            if !called_here && !f.is_module_body {
+                continue;
+            }
             let bodies = std::iter::once(f).chain(class_bodies(ir, f).into_iter().map(|c| c.body));
-            for inst in bodies.flat_map(|g| &g.blocks).flat_map(|b| &b.insts) {
-                if let InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } =
-                    &inst.kind
-                {
-                    names.insert(name.as_str());
+            for body in bodies {
+                loading.insert(body.id);
+                let insts = (body.blocks.iter()).flat_map(|b| &b.insts);
+                for inst in insts.filter(|_| called_here) {
+                    if let InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } =
+                        &inst.kind
+                    {
+                        names.insert(name.as_str());
+                    }
                 }
             }
         }
@@ -78,6 +92,8 @@ impl<'s> LoadReads<'s> {
                 .flat_map(|names| names.into_vec())
                 .collect(),
             module_scope: module.map(|m| scopes[m].id),
+            called,
+            loading,
         }
     }
 
@@ -90,6 +106,210 @@ impl<'s> LoadReads<'s> {
             || self.any
             || self.names.contains(name)
             || self.exports.contains(name)
+    }
+}
+
+impl LoadReads<'_> {
+    /// When `statement`, at `site`, reads the module it names: while the module loads for a
+    /// statement the module body or a class body it runs holds, one in a function that runs
+    /// meanwhile, and a lazy one whose name such code reads; later for the others; never
+    /// under `TYPE_CHECKING`.
+    fn time_of(&self, statement: Statement<'_>, site: &ImportSite) -> Option<ReadTime> {
+        let read_while_loading = matches!(statement, Statement::Import(imp) if self.reads(imp));
+        match site.timing {
+            Answer::Known(Timing::TypeChecking) => None,
+            Answer::Known(Timing::Function) if !self.called.contains(site.qualname.as_str()) => {
+                Some(ReadTime::Later)
+            }
+            Answer::Known(Timing::Lazy) if !read_while_loading => Some(ReadTime::Later),
+            _ => Some(ReadTime::Loading),
+        }
+    }
+
+    /// What the module reads of the namespaces of other modules
+    /// ([`super::ModuleImports::names_read`]; `*` alone past the budget of
+    /// [`attributes_read`]: any public name of any module), `statements` its import statements
+    /// with their sites: the name a `from` import takes, every public name a star import takes
+    /// (`m.*`), and the attributes code reads off what an import binds (`import m` then
+    /// `m.Name`, each step of `a.b.Name`), also through a module global the module body binds to
+    /// it, or, where that value goes anywhere else (an argument, a return, an element), every
+    /// public name of it.
+    pub(super) fn names_read<'a>(
+        &self,
+        ir: &'a ModuleIr,
+        statements: &[(Statement<'a>, &ImportSite)],
+    ) -> BTreeMap<String, ReadTime> {
+        let mut read = NamesRead::default();
+        // What each import binds, by the span of its site, and by the module global it binds.
+        let mut bases: FxHashMap<Span, String> = FxHashMap::default();
+        let mut globals: FxHashMap<&'a str, BTreeSet<String>> = FxHashMap::default();
+        for &(statement, site) in statements {
+            let Answer::Known(named) = &site.modules else {
+                continue;
+            };
+            let [Named::Module(module)] = named.as_slice() else {
+                continue;
+            };
+            let Some(time) = self.time_of(statement, site) else {
+                continue;
+            };
+            let imp = match statement {
+                Statement::Star(_) => {
+                    read.add(format!("{module}.*"), time);
+                    continue;
+                }
+                Statement::Import(imp) => imp,
+            };
+            let base = match &site.form {
+                ImportForm::From(name) => {
+                    let base = format!("{module}.{name}");
+                    read.add(base.clone(), time);
+                    base
+                }
+                _ if imp.has_alias => module.clone(),
+                _ => module.split('.').next().unwrap_or(module).to_owned(),
+            };
+            if Some(imp.scope) == self.module_scope {
+                (globals.entry(imp.bound_name.as_str()).or_default()).insert(base.clone());
+            }
+            bases.insert(site.span, base);
+        }
+        if bases.is_empty() {
+            return read.0;
+        }
+        // The module body first: the globals it binds to what an import binds are known when
+        // the functions read them.
+        let (body, functions): (Vec<&IrFunction>, Vec<&IrFunction>) =
+            ir.functions.iter().partition(|f| f.is_module_body);
+        for f in body.into_iter().chain(functions) {
+            let time = if self.loading.contains(&f.id) {
+                ReadTime::Loading
+            } else {
+                ReadTime::Later
+            };
+            if !attributes_read(f, time, &bases, &mut globals, &mut read) {
+                // Past the budget, the module may read any public name of any module.
+                read.add("*".to_owned(), ReadTime::Loading);
+                break;
+            }
+        }
+        read.0
+    }
+}
+
+/// The attributes `f`, running at `time`, reads off what the imports bind
+/// ([`LoadReads::names_read`]): `bases` by the span of the import, `globals` by the module
+/// global bound to it, which the module body adds to. `false` past the budget of `f`, which the
+/// dotted names it makes spend (a chain of attributes makes names as long as the chain).
+fn attributes_read<'a>(
+    f: &'a IrFunction,
+    time: ReadTime,
+    bases: &FxHashMap<Span, String>,
+    globals: &mut FxHashMap<&'a str, BTreeSet<String>>,
+    read: &mut NamesRead,
+) -> bool {
+    let budget = Budget::of_functions("import_names_read", [f]);
+    // What each variable of `f` may hold of what the imports bind, by dotted name.
+    let mut held: FxHashMap<VarId, Vec<String>> = FxHashMap::default();
+    let hold = |held: &mut FxHashMap<VarId, Vec<String>>, v: VarId, names: Vec<String>| {
+        let size: usize = names.iter().map(String::len).sum();
+        held.insert(v, names);
+        budget.take(size)
+    };
+    let escape = |held: &FxHashMap<VarId, Vec<String>>, read: &mut NamesRead, v: VarId| {
+        for base in held.get(&v).into_iter().flatten() {
+            read.add(format!("{base}.*"), time);
+        }
+    };
+    for block in &f.blocks {
+        let joins_kept = block.phis.iter().all(|phi| {
+            let mut joined: Vec<String> = (phi.incoming.iter())
+                .flat_map(|(_, v)| held.get(v).into_iter().flatten())
+                .cloned()
+                .collect();
+            joined.sort_unstable();
+            joined.dedup();
+            joined.is_empty() || hold(&mut held, phi.dst, joined)
+        });
+        let kept = joins_kept
+            && block.insts.iter().all(|inst| match &inst.kind {
+                InstKind::Import { dst, .. } => match bases.get(&inst.span) {
+                    Some(base) => hold(&mut held, *dst, vec![base.clone()]),
+                    None => true,
+                },
+                InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
+                    match globals.get(name.as_str()) {
+                        Some(bound) => hold(&mut held, *dst, bound.iter().cloned().collect()),
+                        None => true,
+                    }
+                }
+                InstKind::Copy { dst, src } => match held.get(src).cloned() {
+                    Some(bound) => hold(&mut held, *dst, bound),
+                    None => true,
+                },
+                InstKind::AttrLoad { dst, obj, attr } => match held.get(obj) {
+                    Some(bound) => {
+                        let attrs: Vec<String> =
+                            bound.iter().map(|b| format!("{b}.{attr}")).collect();
+                        for a in &attrs {
+                            read.add(a.clone(), time);
+                        }
+                        hold(&mut held, *dst, attrs)
+                    }
+                    None => true,
+                },
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    ..
+                } => {
+                    for base in held.get(recv).into_iter().flatten() {
+                        read.add(format!("{base}.{method}"), time);
+                    }
+                    for &v in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
+                        escape(&held, read, v);
+                    }
+                    true
+                }
+                InstKind::AttrStore { value, .. } => {
+                    escape(&held, read, *value);
+                    true
+                }
+                InstKind::AttrDelete { .. } => true,
+                InstKind::StoreGlobal { name, value } if f.is_module_body => {
+                    if let Some(bound) = held.get(value) {
+                        let names = globals.entry(name.as_str()).or_default();
+                        names.extend(bound.iter().cloned());
+                    }
+                    true
+                }
+                kind => {
+                    for v in kind.operands() {
+                        escape(&held, read, v);
+                    }
+                    true
+                }
+            });
+        if !kept {
+            return false;
+        }
+        if let Terminator::Return(Some(v)) = &block.terminator {
+            escape(&held, read, *v);
+        }
+    }
+    true
+}
+
+/// [`LoadReads::names_read`] as it is gathered: each name with the earliest time it is read.
+#[derive(Default)]
+struct NamesRead(BTreeMap<String, ReadTime>);
+
+impl NamesRead {
+    fn add(&mut self, name: String, time: ReadTime) {
+        let earliest = self.0.entry(name).or_insert(time);
+        *earliest = (*earliest).min(time);
     }
 }
 

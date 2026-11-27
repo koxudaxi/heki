@@ -23,7 +23,8 @@ use crate::patterns::PartIndex;
 use crate::{CheckContext, GLOB_CHARACTERS, NamePart, RuleConfigError, RuleSelection};
 use heki_diagnostics::{ContractEntry, Diagnostic, RelatedLocation};
 use heki_effect::imports::{
-    ChainStep, ImportForm, ImportGraph, ImportSite, ModuleRef, Named, Target, Timing, path_cuts,
+    ChainStep, ImportForm, ImportGraph, ImportSite, ModuleRef, Named, ReadTime, Target, Timing,
+    path_cuts,
 };
 use heki_env::{HekiConfig, ImportBoundaryRule};
 use heki_ir::walk::{Answer, Budget, Visit, reach_breadth_first};
@@ -1375,9 +1376,14 @@ struct CutChanges {
 /// `TYPE_CHECKING`, a lazy import the module body reads), a star import, a call, and an import
 /// whose binding code running while the module loads may read
 /// ([`ImportSite::read_while_loading`]): moved, the read fails, and made lazy, it loads there.
+/// `elsewhere` is the earliest time another module reads the binding
+/// ([`ImportGraph::read_elsewhere`]): moved into the functions, the module no longer has the
+/// name, so no other module may read it; made lazy, it loads at the first read, so none may
+/// while it loads.
 fn cut_changes(
     cx: &CheckContext<'_>,
     site: &ImportSite,
+    elsewhere: Option<ReadTime>,
     counts: impl Fn(Timing) -> bool,
 ) -> Option<CutChanges> {
     let moves = site.timing == Answer::Known(Timing::Body)
@@ -1385,8 +1391,11 @@ fn cut_changes(
         && !site.read_while_loading
         && matches!(site.form, ImportForm::Import | ImportForm::From(_));
     let changes = CutChanges {
-        function: !counts(Timing::Function),
-        lazy: !counts(Timing::Lazy) && site.lazy_allowed && cx.runtime.pep810_lazy_imports,
+        function: !counts(Timing::Function) && elsewhere.is_none(),
+        lazy: !counts(Timing::Lazy)
+            && site.lazy_allowed
+            && cx.runtime.pep810_lazy_imports
+            && elsewhere != Some(ReadTime::Loading),
     };
     (moves && (changes.function || changes.lazy)).then_some(changes)
 }
@@ -1402,7 +1411,8 @@ fn chosen_cut(
 ) -> Option<((u32, usize), CutChanges)> {
     let changes = |&(m, j): &(u32, usize)| {
         let (site, _) = &graph.sites(m).expect("a cut is at a site")[j];
-        cut_changes(cx, site, &counts).map(|c| ((m, j), c))
+        let elsewhere = (site.binds.as_deref()).and_then(|name| graph.read_elsewhere(m, name));
+        cut_changes(cx, site, elsewhere, &counts).map(|c| ((m, j), c))
     };
     (cuts.iter().find(|&&cut| Some(cut) == preferred))
         .and_then(changes)

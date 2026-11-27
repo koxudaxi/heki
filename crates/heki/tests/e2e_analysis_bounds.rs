@@ -9506,3 +9506,49 @@ fn the_names_a_module_reads_while_it_loads_are_collected_once() {
          of them imports, or import the name only where it is used"
     );
 }
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which binds `m` to
+/// `names` modules one after another and reads `names` attributes off it in a function: each
+/// read may be of every one of them.
+fn attributes_off_many_imports(names: usize) -> Project {
+    let p = Project::new("bounds_attributes_off_imports");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let imports: String = (0..names).map(|i| format!("import m{i} as m\n")).collect();
+    let reads: String = (0..names).map(|i| format!("    m.y{i}\n")).collect();
+    p.write("c/d.py", &format!("{imports}\n\ndef reads():\n{reads}"));
+    selecting_import_cycles(p)
+}
+
+/// The attributes a module reads off what its imports bind are followed within the budget of
+/// each function; past it, the module may read any name of any module, so no import whose
+/// name another module may read is named.
+#[test]
+fn the_attributes_a_module_reads_off_its_imports_are_followed_within_a_budget() {
+    let diags = check_past_budgets(4_000, &["import_names_read"], attributes_off_many_imports);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+    let small = check_linear(10, attributes_off_many_imports);
+    let small: Vec<&Value> = (small.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(
+        small[0]["help"],
+        "every import cycle of these modules goes through the import of `c.b` in `c.a`: move it \
+         into the functions of `c.a` that use it"
+    );
+}
