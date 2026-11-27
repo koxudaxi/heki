@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 3
+          fetch-depth: 2
       - id: files
         env:
           EVENT: ${{ github.event_name }}
@@ -69,7 +69,7 @@ jobs:
         run: |
           class=code
           if [ "$EVENT" = pull_request ] && { [ -z "$STACK_BASE" ] || [ "$STACK_BASE" = "$BASE" ]; }; then
-            files=$(git diff --name-only --no-renames HEAD^2^1 HEAD^2)
+            files=$(git diff --name-only --no-renames HEAD^1 HEAD)
             echo "$files"
             if [ -z "$files" ]; then
               :
@@ -204,7 +204,7 @@ jobs:
       # `heki version` embeds. Only pushes save it: a pull request's cache is not shared with
       # main or other pull requests.
       - name: Archive the tests that read the documentation
-        if: runner.os == 'Linux' && (github.event_name == 'push' || github.event_name == 'pull_request')
+        if: runner.os == 'Linux' && github.event_name == 'push'
         env:
           BINARIES: >-
             (package(heki) & (binary(e2e_readme_examples) | binary(e2e_agent_skill)
@@ -213,7 +213,7 @@ jobs:
         run: >-
           cargo nextest archive --workspace --locked --cargo-profile ci
           --manifest-path sdist-tree/Cargo.toml -E "$BINARIES" --archive-file docs-tests.tar.zst
-      - if: runner.os == 'Linux' && (github.event_name == 'push' || github.event_name == 'pull_request')
+      - if: runner.os == 'Linux' && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: docs-tests.tar.zst

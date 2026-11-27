@@ -81,5 +81,3 @@ These are not vulnerabilities. Please report them in the public issue tracker, w
 - the behavior of code that heki only reads.
 
 Non-security bugs should be reported through the public issue tracker.
-
-
