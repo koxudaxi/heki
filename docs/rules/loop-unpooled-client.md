@@ -2,9 +2,9 @@
 
 # loop-unpooled-client (EFF102)
 
-Family: Execution Effects (EFF) · Exact · Opt-in · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
-Opt-in: a loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration.
+A loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration.
 
 ## What it does
 Checks loops that allocate a network or database client on every iteration: module-level
@@ -78,9 +78,6 @@ covers constant arguments and the literal defaults of omitted ones (`False`, `No
 empty displays), tests the caller has already made on the same value (`isinstance`, `is None`,
 truthiness), and wrappers that pass the value on.
 
-This rule is opt-in: enable it with `--extend-select EFF102` or `extend-select = ["EFF102"]`.
-Selecting the `EFF` prefix does not enable it.
-
 ## What a report states
 
 A report states that every iteration of the loop that completes makes a new client, session,
@@ -150,6 +147,3 @@ credentials. A client shared across parties needs all three reset before each pa
 
 ## Fix safety
 No automatic fix.
-
-## Options
-- `lint.extend-select = ["EFF102"]` enables the rule.

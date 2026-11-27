@@ -54,7 +54,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
 | EFF101 | [async-blocking-call](async-blocking-call.md) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call. |  |
-| EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Opt-in: a loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration. | 🔌 |
+| EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | A loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration. |  |
 | EFF103 | [loop-db-query](loop-db-query.md) | A loop over data whose every iteration sends a database statement; its heuristic reports, a loop that can run a database query on every iteration. |  |
 | EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: a call in `async def` that always runs blocking local filesystem I/O on the event loop; its heuristic reports, a call that can reach it. | 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](lock-or-tx-held-across-io.md) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |

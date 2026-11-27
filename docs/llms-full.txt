@@ -145,6 +145,7 @@ was checked by hand, with no false claim ([Rule precision](https://heki.koxudaxi
 | What goes wrong | Rule |
 | --- | --- |
 | A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) |
+| A new HTTP, database, or RPC client (or a request without a session) on every iteration of a loop over data | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) |
 | A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) |
 | A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) |
 | A call of a generator function whose generator nothing iterates, so its body never runs | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) |
@@ -344,6 +345,7 @@ false ([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). W
 - [`MUT114` (cached-result-mutation)](https://heki.koxudaxi.dev/rules/cached-result-mutation/)
 - [`MUT119` (change-lost-on-new-object)](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/)
 - [`EFF101` (async-blocking-call)](https://heki.koxudaxi.dev/rules/async-blocking-call/)
+- [`EFF102` (loop-unpooled-client)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/)
 - [`EFF103` (loop-db-query)](https://heki.koxudaxi.dev/rules/loop-db-query/)
 - [`EFF109` (lock-reacquired-while-held)](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/)
 - [`EFF116` (generator-never-iterated)](https://heki.koxudaxi.dev/rules/generator-never-iterated/)
@@ -875,14 +877,15 @@ An effect is what a call does besides returning a value: it waits on the network
 
 ## 🔍 What runs without configuration
 
-Two rules are exact and run by default, and two more are exact by default and are described with the problems they belong to. Their reports show the call chain, and an error fails `heki check`.
+Three rules are exact and run by default, and two more are exact by default and are described with the problems they belong to. Their reports show the call chain, and an error fails `heki check`.
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) | a call in an `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop, however many helpers below | exact, default |
+| [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | a loop over data whose every iteration makes an HTTP, database, or RPC client, or a sessionless request | exact, default |
 | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) | a loop over data whose every iteration sends a database statement | exact, default |
 
-`EFF103` also has heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration). They appear with `--heuristic`.
+`EFF102` and `EFF103` also have heuristic reports, where a premise of the claim is open (a loop that can make a client or run a query on every iteration). They appear with `--heuristic`.
 
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/#a-generator-that-is-never-iterated). Both are exact and run by default.
 
@@ -897,12 +900,11 @@ These rules are off by default. Name one in `extend-select` or with `--extend-se
 ```toml
 # heki.toml
 [lint]
-extend-select = ["EFF102", "EFF105", "EFF107"]
+extend-select = ["EFF105", "EFF107"]
 ```
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
-| [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | a loop over data whose every iteration makes an HTTP, database, or RPC client, or a sessionless request | exact, opt-in |
 | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | a call in an `async def` that always runs blocking local file I/O on the event loop | exact, opt-in |
 | [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | an `asyncio.create_task` result bound to a local variable that is never awaited, returned, or stored; a call whose result is discarded is not reported | heuristic, opt-in |
 | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
@@ -1866,7 +1868,7 @@ Rules worth enabling here
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
   see the 2 report(s): heki check app --extend-select MUT106,OPT110
-  No reports here: 30 rule(s); exact: EFF102, EFF105, OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 21 heuristic one(s)
+  No reports here: 29 rule(s); exact: EFF105, OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 21 heuristic one(s)
 
 What heki cannot see (no report either way)
   calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
@@ -2801,8 +2803,8 @@ the installed release changed, and the changelog on GitHub lists every release.
   `heuristic = true`, or when its code or name is selected.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
-- A prefix or `ALL` never enables the opt-in rules (`EFF102`, `EFF105`, `EFF106`, `EFF107`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF110`,
+  `EFF112`, `EFF114`, `EFF115`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
   `IMP302`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
   `MUT115`, `MUT120`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`): they need
   their exact code or name. In `ignore`, a prefix covers every rule it matches.
@@ -4365,15 +4367,15 @@ baseline; the CI step checks the whole project. Both fail on new exact errors.
 
 ### An async web or database service
 
-`EFF101` (a blocking call that holds up the event loop), `EFF103` (a query on every iteration
-of a loop), and `EFF109` (a lock taken again while it is held) are exact and run by default.
+`EFF101` (a blocking call that holds up the event loop), `EFF102` (a new HTTP or database
+client on every iteration of a loop), `EFF103` (a query on every iteration of a loop), and
+`EFF109` (a lock taken again while it is held) are exact and run by default.
 Add the checks that fit the service:
 
 ```toml
 # pyproject.toml
 [tool.heki.lint]
 extend-select = [
-  "EFF102",  # a new HTTP or database client on every iteration of a loop
   "EFF105",  # blocking file I/O reached from an async def
   "EFF106",  # an await or network I/O while a threading lock or a transaction is held
   "EFF107",  # an asyncio task bound to a name and then lost
@@ -4382,7 +4384,6 @@ extend-select = [
 
 | Rule | Certainty | Add it when the service |
 | ---- | --------- | ----------------------- |
-| [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | exact | creates HTTP or database clients in loops |
 | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | exact | reads or writes files, templates, or static assets in `async def` handlers |
 | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | heuristic | holds a `threading` lock or a database transaction around network I/O or an `await` |
 | [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | heuristic | starts background work with `asyncio.create_task` |
@@ -4895,7 +4896,6 @@ features can change in any release: `heki recommend`, `heki inspect`, `heki skil
 
     | Rule | Certainty | Turn it on for |
     | ---- | --------- | -------------- |
-    | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | exact | code that calls HTTP or database services in loops |
     | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | exact | async services |
     | [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | heuristic | async services |
     | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | heuristic | threaded code, and code that holds database transactions |
@@ -5766,7 +5766,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
 | EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call. |  |
-| EFF102 | [loop-unpooled-client](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | Opt-in: a loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration. | 🔌 |
+| EFF102 | [loop-unpooled-client](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | A loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration. |  |
 | EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | A loop over data whose every iteration sends a database statement; its heuristic reports, a loop that can run a database query on every iteration. |  |
 | EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: a call in `async def` that always runs blocking local filesystem I/O on the event loop; its heuristic reports, a call that can reach it. | 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
@@ -6076,7 +6076,7 @@ See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-too
 rewrite rules, and the exact tier of `OPT113` are exact (certified below); the other rules are
 heuristic. `MUT101`, `MUT111`, and the six size-dependent `OPT` rules (`OPT103`, `OPT110`,
 `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact and opt-in, for their share of real harm
-(below); `EFF102` and `EFF105` are exact and opt-in.
+(below); `EFF105` is exact and opt-in, as local file I/O is usually fast.
 
 ## What a report states
 
@@ -6285,6 +6285,8 @@ before reports reaching one waiting call are folded together.
 | `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 | - |
 | `EFF109` | 0.10.0 | 6 / 0 | 1 / 0 | 7 |
 | `EFF116` | 0.10.0 | 10 / 0 | 0 / 0 | - |
+| `EFF105` | 0.12.0 | 1289 / 0 | 1514 / 0 | - |
+| `EFF102` | 0.12.0 | 54 / 0 | 30 / 0 | - |
 
 The exact tier of the size-dependent rewrites has since asked that the data decide the loop's trip
 count, which keeps a subset of the reports their census and holdout run checked.
@@ -6297,7 +6299,8 @@ a defect, and [Measurements](https://heki.koxudaxi.dev/precision/#measurements) 
 
 The certification runs of the `OPT` rules classed the harm of their exact reports. The census
 reused the classes of an earlier pre-check, which classed a sample, so some census reports have
-none.
+none. The census of `EFF105` classed each site once, so the reports that share a site with
+another have none.
 
 | Rule | Census: C / P / B / not classified | Holdout: C / P / B / not classified |
 | ---- | ---------------------------------- | ----------------------------------- |
@@ -6312,6 +6315,8 @@ none.
 | `OPT113` | 0 / 2 / 6 / 0 | 0 / 0 / 6 / 0 |
 | `EFF109` | 3 / 3 / 0 / 0 | 1 / 0 / 0 / 0 |
 | `EFF116` | 1 / 4 / 5 / 0 | 0 / 0 / 0 / 0 |
+| `EFF105` | 43 / 419 / 809 / 18 | 48 / 493 / 973 / 0 |
+| `EFF102` | 1 / 14 / 39 / 0 | 5 / 16 / 9 / 0 |
 
 A run of the 0.3.0 build on the frozen holdout corpus (2026-11-24), with the eight rewrite rules
 and `OPT113` selected by code, has 134 exact reports. Each is a report the certification's holdout
@@ -12395,9 +12400,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-unpooled-client/
 
 # loop-unpooled-client (EFF102)
 
-Family: Execution Effects (EFF) · Exact · Opt-in · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
-Opt-in: a loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration.
+A loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration.
 
 ## What it does
 Checks loops that allocate a network or database client on every iteration: module-level
@@ -12471,9 +12476,6 @@ covers constant arguments and the literal defaults of omitted ones (`False`, `No
 empty displays), tests the caller has already made on the same value (`isinstance`, `is None`,
 truthiness), and wrappers that pass the value on.
 
-This rule is opt-in: enable it with `--extend-select EFF102` or `extend-select = ["EFF102"]`.
-Selecting the `EFF` prefix does not enable it.
-
 ## What a report states
 
 A report states that every iteration of the loop that completes makes a new client, session,
@@ -12543,9 +12545,6 @@ credentials. A client shared across parties needs all three reset before each pa
 
 ## Fix safety
 No automatic fix.
-
-## Options
-- `lint.extend-select = ["EFF102"]` enables the rule.
 
 
 ---

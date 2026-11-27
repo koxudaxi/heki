@@ -254,8 +254,8 @@ the installed release changed, and the changelog on GitHub lists every release.
   `heuristic = true`, or when its code or name is selected.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
-- A prefix or `ALL` never enables the opt-in rules (`EFF102`, `EFF105`, `EFF106`, `EFF107`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF110`,
+  `EFF112`, `EFF114`, `EFF115`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
   `IMP302`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
   `MUT115`, `MUT120`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`): they need
   their exact code or name. In `ignore`, a prefix covers every rule it matches.

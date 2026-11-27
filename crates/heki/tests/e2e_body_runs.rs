@@ -1102,13 +1102,7 @@ fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (M
     for (path, text) in files {
         p.write(path, text);
     }
-    // `EFF102` is opt-in: a test of its marks names it.
-    let select: &[&str] = if rules.contains(&"EFF102") {
-        &["--extend-select", "EFF102"]
-    } else {
-        &[]
-    };
-    let mut reported: Marks = found(&diagnostics(&p, select))
+    let mut reported: Marks = found(&diagnostics(&p, &[]))
         .into_iter()
         .filter(|(_, _, _, r, _)| rules.contains(&r.as_str()))
         .map(|(path, line, _, rule, _)| (path, line, rule))

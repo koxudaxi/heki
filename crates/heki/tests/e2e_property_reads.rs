@@ -337,7 +337,7 @@ fn execution_effects_run_property_getters() {
         .write("pkg/api.py", API)
         .write("pkg/handlers.py", HANDLERS)
         .write("pkg/locks.py", LOCKS);
-    let diags = diagnostics(&p, &["--extend-select", "EFF102"]);
+    let diags = diagnostics(&p, &[]);
     let (a, h) = ("pkg/api.py", "pkg/handlers.py");
     assert_eq!(
         found(&diags),

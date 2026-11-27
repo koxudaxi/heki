@@ -75,18 +75,13 @@ fn marked(files: &[(&str, &str)], rules: &[&str]) -> Vec<(String, u64, String)> 
 }
 
 fn check_marks(name: &str, files: &[(&str, &str)], args: &[&str], rules: &[&str]) {
-    // `EFF102` is opt-in: a test of its marks names it.
-    let mut args = args.to_vec();
-    if rules.contains(&"EFF102") {
-        args.extend(["--extend-select", "EFF102"]);
-    }
     let rules = common::with_tiers(rules);
     let rules = rules.as_slice();
     let p = Project::new(name);
     for (path, text) in files {
         p.write(path, text);
     }
-    assert_eq!(reported(&p, &args, rules), marked(files, rules));
+    assert_eq!(reported(&p, args, rules), marked(files, rules));
 }
 
 // ====================================================================== lazy initialization

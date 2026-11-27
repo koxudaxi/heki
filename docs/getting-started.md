@@ -22,6 +22,7 @@ false ([Rule Precision](precision.md#certifications)). Without configuration, it
 - [`MUT114` (cached-result-mutation)](rules/cached-result-mutation.md)
 - [`MUT119` (change-lost-on-new-object)](rules/change-lost-on-new-object.md)
 - [`EFF101` (async-blocking-call)](rules/async-blocking-call.md)
+- [`EFF102` (loop-unpooled-client)](rules/loop-unpooled-client.md)
 - [`EFF103` (loop-db-query)](rules/loop-db-query.md)
 - [`EFF109` (lock-reacquired-while-held)](rules/lock-reacquired-while-held.md)
 - [`EFF116` (generator-never-iterated)](rules/generator-never-iterated.md)

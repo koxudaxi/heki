@@ -87,10 +87,6 @@ fn heki_json(p: &Project, args: &[&str]) -> Value {
 /// `OPT` rules, whose Soundness-lane walks the shapes bound too.
 const EVERY_RULE: [&str; 3] = ["--heuristic", "--extend-select", SIZE_DEPENDENT_OPT_RULES];
 
-/// The configuration of a shape of the opt-in `EFF102`, which names it.
-const WITH_EFF102: &str =
-    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"EFF102\"]\n";
-
 /// `heki check --output-format json` of the project, run once without counting: a shape that
 /// guards only against a run that never ends, or a size too small to count that a test checks
 /// next to a full one.
@@ -1811,8 +1807,7 @@ fn lazy_client_under_nested_loops(depth: usize) -> String {
 fn origins_past_the_walk_budget_count_as_made_in_every_loop() {
     let shape = |depth: usize| {
         let p = Project::new(&format!("bounds_nested_origins_{depth}"));
-        p.write("pyproject.toml", WITH_EFF102)
-            .write("m.py", &lazy_client_under_nested_loops(depth));
+        p.write("m.py", &lazy_client_under_nested_loops(depth));
         p
     };
     let eff102 = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF102").count();
@@ -2046,8 +2041,7 @@ fn flagged_loops(loops: usize) -> String {
 fn lazy_initializations_past_their_budget_are_not_recognized() {
     let shape = |loops: usize| {
         let p = Project::new(&format!("bounds_flags_{loops}"));
-        p.write("pyproject.toml", WITH_EFF102)
-            .write("m.py", &flagged_loops(loops));
+        p.write("m.py", &flagged_loops(loops));
         p
     };
     let eff102 = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF102").count();
@@ -2302,8 +2296,7 @@ fn chains_of_builtin_constructors_are_followed_a_bounded_depth() {
         lines.push(format!("    for _ in x{copies}:"));
         lines.push("        httpx.Client()".to_owned());
         let p = Project::new(&format!("bounds_constructor_chain_{copies}"));
-        p.write("pyproject.toml", WITH_EFF102)
-            .write("m.py", &(lines.join("\n") + "\n"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
         p
     });
     // Four copies keep two items; three thousand are past the depth the sizes follow.

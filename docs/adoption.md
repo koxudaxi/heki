@@ -56,15 +56,15 @@ baseline; the CI step checks the whole project. Both fail on new exact errors.
 
 ### An async web or database service
 
-`EFF101` (a blocking call that holds up the event loop), `EFF103` (a query on every iteration
-of a loop), and `EFF109` (a lock taken again while it is held) are exact and run by default.
+`EFF101` (a blocking call that holds up the event loop), `EFF102` (a new HTTP or database
+client on every iteration of a loop), `EFF103` (a query on every iteration of a loop), and
+`EFF109` (a lock taken again while it is held) are exact and run by default.
 Add the checks that fit the service:
 
 ```toml
 # pyproject.toml
 [tool.heki.lint]
 extend-select = [
-  "EFF102",  # a new HTTP or database client on every iteration of a loop
   "EFF105",  # blocking file I/O reached from an async def
   "EFF106",  # an await or network I/O while a threading lock or a transaction is held
   "EFF107",  # an asyncio task bound to a name and then lost
@@ -73,7 +73,6 @@ extend-select = [
 
 | Rule | Certainty | Add it when the service |
 | ---- | --------- | ----------------------- |
-| [`EFF102`](rules/loop-unpooled-client.md) | exact | creates HTTP or database clients in loops |
 | [`EFF105`](rules/async-blocking-fs.md) | exact | reads or writes files, templates, or static assets in `async def` handlers |
 | [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic | holds a `threading` lock or a database transaction around network I/O or an `await` |
 | [`EFF107`](rules/unretained-async-task.md) | heuristic | starts background work with `asyncio.create_task` |
@@ -586,7 +585,6 @@ features can change in any release: `heki recommend`, `heki inspect`, `heki skil
 
     | Rule | Certainty | Turn it on for |
     | ---- | --------- | -------------- |
-    | [`EFF102`](rules/loop-unpooled-client.md) | exact | code that calls HTTP or database services in loops |
     | [`EFF105`](rules/async-blocking-fs.md) | exact | async services |
     | [`EFF107`](rules/unretained-async-task.md) | heuristic | async services |
     | [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic | threaded code, and code that holds database transactions |
