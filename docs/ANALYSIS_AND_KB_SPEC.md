@@ -896,8 +896,23 @@ of the name may find it unbound, so a call through it may run another object tha
 where the module body leaves the name unbound, binds the name again when the module it imports
 may bind it (its `__all__`, or its public names, through its own star imports; any name for a
 module heki does not read): a call through the name may then run that module's object
-(`ModuleDecls::late_stars`, `ProjectDecls::star_rebound`), and an instance made by calling it is
-still taken for one of the definition's class.
+(`ModuleDecls::late_stars`, `ProjectDecls::late_star_binding`); one binding it to the definition
+itself (a module importing the name from here) leaves it.
+
+What the name of a definition holds where code reads it is one answer (`ProjectDecls::name_holds`,
+which `ProjectDecls::call_rebound` reads too): the definition; the definition or the object a
+star import after it binds the name to, when that object's own name holds nothing else; or an
+object heki cannot name, for any other binding of the name (a store or deletion in its module or
+in another, by name, through `setattr` or under a name heki cannot read, `globals()` or `exec`, a
+store of its `__code__`, a star import of a module heki does not read; a change in place of the
+object, `lib.Client.register(x)`, leaves the name bound to it). A member read on a class through
+its name (`Base.create`) is another object when the class's name is, or when the lookup along the
+MRO may find one. A call through such a name gives what calling each object gives: an instance of
+either class, what either function declares it returns, no known value for an object heki cannot
+name, never an instance of the definition's class alone; the fields a call of a frozen dataclass
+or a `NamedTuple` binds, an exact instance, and what a member called on the class through its
+name returns (`Base.create()`) follow the same answer. A member called on an instance keeps the
+definition its MRO finds, as a type checker reads it.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must

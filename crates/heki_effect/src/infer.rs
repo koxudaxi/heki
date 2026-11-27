@@ -2832,9 +2832,13 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// argument, any other its default; those holding a named object or `None` are tracked
     /// ([`Args::Fields`]). `None` when the call may bind fields heki does not see (`*` or `**`
     /// unpacking) or raises `TypeError` (too many positions, a keyword naming no field or one a
-    /// position binds, a field without a default left unbound).
+    /// position binds, a field without a default left unbound), and when the name `fqn` may
+    /// hold another object than the class ([`ProjectDecls::holds_definition`]).
     fn constructed_fields(&self, fqn: &str, call: Passed<'_>) -> Option<Args> {
         let fields = self.cx.project.constructor_fields(fqn)?;
+        if !self.cx.project.holds_definition(fqn) {
+            return None;
+        }
         if call.star_from.is_some() || call.kwargs.iter().any(|(k, _)| k.is_none()) {
             return None;
         }
@@ -3320,6 +3324,12 @@ impl<'e, 'a> Engine<'e, 'a> {
             };
         }
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
+        // A name of a class, or of its member, that may hold another object: the call may run
+        // that object (R1, `ProjectDecls::name_holds`).
+        let on_name = matches!(recv, Ty::Ref(_));
+        if on_name && !cx.project.holds_definition(class) {
+            return None;
+        }
         // A class body binding `method` to a name (`factory = Scope`): the call calls what it
         // names, a bound method returning what the function does. Bound to different objects on
         // different paths, the call gives what one of them returns, of no one type.
@@ -3335,6 +3345,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
                 _ => None,
             };
+        }
+        if on_name && !cx.project.holds_definition(&format!("{class}.{method}")) {
+            return None;
         }
         if let Some(key) = cx.project.mro_definition(class, method, skip_self) {
             let decl = cx.project.function_decl(&key)?;

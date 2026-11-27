@@ -641,6 +641,14 @@ pub struct StoredElsewhere {
     pub none: bool,
 }
 
+impl StoredElsewhere {
+    /// Whether a store binds the name to an object: what a change in place alone leaves is the
+    /// object the name held.
+    pub(crate) fn binds(&self) -> bool {
+        self.ty.is_some() || self.in_place || self.none
+    }
+}
+
 /// A module's global and attribute types decided without what reading them gives, where they
 /// differ from [`ModuleDecls::global_types`] and [`ClassDecl::attr_stores`]. The fallback of a
 /// name holds once another module stores into a name its stores read, directly or through the
@@ -1446,7 +1454,7 @@ pub struct ModuleDecls {
     /// The module's own module-level classes and functions that one of its star imports may bind
     /// again after their statement has run, each with the index in `star_imports` of the first
     /// such import: the first after the name's first binding in the module body, or the first of
-    /// all when the body does not bind the name on every path ([`ProjectDecls::star_rebound`]).
+    /// all when the body does not bind the name on every path ([`ProjectDecls::late_star_binding`]).
     /// Boxed: few modules star-import after a definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub late_stars: Option<Box<BTreeMap<String, u32>>>,
@@ -2833,9 +2841,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::star_binding`] so far, by module and name; cleared with the
     /// indexes.
     star_bindings: KeptAnswers<(String, String), StarBinding>,
-    /// The answers of [`Self::star_rebound`] so far, by module and name; cleared with the
+    /// The answers of [`Self::late_star_binding`] so far, by module and name; cleared with the
     /// indexes.
-    star_rebinds: KeptAnswers<(String, String), bool>,
+    late_star_bindings: KeptAnswers<(String, String), StarBinding>,
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
@@ -2928,6 +2936,28 @@ pub(crate) enum StarBinding {
     /// objects (`try: from ._speedups import *` with a fallback), which one of a module outside
     /// the project may do for any name, and which of them ran last is not known.
     Open,
+}
+
+/// What a project name of a definition holds where code reads it ([`ProjectDecls::name_holds`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NameHolds {
+    /// The object its statement made, and no other.
+    Definition,
+    /// The object its statement made, or the named object `0` (by fqn) a star import after the
+    /// statement binds it to.
+    Also(String),
+    /// Possibly an object heki cannot name.
+    Unknown,
+}
+
+/// What binds a project name again past its definition ([`ProjectDecls::rebinding`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Rebinding {
+    None,
+    /// Another named object, by fqn.
+    To(String),
+    /// An object heki cannot name.
+    Unknown,
 }
 
 /// What one star import binds a name to ([`ProjectDecls::star_import_binds`]).
@@ -3205,7 +3235,7 @@ impl ProjectDecls {
         self.held_attrs.clear();
         self.capacities.clear();
         self.star_bindings.clear();
-        self.star_rebinds.clear();
+        self.late_star_bindings.clear();
         self.catalog_attributes.clear();
         self.object_attr_reads.clear();
         // What other modules change, which deciding what a module's `__getattr__` serves reads
@@ -3388,7 +3418,7 @@ impl ProjectDecls {
         // The stores are kept by the object a name gives (`ProjectDecls::canonical`); a name
         // the module binds to another module's object is looked up both ways.
         let stored = |fqn: &str| {
-            (self.split_module(fqn)).is_some_and(|(m, _)| self.global_stored_elsewhere(m, fqn))
+            (self.split_module(fqn)).is_some_and(|(m, _)| self.global_rebound_by_store(m, fqn))
         };
         let canonical = self.canonical(&fqn);
         self.rebound_elsewhere(&fqn) || stored(&fqn) || (canonical != fqn && stored(&canonical))
@@ -3403,26 +3433,97 @@ impl ProjectDecls {
 
     /// Whether calling the object the project name `fqn` names (a module's function or class,
     /// a class's method read on the class) may run another object than its definition (R1):
-    /// the project binds the name again ([`ModuleDecls::rebound_definitions`]), another
-    /// module stores into it or deletes it, by name (`lib.f = g`, `setattr(lib, "f", g)`) or
-    /// under a name heki cannot read (`setattr(lib, name, g)`), or replaces its code
-    /// (`lib.f.__code__ = ...`); a class's method, and the `__init__` constructing a class
-    /// runs, may be another than its MRO finds ([`Self::lookup_rebound`]).
+    /// the name may hold another object ([`Self::name_holds`]), or the `__init__` constructing
+    /// a class runs may be another than its MRO finds ([`Self::lookup_rebound`]).
     pub fn call_rebound(&self, fqn: &str) -> bool {
         let fqn = self.canonical(fqn);
-        let Some((m, rest)) = self.split_module(&fqn).filter(|(_, rest)| !rest.is_empty()) else {
-            return false;
-        };
-        if let Some((class, name)) = rest.rsplit_once('.') {
-            let class = format!("{}.{class}", m.module_name);
-            return self.is_project_class(&class) && self.lookup_rebound(&self.mro(&class), name);
+        if self.rebinding(&fqn) != Rebinding::None {
+            return true;
         }
-        m.rebound_definitions.contains(rest)
-            || self.star_rebound(m, rest)
-            || self.rebound_elsewhere_canonical(&fqn)
+        self.split_module(&fqn).is_some_and(|(m, rest)| {
+            m.classes.contains_key(rest) && self.lookup_rebound(&self.mro(&fqn), "__init__")
+        })
+    }
+
+    /// What the project name `fqn` (a module's function or class, a class's member read on the
+    /// class) holds where code reads it (R1): the object its statement made, unless
+    /// [`Self::rebinding`] binds it again; a star import after the definition binds it to the
+    /// object another module's name holds, which is that module's definition while its own
+    /// name holds nothing else.
+    pub(crate) fn name_holds(&self, fqn: &str) -> NameHolds {
+        let fqn = self.canonical(fqn);
+        match self.rebinding(&fqn) {
+            Rebinding::None => NameHolds::Definition,
+            Rebinding::To(other) if self.rebinding(&other) == Rebinding::None => {
+                NameHolds::Also(other)
+            }
+            Rebinding::To(_) | Rebinding::Unknown => NameHolds::Unknown,
+        }
+    }
+
+    /// Whether the project name `fqn` holds the object its statement made, and no other
+    /// ([`Self::name_holds`]).
+    pub(crate) fn holds_definition(&self, fqn: &str) -> bool {
+        self.rebinding(&self.canonical(fqn)) == Rebinding::None
+    }
+
+    /// What binds the project name `fqn` (canonical) again, past its definition
+    /// ([`Self::global_rebinding`]). A member read on a class through its name (`C.m`,
+    /// `Outer.Inner.m`) is another object when the module global its qualname starts with is,
+    /// or when the lookup of a name along the MRO of a class on the way may find another
+    /// object than the class bodies bind ([`Self::lookup_rebound`]).
+    fn rebinding(&self, fqn: &str) -> Rebinding {
+        let Some((m, rest)) = self.split_module(fqn).filter(|(_, rest)| !rest.is_empty()) else {
+            return Rebinding::None;
+        };
+        let Some((owner, _)) = rest.rsplit_once('.') else {
+            return self.global_rebinding(m, fqn, rest);
+        };
+        let class_of = |qualname: &str| format!("{}.{qualname}", m.module_name);
+        let member_rebound = || {
+            rest.match_indices('.').any(|(at, _)| {
+                let class = class_of(&rest[..at]);
+                let name = rest[at + 1..].split('.').next().unwrap_or_default();
+                self.is_project_class(&class) && self.lookup_rebound(&self.mro(&class), name)
+            })
+        };
+        let top = rest.split('.').next().unwrap_or(rest);
+        let rebound = self.is_project_class(&class_of(owner))
+            && (member_rebound()
+                || self.global_rebinding(m, &class_of(top), top) != Rebinding::None);
+        if rebound {
+            Rebinding::Unknown
+        } else {
+            Rebinding::None
+        }
+    }
+
+    /// What binds the module global `name` of `m` (`fqn`, canonical), a definition of the
+    /// module, again past its statement: the module binds it to another object
+    /// ([`ModuleDecls::rebound_definitions`]: a store, a deletion, `globals()` or `exec`, a
+    /// store of its `__code__`), another module stores into it or deletes it, by name (`lib.f =
+    /// g`, `setattr(lib, "f", g)`) or under a name heki cannot read (`setattr(lib, name, g)`),
+    /// or replaces its code (`lib.f.__code__ = ...`), or a star import after its statement
+    /// binds it ([`Self::late_star_binding`]: to the object it names, or to one heki cannot
+    /// name).
+    fn global_rebinding(&self, m: &ModuleDecls, fqn: &str, name: &str) -> Rebinding {
+        if m.rebound_definitions.contains(name)
+            || self.rebound_elsewhere_canonical(fqn)
             || self.rebound_elsewhere_canonical(&format!("{fqn}.__code__"))
-            || self.global_stored_elsewhere(m, &fqn)
-            || (m.classes.contains_key(rest) && self.lookup_rebound(&self.mro(&fqn), "__init__"))
+            || self.global_rebound_by_store(m, fqn)
+        {
+            return Rebinding::Unknown;
+        }
+        match self.late_star_binding(m, name) {
+            StarBinding::Unbound => Rebinding::None,
+            StarBinding::Open => Rebinding::Unknown,
+            // A star import binding the name to the definition itself (a module importing it
+            // from here) leaves it.
+            StarBinding::Bound { target, .. } => match self.object_named(&target) {
+                object if object == fqn => Rebinding::None,
+                object => Rebinding::To(object),
+            },
+        }
     }
 
     /// Whether what looking `name` up along `mro` (canonical classes) finds may be another
@@ -3813,18 +3914,24 @@ impl ProjectDecls {
         })
     }
 
-    /// Whether a star import of `m` that runs after the statement of its module-level definition
-    /// `name` may bind the name to another object ([`ModuleDecls::late_stars`],
-    /// [`Self::star_import_may_bind`]). The answer is kept for the life of the indexes.
-    fn star_rebound(&self, m: &ModuleDecls, name: &str) -> bool {
+    /// What the star imports of `m` that run after the statement of its module-level definition
+    /// `name` bind the name to ([`ModuleDecls::late_stars`]), as [`Self::stars_bind`] reads
+    /// them, except that a module outside the project may bind it to any object (open). The
+    /// answer is kept for the life of the indexes.
+    fn late_star_binding(&self, m: &ModuleDecls, name: &str) -> StarBinding {
         let Some(&from) = m.late_stars.as_deref().and_then(|late| late.get(name)) else {
-            return false;
+            return StarBinding::Unbound;
         };
         let key = (m.module_name.clone(), name.to_owned());
-        self.kept(&self.star_rebinds, key, || {
+        self.kept(&self.late_star_bindings, key, || {
             let stars = m.star_imports.as_deref().unwrap_or_default();
-            (stars.iter().skip(from as usize))
-                .any(|source| self.star_import_may_bind(&m.module_name, source, name))
+            let mut held = FxHashMap::default();
+            held.insert(m.module_name.clone(), Holds::No);
+            let late = stars.get(from as usize..).unwrap_or_default();
+            match self.sources_bind(late, name, &mut held, 0) {
+                (_, true) => StarBinding::Open,
+                (binding, false) => binding,
+            }
         })
     }
 
@@ -3851,9 +3958,26 @@ impl ProjectDecls {
         held: &mut FxHashMap<String, Holds>,
         depth: usize,
     ) -> StarBinding {
+        let sources = m.star_imports.as_deref().unwrap_or_default();
+        match self.sources_bind(sources, name, held, depth) {
+            (StarBinding::Bound { .. }, true) => StarBinding::Open,
+            (binding, _) => binding,
+        }
+    }
+
+    /// What the star imports of the modules `sources` bind `name` to, as [`Self::stars_bind`]
+    /// reads them, past the modules outside the project; and whether one of them imports such
+    /// a module.
+    fn sources_bind(
+        &self,
+        sources: &[String],
+        name: &str,
+        held: &mut FxHashMap<String, Holds>,
+        depth: usize,
+    ) -> (StarBinding, bool) {
         let mut outside = false;
         let mut binding = StarBinding::Unbound;
-        for source in m.star_imports.as_deref().unwrap_or_default() {
+        for source in sources {
             match self.star_import_binds(source, name, held, depth + 1) {
                 StarSource::Nothing => {}
                 StarSource::Anything => outside = true,
@@ -3861,15 +3985,12 @@ impl ProjectDecls {
                     StarBinding::Unbound => binding = StarBinding::Bound { target, origin },
                     // Whichever ran last, the name holds the object of `origin`.
                     StarBinding::Bound { origin: kept, .. } if *kept == origin => {}
-                    _ => return StarBinding::Open,
+                    _ => return (StarBinding::Open, outside),
                 },
-                StarSource::Binds(None) => return StarBinding::Open,
+                StarSource::Binds(None) => return (StarBinding::Open, outside),
             }
         }
-        match binding {
-            StarBinding::Bound { .. } if outside => StarBinding::Open,
-            binding => binding,
-        }
+        (binding, outside)
     }
 
     /// What `from source import *` binds `name` to ([`Self::stars_bind`]), `source` nested
@@ -10971,14 +11092,37 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Instance produced by calling the object `fqn`, if known; `arg` tells what the call
-    /// passes (for the catalog's argument cases).
+    /// Instance produced by calling the name `fqn`, if known; `arg` tells what the call passes
+    /// (for the catalog's argument cases). A project name that may hold another object than its
+    /// definition gives what calling either object gives, when heki names both
+    /// ([`ProjectDecls::name_holds`]): never an instance of the definition's class alone.
     pub(crate) fn call_result(
         &self,
         fqn: &str,
+        mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<Ty> {
+        let symbol = self.called_symbol(fqn);
+        if matches!(symbol, Symbol::Class(_) | Symbol::Function(..)) {
+            match self.project.name_holds(fqn) {
+                NameHolds::Definition => {}
+                NameHolds::Also(other) => {
+                    let other = self.symbol_result(&other, self.called_symbol(&other), &mut arg)?;
+                    return self.symbol_result(fqn, symbol, arg)?.join(&other);
+                }
+                NameHolds::Unknown => return None,
+            }
+        }
+        self.symbol_result(fqn, symbol, arg)
+    }
+
+    /// Instance produced by calling the object `fqn` names, `symbol` ([`Self::call_result`]).
+    fn symbol_result(
+        &self,
+        fqn: &str,
+        symbol: Symbol<'a>,
         arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
-        match self.called_symbol(fqn) {
+        match symbol {
             Symbol::Class(_) => return Some(Ty::inst(fqn)),
             Symbol::Function(_, decl) => {
                 return self
@@ -11145,10 +11289,9 @@ impl<'a> TypeCtx<'a> {
                         .project
                         .instance_targets_complete(class, method, callee, self.kb)
             }
-            Recv::Ref(owner) if self.project.is_project_class(owner) => {
-                let mro = self.project.mro(&self.project.canonical(owner));
-                !self.project.lookup_rebound(&mro, method)
-            }
+            Recv::Ref(owner) if self.project.is_project_class(owner) => !self
+                .project
+                .call_rebound(&format!("{}.{method}", self.project.canonical(owner))),
             Recv::Ref(owner) => !self
                 .project
                 .call_rebound(&self.project.object_named(&format!("{owner}.{method}"))),
