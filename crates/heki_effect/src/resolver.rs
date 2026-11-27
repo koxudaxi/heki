@@ -11511,7 +11511,8 @@ impl<'a> TypeCtx<'a> {
             _ => None,
         };
         let globals = |inst: &Inst| self.module_constant(inst, &module_of);
-        match literal(|v| shape.inst(v), &globals, var)? {
+        // The shape's table of copy roots, not a walk down the chain for each read.
+        match literal(|v| shape.inst(v), &globals, shape.copy_root(var))? {
             LiteralValue::Int(n) => Some(n),
             _ => None,
         }
