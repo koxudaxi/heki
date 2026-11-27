@@ -937,6 +937,7 @@ mod set_order_output;
 mod unawaited_callables;
 mod unlocked_writes;
 mod unretained_task;
+mod unshielded_cleanup;
 
 pub use unlocked_writes::GuardedView;
 
@@ -993,6 +994,12 @@ pub(crate) fn eff117(
     out: &mut Vec<Diagnostic>,
 ) {
     unlocked_writes::run(cx, view, unit, out);
+}
+
+/// `EFF118` (heuristic): a cleanup awaiting a call that reaches an AnyIO or Trio cancellation
+/// checkpoint with no shield on the way.
+pub(crate) fn eff118(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    unshielded_cleanup::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one

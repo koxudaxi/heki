@@ -202,6 +202,9 @@ pub enum ExecEffectKind {
     UnpooledClientAlloc,
     DbQuery,
     QuadraticRealloc,
+    /// An await where a cancelled AnyIO or Trio scope raises its cancellation (`EFF118`): kept
+    /// only on an awaited call, and only while a rule reading it runs.
+    Checkpoint,
 }
 
 impl ExecEffectKind {
@@ -226,6 +229,7 @@ impl ExecEffectKind {
         Self::UnpooledClientAlloc,
         Self::DbQuery,
         Self::QuadraticRealloc,
+        Self::Checkpoint,
     ];
 
     /// The effect's name in the catalogs and in `[[tool.heki.ecosystem]]` (`blocking_net`).
@@ -240,6 +244,7 @@ impl ExecEffectKind {
             Self::UnpooledClientAlloc => "unpooled_client_alloc",
             Self::DbQuery => "db_query",
             Self::QuadraticRealloc => "quadratic_realloc",
+            Self::Checkpoint => "checkpoint",
         }
     }
 
@@ -257,7 +262,10 @@ impl ExecEffectKind {
             | Self::Sleep
             | Self::BlockingFs => Some(WaitKind::Io),
             Self::BlockingSync => Some(WaitKind::Thread),
-            Self::UnpooledClientAlloc | Self::DbQuery | Self::QuadraticRealloc => None,
+            Self::UnpooledClientAlloc
+            | Self::DbQuery
+            | Self::QuadraticRealloc
+            | Self::Checkpoint => None,
         }
     }
 
@@ -436,6 +444,10 @@ pub struct EcosystemEntry {
     /// The call gives at most as many of its [`Self::items`] as the integer passed here
     /// (`fetchmany(size)`): a count the code passes fixes how many there are.
     pub items_up_to: Option<ArgSlot>,
+    /// `EFF118`: the call makes a cancel scope, or the class is one (`anyio.CancelScope`,
+    /// `trio.move_on_after`): a `with` over it shields what runs inside from the cancellation
+    /// of the scopes around it when the argument at this slot is true (`shield=True`).
+    pub cancel_scope: Option<ArgSlot>,
     /// The library API a method of a catalog class is, as reports name it: the class of what a
     /// call returns in one case (`sqlite3.connect(":memory:")`) has the methods of a library
     /// class (`sqlite3.Connection.execute`).
@@ -2384,10 +2396,175 @@ mod tests {
             pydantic_models(),
             llm_requests(),
             file_process_and_network_rows(),
+            cancellation_rows(),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The AnyIO and Trio awaits that check for cancellation (`checkpoint`), and the cancel
+    /// scopes that shield from it (`EFF118`). An entry of a class with `fast_acquire=True` is a
+    /// method of the library class (`api`) that takes no checkpoint while uncontended.
+    fn cancellation_rows() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let checkpoint = || async_safe(entry(&[Checkpoint]));
+        let fast_acquire = |class: &str| ArgCase {
+            param: Some("fast_acquire".into()),
+            equals: Some(ArgLiteral::Bool(true)),
+            return_type: Some(format!("{class}(fast_acquire=True)")),
+            ..ArgCase::default()
+        };
+        let scope = |arg: Option<u8>| EcosystemEntry {
+            cancel_scope: Some(ArgSlot {
+                arg,
+                param: Some("shield".into()),
+            }),
+            ..entry(&[])
+        };
+        vec![
+            (s(ANYIO_CHECKPOINTS), checkpoint()),
+            (s(TRIO_CHECKPOINTS), checkpoint()),
+            (
+                s(&["anyio.Lock"]),
+                EcosystemEntry {
+                    cases: vec![fast_acquire("anyio.Lock")],
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["anyio.Semaphore"]),
+                EcosystemEntry {
+                    cases: vec![fast_acquire("anyio.Semaphore")],
+                    ..entry(&[])
+                },
+            ),
+            (
+                [FAST_ACQUIRE_LOCK, FAST_ACQUIRE_SEMAPHORE]
+                    .iter()
+                    .flat_map(|class| with_prefix(class, &["acquire", "__aenter__"]))
+                    .collect(),
+                async_safe(entry(&[])),
+            ),
+            (s(&["anyio.CancelScope", "trio.CancelScope"]), scope(None)),
+            (
+                with_prefix(
+                    "anyio",
+                    &["move_on_after", "fail_after", "move_on_at", "fail_at"],
+                ),
+                scope(Some(1)),
+            ),
+            (
+                with_prefix(
+                    "trio",
+                    &["move_on_after", "fail_after", "move_on_at", "fail_at"],
+                ),
+                scope(None),
+            ),
+        ]
+    }
+
+    const FAST_ACQUIRE_LOCK: &str = "anyio.Lock(fast_acquire=True)";
+    const FAST_ACQUIRE_SEMAPHORE: &str = "anyio.Semaphore(fast_acquire=True)";
+
+    /// The AnyIO awaits that check for cancellation; `to_thread.run_sync` and its siblings carry
+    /// the effect beside offloading.
+    const ANYIO_CHECKPOINTS: &[&str] = &[
+        "anyio.sleep",
+        "anyio.sleep_forever",
+        "anyio.sleep_until",
+        "anyio.lowlevel.checkpoint",
+        "anyio.lowlevel.checkpoint_if_cancelled",
+        "anyio.run_process",
+        "anyio.open_process",
+        "anyio.open_file",
+        "anyio.connect_tcp",
+        "anyio.connect_unix",
+        "anyio.getaddrinfo",
+        "anyio.wait_readable",
+        "anyio.wait_writable",
+        "anyio.Event.wait",
+        "anyio.Lock.acquire",
+        "anyio.Lock.__aenter__",
+        "anyio.Semaphore.acquire",
+        "anyio.Semaphore.__aenter__",
+        "anyio.CapacityLimiter.acquire",
+        "anyio.CapacityLimiter.acquire_on_behalf_of",
+        "anyio.CapacityLimiter.__aenter__",
+        "anyio.Condition.acquire",
+        "anyio.Condition.__aenter__",
+        "anyio.Condition.wait",
+        "anyio.streams.memory.MemoryObjectSendStream.send",
+        "anyio.streams.memory.MemoryObjectReceiveStream.receive",
+        "anyio.abc.Process.wait",
+    ];
+
+    /// The Trio awaits that check for cancellation.
+    const TRIO_CHECKPOINTS: &[&str] = &[
+        "trio.sleep",
+        "trio.sleep_forever",
+        "trio.sleep_until",
+        "trio.lowlevel.checkpoint",
+        "trio.lowlevel.checkpoint_if_cancelled",
+        "trio.open_file",
+        "trio.open_tcp_stream",
+        "trio.open_unix_socket",
+        "trio.run_process",
+        "trio.Event.wait",
+        "trio.Lock.acquire",
+        "trio.Lock.__aenter__",
+        "trio.Semaphore.acquire",
+        "trio.Semaphore.__aenter__",
+        "trio.CapacityLimiter.acquire",
+        "trio.CapacityLimiter.acquire_on_behalf_of",
+        "trio.CapacityLimiter.__aenter__",
+        "trio.Condition.acquire",
+        "trio.Condition.__aenter__",
+        "trio.Condition.wait",
+        "trio.MemorySendChannel.send",
+        "trio.MemoryReceiveChannel.receive",
+    ];
+
+    /// The awaits an earlier catalog had as checkpoints, and the remedies: none is one. A
+    /// subprocess of `asyncio` is no AnyIO object, `aclose_forcefully` and
+    /// `cancel_shielded_checkpoint` close or yield under a shield, and AnyIO's `AsyncFile`
+    /// closes under its own.
+    #[test]
+    fn layer2_checkpoints_leave_out_the_remedies_and_native_asyncio() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for symbol in [
+            "asyncio.subprocess.Process.wait",
+            "anyio.aclose_forcefully",
+            "anyio.lowlevel.cancel_shielded_checkpoint",
+            "anyio.AsyncFile.aclose",
+            "trio.lowlevel.cancel_shielded_checkpoint",
+            "asyncio.sleep",
+            "asyncio.Lock.acquire",
+        ] {
+            assert!(
+                kb.lookup(symbol)
+                    .is_none_or(|e| !e.effects.contains(&Checkpoint)),
+                "{symbol}"
+            );
+        }
+        let checkpoints: BTreeSet<&str> = (kb.entries.values())
+            .filter(|e| e.effects.contains(&Checkpoint))
+            .map(|e| e.symbol.as_str())
+            .collect();
+        // Every checkpoint is an AnyIO or Trio await, or Starlette's offloading call.
+        for symbol in &checkpoints {
+            let e = kb.lookup(symbol).unwrap();
+            assert!(e.async_safe, "{symbol}");
+            assert!(
+                ["anyio.", "trio.", "starlette.", "fastapi."]
+                    .iter()
+                    .any(|p| symbol.starts_with(p)),
+                "{symbol}"
+            );
+        }
+        assert_eq!(
+            checkpoints.len(),
+            ANYIO_CHECKPOINTS.len() + TRIO_CHECKPOINTS.len() + 6
+        );
     }
 
     /// The file system, process, and network calls the catalog lists by module (#434, #445,
@@ -3256,17 +3433,26 @@ mod tests {
             (
                 s(&[
                     "asyncio.to_thread",
+                    "asgiref.sync.sync_to_async",
+                    "asyncer.asyncify",
+                    "channels.db.database_sync_to_async",
+                ]),
+                offload(0),
+            ),
+            // They check for cancellation before the callable starts (`EFF118`).
+            (
+                s(&[
                     "anyio.to_thread.run_sync",
                     "anyio.to_process.run_sync",
                     "anyio.to_interpreter.run_sync",
                     "trio.to_thread.run_sync",
                     "starlette.concurrency.run_in_threadpool",
                     "fastapi.concurrency.run_in_threadpool",
-                    "asgiref.sync.sync_to_async",
-                    "asyncer.asyncify",
-                    "channels.db.database_sync_to_async",
                 ]),
-                offload(0),
+                EcosystemEntry {
+                    effects: vec![Checkpoint],
+                    ..offload(0)
+                },
             ),
             (
                 with_prefix(
@@ -5195,14 +5381,26 @@ mod tests {
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
                     .map(|(default, _)| HeldValue { default: *default });
-                // The methods of the classes of what `sqlite3.connect` returns are the library's.
-                let api = [SQLITE3_MEMORY, SQLITE3_FILE].iter().find_map(|class| {
-                    let method = symbol.strip_prefix(&format!("{class}."))?;
-                    Some(match method.strip_prefix("cursor().") {
-                        Some(m) => format!("sqlite3.Cursor.{m}"),
-                        None => format!("sqlite3.Connection.{method}"),
+                // The methods of the classes of what `sqlite3.connect` returns are the library's,
+                // and so are those of a lock made with `fast_acquire=True`.
+                let api = [SQLITE3_MEMORY, SQLITE3_FILE]
+                    .iter()
+                    .find_map(|class| {
+                        let method = symbol.strip_prefix(&format!("{class}."))?;
+                        Some(match method.strip_prefix("cursor().") {
+                            Some(m) => format!("sqlite3.Cursor.{m}"),
+                            None => format!("sqlite3.Connection.{method}"),
+                        })
                     })
-                });
+                    .or_else(|| {
+                        [FAST_ACQUIRE_LOCK, FAST_ACQUIRE_SEMAPHORE]
+                            .iter()
+                            .find_map(|class| {
+                                let method = symbol.strip_prefix(&format!("{class}."))?;
+                                let library = class.strip_suffix("(fast_acquire=True)")?;
+                                Some(format!("{library}.{method}"))
+                            })
+                    });
                 let writes_in_order = ORDERED_OUTPUTS
                     .iter()
                     .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
@@ -5518,7 +5716,7 @@ mod tests {
         ] {
             assert_eq!(e.wait_kind(), Some(WaitKind::Io), "{e:?}");
         }
-        for e in [UnpooledClientAlloc, DbQuery, QuadraticRealloc] {
+        for e in [UnpooledClientAlloc, DbQuery, QuadraticRealloc, Checkpoint] {
             assert_eq!(e.wait_kind(), None, "{e:?}");
         }
         assert!(

@@ -75,7 +75,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` alwa
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
@@ -108,7 +108,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
 
 Found 1 diagnostic(s) in 1 file(s).
 heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports, which can be wrong about the code and count as warnings; `fail-on = "warning"` in the lint settings makes them fail it.
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
@@ -379,7 +379,10 @@ and what it does when it cannot tell.
 heki differs from these tools in what it models: effects and aliases. It leaves syntax and types
 to the tools that model them, also as they grow. Where another tool covers part of a case, heki
 keeps the rest: Ruff's `RUF006` reports discarded tasks, so `EFF107` reports only the tasks bound
-to a variable.
+to a variable. An `await` written directly in a `finally` body or an `__aexit__` with no shielded
+scope around it is a single-file linter's check (flake8-async's `ASYNC102`); `EFF118` adds what
+needs the call graph: which awaits reach a cancellation checkpoint through helpers, and which
+helpers and callers shield them.
 
 ### Clean for Ruff, ty, and tach; broken all the same
 
@@ -455,7 +458,7 @@ $ heki check --output-format concise
 app/api.py:5:12: EFF101 `app.users.load_user` always runs the waiting call `requests.get` on the event loop (3 calls down, on every path)
 app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (through a helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 ## Where heki pays off
@@ -890,7 +893,7 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT113`, `MUT208`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF118`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204`, `MUT208` |
@@ -1381,12 +1384,13 @@ Two rules are exact and run by default. Their reports show the call chain, and a
 
 `EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
 
-Two more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
+Three more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
 | [`EFF117`](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | state that one writer changes holding a thread lock and another changes holding none, where both can run on threads heki resolves | heuristic, runs with `--heuristic` |
+| [`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/) | a `finally` body, an `except` taking the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way, so in a cancelled scope the cleanup stops there | heuristic, runs with `--heuristic` |
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
 
@@ -2198,7 +2202,7 @@ def test_load_user() -> None:
 $ heki recommend app
 heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
-Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 4 heuristic rule(s) off
+Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
 
 Start here
   - heki check fails on 1 report(s) now: a Ratchet baseline records them, so that it fails only on new ones (Notes)
@@ -2219,7 +2223,7 @@ Rules worth enabling here
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
   see the 2 report(s): heki check app --extend-select MUT106,OPT110
-  No reports here: 31 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 24 heuristic one(s)
+  No reports here: 32 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 25 heuristic one(s)
 
 What heki cannot see (no report either way)
   calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
@@ -3342,7 +3346,11 @@ A write into the entries of a target's container (`model.meta["kw"][name] = v`) 
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
 after an augmented assignment that changes the container in place and so keeps it
 (`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
-(`count += 1`) binds a new object.
+(`count += 1`) binds a new object. An attribute write on an entry of a project class
+(`model.fields[0].name = v` with `fields: list[Field]`) is a write of that class's attribute
+(`Field.name`), judged by its own contracts, also in a helper handed the container
+(`rename_all(model.fields)`); on an entry heki ties to no project class, a helper handed the
+container writes the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -3374,6 +3382,24 @@ may store what it reads out of it. A project function's result that holds itself
 objects it links (`made.part = part; part.parent = made`) is new at a call until a value read
 out of it is stored. A store into an object the function did not make, or into one of its own
 that was kept before, still ends the freshness of what it stores.
+
+A container a class's constructor makes for each instance is held by that instance, so storing a new
+object into it links the two the same way: `copied = Node(); copied.children.append(part)` leaves
+`part` new while `copied` is (`append`, `appendleft`, `insert`, `add`, `setdefault`, and item
+stores, on a list, set, or dict, when they run no project code on what they store). The constructor
+is the project `__init__` the class runs, its own or a base's (no class decorator,
+`__init_subclass__`, `dataclass_transform`, or metaclass other than `type` or `abc.ABCMeta` along
+the MRO, and no code that reading the attribute runs), and it binds the attribute once, on every
+path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
+`bytearray()`. It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
+call `super().__init__(...)`, whose `__init__` along the MRO does the same or is `object`'s, and
+no store in them runs code (a property's setter, a descriptor, `__setattr__`): a call handed
+`self` or a member of it, such as `self.setup()`, may hand the container anywhere. The object must
+be one the function made by calling the class on every path.
+Rebinding the attribute before an object is stored into the list (`copied.children = node.children`
+on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, or a helper handed
+`copied`), or keeping the list, ends the freshness of what is stored into it. A project function
+returning such an object does not carry the fact to its callers.
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
@@ -4330,7 +4356,7 @@ excluded = true               # never reported
 | Key | Meaning |
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
-| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
+| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`, `checkpoint` (an await where a cancelled AnyIO or Trio scope raises, `EFF118`). |
 | `async-safe` | Safe to call from `async def`: it never blocks the event loop, so the blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread (the receiver is not counted). |
 | `excluded` | Never reported (logging and similar). |
@@ -5820,7 +5846,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 54 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 55 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -5884,6 +5910,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF115 | [async-def-as-sync-callback](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run. | ≈ 🔌 🧪 |
 | EFF116 | [generator-never-iterated](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run. | ≈ 🔌 🧪 |
 | EFF117 | [unlocked-write-of-guarded-state](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | State that another writer changes holding a thread lock (`threading.Lock`, `RLock`, `Condition`, `Semaphore`), changed here holding none, where a thread heki resolves can run one of the writes: an update can be lost. | ≈ |
+| EFF118 | [unshielded-cleanup-checkpoint](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/) | A cleanup (a `finally` body, an `except` taking the cancellation, an `__aexit__`) that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way: in a cancelled scope the cleanup stops there. | ≈ |
 | EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)
@@ -6601,6 +6628,7 @@ On a save, the edit reaches other files only through what it changes:
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
 | the writes that leave a `@cached_property` stale (`MUT111`, when selected) | the files reading such a property: whether a read is reported depends on every writer of the class family, wherever it is |
 | the states written holding a thread lock, the functions threads reach, those every call of which holds a lock, or those only construction and the after-fork handlers run (`EFF117`, when selected) | every file when the states, their locked writers, or whether a thread runs those writers change; otherwise the files of the functions that joined or left those sets |
+| the cancellation checkpoints a function's awaits reach, or whether a call runs under a shield (`EFF118`, when selected) | the callers of the function, as for any effect, and the files of the functions a changed call reaches: whether every call of a function shields it decides its report |
 | a function generators are handed to | those generators: whether it iterates them decides where their writes and reads are reported |
 | a function's own in-place changes, attribute rebindings, or calls, while its effects stay the same | the files with `MUT108` / `MUT110` / `MUT120` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
@@ -12155,7 +12183,11 @@ is the receiver's class, and a class method returning `Self`, such as pydantic's
 type parameter of its class (`obj: T` in `class Site(Generic[T])` or `class Site[T]:`) holds
 the argument the instance's annotation gives (`site: Site[Schema]`, also through a type alias);
 a name another module binds only under `if TYPE_CHECKING:` (serving it from a module
-`__getattr__`) is the class that import names, also as a base class; a copy (`copy.copy`,
+`__getattr__`) is the class that import names, also as a base class, and a name a module
+serves only from its `__getattr__` is what the hook returns for it where heki follows the hook
+(a branch testing the name against the literal, a factory read from a module-level dict by the
+name and called), as an import of it would be, and a class object a factory annotated `-> type[C]`
+returns is `C` as a `TYPE_CHECKING` import is; a copy (`copy.copy`,
 `copy.deepcopy`, `dataclasses.replace`, `model_copy`) has its original's class, calling a `functools.partial` object returns what the
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
 an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
@@ -14205,6 +14237,126 @@ No automatic fix.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/
+
+# unshielded-cleanup-checkpoint (EFF118)
+
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+
+A cleanup (a `finally` body, an `except` taking the cancellation, an `__aexit__`) that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way: in a cancelled scope the cleanup stops there.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+## What it does
+Checks for cleanup code that awaits a call reaching an AnyIO or Trio cancellation checkpoint with
+no shield on the way. The rule is heuristic: it runs when `select` or `extend-select` names it,
+and with `--heuristic` (`lint.heuristic = true`).
+
+A cleanup is:
+
+- a `finally` body;
+- an `except` clause that is the first of its `try` to take the cancellation: a bare `except`,
+  `BaseException`, `asyncio.CancelledError`, `trio.Cancelled`,
+  `anyio.get_cancelled_exc_class()`, or a tuple holding one; a clause after one whose classes
+  heki cannot tell is left out, and so is a clause after one taking the cancellation
+  (`except Cancelled: raise` first);
+- the body of an `__aexit__` method.
+
+A checkpoint is an await of a call the catalog lists as one: `anyio.sleep`, the `to_thread`,
+`to_process`, and `to_interpreter` calls, `run_process`, `open_process`, `open_file`, the
+connections, `Event.wait`, the acquisition of a `Lock`, `Semaphore`, `CapacityLimiter`, or
+`Condition` (also by `async with`), `Condition.wait`, a memory object stream's `send` and
+`receive`, `Process.wait`, their Trio counterparts, and `run_in_threadpool`. The call is found
+through awaited project calls, with the shortest chain of calls down to it. A lock or semaphore
+made with `fast_acquire=True` takes no checkpoint while nobody holds it and is not counted.
+`lowlevel.checkpoint()` and `checkpoint_if_cancelled()` count only where something runs after
+them: awaited last, they hand the cancellation on to the caller on purpose.
+
+It does not report:
+
+- a checkpoint inside a `with` over `CancelScope(shield=True)` or `move_on_after(...,
+  shield=True)` (and the other `move_on_*` and `fail_*` calls) on every path to it, in the
+  cleanup or in any function on the way; a project function whose checkpoints are all shielded
+  reaches none;
+- a checkpoint inside a cancel scope that may shield: one made with a `shield` argument that is
+  not a constant, one whose `shield` attribute the function sets, or one made elsewhere;
+- a checkpoint on a branch the call's constant arguments never take (`await self._stop()` where
+  the checkpoint is under `if force:` and `force` defaults to `False`);
+- a function every call of which runs it shielded: each awaits it inside a shield, or only
+  creates its coroutine (`await _shielded(self._close())`, a task) where heki does not follow
+  it; a function with no call heki finds is reported;
+- an await of a coroutine stored first (`pending = work(); await pending`), an `async for`,
+  and a project context manager entering a shielded scope (not followed);
+- native asyncio awaits (`asyncio.sleep`, `asyncio.Lock`): what cancels them is a task's
+  `cancel()`, which is delivered once;
+- test code.
+
+## What a report states
+
+A report states that when the scope around the cleanup is already cancelled, the await raises
+the cancellation at the checkpoint, so the statements after it in the cleanup, and the work of
+the call itself, do not run.
+
+Its premises:
+
+- **Cancelled scope**: the cleanup runs while an AnyIO or Trio scope around it is cancelled. An
+  AnyIO cancellation is level-triggered: every checkpoint inside the cancelled scope raises
+  again until the scope exits. Open: whether the cleanup runs after a cancellation at all (a
+  `finally` also runs on a normal exit) is not established.
+- **Checkpoint**: the call reaches the checkpoint on some path. Open: one path is enough, and a
+  branch decided by state the call does not show is not told apart.
+- **No shield**: no shield is on the path, in the functions on the way or in the calls of the
+  function holding the cleanup. Open: a caller further up and a caller heki does not see (a
+  framework calling an endpoint) may run it shielded.
+
+## Why is this bad?
+A cleanup releases what the code holds: it deletes a temporary resource, stops a process,
+closes a connection, or puts a worker back into its pool. Cancellation is the usual reason the
+cleanup runs, and an AnyIO or Trio scope cancelled once cancels every checkpoint inside it, so
+the first await that checks for cancellation raises again. A shutdown loop that stops each
+process inside `try: ... except Exception:` ends at the first process, because the cancellation
+is not an `Exception`; a pool that pops a stale worker into a call argument and then awaits
+neither destroys nor keeps it.
+
+## Example
+```python
+import anyio
+
+
+async def delete_group(name: str) -> None:
+    await anyio.to_thread.run_sync(delete_container_group, name)
+
+
+async def run(name: str) -> None:
+    try:
+        await watch(name)
+    finally:
+        await delete_group(name)  # EFF118
+        log_deleted(name)
+```
+
+Use instead:
+```python
+    finally:
+        with anyio.CancelScope(shield=True):
+            await delete_group(name)
+        log_deleted(name)
+```
+
+## Fix safety
+No automatic fix. A shield keeps the cleanup running while the scope is cancelled: give a
+cleanup that can wait for long a deadline too (`anyio.move_on_after(10, shield=True)`).
+
+## Options
+- `lint.heuristic = true` (or `--heuristic`) runs the rule by default; `--select EFF118` runs
+  it alone.
+- `[[tool.heki.ecosystem]]` entries with `effects = ["checkpoint"]` add checkpoints.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/write-owner-violation/
 
 # write-owner-violation (MUT201)
@@ -14271,7 +14423,15 @@ allowed writers:
   reported once at the outermost call site; a helper changing an entry of the container it is
   handed (`box["k"].add(v)`, also through a local alias of the entry) writes it too, an
   `indirect_item_mut` write, and so does a method of the container changing an entry of its
-  own `self`, called on the attribute's value (an `item_mut` write at the call). A helper that
+  own `self`, called on the attribute's value (an `item_mut` write at the call). An attribute
+  write on an entry is such a change only when heki ties the entry to no project class
+  (`for field in fields: field.name = v` with `fields: list`, also in a function the entry is
+  handed to that does not type it either): on an entry of a project class
+  (`fields: list[Field]`), it is that
+  class's write (`Field.name`), judged by the contracts of `Field.name` as the same write made
+  directly (`for field in model.fields: field.name = v`) is, also when the helper hands the
+  entry to a function typing it (`rename(field, v)`) or writes below one of its attributes
+  (`field.tags.append(v)`). A helper that
   sees the object's class (an annotated parameter, `self` of a method) reports its own write
   instead, so a write it routes through the allowed writers stays allowed for its callers; a helper handed the value of an attribute
   (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
@@ -14317,7 +14477,11 @@ is the receiver's class, and a class method returning `Self`, such as pydantic's
 type parameter of its class (`obj: T` in `class Site(Generic[T])` or `class Site[T]:`) holds
 the argument the instance's annotation gives (`site: Site[Schema]`, also through a type alias);
 a name another module binds only under `if TYPE_CHECKING:` (serving it from a module
-`__getattr__`) is the class that import names, also as a base class; a copy (`copy.copy`,
+`__getattr__`) is the class that import names, also as a base class, and a name a module
+serves only from its `__getattr__` is what the hook returns for it where heki follows the hook
+(a branch testing the name against the literal, a factory read from a module-level dict by the
+name and called), as an import of it would be, and a class object a factory annotated `-> type[C]`
+returns is `C` as a `TYPE_CHECKING` import is; a copy (`copy.copy`,
 `copy.deepcopy`, `dataclasses.replace`, `model_copy`) has its original's class, calling a `functools.partial` object returns what the
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
 an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
@@ -14416,7 +14580,8 @@ an object the function did not make, a container, a global, or a closure, no `yi
 call that may keep it ran before the write. An attribute store into another new object of a
 class whose attribute write runs no code links the holder to it instead: the object stays new
 until it, an object holding it, or a value read out of one is kept (see
-[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). A project function keeps an object it
+[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). So does a store into a list, set, or dict
+the class's constructor made for a new instance (`copied.children.append(part)`). A project function keeps an object it
 stores, yields, or hands to code heki does not follow or to a function that keeps it; reading
 or writing it keeps nothing. A
 store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a

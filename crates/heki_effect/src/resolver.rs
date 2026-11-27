@@ -45,6 +45,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod fields;
+mod getattr_exports;
+mod init_containers;
 mod package_paths;
 mod returns;
 mod sentinels;
@@ -70,6 +72,7 @@ struct Indexes {
     grown_elsewhere: FxHashSet<String>,
     rebound_elsewhere: FxHashSet<String>,
     getattr_called: FxHashSet<String>,
+    getattr_open: FxHashSet<String>,
     changed_paths: BTreeMap<String, PathChange>,
     copy_registered: FxHashSet<String>,
     families: FxHashMap<(ContainerKind, FamilyLevel), FamilyMembers>,
@@ -673,6 +676,21 @@ pub enum StoreTarget {
     Attr(String, String),
 }
 
+/// A class's own `__init__` that uses the instance only as the object of attribute stores (none
+/// of `__dict__` or `__class__`) and as `super()` for a call of the next `__init__` along the
+/// MRO handed nothing that may hold the instance (`init_containers`). Whether the stores run
+/// code depends on the class constructed ([`ProjectDecls::constructor_containers`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlainInit {
+    /// The attributes it stores through the instance, sorted, each once.
+    pub stores: Box<[Box<str>]>,
+    /// It calls `super().__init__(...)`.
+    pub calls_next: bool,
+    /// The attributes it binds to a builtin container it makes there, with the container's
+    /// kind, sorted: when it returns, the attribute holds that container and nothing else does.
+    pub containers: Box<[(Box<str>, ContainerKind)]>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassDecl {
     /// Base classes, resolved within the defining module (canonicalized on lookup), each the
@@ -793,6 +811,11 @@ pub struct ClassDecl {
     /// capacity ([`ProjectDecls::attr_capacity`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attr_capacities: BTreeMap<String, CapacityOf>,
+    /// What the class's own `__init__` does with the instance when all it does is store
+    /// attributes on it and call the next `__init__` along the MRO ([`PlainInit`]); `None` for
+    /// any other `__init__`, and without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_init: Option<Box<PlainInit>>,
     /// `typing.Protocol` is one of the bases (PEP 544: the class is a protocol, not an
     /// implementation of one).
     pub is_protocol: bool,
@@ -1108,16 +1131,41 @@ impl FunctionDecl {
         let Some(fqn) = &self.returned_import else {
             return declared;
         };
-        let says_nothing = self
-            .return_type
-            .as_ref()
-            .is_none_or(|t| t.obj().is_some_and(|o| is_any_module(&o.class)));
         let module = matches!(project.symbol(&project.object_named(fqn)), Symbol::Module);
-        if module || says_nothing {
+        if module || self.annotation_names_no_object() {
             Some(project.named_ty(fqn))
         } else {
             declared
         }
+    }
+
+    /// [`Self::declared_return`] as the module's declarations name what calling it gives,
+    /// before the project resolves the classes they name, with the globals it was inferred from
+    /// ([`ReturnFact::ty_globals`]): pass 1 reads it, where a class of another module is no
+    /// class yet (`getattr_exports`).
+    pub(crate) fn declared_return_as_named(&self) -> Option<(Ty, &[String])> {
+        if let Some(fqn) = self
+            .returned_import
+            .as_deref()
+            .filter(|_| self.annotation_names_no_object())
+        {
+            return Some((Ty::Ref(fqn.to_owned()), &[]));
+        }
+        match self.returns.as_deref() {
+            Some(ReturnFact {
+                ty: Some(t),
+                ty_globals,
+                ..
+            }) => Some((t.clone(), ty_globals)),
+            _ => self.return_type.clone().map(|t| (t, &[][..])),
+        }
+    }
+
+    /// Its return annotation names no object of its own: there is none, or it is `ModuleType`.
+    fn annotation_names_no_object(&self) -> bool {
+        self.return_type
+            .as_ref()
+            .is_none_or(|t| t.obj().is_some_and(|o| is_any_module(&o.class)))
     }
 
     /// What every return gives past the annotation ([`ReturnFact::ty`]), while no other module
@@ -1360,6 +1408,12 @@ pub struct ModuleDecls {
     /// order: they bind the names the module binds no other way (`ProjectDecls::star_binding`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub star_imports: Option<Box<[String]>>,
+    /// The names no statement of the module binds that its `__getattr__` (PEP 562) serves,
+    /// where heki follows the hook for that literal name ([`getattr_exports::getattr_exports`]):
+    /// another module's `from module import name` or `module.name` reads that
+    /// ([`ProjectDecls::served_by_getattr`]). Boxed: few modules have such a hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub getattr_exports: Option<Box<GetattrExports>>,
     /// The packages whose `__path__` the module changes, by the fqn its imports give them
     /// (`plugins.__path__.append(d)`), or by its own name when it is a package changing its own
     /// (`__path__ = extend_path(__path__, __name__)`), and how
@@ -1417,6 +1471,20 @@ pub struct ModuleDecls {
 /// The entries of a table ([`ModuleDecls::tables`]): each string key with the type of its value
 /// (`None`: unknown), in order.
 pub type Table = Box<[(Box<str>, Option<Ty>)]>;
+
+/// What a module's `__getattr__` serves ([`ModuleDecls::getattr_exports`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetattrExports {
+    /// By name, what the hook serves: a named object (`Ty::Ref`: what an import binds, a class
+    /// a function the hook calls defines in its body), or a class object that may be a
+    /// subclass of the class (`Ty::Class`: what a function annotated `-> type[C]` returns).
+    pub served: BTreeMap<String, Ty>,
+    /// The module's own globals the hook reads (fqns), the hook's own name among them, and
+    /// those the return facts of the functions it calls were inferred from
+    /// (`ReturnFact::ty_globals`): another module rebinding one, or storing into one, may make
+    /// the hook serve other objects ([`ProjectDecls::getattr_open`]).
+    pub globals: Box<[String]>,
+}
 
 /// How a module changes the `__path__` of a package, the directories Python finds the modules
 /// under the package in, which start as the package's own directory
@@ -2580,6 +2648,11 @@ pub struct ProjectDecls {
     /// (`ModuleDecls::getattr_rebinds`) and another project module loads
     /// (`ModuleDecls::getattr_loads`).
     getattr_called: FxHashSet<String>,
+    /// The modules whose `__getattr__` another project module may make serve other objects
+    /// than [`ModuleDecls::getattr_exports`] says: it stores into the module under a name heki
+    /// cannot read, or rebinds or stores into a global the hook reads
+    /// ([`GetattrExports::globals`]).
+    getattr_open: FxHashSet<String>,
     /// The dotted prefixes of the names in `rebound_elsewhere` (`pkg.mod.C` of
     /// `pkg.mod.C.run.__code__`): another module rebinds no attribute of a class not among them.
     rebound_owners: FxHashSet<String>,
@@ -2760,10 +2833,19 @@ enum Chase {
 impl Chase {
     /// Whether the chase reads a name as a type checker does: past a module's `if
     /// TYPE_CHECKING:` import of a name it binds no other way
-    /// ([`ModuleDecls::type_checking_binding`]). At run time a module `__getattr__` may serve
-    /// another object under it, or none, so no chase deciding what a name holds or runs does.
+    /// ([`ModuleDecls::type_checking_binding`]), and past the class object of a class or a
+    /// subclass its `__getattr__` serves under the name (`-> type[C]`). At run time the hook
+    /// may serve another object under it, or none, so no chase deciding what a name holds or
+    /// runs does.
     fn reads_type_checking(self) -> bool {
         matches!(self, Chase::Types | Chase::Bases | Chase::Declared)
+    }
+
+    /// Whether the chase reads an annotation, which names what a type checker reads for a name
+    /// first: its `if TYPE_CHECKING:` import before what the module's `__getattr__` serves at
+    /// run time ([`ProjectDecls::unbound_name`]). A class base is the class the hook serves.
+    fn reads_annotations(self) -> bool {
+        matches!(self, Chase::Types | Chase::Declared)
     }
 }
 
@@ -2773,8 +2855,9 @@ struct Followed {
     /// The name is the object a class or function statement made rather than what it holds
     /// once its module has run.
     definition: bool,
-    /// The chase went past an `if TYPE_CHECKING:` import ([`Chase::reads_type_checking`]).
-    type_checking: bool,
+    /// The chase went past a binding that names only the class a type checker reads
+    /// ([`Chase::reads_type_checking`]): at run time the name may hold another class.
+    declared_only: bool,
 }
 
 /// `a`, `a.b`, and `a.b.c` of `a.b.c`.
@@ -2914,6 +2997,11 @@ impl ProjectDecls {
             .extend(differ(&before.rebound_elsewhere, &self.rebound_elsewhere));
         out.grown_globals
             .extend(differ(&before.getattr_called, &self.getattr_called));
+        out.grown_globals.extend(
+            differ(&before.getattr_open, &self.getattr_open)
+                .into_iter()
+                .map(|module| format!("{module}.__getattr__")),
+        );
         out.class_facts
             .extend(differ(&before.copy_registered, &self.copy_registered));
         for &(kind, level) in before.families.keys().chain(self.families.keys()) {
@@ -2946,6 +3034,7 @@ impl ProjectDecls {
             grown_elsewhere: self.grown_elsewhere.clone(),
             rebound_elsewhere: self.rebound_elsewhere.clone(),
             getattr_called: self.getattr_called.clone(),
+            getattr_open: self.getattr_open.clone(),
             changed_paths: self.changed_paths.clone(),
             copy_registered: self.copy_registered.clone(),
             families: self.families.clone(),
@@ -2969,6 +3058,13 @@ impl ProjectDecls {
         self.star_bindings.clear();
         self.catalog_attributes.clear();
         self.object_attr_reads.clear();
+        // What other modules change, which deciding what a module's `__getattr__` serves reads
+        // (`Self::getattr_open`) while the indexes are built: as for new declarations, nothing
+        // until each is built again.
+        self.rebound_elsewhere.clear();
+        self.getattr_called.clear();
+        self.elsewhere = stores::Elsewhere::default();
+        self.getattr_open.clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
         self.build_indexes();
@@ -3045,6 +3141,7 @@ impl ProjectDecls {
             .collect();
         self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
         self.elsewhere = self.stores_elsewhere();
+        self.getattr_open = self.getattr_hooks_changed();
         self.changed_paths = self.package_path_changes();
         self.copy_registered = self
             .modules
@@ -3180,8 +3277,8 @@ impl ProjectDecls {
     /// or replaces the method's code ([`ModuleDecls::rebound_definitions`]), or another module
     /// stores into it, deletes it, or replaces its code ([`Self::rebound_elsewhere`]); or the
     /// project gives a project class of `mro` other bases (`__bases__`), or its instances
-    /// another class (`__class__`); or the lookup reaches a base named only under `if
-    /// TYPE_CHECKING:` ([`Self::typing_only_base`]) before a class binding the name.
+    /// another class (`__class__`); or the lookup reaches a base that names only the class a
+    /// type checker reads ([`Self::declared_only_base`]) before a class binding the name.
     pub(crate) fn lookup_rebound(&self, mro: &[String], name: &str) -> bool {
         // Only an analysis whose reads are recorded asks for keys no module stores yet. Every
         // call whose targets are checked asks for each class it may run on, along its MRO.
@@ -3192,7 +3289,7 @@ impl ProjectDecls {
                 .split_module(c)
                 .and_then(|(m, q)| Some((m, q, m.classes.get(q)?)))
             else {
-                if !found && self.typing_only_base(c) {
+                if !found && self.declared_only_base(c) {
                     return true;
                 }
                 continue;
@@ -3218,12 +3315,13 @@ impl ProjectDecls {
         false
     }
 
-    /// Whether the base `base` of an MRO ([`Self::mro`]) is a name its module binds only under
-    /// `if TYPE_CHECKING:`: a type checker reads it as the class that import names
-    /// ([`Self::declared_mro`]), but at run time a module `__getattr__` may serve another class.
-    fn typing_only_base(&self, base: &str) -> bool {
+    /// Whether the base `base` of an MRO ([`Self::mro`]) names only the class a type checker
+    /// reads ([`Self::declared_mro`]): a name its module binds only under `if TYPE_CHECKING:`,
+    /// or the class object of a class or a subclass its module's `__getattr__` serves. At run
+    /// time the module may serve another class under it.
+    fn declared_only_base(&self, base: &str) -> bool {
         self.follow(base, Chase::Bases)
-            .is_some_and(|found| found.type_checking)
+            .is_some_and(|found| found.declared_only)
     }
 
     /// Whether another project module may change what the module global `fqn` holds: grow it
@@ -3706,7 +3804,7 @@ impl ProjectDecls {
         let values = how == Chase::Values;
         let mut cur = fqn.to_owned();
         let mut aliased_in: Option<String> = None;
-        let mut type_checking = false;
+        let mut declared_only = false;
         for _ in 0..MAX_ALIAS_CHASE {
             let Some((m, rest)) = self.split_module(&cur) else {
                 break;
@@ -3724,7 +3822,7 @@ impl ProjectDecls {
             // `imports` holds the names an import binds once the module has run
             // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
             // it.
-            let star;
+            let bound_elsewhere;
             let target = match m.imports.get(first) {
                 Some(_) if values && m.fixed_import(first).is_none() => return None,
                 Some(target) => {
@@ -3742,7 +3840,7 @@ impl ProjectDecls {
                             return Some(Followed {
                                 name: cur,
                                 definition: true,
-                                type_checking,
+                                declared_only,
                             });
                         }
                     }
@@ -3753,23 +3851,25 @@ impl ProjectDecls {
                         }
                         Some(_) => break,
                         // A name the module binds no other way is what its star imports bind,
-                        // else, for a type checker, what its `if TYPE_CHECKING:` import binds.
+                        // else what its `__getattr__` serves or its `if TYPE_CHECKING:` import
+                        // binds.
                         None => match self.star_binding(m, first) {
                             StarBinding::Bound { target, .. } => {
                                 aliased_in = None;
-                                star = target;
-                                &star
+                                bound_elsewhere = target;
+                                &bound_elsewhere
                             }
                             StarBinding::Open if values => return None,
-                            StarBinding::Unbound
-                                if how.reads_type_checking()
-                                    && let Some(target) = m.type_checking_binding(first) =>
-                            {
-                                aliased_in = None;
-                                type_checking = true;
-                                target
-                            }
-                            StarBinding::Open | StarBinding::Unbound => break,
+                            StarBinding::Unbound => match self.unbound_name(m, first, how) {
+                                Some((target, declared)) => {
+                                    aliased_in = None;
+                                    declared_only |= declared;
+                                    bound_elsewhere = target;
+                                    &bound_elsewhere
+                                }
+                                None => break,
+                            },
+                            StarBinding::Open => break,
                         },
                     }
                 }
@@ -3786,8 +3886,66 @@ impl ProjectDecls {
         Some(Followed {
             name: cur,
             definition: false,
-            type_checking,
+            declared_only,
         })
+    }
+
+    /// What the name `name`, which no statement of `m` binds nor a star import, is for the chase
+    /// `how`, and whether that names only the class a type checker reads
+    /// ([`Followed::declared_only`]): what the module's `__getattr__` serves under it
+    /// ([`Self::served_by_getattr`]), a class object that may be a subclass only for the chases
+    /// reading names as a type checker does; and for those, what its `if TYPE_CHECKING:` import
+    /// binds, first for an annotation.
+    fn unbound_name(&self, m: &ModuleDecls, name: &str, how: Chase) -> Option<(String, bool)> {
+        let checked = || {
+            m.type_checking_binding(name)
+                .filter(|_| how.reads_type_checking())
+                .map(|target| (target.clone(), true))
+        };
+        if how.reads_annotations()
+            && let Some(found) = checked()
+        {
+            return Some(found);
+        }
+        let served = match self.served_by_getattr(m, name) {
+            Some(Ty::Ref(target)) => Some((target.clone(), false)),
+            Some(Ty::Class(class)) if how.reads_type_checking() => Some((class.clone(), true)),
+            _ => None,
+        };
+        served.or_else(checked)
+    }
+
+    /// What the `__getattr__` of `m` serves under `name` ([`ModuleDecls::getattr_exports`]),
+    /// unless another module may make it serve another object ([`Self::getattr_open`]).
+    fn served_by_getattr<'m>(&self, m: &'m ModuleDecls, name: &str) -> Option<&'m Ty> {
+        let served = m.getattr_exports.as_deref()?.served.get(name)?;
+        let module = &m.module_name;
+        self.read(|k| note(&mut k.grown_globals, &format!("{module}.__getattr__")));
+        (!self.getattr_open.contains(module)).then_some(served)
+    }
+
+    /// [`Self::getattr_open`]: the modules with a `__getattr__` heki follows that another
+    /// module stores into under a name heki cannot read (`setattr(module, key, v)`, which may
+    /// bind a name the hook serves), or one of whose hook's globals another module rebinds or
+    /// stores into (its table, the function it calls, the hook itself).
+    fn getattr_hooks_changed(&self) -> FxHashSet<String> {
+        let touched = |fqn: &str| {
+            self.rebound_elsewhere.contains(fqn)
+                || self.rebound_by_getattr(fqn)
+                || self.call_rebound(fqn)
+                || (self.split_module(fqn))
+                    .is_some_and(|(m, _)| self.global_stored_elsewhere(m, fqn))
+        };
+        // The hook's own name and the factories it calls are among its globals (another module
+        // may replace their code), and a store under a name heki cannot read touches every
+        // global of the module.
+        (self.modules.values())
+            .filter(|m| {
+                (m.getattr_exports.as_deref())
+                    .is_some_and(|exports| exports.globals.iter().any(|g| touched(g)))
+            })
+            .map(|m| m.module_name.clone())
+            .collect()
     }
 
     /// Whether another module rebinds or deletes the module alias `name` of `module`
@@ -4536,19 +4694,19 @@ impl ProjectDecls {
             })
     }
 
-    /// Whether storing or deleting `attr` on a value of the project class `class` runs no code
-    /// on every class it may be under R2: as [`Self::attr_store_on_instance`], except that a
-    /// class body may bind the name to a function it defines that no decorator replaces (a
-    /// method, which an instance's own attribute shadows) or that is a getter without a setter
-    /// or deleter (`FunctionDecl::is_property`: a `property` raises, a cached property's value
-    /// is the instance's own attribute).
+    /// Whether storing or deleting each of `attrs` on a value of the project class `class` runs
+    /// no code on every class it may be under R2: as [`Self::attr_store_on_instance`], except
+    /// that a class body may bind the name to a function it defines that no decorator replaces
+    /// (a method, which an instance's own attribute shadows) or that is a getter without a
+    /// setter or deleter (`FunctionDecl::is_property`: a `property` raises, a cached property's
+    /// value is the instance's own attribute).
     pub(crate) fn attr_write_runs_no_code(
         &self,
         class: &str,
-        attr: &str,
+        attrs: &[&str],
         catalog_stores: impl Fn(&str) -> bool,
     ) -> bool {
-        let plain_function = |c: &str| {
+        let plain_function = |c: &str, attr: &str| {
             self.own_method(c, attr)
                 .and_then(|k| self.function_decl(&k))
                 .is_some_and(|f| f.called_as_defined || f.is_property)
@@ -4557,27 +4715,29 @@ impl ProjectDecls {
             && self.value_classes(class).iter().all(|c| {
                 self.read(|k| note(&mut k.class_facts, c));
                 self.class(c).is_some_and(|d| {
-                    !d.properties.contains(attr)
-                        && (!d.code_attrs.contains(attr) || plain_function(c))
+                    attrs.iter().all(|attr| {
+                        !d.properties.contains(*attr)
+                            && (!d.code_attrs.contains(*attr) || plain_function(c, attr))
+                    })
                 })
             })
     }
 
-    /// Whether storing `attr` on a value of the project class `class` binds the instance's own
-    /// attribute to the value itself and runs no code of the project, on every class it may be
-    /// under R2: as [`Self::attr_write_runs_no_code`], and when one of those classes derives
-    /// from a base the catalog says stores on the instance (`catalog_stores`), none of them
-    /// configures it: binds a model configuration ([`ClassDecl::configures_model`]) or passes
-    /// class keywords (`ClassDecl::passes_keywords`). With `validate_assignment`,
+    /// Whether storing each of `attrs` on a value of the project class `class` binds the
+    /// instance's own attribute to the value itself and runs no code of the project, on every
+    /// class it may be under R2: as [`Self::attr_write_runs_no_code`], and when one of those
+    /// classes derives from a base the catalog says stores on the instance (`catalog_stores`),
+    /// none of them configures it: binds a model configuration ([`ClassDecl::configures_model`])
+    /// or passes class keywords (`ClassDecl::passes_keywords`). With `validate_assignment`,
     /// `pydantic.BaseModel` stores a validated conversion and runs the project's validators,
     /// which may keep the value.
     pub(crate) fn attr_write_stores_value(
         &self,
         class: &str,
-        attr: &str,
+        attrs: &[&str],
         catalog_stores: impl Fn(&str) -> bool,
     ) -> bool {
-        if !self.attr_write_runs_no_code(class, attr, &catalog_stores) {
+        if !self.attr_write_runs_no_code(class, attrs, &catalog_stores) {
             return false;
         }
         let classes = self.value_classes(class);
@@ -4607,6 +4767,85 @@ impl ProjectDecls {
             && !read.runs_hook(true)
             && read.code_binders.is_empty()
             && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
+    }
+
+    /// The containers a new instance of the project class `class` holds when the call
+    /// constructing it returns, each one the call made and nothing else holds, by attribute
+    /// ([`PlainInit::containers`]): those of the `__init__` the call runs, that of the first class
+    /// along the MRO defining one. Nothing else may run or change the construction: no class
+    /// along the MRO has a class decorator (which may generate another `__init__`),
+    /// `__init_subclass__`, a `dataclass_transform`, or a metaclass other than `type` or
+    /// `abc.ABCMeta` (whose `__call__` may run anything); that `__init__` and every one it
+    /// reaches through `super().__init__(...)` is a [`PlainInit`] (one along the MRO outside the
+    /// project is `object`'s), no `__init__` it reaches stores an attribute it makes a container
+    /// for, and every attribute they store is stored on the instance without running code of the
+    /// project ([`Self::attr_write_stores_value`]). A store running a property's setter or a
+    /// descriptor may hand the instance anywhere, and a base's `__init__` replacing the
+    /// instance's namespace makes every attribute shared. Empty for any other class. A read of
+    /// one of the attributes finds its container when reading it finds what the instance stores
+    /// ([`Self::attr_read_finds_stored`]).
+    pub(crate) fn constructor_containers(
+        &self,
+        class: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> &[(Box<str>, ContainerKind)] {
+        let mro = self.mro(class);
+        let decls: Vec<Option<&ClassDecl>> = (mro.iter())
+            .map(|c| {
+                self.read(|k| note(&mut k.class_facts, c));
+                self.class(c)
+            })
+            .collect();
+        let changes_construction = |d: &ClassDecl| {
+            !d.decorators.is_empty()
+                || d.transform.is_some()
+                || d.members.contains("__init_subclass__")
+        };
+        if self.has_custom_metaclass(class)
+            || decls.iter().flatten().any(|d| changes_construction(d))
+        {
+            return &[];
+        }
+        // From the class at `from` on, the first class defining `__init__`: a project class's
+        // own, or `None` for one outside the project other than a plain base, which may define
+        // its own; `Some(None)` when only `object.__init__` is left.
+        let next_init = |from: usize| -> Option<Option<(usize, &PlainInit)>> {
+            let found = (from..decls.len()).find(|&i| match decls[i] {
+                Some(d) => d.members.contains("__init__"),
+                None => !PLAIN_BASES.contains(&mro[i].as_str()),
+            });
+            let Some(i) = found else {
+                return Some(None);
+            };
+            decls[i]
+                .and_then(|d| d.plain_init.as_deref())
+                .map(|init| Some((i, init)))
+        };
+        let Some(Some((mut at, first))) = next_init(0) else {
+            return &[];
+        };
+        let mut stores: Vec<&str> = first.stores.iter().map(|a| &**a).collect();
+        let mut init = first;
+        while init.calls_next {
+            match next_init(at + 1) {
+                Some(Some((i, next))) => {
+                    // A base's `__init__` storing the attribute may rebind it after the store.
+                    let rebinds = |(a, _): &(Box<str>, _)| next.stores.binary_search(a).is_ok();
+                    if first.containers.iter().any(rebinds) {
+                        return &[];
+                    }
+                    stores.extend(next.stores.iter().map(|a| &**a));
+                    (at, init) = (i, next);
+                }
+                Some(None) => break,
+                None => return &[],
+            }
+        }
+        if self.attr_write_stores_value(class, &stores, &catalog_stores) {
+            &first.containers
+        } else {
+            &[]
+        }
     }
 
     /// The project classes whose bodies may supply an attribute of a value of the class `class`
@@ -7172,6 +7411,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
+    init_containers::init_containers(input, &mut decls);
     code_attrs(input, &mut decls);
     for (class, attr) in class_attrs_rebound(input, &decls) {
         if let Some(c) = decls.classes.get_mut(&class) {
@@ -7187,6 +7427,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.copy_registrations = sentinels::copy_registrations(input, &decls);
     decls.abc_registrations = sentinels::abc_registrations(input, &decls);
     returns::record_return_facts(input, &mut decls, kb);
+    decls.getattr_exports = getattr_exports::getattr_exports(input, &decls, kb).map(Box::new);
     decls
 }
 
@@ -9618,7 +9859,7 @@ fn set_flags<'i>(
 }
 
 /// Inferred value of an SSA variable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Val {
     /// A named object: module, class, function, or external symbol (by fqn).
     Ref(String),
@@ -9937,6 +10178,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     calls_setstate: false,
     exports: None,
     star_imports: None,
+    getattr_exports: None,
     path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
@@ -10231,7 +10473,12 @@ impl<'a> TypeCtx<'a> {
         }
         let last = fqn.rsplit('.').next().unwrap_or(fqn);
         if builtin.is_none() && last.chars().next().is_some_and(char::is_uppercase) {
-            return Some(Ty::inst(fqn));
+            // A class whose instances behave differently for an argument is typed as the
+            // catalog's class of that case (`anyio.Lock(fast_acquire=True)`).
+            let case = self.catalog(fqn).and_then(|e| e.case_for(arg));
+            return Some(Ty::inst(
+                case.and_then(|c| c.return_type.as_deref()).unwrap_or(fqn),
+            ));
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`,
         // `boto3.client`, `open`).

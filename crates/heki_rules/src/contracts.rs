@@ -599,6 +599,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
             .iter()
             .any(|code| selection.is_enabled(code)),
         guarded: selection.is_enabled("EFF117"),
+        checkpoints: selection.is_enabled("EFF118"),
         fresh_returns: selection.is_enabled("MUT119"),
         shared_state: false,
         blind_spots: false,

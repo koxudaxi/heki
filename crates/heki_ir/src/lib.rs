@@ -20,7 +20,7 @@ pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
     Carries, Decided, FnIndex, GlobalStores, InPlaceChanges, ItemOrigin, ItemOrigins, ItemSource,
     LEN_CAP_MAX, LastBindings, ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress,
-    SMALL_MAX, SmallDisplay, Trips, comprehension_id, is_builtin_name,
+    SMALL_MAX, SmallDisplay, Trips, comprehension_id, is_builtin_name, module_getattr_hook,
 };
 pub use special_methods::SpecialMethods;
 
@@ -882,6 +882,11 @@ pub struct IrFunction {
     /// variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub str_tails: Vec<(VarId, String)>,
+    /// The spans of the function's `finally` bodies, from the first statement to the end of
+    /// the last, in source order: a body is built once per way out of its `try`, and its
+    /// instructions keep the spans of its statements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finally_bodies: Vec<Span>,
     pub blocks: Vec<BasicBlock>,
     pub loops: Vec<NaturalLoop>,
     pub loop_carried: Vec<LoopCarriedInfo>,

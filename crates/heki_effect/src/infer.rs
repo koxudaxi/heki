@@ -217,7 +217,23 @@ impl Inferred {
         } else {
             self.value_of.clone()
         };
-        NarrowedVals { by_value, value_of }
+        let mut by_block: FxHashMap<BlockId, Vec<(VarId, Val)>> = FxHashMap::default();
+        for (&(bb, value), val) in &by_value {
+            by_block.entry(bb).or_default().push((value, val.clone()));
+        }
+        let mut scopes: FxHashMap<Vec<(VarId, Val)>, usize> = FxHashMap::default();
+        let mut scope_of = FxHashMap::default();
+        for (bb, mut vals) in by_block {
+            vals.sort_unstable_by_key(|(value, _)| *value);
+            let next = scopes.len() + 1;
+            scope_of.insert(bb, *scopes.entry(vals).or_insert(next));
+        }
+        NarrowedVals {
+            by_value,
+            value_of,
+            scope_of,
+            scopes: scopes.len() + 1,
+        }
     }
 
     /// The classes the second argument of each `isinstance(x, C)` call of `f` names, by that
@@ -264,6 +280,10 @@ pub(crate) struct NarrowedVals {
     by_value: FxHashMap<(BlockId, VarId), Val>,
     /// [`Narrowing::value_of`].
     value_of: FxHashMap<VarId, VarId>,
+    /// [`Self::scope`] of each block the checks narrow a value in.
+    scope_of: FxHashMap<BlockId, usize>,
+    /// [`Self::scopes`].
+    scopes: usize,
 }
 
 impl NarrowedVals {
@@ -272,6 +292,20 @@ impl NarrowedVals {
     pub(crate) fn get(&self, bb: BlockId, var: VarId) -> Option<&Val> {
         let value = self.value_of.get(&var).copied().unwrap_or(var);
         self.by_value.get(&(bb, value))
+    }
+
+    /// The narrowing scope of block `bb`, below [`Self::scopes`]: blocks share one when the
+    /// checks guarding them give every value the same type, so that [`Self::get`] answers alike
+    /// in all of them, and the blocks no check narrows a value in share scope 0. A walk reading
+    /// the values of the block it is asked in keeps its answers per scope and value, not per
+    /// block.
+    pub(crate) fn scope(&self, bb: BlockId) -> usize {
+        self.scope_of.get(&bb).copied().unwrap_or(0)
+    }
+
+    /// How many narrowing scopes the function's blocks fall into ([`Self::scope`]).
+    pub(crate) fn scopes(&self) -> usize {
+        self.scopes
     }
 }
 

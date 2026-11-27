@@ -429,6 +429,44 @@ resting on them is heuristic, under the open premise "incomplete-targets". The f
 what the class's instances run otherwise (special methods, attribute hooks, stores) read the base
 as a base heki knows nothing of (`ProjectDecls::mro`).
 
+A name no statement of a module binds at run time (one it binds only under `if TYPE_CHECKING:`
+included) is what the module's `__getattr__` (PEP 562) serves under it, where heki follows the
+hook for that literal name (`ModuleDecls::getattr_exports`, pass 1, `resolver::getattr_exports`).
+The hook is the module's only `def __getattr__(name)`, plain and undecorated, which no code of
+the module calls or binds again (`heki_ir::module_getattr_hook`), in a module that binds no name
+behind the IR (`exec`, a change through `globals()`, which a hook caching what it serves makes
+too). A walk over the hook's blocks keeps the names that may reach each block, as the names
+listed or every name but those listed (`resolver::getattr_exports::Reaching`, joined where ways
+meet): every name at the entry; along a branch, the names its test lets take each way (`name ==
+"Base"`, either way round, `name in ("Base", "Model")`, `name in TABLE`, also negated: the
+literals one way, every other name the other; `TABLE.get(name) is None`: only the table's keys
+the way it fails, every name but the keys whose value is a class or a function the way it
+holds); every name reaching a block through its exception edge and through a test of anything
+else (`and` / `or` of tests included). A name is served what every `return` it may reach
+gives, when they agree: a value read from a table of the module by the name (`TABLE[name]`,
+`TABLE.get(name)`; a missing key of a subscript raises, and so does calling the `None` of a
+missing `get`), what calling it, or calling a function of the module by its name, gives by that
+function's declarations (`FunctionDecl::declared_return_as_named`: the named object or class every
+return gives, such as a class it defines in its body, also behind `functools.lru_cache`, else the
+class object its annotation names), or the value any other `return` gives, whatever the name.
+Only a named object (`Ty::Ref`: an import, a class, a function) or a class object that may be a
+subclass (`Ty::Class`, `-> type[Base]`) is served. A bare `return`, a value of no type heki
+knows, different objects on different `return`s, and a factory another module defines (no type
+in pass 1) leave the name unknown, as before.
+
+The chases follow a served name as they follow an import (`ProjectDecls::unbound_name`): a named
+object for every chase, so calling the name, constructing it, and a class based on it are what
+the hook serves (exact targets, as through an import); a class object only for the chases that
+read names as a type checker does, as a `TYPE_CHECKING` import is followed (`Followed::declared_only`),
+so its methods type a call and give heuristic targets. An annotation naming the name reads it as a
+type checker does: its `if TYPE_CHECKING:` import first; a class base, a call, and a value read
+what the hook serves first. Another module storing into the module under a name heki cannot read
+(`setattr(module, key, v)`), or rebinding or storing into a global the hook reads (its table, the
+function it calls, the hook itself; `GetattrExports::globals`), leaves every name it serves
+unknown (`ProjectDecls::getattr_open`, an index of the declarations). The sets of what other
+modules change are emptied before the indexes are built again, so the language server reads a
+served name while it rebuilds them as `heki check` does.
+
 Some receivers have the class the language or the standard library gives them. An instance's
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
@@ -971,6 +1009,14 @@ EffectSummary(f) = {
                                                            // "[]": an object it holds as an item or an element
                                                            // (p["k"].append(x), for x in p: x.clear()), also
                                                            // through a shallow copy of it (ELEMENTS_PATH)
+    entry_change_params:      Bitset,                      // the "[]" changes that change an entry as part of
+                                                           // the container: in place, or an attribute heki ties
+                                                           // to no project class (an attribute of an entry of a
+                                                           // project class is that class's write, also of one
+                                                           // an isinstance check gives it, in the blocks the
+                                                           // check guards); with ArgOrigin::param_entries,
+                                                           // which argument is such an entry; contract-only
+                                                           // (IndirectItemMut)
     changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes (and "[]") whose objects change (in place
                                                            // or deeper), not just rebound: what a shallow copy
                                                            // shares (MUT202)
@@ -1175,7 +1221,8 @@ declaring the name `global`), and all of them when a star import, `exec`, or `gl
 rebind its names. `TypeCtx::global_literal` and `TypeCtx::global_str` read through it, and so do
 re-exports (`ProjectDecls::canonical_value`, which `literal_constant`, `str_constant`, and
 `small_global` follow). Contract-only facts
-(container entries, `WriteKind::ItemMut`, and a helper's `WriteKind::IndirectItemMut`, construction through `ArgOrigin::new_object` and
+(container entries, `WriteKind::ItemMut`, and a helper's `WriteKind::IndirectItemMut` from
+`EffectSummary::entry_change_params` and `ArgOrigin::param_entries`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
@@ -2199,7 +2246,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF118`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF103`, `DATA101`, or `EFF114` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -2552,7 +2599,31 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      and the files of the functions whose membership changed otherwise; the locked writes are
      places other files' reports show.
 
-14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+15. **`EFF118`** (heuristic): a cleanup awaiting a call that reaches an AnyIO or Trio cancellation
+   checkpoint with no shield on the way.
+   - The facts (computed only while the rule runs: `OptInFacts::checkpoints`): the catalog's
+     `checkpoint` effect is kept on an awaited call (an `async with` awaits the manager's
+     `__aenter__`) outside a shield, and propagates like any execution effect through the calls
+     that run a callee's body (an awaited `async def`), with its guards and shortest chain; a
+     constant argument deciding a guard against it stops it. `lowlevel.checkpoint()` and
+     `checkpoint_if_cancelled()` count only where a call, an await, or a `with` step follows on
+     some path (a walk over the blocks after them, linear in the function). `CallSite::shield`
+     is the state at the call (`heki_effect::cancellation::ShieldPoints`, a forward
+     must-dataflow over the `with` regions, `held::at_entry`): shielded inside a catalog cancel
+     scope (`cancel_scope`) made with a constant `shield=True`, open inside one made with
+     another value, one whose `shield` attribute the function sets, or one made elsewhere;
+     `CallSite::hides` drops the checkpoint at both. `anyio.Lock(fast_acquire=True)` is typed as
+     a class of its own (an argument case's `return_type`), which has no checkpoint rows.
+   - The rule (`eff_rules::unshielded_cleanup`) reads the cleanups of each `async def` from the
+     IR: `IrFunction::finally_bodies`, the `except` clauses first to take the cancellation (the
+     clause classes resolved as `EFF114` resolves them), and an `__aexit__` body; an awaited
+     call there with no scope around it reaching the checkpoint (`ProjectIndex::site_effects`) is
+     reported, once per position, unless the function's calls one level up (at most 64) all run
+     it shielded or only create its coroutine. The checkpoint effect is part of the summaries
+     and `CallSite::shield` of the call sites, so the language server's caller and callee
+     invalidation covers both.
+
+16. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
