@@ -335,7 +335,17 @@ fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Option<ShownByCh
 /// The `heki check` command that analyzes and selects as the run did, with `codes` named in
 /// `extend-select` when there are any.
 pub(super) fn check_command(analyzed: &Analyzed, codes: &[&str]) -> String {
-    let mut command = "heki check".to_owned();
+    let mut command = analysis_command(analyzed, "check");
+    if !codes.is_empty() {
+        command.push_str(" --extend-select ");
+        command.push_str(&codes.join(","));
+    }
+    command
+}
+
+/// `heki <subcommand>` with the paths and options that analyze and select as the run did.
+pub(super) fn analysis_command(analyzed: &Analyzed, subcommand: &str) -> String {
+    let mut command = format!("heki {subcommand}");
     if analyzed.check_paths != ["."] {
         for word in &analyzed.check_paths {
             command.push(' ');
@@ -345,10 +355,6 @@ pub(super) fn check_command(analyzed: &Analyzed, codes: &[&str]) -> String {
     for word in &analyzed.check_options {
         command.push(' ');
         command.push_str(&super::command_word(word));
-    }
-    if !codes.is_empty() {
-        command.push_str(" --extend-select ");
-        command.push_str(&codes.join(","));
     }
     command
 }

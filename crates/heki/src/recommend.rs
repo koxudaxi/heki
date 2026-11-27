@@ -4,14 +4,14 @@
 //! printed). It writes no file.
 
 use crate::check::{
-    baseline_path, finish, load, selectors, shown_dir, shown_errors, shown_text,
+    baseline_path, finish, load, print_diff, selectors, shown_dir, shown_errors, shown_text,
     warn_files_not_analyzed,
 };
-use crate::{AnalysisArgs, OutputFormat, RecommendArgs, ReportFormat};
+use crate::{AnalysisArgs, OutputFormat, RecommendArgs, RecommendFocus, ReportFormat};
 use anyhow::Result;
-use heki_diagnostics::RatchetBaseline;
+use heki_diagnostics::{RatchetBaseline, Stylesheet};
 use heki_rules::project::CommandPaths;
-use heki_rules::recommend::{Request, recommend};
+use heki_rules::recommend::{Advice, Focus, Request, recommend};
 use std::process::ExitCode;
 
 pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
@@ -36,7 +36,7 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
     let errors = shown_errors(&project.errors);
     let problems = crate::failure::of_files(&project.errors);
     let root = shown_dir(&project.env.root);
-    let report = recommend(Request {
+    let request = Request {
         root,
         project,
         current,
@@ -48,10 +48,32 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         shown: &shown_text,
         errors: errors.clone(),
         all: args.all,
-    })?;
-    match args.output_format {
-        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        ReportFormat::Text => print!("{}", report.content),
+        focus: args.focus.map(|RecommendFocus::Types| Focus::Types),
+        diff: args.diff,
+    };
+    let Advice { report, edited } = recommend(request)?;
+    if args.diff {
+        // A patch tool reads stdout: no color, and the summary on stderr.
+        for f in &edited {
+            print_diff(&f.path, &f.text, &f.edited, &Stylesheet::plain())?;
+        }
+        let (exact, heuristic) = report.suggestions.totals();
+        let left_out = match heuristic {
+            0 => String::new(),
+            n => format!(
+                "; the {n} heuristic one(s) are not in it ({} --focus types --all lists them)",
+                heki_rules::recommend::analysis_command(&report.analyzed, "recommend")
+            ),
+        };
+        eprintln!(
+            "The diff holds {exact} exact suggestion group(s) in {} file(s){left_out}.",
+            edited.len()
+        );
+    } else {
+        match args.output_format {
+            ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            ReportFormat::Text => print!("{}", report.content),
+        }
     }
     finish(OutputFormat::Full, &problems, ExitCode::SUCCESS)
 }

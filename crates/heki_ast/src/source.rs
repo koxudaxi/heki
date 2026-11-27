@@ -139,7 +139,13 @@ pub fn decode_source(bytes: Vec<u8>) -> Result<String, SourceError> {
 
 /// Encode source text in the encoding its own declaration names.
 pub fn encode_source(text: &str) -> Result<Vec<u8>, SourceError> {
-    let encoding = source_encoding(text.as_bytes())?;
+    encode_like(text, text)
+}
+
+/// Encode `text`, lines of the source text `source` or of an edit of it, in the encoding the
+/// declaration of `source` names: the bytes those lines have in the file.
+pub fn encode_like(source: &str, text: &str) -> Result<Vec<u8>, SourceError> {
+    let encoding = source_encoding(source.as_bytes())?;
     let limit = match encoding {
         SourceEncoding::Utf8 => return Ok(text.as_bytes().to_vec()),
         SourceEncoding::Latin1 => 0xFF,

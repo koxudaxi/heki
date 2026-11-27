@@ -121,7 +121,8 @@ naive rewrite are run on CPython: see [Development](development.md#checks-agains
 | `\n`, `\r\n`, or lone `\r` line breaks | Fixes work the same, and the lines they insert use the file's own line break. |
 
 `--diff` prints the paths every other output format prints (relative to the working directory),
-so `patch -p1` applies it where heki ran.
+so `patch -p1` applies it where heki ran. It writes the lines in the file's own encoding (a
+PEP 263 Latin-1 declaration included), as `--fix` writes the file, so the patch matches its bytes.
 
 ## Fixes keep type checkers and isort satisfied
 
