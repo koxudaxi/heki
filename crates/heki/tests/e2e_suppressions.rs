@@ -117,7 +117,7 @@ fn codes_that_suppressed_nothing_are_reported_only_when_asked() {
 #[test]
 fn only_codes_of_rules_that_ran_on_the_file_are_judged() {
     // `--select` leaves `EFF101` off; `per-file-ignores` turns it off in `a.py`; a heuristic
-    // rule left off (`EFF102`) did not run either.
+    // rule left off (`EFF117`) did not run either.
     let p = project("unused_ran", UNUSED, SUPPRESSED);
     let (code, stdout, _) = p.heki(&["check", "--select", "DATA101", "--output-format", "json"]);
     assert_eq!((code, json_reports(&stdout).len()), (0, 0), "{stdout}");
@@ -131,7 +131,7 @@ fn only_codes_of_rules_that_ran_on_the_file_are_judged() {
     let p = project(
         "unused_heuristic",
         UNUSED,
-        "def f(xs):\n    return [x for x in xs]  # heki: ignore[EFF102]\n",
+        "def f(xs):\n    return [x for x in xs]  # heki: ignore[EFF117]\n",
     );
     let (code, stdout, _) = p.heki(&["check", "--output-format", "json"]);
     assert_eq!((code, json_reports(&stdout).len()), (0, 0), "{stdout}");
@@ -139,7 +139,7 @@ fn only_codes_of_rules_that_ran_on_the_file_are_judged() {
     assert_eq!(code, 1);
     assert_eq!(
         found(&json_reports(&stdout)),
-        [(2, "unused-suppression", "EFF102")]
+        [(2, "unused-suppression", "EFF117")]
     );
 }
 

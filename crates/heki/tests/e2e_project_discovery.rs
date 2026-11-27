@@ -10,9 +10,11 @@ use std::path::Path;
 /// `import time` + a blocking helper.
 const BLOCKING_WAIT: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
 
-/// `heki check --output-format concise` of the project: `(exit code, stdout)`.
+/// `heki check --output-format concise` of the project, the opt-in `EFF102` named: `(exit code,
+/// stdout)`.
 fn concise(p: &Project) -> (i32, String) {
-    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    let (code, stdout, stderr) =
+        p.check(&["--output-format", "concise", "--extend-select", "EFF102"]);
     assert_ne!(code, 2, "{stderr}");
     (code, stdout)
 }
@@ -65,13 +67,15 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
     assert_eq!(concise(&p), (0, String::new()));
 }
 
-/// `heki check --heuristic --fail-on warning --output-format concise <args>` run from `dir`, as
-/// `Project::check` runs it: `(exit code, stdout)`.
+/// `heki check --heuristic --extend-select EFF102 --fail-on warning --output-format concise
+/// <args>` run from `dir`, as [`concise`] runs it: `(exit code, stdout)`.
 fn concise_in(dir: &Path, args: &[&str]) -> (i32, String) {
     let out = common::heki_command()
         .args([
             "check",
             "--heuristic",
+            "--extend-select",
+            "EFF102",
             "--fail-on",
             "warning",
             "--output-format",
@@ -160,7 +164,10 @@ fn src_lists_the_source_roots() {
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
     assert!(
-        stdout.contains("backend/server.py:6:9: EFF102 [heuristic] `config.net.client` allocates"),
+        stdout.contains(&format!(
+            "backend/server.py:6:9: EFF102 {} (through `config.net.client`)",
+            "every iteration over parameter `items` allocates an unpooled client: `httpx.Client`"
+        )),
         "{stdout}"
     );
 
@@ -174,7 +181,10 @@ fn src_lists_the_source_roots() {
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
     assert!(
-        stdout.contains("lib/pkg/server.py:6:9: EFF102 [heuristic] `pkg.net.client` allocates"),
+        stdout.contains(&format!(
+            "lib/pkg/server.py:6:9: EFF102 {} (through `pkg.net.client`)",
+            "every iteration over parameter `items` allocates an unpooled client: `httpx.Client`"
+        )),
         "{stdout}"
     );
 }

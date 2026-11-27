@@ -157,7 +157,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          annotation or a value annotated `Any` or `object`; an annotation naming the class lets \
          heki follow them (What heki cannot see)\n\
          \n\
-         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
+         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 4 heuristic rule(s) \
          off\n\
          \n\
          Types the code already keeps\n\
@@ -173,9 +173,9 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
          no: slower code, not a bug\n\
          \x20 see the 3 report(s): heki check --extend-select EFF101,OPT101,OPT110\n\
-         \x20 No reports here: 31 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
-         experimental and exact: MUT101, MUT111; heki recommend --all names the 24 heuristic \
-         one(s)\n\
+         \x20 No reports here: 31 rule(s); exact: EFF102, EFF105, OPT103, OPT111, OPT120, OPT121, \
+         OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 22 \
+         heuristic one(s)\n\
          \n\
          Contract candidates\n\
          \x20 effect-boundaries  app.lists  medium\n\
@@ -210,7 +210,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     );
     let (_, _, note) = p.heki(&["check"]);
     assert!(
-        note.contains("5 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
+        note.contains("4 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
         "{note}"
     );
     // The same counts as `heki check` for every selection, also with `lint.heuristic`.
@@ -760,8 +760,9 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF110        1      -  bug          not measured                      -          no: experimental\n\
         \x20 see the 7 report(s): heki check --extend-select EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF110\n\
-        \x20 No reports here: 27 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
-        experimental and exact: MUT101, MUT111; heki recommend --all names the 20 heuristic one(s)"
+        \x20 No reports here: 27 rule(s); exact: EFF102, EFF105, OPT103, OPT111, OPT120, OPT121, \
+        OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 18 heuristic \
+        one(s)"
     );
     assert!(
         out.contains(
@@ -784,9 +785,9 @@ fn rules_worth_enabling_follow_the_policy() {
     let listed = quiet_lines(&["--all"]);
     assert!(
         listed[0].ends_with(
-            "; experimental and exact: MUT101, MUT111; heuristic: EFF102, EFF105, EFF106, \
-             EFF112, EFF114, EFF115, EFF117, EFF118, IMP101, IMP102, IMP104, IMP301, \
-             IMP302, MUT108, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112"
+            "; experimental and exact: MUT101, MUT111; heuristic: EFF106, EFF112, EFF114, \
+             EFF115, EFF117, EFF118, IMP101, IMP102, IMP104, IMP301, IMP302, MUT108, MUT112, \
+             MUT113, MUT115, MUT118, MUT120, OPT112"
         ),
         "{listed:?}"
     );
