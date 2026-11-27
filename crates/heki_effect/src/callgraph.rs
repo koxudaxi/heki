@@ -1974,7 +1974,7 @@ enum KeptChain {
 }
 
 /// How an execution effect of a callee reaches the caller at one call ([`arrival`]).
-pub enum Arrival<'f> {
+pub(crate) enum Arrival<'f> {
     /// It does not: only implementations of classes the arguments cannot be reach it.
     Never,
     /// Whatever the caller's parameters are, by this chain of the callee.
@@ -1986,7 +1986,7 @@ pub enum Arrival<'f> {
 
 impl<'f> Arrival<'f> {
     /// The callee's shortest chain to the effect, `None` when it does not arrive.
-    pub fn tail(&self) -> Option<&'f [Arc<CallHop>]> {
+    pub(crate) fn tail(&self) -> Option<&'f [Arc<CallHop>]> {
         match self {
             Self::Never => None,
             Self::Always(tail) => Some(tail),
@@ -2003,7 +2003,7 @@ impl<'f> Arrival<'f> {
 /// derive not one from the other; when it is a parameter of the caller as itself, the caller's
 /// callers decide. A callee that is itself a subclass's override of a call on a parameter of
 /// the caller runs only when that parameter is an instance of the subclass.
-pub fn arrival<'f>(
+pub(crate) fn arrival<'f>(
     facts: &'f EffectSummary,
     callee: &EffectSummary,
     e: ExecEffectKind,
