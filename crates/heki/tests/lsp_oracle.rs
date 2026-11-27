@@ -9960,6 +9960,85 @@ fn lsp_diagnostics_equal_a_full_check_as_classes_start_and_stop_implementing_a_p
     s.lsp.stop(true);
 }
 
+const STATIC_MEMBERS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "members"
+targets = ["pkg.impl:Impl.build", "pkg.impl:Impl.make"]
+allowed-callers = ["pkg.impl:*"]
+"#;
+
+const STATIC_MEMBERS_HOST: &str = "from typing import Protocol\n\n\nclass Host(Protocol):\n    size: int\n\n    @staticmethod\n    def build() -> None: ...\n\n    @classmethod\n    def make(cls) -> None: ...\n";
+const STATIC_MEMBERS_IMPL: &str = "class Impl:\n    def __init__(self) -> None:\n        self.size = 0\n\n    @staticmethod\n    def build() -> None:\n        pass\n\n    @classmethod\n    def make(cls) -> None:\n        pass\n";
+const STATIC_MEMBERS_OTHER: &str =
+    "class Other:\n    def __init__(self) -> None:\n        self.size = 0\n";
+const STATIC_MEMBERS_USE: &str =
+    "from pkg.host import Host\n\n\ndef through(h: Host) -> None:\n    h.build()\n    h.make()\n";
+
+/// The static and class methods called through a protocol are a target's while the target's
+/// class alone implements the protocol, as the receiver tells the protocol: the calling module
+/// stays as it is while a class of another module starts implementing the protocol and stops
+/// again, and the protocol stops declaring the methods and declares them again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_static_and_class_members_through_a_protocol() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/host.py", STATIC_MEMBERS_HOST.to_owned()),
+        ("pkg/impl.py", STATIC_MEMBERS_IMPL.to_owned()),
+        ("pkg/other.py", STATIC_MEMBERS_OTHER.to_owned()),
+        ("pkg/use.py", STATIC_MEMBERS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_protocol_static_members",
+        STATIC_MEMBERS_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let other_implements = STATIC_MEMBERS_OTHER.replace(
+        "        self.size = 0\n",
+        "        self.size = 0\n\n    @staticmethod\n    def build() -> None:\n        pass\n\n    @classmethod\n    def make(cls) -> None:\n        pass\n",
+    );
+    let undeclared = STATIC_MEMBERS_HOST
+        .split("\n\n    @staticmethod")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+        + "\n";
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "a class outside the target's family starts implementing the protocol",
+            vec![save("pkg/other.py", &other_implements)],
+        )
+        .absent(reported),
+        Step::new(
+            "it stops implementing it",
+            vec![save("pkg/other.py", STATIC_MEMBERS_OTHER)],
+        )
+        .present(reported),
+        Step::new(
+            "the protocol stops declaring the static and class methods",
+            vec![save("pkg/host.py", &undeclared)],
+        ),
+        Step::new(
+            "it declares them again",
+            vec![save("pkg/host.py", STATIC_MEMBERS_HOST)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ------------------------------------- `__dict__` keys another `write-owners` contract names
 
 const LISTED_KEYS_CONFIG: &str = r#"[project]

@@ -242,13 +242,6 @@ fn judged_callees(site: &CallSite) -> Box<dyn Iterator<Item = &FuncKey> + '_> {
     }
 }
 
-/// The project class the receiver of `site` is typed with (the protocol of `h._helper()` with
-/// `h: Host`), as the first function it may call binds it.
-fn receiver_class(site: &CallSite) -> Option<&str> {
-    let bc = site.project_callees().first()?;
-    bc.params.first()?.typed_instance.as_deref()
-}
-
 /// Add to `groups` each of `targets` that none of them holds, as a group of its own.
 fn add_alone(groups: &mut Vec<Vec<usize>>, targets: Vec<usize>) {
     for t in targets {
@@ -469,7 +462,7 @@ impl FunctionMatchers {
     /// through a base class is one of a target only when each method it may run is.
     fn through_protocol(&self, decls: &ProjectDecls, site: &CallSite) -> Vec<usize> {
         let callees = site.project_callees();
-        let protocol = receiver_class(site);
+        let protocol = site.receiver_protocol();
         // A matcher naming every function the call runs names the first.
         let mut found = (callees.first())
             .map(|bc| self.matching(&bc.callee))
@@ -816,7 +809,8 @@ pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
 /// protocol, and the method is the protocol's declaration ([`CallSite::declared`]) or, for a
 /// reference, which keeps none, the one the site names.
 fn through_allowed_protocol(cx: &CheckContext<'_>, allowance: &Allowance, site: &CallSite) -> bool {
-    let (Some(bc), Some(protocol)) = (site.project_callees().first(), receiver_class(site)) else {
+    let (Some(bc), Some(protocol)) = (site.project_callees().first(), site.receiver_protocol())
+    else {
         return false;
     };
     let method = site.declared().unwrap_or(&bc.callee);
