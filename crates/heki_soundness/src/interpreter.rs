@@ -411,6 +411,10 @@ fn binop_result(op: BinOpKind, l: BuiltinKind, r: BuiltinKind) -> Option<Builtin
             }
             _ => None,
         },
+        // `str % value` formats into a new exact `str`. A scalar operand formats itself; a
+        // tuple, list, or dict hands its items to their `__repr__` / `__str__`, and an operand
+        // of unknown type may be a `str` subclass whose `__rmod__` runs first.
+        Mod if l == Str && matches!(r, Str | Bytes | Int | Float | Bool) => Some(Str),
         Sub | Mult | FloorDiv | Mod => match (l, r) {
             (a, b) if numeric(a) && numeric(b) => {
                 Some(if a == Float || b == Float { Float } else { Int })
@@ -1287,7 +1291,11 @@ impl<'a> FnCtx<'a> {
                     .chain(kwargs.iter().map(|(_, v)| *v)),
                 span,
             );
-            Self::opaque(st, dst, &format!("result of `{callee}`"), span);
+            if !unpacked && self.formats_exact_operands(st, callee_var, callee, args, kwargs) {
+                self.fresh(st, dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
+            } else {
+                Self::opaque(st, dst, &format!("result of `{callee}`"), span);
+            }
             self.after_def(st, dst, span);
             return;
         };
@@ -1312,6 +1320,9 @@ impl<'a> FnCtx<'a> {
                 _ => ElemKinds::Unknown,
             };
             self.fresh(st, dst, kind, site, span, elems);
+        } else if name == "str" && self.formats_exact_operands(st, callee_var, callee, args, kwargs)
+        {
+            self.fresh(st, dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
         } else if name == "range" {
             st.define(
                 dst,
@@ -1332,6 +1343,28 @@ impl<'a> FnCtx<'a> {
             st.add_derived(dst, &retained);
         }
         self.after_def(st, dst, span);
+    }
+
+    /// `str(x)`, `repr(x)`, `ascii(x)`, and `format(x, spec)` of exact builtins: their own
+    /// `__str__` / `__repr__` / `__format__` return an exact `str`. Another class's may return a
+    /// `str` subclass instance, which `str(x)` hands back unchanged (see `builtins.str` in the
+    /// knowledge base): an operand of unknown type gives no exact result.
+    fn formats_exact_operands(
+        &self,
+        st: &FrameState,
+        callee_var: Option<VarId>,
+        callee: &str,
+        args: &[VarId],
+        kwargs: &[(Option<String>, VarId)],
+    ) -> bool {
+        let max_args = match self.builtin_callee(callee_var, callee) {
+            Some("str" | "repr" | "ascii") => 1,
+            Some("format") => 2,
+            _ => return false,
+        };
+        kwargs.is_empty()
+            && args.len() <= max_args
+            && args.iter().all(|a| st.exact_type(*a).is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1360,7 +1393,14 @@ impl<'a> FnCtx<'a> {
                     .chain(kwargs.iter().map(|(_, v)| *v)),
                 span,
             );
-            Self::opaque(st, dst, &format!("result of `.{method}()`"), span);
+            // `str.join` and `str.format` on an exact `str` build a new exact `str` whatever
+            // their operands are (items that are not `str` raise); the operands stay escaped.
+            if st.exact_type(recv) == Some(BuiltinKind::Str) && matches!(method, "join" | "format")
+            {
+                self.fresh(st, dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
+            } else {
+                Self::opaque(st, dst, &format!("result of `.{method}()`"), span);
+            }
             self.after_def(st, dst, span);
             return;
         };
