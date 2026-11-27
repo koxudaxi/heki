@@ -69,6 +69,7 @@ docs_pages! {
     ImportBoundaries => "configuration/#import-boundaries",
     Groups => "configuration/#named-groups",
     Include => "configuration/#several-configuration-files",
+    DefinedAt => "configuration/#where-a-contract-is-defined",
     Imports => "configuration/#imports-toolhekiimports",
     Ecosystem => "configuration/#ecosystem-knowledge-toolhekiecosystem",
     Rules => "rules/",
@@ -387,6 +388,24 @@ pub fn line_column(text: &str, offset: usize) -> (u32, u32) {
     (to_u32(line), to_u32(column))
 }
 
+/// The byte offsets at which the lines of a text start, so each position of the text is found
+/// without scanning the text before it again.
+pub struct LineStarts(Vec<usize>);
+
+impl LineStarts {
+    pub fn of(text: &str) -> Self {
+        let newlines = text.match_indices('\n').map(|(i, _)| i + 1);
+        Self(std::iter::once(0).chain(newlines).collect())
+    }
+
+    /// [`line_column`] of `offset` in the text these starts are of.
+    pub fn line_column(&self, text: &str, offset: usize) -> (u32, u32) {
+        let offset = offset.min(text.len());
+        let line = self.0.partition_point(|start| *start <= offset);
+        (to_u32(line), to_u32(offset - self.0[line - 1] + 1))
+    }
+}
+
 fn to_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
@@ -452,20 +471,29 @@ pub(crate) fn settings_root(
 
 /// The tables an item holds: itself, or each table of an array of tables.
 pub(crate) fn table_items(item: &toml_edit::Item) -> Vec<&dyn toml_edit::TableLike> {
+    (tables_at(item).into_iter()).map(|(t, _)| t).collect()
+}
+
+/// [`table_items`], each with the offset where it starts: its header, or its `{` when inline.
+pub(crate) fn tables_at(item: &toml_edit::Item) -> Vec<(&dyn toml_edit::TableLike, Option<usize>)> {
+    let start = |span: Option<Range<usize>>| span.map(|s| s.start);
     if let Some(array) = item.as_array_of_tables() {
         return array
             .iter()
-            .map(|t| t as &dyn toml_edit::TableLike)
+            .map(|t| (t as &dyn toml_edit::TableLike, start(t.span())))
             .collect();
     }
     if let Some(array) = item.as_array() {
         return array
             .iter()
             .filter_map(|v| v.as_inline_table())
-            .map(|t| t as &dyn toml_edit::TableLike)
+            .map(|t| (t as &dyn toml_edit::TableLike, start(t.span())))
             .collect();
     }
-    item.as_table_like().into_iter().collect()
+    let at = |t: &toml_edit::Table| start(t.span());
+    (item.as_table_like().into_iter())
+        .map(|t| (t, item.as_table().and_then(at)))
+        .collect()
 }
 
 /// The span of `value` in `item`: the item itself, or an entry of its array.
@@ -522,6 +550,16 @@ mod tests {
         assert_eq!(line_column("ab\ncd", 0), (1, 1));
         assert_eq!(line_column("ab\ncd", 4), (2, 2));
         assert_eq!(line_column("ab", 9), (1, 3));
+        for text in ["ab\ncd", "ab\n", "\n\nx", ""] {
+            let starts = LineStarts::of(text);
+            for offset in 0..text.len() + 3 {
+                assert_eq!(
+                    starts.line_column(text, offset),
+                    line_column(text, offset),
+                    "{text:?} at {offset}"
+                );
+            }
+        }
     }
 
     #[test]

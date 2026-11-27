@@ -217,7 +217,17 @@ fn the_key_works_in_an_included_file_and_in_its_defaults_table() {
         tables.replace("KEY", "")
     );
     p.write("contracts/owners.toml", &defaults);
-    assert_eq!(found(&p), in_file);
+    // The places of the contracts differ between the two files; the findings do not.
+    let without_places = |mut found: Vec<Value>| {
+        for finding in &mut found {
+            finding
+                .as_object_mut()
+                .unwrap()
+                .remove("contract_locations");
+        }
+        found
+    };
+    assert_eq!(without_places(found(&p)), without_places(in_file));
 }
 
 #[test]
@@ -234,7 +244,9 @@ fn an_entry_names_only_methods_that_exist_as_before() {
     let (code, _, stderr) = run(&files, config);
     assert_eq!(code, 1);
     assert!(
-        stderr.contains("`allowed-writers` entry `Base.extra` of write-owners `items` names no function or method"),
+        stderr.contains(
+            "`allowed-writers` entry `Base.extra` of write-owners `items` (from pyproject.toml:"
+        ) && stderr.contains("names no function or method"),
         "{stderr}"
     );
 }

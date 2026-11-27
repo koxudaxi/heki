@@ -312,6 +312,39 @@
       ],
       "type": "object"
     },
+    "ContractLocation": {
+      "additionalProperties": false,
+      "description": "Where the configuration defines a contract a report is of, or the entry of it the report\nnames: where a configuration file writes it, or the place the contract's `source` or\n`entry-sources` names instead.",
+      "properties": {
+        "column": {
+          "description": "The 1-based byte column (1 for a place `source` or `entry-sources` names).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "The 1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "What is there: the contract (``write-owners contract `fields` ``), or the entry of it\n(``` `targets` entry `pkg.m.Model.fields` ```), with the group that holds it.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, as reports print paths.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "message"
+      ],
+      "type": "object"
+    },
     "ContractRole": {
       "additionalProperties": false,
       "properties": {
@@ -376,6 +409,7 @@
         "https://heki.koxudaxi.dev/configuration/#import-boundaries",
         "https://heki.koxudaxi.dev/configuration/#named-groups",
         "https://heki.koxudaxi.dev/configuration/#several-configuration-files",
+        "https://heki.koxudaxi.dev/configuration/#where-a-contract-is-defined",
         "https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports",
         "https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem",
         "https://heki.koxudaxi.dev/rules/",
@@ -1342,6 +1376,13 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "contract_locations": {
+          "description": "Where the configuration defines the contracts a contract report is of: each contract,\nthen the entry of it the report names as its target. Written to JSON only when not\nempty; SARIF and the language server add them to the related locations.",
+          "items": {
+            "$ref": "#/$defs/ContractLocation"
+          },
+          "type": "array"
         },
         "evidence": {
           "description": "What shows the claim holds, when the rule keeps it.",

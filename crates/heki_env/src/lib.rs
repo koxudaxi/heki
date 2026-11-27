@@ -11,7 +11,7 @@ mod stdlib;
 
 pub use declared::{Declared, EntryPoint, normalize_distribution, requirement_name};
 pub use defaults::with_defaults;
-pub use fold::{ConfigSources, EntryPlace, FoldProblem, UnusedGroup, included_files};
+pub use fold::{ConfigSources, DefinedAt, EntryPlace, FoldProblem, UnusedGroup, included_files};
 pub use problem::{Docs, Explain, Problem, Setting};
 pub use published::{SCHEMA_SITE, published_schema};
 pub use stdlib::is_stdlib_module;
@@ -223,6 +223,14 @@ pub struct WriteOwnerRule {
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
     pub fail: Option<bool>,
+    /// Where the contract is defined, as `"path:line"` with the path relative to the project
+    /// root, when the table is generated from another file: reports point there instead of at
+    /// the table. Metadata only.
+    pub source: Option<String>,
+    /// Where entries of the table's lists are defined, by entry (`"path:line"` as for
+    /// `source`), when the table holds entries of several origins: reports point there instead
+    /// of at the entry. Metadata only.
+    pub entry_sources: BTreeMap<String, String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -258,6 +266,14 @@ pub struct ReadOwnerRule {
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
     pub fail: Option<bool>,
+    /// Where the contract is defined, as `"path:line"` with the path relative to the project
+    /// root, when the table is generated from another file: reports point there instead of at
+    /// the table. Metadata only.
+    pub source: Option<String>,
+    /// Where entries of the table's lists are defined, by entry (`"path:line"` as for
+    /// `source`), when the table holds entries of several origins: reports point there instead
+    /// of at the entry. Metadata only.
+    pub entry_sources: BTreeMap<String, String>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -311,6 +327,14 @@ pub struct CallOwnerRule {
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
     pub fail: Option<bool>,
+    /// Where the contract is defined, as `"path:line"` with the path relative to the project
+    /// root, when the table is generated from another file: reports point there instead of at
+    /// the table. Metadata only.
+    pub source: Option<String>,
+    /// Where entries of the table's lists are defined, by entry (`"path:line"` as for
+    /// `source`), when the table holds entries of several origins: reports point there instead
+    /// of at the entry. Metadata only.
+    pub entry_sources: BTreeMap<String, String>,
 }
 
 /// `[[tool.heki.import-boundaries]]` contract for `IMP201`: which modules the modules of
@@ -348,6 +372,14 @@ pub struct ImportBoundaryRule {
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
     pub fail: Option<bool>,
+    /// Where the contract is defined, as `"path:line"` with the path relative to the project
+    /// root, when the table is generated from another file: reports point there instead of at
+    /// the table. Metadata only.
+    pub source: Option<String>,
+    /// Where entries of the table's lists are defined, by entry (`"path:line"` as for
+    /// `source`), when the table holds entries of several origins: reports point there instead
+    /// of at the entry. Metadata only.
+    pub entry_sources: BTreeMap<String, String>,
 }
 
 /// `[tool.heki.imports]`: which imports the import rules count, and which distributions
@@ -417,6 +449,14 @@ pub struct EffectBoundaryRule {
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
     pub fail: Option<bool>,
+    /// Where the contract is defined, as `"path:line"` with the path relative to the project
+    /// root, when the table is generated from another file: reports point there instead of at
+    /// the table. Metadata only.
+    pub source: Option<String>,
+    /// Where entries of the table's lists are defined, by entry (`"path:line"` as for
+    /// `source`), when the table holds entries of several origins: reports point there instead
+    /// of at the entry. Metadata only.
+    pub entry_sources: BTreeMap<String, String>,
 }
 
 /// `[[tool.heki.readonly-returns]]` contract for `MUT202`.
@@ -430,6 +470,14 @@ pub struct ReadOnlyReturnRule {
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
     pub fail: Option<bool>,
+    /// Where the contract is defined, as `"path:line"` with the path relative to the project
+    /// root, when the table is generated from another file: reports point there instead of at
+    /// the table. Metadata only.
+    pub source: Option<String>,
+    /// Where entries of the table's lists are defined, by entry (`"path:line"` as for
+    /// `source`), when the table holds entries of several origins: reports point there instead
+    /// of at the entry. Metadata only.
+    pub entry_sources: BTreeMap<String, String>,
 }
 
 /// `[[tool.heki.invalidation]]` contract for `MUT208`: a write to one of `targets` must be
@@ -455,6 +503,14 @@ pub struct InvalidationRule {
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
     pub fail: Option<bool>,
+    /// Where the contract is defined, as `"path:line"` with the path relative to the project
+    /// root, when the table is generated from another file: reports point there instead of at
+    /// the table. Metadata only.
+    pub source: Option<String>,
+    /// Where entries of the table's lists are defined, by entry (`"path:line"` as for
+    /// `source`), when the table holds entries of several origins: reports point there instead
+    /// of at the entry. Metadata only.
+    pub entry_sources: BTreeMap<String, String>,
 }
 
 /// `[[tool.heki.ecosystem]]` user addition / override of a Layer 2 ecosystem KB entry.
@@ -1367,6 +1423,8 @@ import-probes = "report"
                 protocol_subclasses: Some(false),
                 include_overrides: None,
                 fail: None,
+                source: None,
+                entry_sources: BTreeMap::new(),
             }
         );
         assert_eq!(
@@ -1388,6 +1446,8 @@ import-probes = "report"
                 protocol_subclasses: None,
                 include_overrides: None,
                 fail: None,
+                source: None,
+                entry_sources: BTreeMap::new(),
             }
         );
         assert_eq!(
@@ -1414,6 +1474,8 @@ import-probes = "report"
                 unresolved: None,
                 include_overrides: None,
                 fail: None,
+                source: None,
+                entry_sources: BTreeMap::new(),
             }
         );
         assert!(cfg.readonly_returns[0].deep);
@@ -1427,6 +1489,8 @@ import-probes = "report"
                 include_overrides: Some(true),
                 message: Some("announce the change to the store".into()),
                 fail: None,
+                source: None,
+                entry_sources: BTreeMap::new(),
             }
         );
         assert!(cfg.ecosystem.is_empty());

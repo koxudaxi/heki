@@ -236,7 +236,7 @@ fn an_argument_list_no_named_callable_takes_is_warned_about() {
     // `keywords` takes `**options`, and `Backend` takes `name`.
     let warned = |entry: &str, taking: &str| {
         format!(
-            "warning: `targets` entry `{entry}` of call-owners `backend-module` names no function, method, or class taking {taking} in the analyzed files"
+            "warning: `targets` entry `{entry}` of call-owners `backend-module` (from pyproject.toml:9; contract at pyproject.toml:7) names no function, method, or class taking {taking} in the analyzed files"
         )
     };
     assert_eq!(
@@ -265,7 +265,7 @@ fn a_module_qualified_argument_list_is_checked_against_the_project_declarations(
     assert_eq!(
         warnings,
         vec![
-            "warning: `targets` entry `pkg.lib:make(backend=\"x\")` of call-owners `backend-module` names no function, method, or class taking `backend` in the analyzed files"
+            "warning: `targets` entry `pkg.lib:make(backend=\"x\")` of call-owners `backend-module` (from pyproject.toml:9; contract at pyproject.toml:7) names no function, method, or class taking `backend` in the analyzed files"
         ]
     );
 }

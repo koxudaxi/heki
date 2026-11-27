@@ -9,8 +9,9 @@
 //! watcher report it (`workspace/didChangeWatchedFiles`). After it, the harness waits until the
 //! server is idle ([`Lsp::settle`]: `heki/stats` reports no work in flight, and every
 //! publication it counts has arrived; no sleeps) and compares, file by file, the range, code,
-//! severity, certainty, message (labelled for a heuristic rule), related locations, and help (the
-//! last related entry, at the diagnostic's own range) of every diagnostic. A step also names diagnostics
+//! severity, certainty, message (labelled for a heuristic rule), related locations, the places of
+//! its contracts, and help (the last related entry, at the diagnostic's own range) of every
+//! diagnostic. A step also names diagnostics
 //! the CLI must (or must not) report, so it exercises what it describes, and a step marked
 //! `cutoff` must stop at the edited files (Early Cutoff). A new step is a few lines; a new group
 //! is a function and a line in `sessions!`.
@@ -7177,7 +7178,53 @@ fn steps_configuration() -> Vec<Step> {
             vec![Action::Configure(CONFIG.to_owned())],
         )
         .present(&[("pkg/svc_user.py", "EFF101")]),
+        // The places of the contracts are compared too: each step moves the ones a report shows.
+        Step::new(
+            "a comment above the contracts moves the place of each",
+            vec![Action::Configure(format!("# contracts\n\n{CONFIG}"))],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "a write owner in an included file",
+            vec![
+                Action::Write("contracts/boxes.toml", BOXES.to_owned()),
+                Action::Configure(with_boxes()),
+            ],
+        )
+        .present(&[("pkg/shapes.py", "MUT201")]),
+        Step::new(
+            "the included file's table moves down",
+            vec![Action::Write(
+                "contracts/boxes.toml",
+                format!("# boxes\n\n{BOXES}"),
+            )],
+        )
+        .present(&[("pkg/shapes.py", "MUT201")]),
+        Step::new(
+            "the included table names where it is defined",
+            vec![Action::Write(
+                "contracts/boxes.toml",
+                format!("{BOXES}source = \"gen/boxes.py:7\"\nentry-sources = {{ \"Box.items\" = \"gen/boxes.py:9\" }}\n"),
+            )],
+        )
+        .present(&[("pkg/shapes.py", "MUT201")]),
+        Step::new(
+            "the included file is gone from the configuration",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .absent(&[("pkg/shapes.py", "MUT201")]),
     ]
+}
+
+/// A write owner of an included file ([`with_boxes`]).
+const BOXES: &str = "[[write-owners]]\nname = \"boxes\"\ntargets = [\"Box.items\"]\n";
+
+/// [`CONFIG`] including `contracts/boxes.toml`.
+fn with_boxes() -> String {
+    CONFIG.replace(
+        "[tool.heki.lint]\n",
+        "[tool.heki]\ninclude = [\"contracts/boxes.toml\"]\n\n[tool.heki.lint]\n",
+    )
 }
 
 const MEMBER_PYPROJECT: &str = "[project]\nname = \"member\"\n";
@@ -7684,6 +7731,21 @@ fn cli_range(p: &Project, file: &str, span: &Value) -> Range {
     )
 }
 
+/// A place given by its 1-based line and byte column -> the empty LSP range there.
+fn cli_point(p: &Project, file: &str, line: u64, column: u64) -> Range {
+    let text = std::fs::read_to_string(p.dir.join(file)).unwrap_or_default();
+    let shown = text.lines().nth(usize::try_from(line - 1).unwrap());
+    let before = |l: &str| {
+        l.get(..usize::try_from(column - 1).unwrap())
+            .map(str::to_owned)
+    };
+    let character = shown
+        .and_then(before)
+        .map_or(column - 1, |b| b.encode_utf16().count() as u64);
+    let at = (line - 1, character);
+    (file.to_owned(), at, at)
+}
+
 /// `heki check --output-format json` of the project, by file.
 fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
     let (code, out, err) = p.check(&["--output-format", "json"]);
@@ -7712,6 +7774,20 @@ fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
                     r["message"].as_str().unwrap().to_owned(),
                 )
             })
+            .chain(
+                d["contract_locations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| {
+                        let at = |key: &str| c[key].as_u64().unwrap();
+                        let file = c["path"].as_str().unwrap();
+                        (
+                            cli_point(p, file, at("line"), at("column")),
+                            c["message"].as_str().unwrap().to_owned(),
+                        )
+                    }),
+            )
             .chain(help)
             .collect();
         by_file.entry(file.clone()).or_default().push(Diag {

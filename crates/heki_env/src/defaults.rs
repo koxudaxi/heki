@@ -2,7 +2,8 @@
 //! the defaults table, so a configuration of many tables that repeat one value writes it once.
 //!
 //! A table's own key wins, and a list is the table's whole or the default's whole, never both.
-//! `name` and `targets` identify one contract and cannot be defaulted. The defaults are folded
+//! `name` and `targets` identify one contract, and `source` and `entry-sources` say where it is
+//! defined: they cannot be defaulted. The defaults are folded
 //! into the text before the tables are read ([`crate::fold`]), so each reader (a check, `heki
 //! inspect`) sees the effective values; a tool that adds a table to the configuration (`heki
 //! recommend` trying a candidate) takes them through [`with_defaults`].
@@ -10,8 +11,8 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// The keys that name one contract of a kind.
-pub(crate) const NOT_DEFAULTED: [&str; 2] = ["name", "targets"];
+/// The keys that name one contract of a kind, and where it is defined.
+pub(crate) const NOT_DEFAULTED: [&str; 4] = ["name", "targets", "source", "entry-sources"];
 
 /// The suffix of a contract key's defaults table: `call-owners-defaults`.
 pub(crate) const SUFFIX: &str = "-defaults";

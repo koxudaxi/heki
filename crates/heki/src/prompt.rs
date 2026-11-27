@@ -283,6 +283,7 @@ fn is_unset(value: &Value) -> bool {
         Value::Null => true,
         Value::String(s) => s.is_empty(),
         Value::Array(items) => items.is_empty(),
+        Value::Object(keys) => keys.is_empty(),
         _ => false,
     }
 }

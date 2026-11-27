@@ -188,9 +188,9 @@ fn a_dotted_target_stays_judged_at_the_definition() {
     assert_eq!(
         warnings,
         vec![
-            "warning: `targets` entry `pkg.Kind` of call-owners `root-name` names no function, method, or class in the analyzed files"
+            "warning: `targets` entry `pkg.Kind` of call-owners `root-name` (from pyproject.toml:9; contract at pyproject.toml:7) names no function, method, or class in the analyzed files"
                 .to_owned(),
-            "warning: `targets` entry `pkg.missing:Kind` of call-owners `root-name` names no function, method, or class in the analyzed files"
+            "warning: `targets` entry `pkg.missing:Kind` of call-owners `root-name` (from pyproject.toml:9; contract at pyproject.toml:7) names no function, method, or class in the analyzed files"
                 .to_owned(),
         ]
     );

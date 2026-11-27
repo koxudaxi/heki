@@ -68,6 +68,13 @@ pub struct UnmatchedEntry {
     /// it: in a file `include` lists, or in a group (`@name`); each place once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub written_at: Vec<EntryPlace>,
+    /// Where the entry is defined: each place once, as `entry-sources` names it, else as
+    /// written (in a table, or in a group).
+    pub entry_at: Vec<EntryPlace>,
+    /// Where the contracts of `contracts` are defined, each defining table once, in their
+    /// order: as its `source` names it, else its table. Contracts of one name defined in
+    /// several tables list every table.
+    pub contracts_at: Vec<EntryPlace>,
 }
 
 impl UnmatchedEntry {
@@ -77,15 +84,31 @@ impl UnmatchedEntry {
             Some(_) => c.to_owned(),
             None => format!("`{c}`"),
         });
-        let written_at = match self.written_at.as_slice() {
-            [] => String::new(),
-            places => {
-                let places: Vec<String> = places.iter().map(ToString::to_string).collect();
-                format!(" (from {})", places.join(", "))
+        let shown = |places: &[EntryPlace]| {
+            let mut texts: Vec<String> = Vec::new();
+            for text in places.iter().map(ToString::to_string) {
+                if !texts.contains(&text) {
+                    texts.push(text);
+                }
             }
+            texts
+        };
+        let (entries, tables) = (shown(&self.entry_at), shown(&self.contracts_at));
+        let mut places = Vec::new();
+        if !entries.is_empty() {
+            places.push(format!("from {}", entries.join(", ")));
+        }
+        match tables.as_slice() {
+            [] => {}
+            [one] => places.push(format!("contract at {one}")),
+            all => places.push(format!("contracts at {}", all.join(", "))),
+        }
+        let places = match places.as_slice() {
+            [] => String::new(),
+            parts => format!(" ({})", parts.join("; ")),
         };
         let mut out = format!(
-            "`{}` entry `{}` of {} {contracts}{written_at} ",
+            "`{}` entry `{}` of {} {contracts}{places} ",
             self.key, self.entry, self.kind
         );
         let (verb, they) = match self.alternatives.as_slice() {
@@ -864,11 +887,23 @@ pub(crate) fn unmatched_entries(
                     at.insert(record(&mut found, (kind, name), entry, unmatched))
                 }
             };
-            let place = (cx.config.sources).place(kind, key.index, name, position);
+            let sources = &cx.config.sources;
+            let place = sources.place(kind, key.index, name, position);
+            let defined = sources.entry_at(kind, key.index, name, position);
             for &at in at.iter() {
                 let found = &mut found[at];
                 if found.contracts.last() != Some(&key.contract) {
                     found.contracts.push(key.contract.clone());
+                }
+                if let Some(table) = sources.contract(kind, key.index)
+                    && !found.contracts_at.contains(&table.place)
+                {
+                    found.contracts_at.push(table.place.clone());
+                }
+                if let Some(defined) = defined
+                    && !found.entry_at.contains(&defined.place)
+                {
+                    found.entry_at.push(defined.place.clone());
                 }
                 if let Some(place) = place
                     && !found.written_at.contains(place)
@@ -906,6 +941,8 @@ fn record(
                 alternatives: Vec::new(),
                 named_at_run_time: missing.named_at_run_time,
                 written_at: Vec::new(),
+                entry_at: Vec::new(),
+                contracts_at: Vec::new(),
             });
             at.push(found.len() - 1);
             found.len() - 1

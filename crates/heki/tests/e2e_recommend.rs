@@ -2716,12 +2716,14 @@ fn the_report_lists_the_contract_entries_that_match_nothing() {
             "contracts": ["fields"],
             "names_no": "attribute, method, or `__dict__` key of `pkg.model.Field`",
             "nearest": ["pkg.model.Field.kind"],
+            "entry_at": [{"file": "pyproject.toml", "line": 9}],
+            "contracts_at": [{"file": "pyproject.toml", "line": 7}],
         }])
     );
     assert_follows_the_schema(&report);
     let (_, text, _) = p.heki(&["recommend"]);
     assert!(
-        text.contains("\nContract entries that match nothing\n  - `targets` entry `pkg.model.Field.knd` of write-owners `fields` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field.kind` exists\n"),
+        text.contains("\nContract entries that match nothing\n  - `targets` entry `pkg.model.Field.knd` of write-owners `fields` (from pyproject.toml:9; contract at pyproject.toml:7) names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field.kind` exists\n"),
         "{text}"
     );
 }

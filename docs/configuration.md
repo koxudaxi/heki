@@ -394,7 +394,8 @@ references = "ignore"
   `references`. `heki check`, `heki inspect`, and `heki recommend` read the effective values.
 - A table's own key overrides the default, an empty list too (`allowed-callers = []` is a list
   of no callers). A list is replaced whole, never merged with the default's.
-- `name` and `targets` name one contract, so they are errors in a defaults table. Any other key
+- `name` and `targets` name one contract, and `source` and `entry-sources` say where one is
+  [defined](#where-a-contract-is-defined), so they are errors in a defaults table. Any other key
   of the kind may be defaulted, `fail` among them: `fail = true` in `[tool.heki.call-owners-defaults]`
   makes the reports of every `call-owners` table fail the run, and a table with `fail = false`
   keeps its reports advisory.
@@ -491,6 +492,34 @@ allowed-writers = ["@store"]
   that is not relative, a file listed twice, the main file listed, `include` in an included file, and any setting but the
   tables above in an included file. An error in the TOML or a value of an included file names
   that file.
+
+### Where a contract is defined
+
+Every contract report points at the contract it is of and at the entry its target names (JSON
+`contract_locations`, SARIF related locations, and the language server's related information:
+[Output formats](output-formats.md#where-a-contract-report-points)), and every
+[entry that matches nothing](#entries-that-match-nothing) is warned about with its place and its
+contract's. The place is where the file writes it: the table's header, the entry in its list,
+in an included file, a defaults table, or a group. A table generated from another file can name
+the place of the rule there instead:
+
+```toml
+[[tool.heki.write-owners]]
+name = "fields"
+targets = ["pkg.model.Model.fields", "pkg.model.Model.extra"]
+allowed-writers = ["pkg.store.*"]
+source = "scripts/tables.py:120"
+entry-sources = { "pkg.model.Model.extra" = "scripts/tables.py:131" }
+```
+
+- `source = "path:line"` is shown for the table, and `entry-sources` maps an entry, as the lists
+  write it out, to the place shown for it, for a table whose entries come from several places.
+  The path is relative to the project root, and the line counts from 1. The file need not
+  exist.
+- They are metadata: they change no match, no baseline key, and no judgment of an entry that
+  matches nothing. Without them, the places in the configuration files are given.
+- Errors (exit code 2), each at its file and line: a value that is not `path:line` (no line, a
+  line of 0, a rooted path), and an `entry-sources` entry that no list of the table holds.
 
 ### `write-owners`
 
@@ -1464,7 +1493,7 @@ last part, or the same last part and a like holder), and
 
 ```console
 $ heki check
-warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-caches` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field._type_cache` exists
+warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-caches` (from pyproject.toml:9; contract at pyproject.toml:7) names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field._type_cache` exists
 ```
 
 - Judged, in the contracts whose rules run: the targets, `allowed-*`, `forbidden-*`,
@@ -1549,11 +1578,14 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   code in the others. A file given is checked in its project, so its run judges. With the key
   set, every run judges the files it analyzes.
 - An entry written in a file `include` lists, or in a group, is judged as one written in the
-  contract (braces first, a glob holder by its written-out prefix), and is named with where it
-  is written:
+  contract (braces first, a glob holder by its written-out prefix). Each warning names where
+  the entry is written, in a table, an included file, or a group, and where its contracts are,
+  or the places their [`source` and `entry-sources`](#where-a-contract-is-defined) name:
   ``warning: `allowed-writers` entry `pkg.store.gone` of write-owners `fields` (from group `store`
-  at contracts/store.toml:3) names no function or method in the analyzed files``. A group that no
-  contract uses is reported under the same setting:
+  at contracts/store.toml:3; contract at pyproject.toml:12) names no function or method in the
+  analyzed files``. JSON output of `heki recommend` gives them as `entry_at` and
+  `contracts_at`, and the places in the files `include` lists and in groups also as
+  `written_at`. A group that no contract uses is reported under the same setting:
   ``warning: the group `old` (pyproject.toml:12) is used by no contract``.
 - `--watch` and the language server do not report them.
 

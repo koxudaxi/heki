@@ -558,7 +558,7 @@ fn mut202_producers_propagation_and_sanitizers() {
             name: "registry".into(),
             producers: vec!["shallow_registry".into()],
             deep: false,
-            fail: None,
+            ..ReadOnlyReturnRule::default()
         }],
         ..HekiConfig::default()
     };

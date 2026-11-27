@@ -6,11 +6,11 @@
 //! the one file would give, and a baseline keys its reports as that file would.
 
 use crate::defaults::SUFFIX;
-use crate::problem::{line_column, settings_root, table_items};
+use crate::problem::{LineStarts, line_column, settings_root, tables_at};
 use crate::{ConfigError, ConfigLayout, Docs, HekiConfig, Problem, Setting};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -22,14 +22,14 @@ pub(crate) const INCLUDE: &str = "include";
 /// The table of the named groups.
 pub(crate) const GROUPS: &str = "groups";
 
-/// Where a contract entry is written when no contract table of the main configuration file holds
-/// its text: in a table of an included file, or in a group.
+/// A place of the configuration: where a file writes a contract table or an entry of one (in a
+/// table, or in a group), or the place the table's `source` or `entry-sources` names instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct EntryPlace {
     /// The file, relative to the project root when it is below it.
     pub file: String,
-    /// The line of the entry (from 1).
+    /// The line (from 1).
     pub line: u32,
     /// The group that holds the entry, when it comes from one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,6 +43,24 @@ impl fmt::Display for EntryPlace {
         }
         write!(f, "{}:{}", self.file, self.line)
     }
+}
+
+/// Where a contract table or an entry of one is defined ([`EntryPlace`]), with the file as the
+/// configuration was read (a path `source` or `entry-sources` names joined to the project root)
+/// and the byte column (1 for a named place), as reports point at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinedAt {
+    pub path: PathBuf,
+    pub column: u32,
+    pub place: EntryPlace,
+}
+
+/// Where a contract table and the entries of its lists are defined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContractPlaces {
+    table: DefinedAt,
+    /// By key, each entry with its place, in list order.
+    entries: Vec<(String, Vec<(String, DefinedAt)>)>,
 }
 
 /// A group of `[groups]` that no contract uses.
@@ -65,6 +83,9 @@ pub struct ConfigSources {
     /// By contract kind, position of the table among those of its kind, and key: the place of
     /// each entry, `None` for an entry a contract table of the main file holds.
     places: BTreeMap<(String, usize, String), Vec<Option<EntryPlace>>>,
+    /// By contract kind and position of the table among those of its kind: where it and its
+    /// entries are defined.
+    contracts: BTreeMap<(String, usize), ContractPlaces>,
 }
 
 impl ConfigSources {
@@ -82,6 +103,34 @@ impl ConfigSources {
             .get(&(kind.to_owned(), table, key.to_owned()))?
             .get(position)?
             .as_ref()
+    }
+
+    /// Where the contract at `table` (in configuration order) of the kind `kind` is defined.
+    pub fn contract(&self, kind: &str, table: usize) -> Option<&DefinedAt> {
+        Some(&self.contracts.get(&(kind.to_owned(), table))?.table)
+    }
+
+    /// The key of that contract whose list holds the entry `entry`, and where the entry is
+    /// defined: its first place, in the keys' order.
+    pub fn entry_named(&self, kind: &str, table: usize, entry: &str) -> Option<(&str, &DefinedAt)> {
+        let contract = self.contracts.get(&(kind.to_owned(), table))?;
+        (contract.entries.iter()).find_map(|(key, entries)| {
+            let (_, at) = entries.iter().find(|(text, _)| text == entry)?;
+            Some((key.as_str(), at))
+        })
+    }
+
+    /// Where the entry at `position` of the key `key` of that contract is defined.
+    pub fn entry_at(
+        &self,
+        kind: &str,
+        table: usize,
+        key: &str,
+        position: usize,
+    ) -> Option<&DefinedAt> {
+        let contract = self.contracts.get(&(kind.to_owned(), table))?;
+        let (_, entries) = contract.entries.iter().find(|(k, _)| k == key)?;
+        entries.get(position).map(|(_, at)| at)
     }
 }
 
@@ -112,6 +161,10 @@ pub enum FoldProblem {
     Rooted(String),
     #[error("`{0}` in an included file")]
     MainSetting(String),
+    #[error("`{key}` value `{value}` is not `path:line`")]
+    NamedPlace { key: &'static str, value: String },
+    #[error("`entry-sources` names `{0}`, which no list of the contract holds")]
+    UnknownEntrySource(String),
 }
 
 impl FoldProblem {
@@ -163,6 +216,14 @@ impl FoldProblem {
                 ),
                 Docs::Include,
             ),
+            Self::NamedPlace { .. } => (
+                "write the file relative to the project root and the line from 1: `source = \"scripts/tables.py:120\"`".to_owned(),
+                Docs::DefinedAt,
+            ),
+            Self::UnknownEntrySource(_) => (
+                "name an entry as the contract's lists write it out, or remove it from `entry-sources`".to_owned(),
+                Docs::DefinedAt,
+            ),
         };
         problem.help(help).docs(docs)
     }
@@ -207,11 +268,7 @@ fn included_path(main: &Path, entry: &str) -> Result<PathBuf, FoldProblem> {
     if entry.contains(['*', '?', '[', ']', '{', '}']) {
         return Err(FoldProblem::Glob(entry.to_owned()));
     }
-    let drive = entry
-        .as_bytes()
-        .get(..2)
-        .is_some_and(|b| b[0].is_ascii_alphabetic() && b[1] == b':');
-    if drive || entry.starts_with(['/', '\\']) {
+    if rooted(entry) {
         return Err(FoldProblem::Rooted(entry.to_owned()));
     }
     let joined = main.parent().unwrap_or(Path::new("")).join(entry);
@@ -219,6 +276,15 @@ fn included_path(main: &Path, entry: &str) -> Result<PathBuf, FoldProblem> {
         .components()
         .filter(|c| *c != Component::CurDir)
         .collect())
+}
+
+/// Whether the path `entry` is rooted or drive-prefixed, on any platform.
+fn rooted(entry: &str) -> bool {
+    let drive = entry
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|b| b[0].is_ascii_alphabetic() && b[1] == b':');
+    drive || entry.starts_with(['/', '\\'])
 }
 
 /// The entries of `include` in the configuration `text` of `layout`, with their offsets; none
@@ -369,10 +435,54 @@ struct Group {
     entries: Vec<Entry>,
 }
 
+/// Where a contract table is written, and the places it names for itself and its entries.
+#[derive(Debug, Clone, Default)]
+struct Origin {
+    file: usize,
+    /// Where the table starts.
+    offset: Option<usize>,
+    /// `source`, and the offset of its value.
+    source: Option<(String, Option<usize>)>,
+    /// `entry-sources`: each entry, the place it names, and the offset of the entry.
+    entry_sources: Vec<(String, String, Option<usize>)>,
+}
+
+/// The key of a contract table naming where the contract is defined.
+const SOURCE: &str = "source";
+
+/// The key of a contract table naming where its entries are defined.
+const ENTRY_SOURCES: &str = "entry-sources";
+
+impl Origin {
+    fn of(file: usize, (table, offset): (&dyn TableLike, Option<usize>)) -> Self {
+        let source = table.get(SOURCE).and_then(|item| {
+            let value = item.as_value()?;
+            Some((value.as_str()?.to_owned(), value.span().map(|s| s.start)))
+        });
+        let named = table
+            .get(ENTRY_SOURCES)
+            .and_then(toml_edit::Item::as_table_like);
+        let entry_sources = (named.into_iter().flat_map(|t| t.iter()))
+            .filter_map(|(entry, item)| {
+                let at = named?.get_key_value(entry)?.0.span().map(|s| s.start);
+                Some((entry.to_owned(), item.as_str()?.to_owned(), at))
+            })
+            .collect();
+        Self {
+            file,
+            offset,
+            source,
+            entry_sources,
+        }
+    }
+}
+
 /// The contract tables, defaults tables, and groups of one file.
 struct Settings {
     /// By kind, in [`HekiConfig::CONTRACT_KEYS`] order.
     tables: Vec<Vec<Table>>,
+    /// Where each table of `tables` is written.
+    origins: Vec<Vec<Origin>>,
     defaults: Vec<Option<Table>>,
     groups: Vec<Group>,
 }
@@ -422,21 +532,28 @@ fn settings_of(index: usize, file: &File) -> Settings {
     let edit = settings_root(doc.as_table(), file.layout);
     let value = settings_mut(file.layout, &mut value).map(|v| &*v);
     let kinds = HekiConfig::CONTRACT_KEYS;
-    let tables = kinds
+    let (tables, origins) = kinds
         .iter()
         .map(|kind| {
             let values = value.and_then(|v| v.get(*kind)?.as_array());
             let edits = edit
                 .and_then(|e| e.get(kind))
-                .map(table_items)
+                .map(tables_at)
                 .unwrap_or_default();
             (values.into_iter().flatten())
                 .filter_map(toml::Value::as_table)
                 .enumerate()
-                .map(|(i, t)| table_of(index, t, edits.get(i).copied()))
-                .collect()
+                .map(|(i, t)| {
+                    let edit = edits.get(i).copied();
+                    let table = table_of(index, t, edit.map(|(e, _)| e));
+                    (
+                        table,
+                        edit.map(|e| Origin::of(index, e)).unwrap_or_default(),
+                    )
+                })
+                .unzip()
         })
-        .collect();
+        .unzip();
     let defaults = kinds
         .iter()
         .map(|kind| {
@@ -470,6 +587,7 @@ fn settings_of(index: usize, file: &File) -> Settings {
     .collect();
     Settings {
         tables,
+        origins,
         defaults,
         groups,
     }
@@ -638,6 +756,7 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
     let groups = Groups::new(files, &shown, &settings)?;
     let Merged {
         tables: merged,
+        origins,
         main_defaults,
         used,
     } = merge(files, &settings, &groups)?;
@@ -655,9 +774,18 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
             })
             .collect(),
         places: BTreeMap::new(),
+        contracts: BTreeMap::new(),
+    };
+    let defined = Defined {
+        files,
+        starts: files.iter().map(|f| LineStarts::of(&f.text)).collect(),
+        shown: &shown,
+        root,
     };
     for (k, tables) in merged.iter().enumerate() {
-        for (i, table) in tables.iter().enumerate() {
+        for (i, (table, origin)) in tables.iter().zip(&origins[k]).enumerate() {
+            let places = defined.contract(table, origin)?;
+            sources.contracts.insert((kinds[k].to_owned(), i), places);
             for (key, field) in table {
                 let Field::List(entries) = field else {
                     continue;
@@ -667,9 +795,9 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
                     .map(|e| {
                         (e.file != 0 || e.group.is_some()).then(|| EntryPlace {
                             file: shown[e.file].clone(),
-                            line: e
-                                .offset
-                                .map_or(1, |o| line_column(&files[e.file].text, o).0),
+                            line: e.offset.map_or(1, |o| {
+                                defined.starts[e.file].line_column(&files[e.file].text, o).0
+                            }),
                             group: e.group.clone(),
                         })
                     })
@@ -694,6 +822,8 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
 struct Merged {
     /// By kind, the main file's tables, then each included file's.
     tables: Vec<Vec<Table>>,
+    /// Where each table of `tables` is written.
+    origins: Vec<Vec<Origin>>,
     /// By kind, the main file's defaults table with its lists written out.
     main_defaults: Vec<Option<Defaults>>,
     /// The groups a table uses.
@@ -720,8 +850,10 @@ fn merge(files: &[File], settings: &[Settings], groups: &Groups) -> Result<Merge
         defaults.push(of_file);
     }
     let mut merged: Vec<Vec<Table>> = vec![Vec::new(); kinds.len()];
+    let mut origins: Vec<Vec<Origin>> = vec![Vec::new(); kinds.len()];
     for (f, s) in settings.iter().enumerate() {
         for (k, tables) in s.tables.iter().enumerate() {
+            origins[k].extend(s.origins[k].iter().cloned());
             for table in tables {
                 let mut expanded = Table::new();
                 for (key, field) in table {
@@ -743,9 +875,109 @@ fn merge(files: &[File], settings: &[Settings], groups: &Groups) -> Result<Merge
     let main_defaults = defaults.swap_remove(0);
     Ok(Merged {
         tables: merged,
+        origins,
         main_defaults,
         used,
     })
+}
+
+/// What the places of a fold's contracts are read against: its files, as [`EntryPlace::file`]
+/// names them (`shown`), and the project root a named place is relative to.
+struct Defined<'f> {
+    files: &'f [File],
+    /// The line starts of each of `files`.
+    starts: Vec<LineStarts>,
+    shown: &'f [String],
+    root: &'f Path,
+}
+
+impl Defined<'_> {
+    /// Where `table`, written as `origin` says, and the entries of its lists are defined.
+    fn contract(&self, table: &Table, origin: &Origin) -> Result<ContractPlaces, ConfigError> {
+        let file = &self.files[origin.file];
+        let table_at = match &origin.source {
+            Some((value, at)) => self
+                .named(SOURCE, value)
+                .map_err(|problem| file.error(*at, problem))?,
+            None => self.written(origin.file, origin.offset, None),
+        };
+        let mut named: HashMap<&str, DefinedAt> = HashMap::new();
+        let held: HashSet<&str> = (table.values())
+            .filter_map(|field| match field {
+                Field::List(entries) => Some(entries),
+                Field::Value(_) => None,
+            })
+            .flatten()
+            .map(|e| e.text.as_str())
+            .collect();
+        for (entry, value, at) in &origin.entry_sources {
+            if !held.contains(entry.as_str()) {
+                return Err(file.error(*at, FoldProblem::UnknownEntrySource(entry.clone())));
+            }
+            let place = (self.named(ENTRY_SOURCES, value)).map_err(|p| file.error(*at, p))?;
+            named.insert(entry.as_str(), place);
+        }
+        let entries = (table.iter())
+            .filter_map(|(key, field)| match field {
+                Field::List(entries) => Some((key, entries)),
+                Field::Value(_) => None,
+            })
+            .map(|(key, entries)| {
+                let places = (entries.iter())
+                    .map(|e| {
+                        let at = named
+                            .get(e.text.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| self.written(e.file, e.offset, e.group.clone()));
+                        (e.text.clone(), at)
+                    })
+                    .collect();
+                (key.clone(), places)
+            })
+            .collect();
+        Ok(ContractPlaces {
+            table: table_at,
+            entries,
+        })
+    }
+
+    /// The place at `offset` of the file at `file`, in the group `group`.
+    fn written(&self, file: usize, offset: Option<usize>, group: Option<String>) -> DefinedAt {
+        let (line, column) = offset.map_or((1, 1), |o| {
+            self.starts[file].line_column(&self.files[file].text, o)
+        });
+        DefinedAt {
+            path: self.files[file].path.clone(),
+            column,
+            place: EntryPlace {
+                file: self.shown[file].clone(),
+                line,
+                group,
+            },
+        }
+    }
+
+    /// The place `value` of `key` names: `path:line`, the path relative to the project root.
+    fn named(&self, key: &'static str, value: &str) -> Result<DefinedAt, FoldProblem> {
+        let bad = || FoldProblem::NamedPlace {
+            key,
+            value: value.to_owned(),
+        };
+        let (file, line) = value.rsplit_once(':').ok_or_else(bad)?;
+        let line: u32 = line.parse().ok().filter(|l| *l > 0).ok_or_else(bad)?;
+        if file.is_empty() || rooted(file) {
+            return Err(bad());
+        }
+        Ok(DefinedAt {
+            path: self.root.join(file),
+            column: 1,
+            place: EntryPlace {
+                file: file.to_owned(),
+                line,
+                group: None,
+            },
+        })
+    }
 }
 
 /// Where the entry `setting` names is written in a group, when a list of its contract took it

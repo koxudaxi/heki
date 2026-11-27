@@ -56,12 +56,41 @@ const REPRO_ENTRIES: [&str; 3] = [
     "`targets` entry `pkg.model.Field.removed_method` of call-owners `store-calls` names no function, method, or class in the analyzed files",
 ];
 
-/// The lines of `stderr` that start with `prefix`, without it.
-fn lines<'s>(stderr: &'s str, prefix: &str) -> Vec<&'s str> {
+/// The lines of `stderr` that start with `prefix`, without it and without the places of the
+/// entry and its contracts (`a_warning_names_where_the_entry_and_its_contracts_are`).
+fn lines(stderr: &str, prefix: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix(prefix))
+        .map(|l| match (l.find(" (from "), l.find(") ")) {
+            (Some(start), Some(end)) if start < end => format!("{}{}", &l[..start], &l[end + 1..]),
+            _ => l.to_owned(),
+        })
+        .collect()
+}
+
+/// The lines of `stderr` that start with `prefix`, without it, as written.
+fn lines_as_written<'s>(stderr: &'s str, prefix: &str) -> Vec<&'s str> {
     stderr
         .lines()
         .filter_map(|l| l.strip_prefix(prefix))
         .collect()
+}
+
+/// A warning names where the entry is written and where its contract is.
+#[test]
+fn a_warning_names_where_the_entry_and_its_contracts_are() {
+    let p = repro("unmatched_places", "");
+    let (_, stdout, stderr) = p.heki(&["check"]);
+    let warned: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("warning: "))
+        .collect();
+    assert_eq!(
+        warned[2],
+        "`targets` entry `pkg.model.Field.removed_method` of call-owners `store-calls` (from pyproject.toml:15; contract at pyproject.toml:13) names no function, method, or class in the analyzed files",
+        "{stdout}{stderr}"
+    );
 }
 
 /// A run over the whole project warns about the entries that name nothing, which do not fail
@@ -684,7 +713,7 @@ fn a_run_over_some_files_judges_only_with_the_key() {
     let (_, _, stderr) = p.heki(&["check", "pkg/stores"]);
     let warned = lines(&stderr, "warning: ");
     assert!(
-        warned.contains(&"`targets` entry `pkg.model.Field.replace_type` of call-owners `store-calls` names no function, method, or class in the analyzed files"),
+        warned.iter().any(|w| w == "`targets` entry `pkg.model.Field.replace_type` of call-owners `store-calls` names no function, method, or class in the analyzed files"),
         "{stderr}"
     );
 }
@@ -1089,18 +1118,18 @@ fn entries_from_groups_and_included_files_are_judged_alike() {
     let (code, stdout, stderr) = p.heki(&["check"]);
     assert_eq!(code, 1, "{stdout}{stderr}");
     assert_eq!(
-        lines(&stderr, "error: "),
+        lines_as_written(&stderr, "error: "),
         [
             "the group `stale` (contracts/more.toml:2) is used by no contract",
-            "`allowed-callers` entry `pkg.store:{outr,outter}` of call-owners `main` (from group `callers` at pyproject.toml:12) lists `pkg.store:outr` and `pkg.store:outter`, which name no function or method in the analyzed files; `pkg.store:outer` exists",
-            "`allowed-callers` entry `pkg.gone.*:*` of call-owners `main` (from group `callers` at pyproject.toml:12) names no function or method in the analyzed files",
-            "`targets` entry `pkg.store:{run,gone}` of call-owners `included` (from contracts/more.toml:12) lists `pkg.store:gone`, which names no function, method, or class in the analyzed files",
-            "`allowed-callers` entry `pkg.store:Base.{op,c}` of call-owners `included` (from contracts/more.toml:13) lists `pkg.store:Base.c`, which names no function or method in the analyzed files",
-            "`allowed-callers` entry `pkg.gone{,.*}:*` of call-owners `included` (from contracts/more.toml:13) names no function or method in the analyzed files",
-            "`allowed-callers` entry `pkg.{store,gone}:run` of call-owners `included` (from group `more-callers` at contracts/more.toml:4) lists `pkg.gone:run`, which names no function or method in the analyzed files; `pkg.store:run` exists",
-            "`allowed-callers` entry `pkg.gone_dir.*:*` of call-owners `included` (from group `more-callers` at contracts/more.toml:6) names no function or method in the analyzed files",
-            "`importers` entry `pkg.{store,gone_m}` of import-boundaries `imports` (from group `modules` at contracts/more.toml:8) lists `pkg.gone_m`, which names no module in the analyzed files",
-            "`importers` entry `pkg.gone_pkg.*` of import-boundaries `imports` (from group `modules` at contracts/more.toml:8) names no module in the analyzed files",
+            "`allowed-callers` entry `pkg.store:{outr,outter}` of call-owners `main` (from group `callers` at pyproject.toml:12; contract at pyproject.toml:14) lists `pkg.store:outr` and `pkg.store:outter`, which name no function or method in the analyzed files; `pkg.store:outer` exists",
+            "`allowed-callers` entry `pkg.gone.*:*` of call-owners `main` (from group `callers` at pyproject.toml:12; contract at pyproject.toml:14) names no function or method in the analyzed files",
+            "`targets` entry `pkg.store:{run,gone}` of call-owners `included` (from contracts/more.toml:12; contract at contracts/more.toml:10) lists `pkg.store:gone`, which names no function, method, or class in the analyzed files",
+            "`allowed-callers` entry `pkg.store:Base.{op,c}` of call-owners `included` (from contracts/more.toml:13; contract at contracts/more.toml:10) lists `pkg.store:Base.c`, which names no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.gone{,.*}:*` of call-owners `included` (from contracts/more.toml:13; contract at contracts/more.toml:10) names no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.{store,gone}:run` of call-owners `included` (from group `more-callers` at contracts/more.toml:4; contract at contracts/more.toml:10) lists `pkg.gone:run`, which names no function or method in the analyzed files; `pkg.store:run` exists",
+            "`allowed-callers` entry `pkg.gone_dir.*:*` of call-owners `included` (from group `more-callers` at contracts/more.toml:6; contract at contracts/more.toml:10) names no function or method in the analyzed files",
+            "`importers` entry `pkg.{store,gone_m}` of import-boundaries `imports` (from group `modules` at contracts/more.toml:8; contract at contracts/more.toml:15) lists `pkg.gone_m`, which names no module in the analyzed files",
+            "`importers` entry `pkg.gone_pkg.*` of import-boundaries `imports` (from group `modules` at contracts/more.toml:8; contract at contracts/more.toml:15) names no module in the analyzed files",
         ],
         "{stdout}{stderr}"
     );

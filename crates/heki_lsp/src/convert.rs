@@ -3,8 +3,10 @@
 //! - `Diagnostic.message` → the LSP message, with ` [heuristic]` after it for a heuristic rule
 //!   (`data.certainty` says it for every rule), and the rule's page as `codeDescription`;
 //!   `Diagnostic.related` →
-//!   `DiagnosticRelatedInformation` (every call-chain hop), then `Diagnostic.help` as one more
-//!   entry at the diagnostic's own range (`help: ...`), as rust-analyzer shows a `help:` child.
+//!   `DiagnosticRelatedInformation` (every call-chain hop), then each of
+//!   `Diagnostic.contract_locations` (where the configuration defines its contracts), then
+//!   `Diagnostic.help` as one more entry at the diagnostic's own range (`help: ...`), as
+//!   rust-analyzer shows a `help:` child.
 //! - `Diagnostic.fix` of `safe` + `unconditional` rules → preferred `quickfix`; an unsafe fix
 //!   (`MUT118`) → `quickfix` that is not preferred; size-dependent `OPT` suggestions →
 //!   `refactor.rewrite.heki`; a fix whose result would not parse is withheld.
@@ -57,8 +59,27 @@ fn severity(s: Severity) -> DiagnosticSeverity {
     }
 }
 
+/// Byte column `column` (1-based) of 1-based `line` → LSP position, in `text` when the file has
+/// one; the character is the byte column without it.
+fn line_position(text: Option<&str>, line: u32, column: u32) -> Position {
+    let before = |l: &str| {
+        l.get(..(column as usize).saturating_sub(1))
+            .map(str::to_owned)
+    };
+    let shown = text.and_then(|t| t.lines().nth(line.saturating_sub(1) as usize));
+    let character = shown
+        .and_then(before)
+        .map_or(column.saturating_sub(1), |b| {
+            u32::try_from(b.encode_utf16().count()).unwrap_or(u32::MAX)
+        });
+    Position {
+        line: line.saturating_sub(1),
+        character,
+    }
+}
+
 /// Convert one diagnostic of a document with text `text`. `text_of` gives the text of other
-/// files (related call-chain hops).
+/// files (related call-chain hops, the configuration).
 pub fn diagnostic(
     d: &Diagnostic,
     text: &str,
@@ -88,6 +109,17 @@ pub fn diagnostic(
                 message: r.message.clone(),
             })
         })
+        .chain(d.contract_locations.iter().filter_map(|c| {
+            let uri = Url::from_file_path(&c.path).ok()?;
+            let at = line_position(text_of(&c.path).as_deref(), c.line, c.column);
+            Some(DiagnosticRelatedInformation {
+                location: Location {
+                    uri,
+                    range: Range { start: at, end: at },
+                },
+                message: c.message.clone(),
+            })
+        }))
         .chain(help)
         .collect();
     let page = find_rule(&d.rule_code).and_then(|r| Url::parse(&r.page_url()).ok());
@@ -292,6 +324,7 @@ mod tests {
             evidence: None,
             blocker: None,
             related: Vec::new(),
+            contract_locations: Vec::new(),
             fix: Some(vec![heki_diagnostics::TextEdit {
                 span,
                 replacement: replacement.into(),

@@ -42,6 +42,25 @@ pub struct RelatedLocation {
     pub message: String,
 }
 
+/// Where the configuration defines a contract a report is of, or the entry of it the report
+/// names: where a configuration file writes it, or the place the contract's `source` or
+/// `entry-sources` names instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ContractLocation {
+    /// The file, as reports print paths.
+    #[serde(serialize_with = "report_path")]
+    #[schemars(with = "String")]
+    pub path: PathBuf,
+    /// The 1-based line.
+    pub line: u32,
+    /// The 1-based byte column (1 for a place `source` or `entry-sources` names).
+    pub column: u32,
+    /// What is there: the contract (``write-owners contract `fields` ``), or the entry of it
+    /// (``` `targets` entry `pkg.m.Model.fields` ```), with the group that holds it.
+    pub message: String,
+}
+
 /// A public project function that does what a contract report shows from a place its contract
 /// allows, and the file defining it (the report's help names it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -155,6 +174,11 @@ pub struct Diagnostic {
     pub blocker: Option<String>,
     /// The other places the report is about: the hops of a call chain, a definition.
     pub related: Vec<RelatedLocation>,
+    /// Where the configuration defines the contracts a contract report is of: each contract,
+    /// then the entry of it the report names as its target. Written to JSON only when not
+    /// empty; SARIF and the language server add them to the related locations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contract_locations: Vec<ContractLocation>,
     /// The edits of the report's fix, as byte spans of `path`; none when the report has no fix.
     pub fix: Option<Vec<TextEdit>>,
     /// Distinct violation sites the diagnostic stands for (at least 1): a contract report at the
@@ -674,14 +698,17 @@ pub fn sarif(
     let results: Vec<serde_json::Value> = diags
         .iter()
         .map(|d| {
-            let related: Vec<serde_json::Value> = d
-                .related
-                .iter()
+            let places = (d.related.iter())
+                .map(|r| (&r.path, r.line, r.column, &r.message))
+                .chain(
+                    (d.contract_locations.iter()).map(|c| (&c.path, c.line, c.column, &c.message)),
+                );
+            let related: Vec<serde_json::Value> = places
                 .enumerate()
-                .map(|(i, r)| {
-                    let mut loc = location(&r.path, r.line, r.column);
+                .map(|(i, (path, line, column, message))| {
+                    let mut loc = location(path, line, column);
                     loc["id"] = json!(i);
-                    loc["message"] = json!({ "text": r.message });
+                    loc["message"] = json!({ "text": message });
                     loc
                 })
                 .collect();
@@ -1429,6 +1456,7 @@ mod tests {
                 span: Span { start: 0, end: 0 },
                 message: "calls helper".into(),
             }],
+            contract_locations: Vec::new(),
             fix: None,
             sites: 1,
             fold_key: None,
