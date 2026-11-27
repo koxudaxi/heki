@@ -228,6 +228,8 @@ Found 1 diagnostic(s) in 3 file(s).
 
 The run exits with code 1. `forbid` takes tokens such as `blocking`, `blocking-net`, `blocking-db`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, and `reads-environment`. [`effect-boundaries`](configuration.md#effect-boundaries) lists them all with their extra keys.
 
+A `scopes` or `allowed-callees` entry naming a method (`Class.method`) names that method only. With `include-overrides = true` in the boundary (or in its [defaults table](configuration.md#defaults-for-the-tables-of-a-kind)) it also names the overrides in the project subclasses of `Class`, nested scopes included, so a subclass written later is in scope or allowed with no change of the configuration. The key is off by default for that reason.
+
 ## 📸 Public API effect changes across pull requests
 
 A change in what a public function does is worth a review even when no rule fires: it starts changing an argument, or doing network I/O. `heki snapshot` saves the effect summaries of the project, and `MUT103` ([`summary-effect-regression`](rules/summary-effect-regression.md), heuristic, opt-in) reports each function that gained an effect since.

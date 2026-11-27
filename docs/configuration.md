@@ -989,13 +989,14 @@ allowed-readers = ["pkg.parser.index.*"]
   `scopes` and `allowed-callees`, and the `invalidators` and `exempt-writers` of `invalidation`)
   also names the methods of that name in the project subclasses of `Class`, in any module: the
   family a `call-owners` target `Class.method` covers. Where the key covers nested scopes
-  (`scopes`, or an entry ending in `{,.*}`), the overrides' nested scopes count too. A private
+  (`scopes`, `allowed-callees`, or an entry ending in `{,.*}`), the overrides' nested scopes count too. A private
   name (`Base.__run`) names the method of `Base` only: a subclass's `__run` is its own. The
   reports are those of the same contract listing every override by hand, so the key is off by
   default: it widens what a contract allows, and a new subclass's override is allowed without a
   change of the configuration, which a project using the configuration as a review wall should
-  know. An entry still has to name a method of `Class` itself ([Entries that match
-  nothing](#entries-that-match-nothing)).
+  know. An entry still has to name a method of `Class` itself, and is judged as before ([Entries that
+  match nothing](#entries-that-match-nothing)): an `allowed-callees` entry only when its first name
+  is a module of the project, as that section says.
 
   ```toml
   [[tool.heki.call-owners]]

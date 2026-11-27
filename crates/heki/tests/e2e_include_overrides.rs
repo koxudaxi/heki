@@ -183,6 +183,44 @@ fn the_defaults_table_sets_the_key_for_every_contract_of_its_kind() {
 }
 
 #[test]
+fn the_key_works_in_an_included_file_and_in_its_defaults_table() {
+    let files = [("pkg/model.py", MODEL), ("pkg/sub.py", SUB)];
+    let keyed = reported(&files, &OWNERS.replace("KEY", "include-overrides = true"));
+    let main = "[tool.heki]\ninclude = [\"contracts/owners.toml\"]\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\"]\n";
+    let tables = OWNERS
+        .replace(
+            "[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\"]\n\n",
+            "",
+        )
+        .replace("tool.heki.", "");
+    // The key written in each table of the included file.
+    let own = tables.replace("KEY", "include-overrides = true");
+    let p = Project::new("include_overrides_included");
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n{main}"),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/sub.py", SUB)
+    .write("contracts/owners.toml", &own);
+    let found = |p: &Project| -> Vec<Value> {
+        let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+        assert!(code <= 1 && stderr.is_empty(), "{stdout}{stderr}");
+        serde_json::from_str(&stdout).unwrap()
+    };
+    let in_file = found(&p);
+    assert_eq!(in_file.len(), keyed.len());
+    // The same through a defaults table of the included file.
+    let defaults = format!(
+        "[write-owners-defaults]\ninclude-overrides = true\n\n[read-owners-defaults]\ninclude-overrides = true\n\n{}",
+        tables.replace("KEY", "")
+    );
+    p.write("contracts/owners.toml", &defaults);
+    assert_eq!(found(&p), in_file);
+}
+
+#[test]
 fn an_entry_names_only_methods_that_exist_as_before() {
     // `Base.extra` names no method of `Base`: only a subclass defines `extra`.
     let files = [

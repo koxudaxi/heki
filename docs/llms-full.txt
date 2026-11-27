@@ -639,6 +639,8 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 | "after changing this field, always call that function" | `invalidation` |
 | "this code must not write, read, or call anything of that kind, however deep" | `effect-boundaries`, see [Async and Execution Effects](https://heki.koxudaxi.dev/effects/#contracts-for-execution-effects) |
 
+A contract names a method as `Class.method`, and a subclass that overrides the method is another function. Set `include-overrides = true` on a contract (or in its [defaults table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind)) and an entry naming a method in `allowed-*`, `forbidden-*`, `exempt-methods`, `invalidators`, or `exempt-writers` also names the overrides of it in the project subclasses of `Class`. The key is off by default because it allows a subclass written later to do what its base class may, with no change of the configuration. See [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions).
+
 `lru_cache` and `cache` results are protected without a contract. A `readonly-returns` entry adds the producers that are not cached, such as a function that returns a module-level dict.
 
 ## 🤝 Not breaking a value you borrowed or share
@@ -1094,6 +1096,8 @@ Found 1 diagnostic(s) in 3 file(s).
 ```
 
 The run exits with code 1. `forbid` takes tokens such as `blocking`, `blocking-net`, `blocking-db`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, and `reads-environment`. [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) lists them all with their extra keys.
+
+A `scopes` or `allowed-callees` entry naming a method (`Class.method`) names that method only. With `include-overrides = true` in the boundary (or in its [defaults table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind)) it also names the overrides in the project subclasses of `Class`, nested scopes included, so a subclass written later is in scope or allowed with no change of the configuration. The key is off by default for that reason.
 
 ## 📸 Public API effect changes across pull requests
 
@@ -3537,13 +3541,14 @@ allowed-readers = ["pkg.parser.index.*"]
   `scopes` and `allowed-callees`, and the `invalidators` and `exempt-writers` of `invalidation`)
   also names the methods of that name in the project subclasses of `Class`, in any module: the
   family a `call-owners` target `Class.method` covers. Where the key covers nested scopes
-  (`scopes`, or an entry ending in `{,.*}`), the overrides' nested scopes count too. A private
+  (`scopes`, `allowed-callees`, or an entry ending in `{,.*}`), the overrides' nested scopes count too. A private
   name (`Base.__run`) names the method of `Base` only: a subclass's `__run` is its own. The
   reports are those of the same contract listing every override by hand, so the key is off by
   default: it widens what a contract allows, and a new subclass's override is allowed without a
   change of the configuration, which a project using the configuration as a review wall should
-  know. An entry still has to name a method of `Class` itself ([Entries that match
-  nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)).
+  know. An entry still has to name a method of `Class` itself, and is judged as before ([Entries that
+  match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)): an `allowed-callees` entry only when its first name
+  is a module of the project, as that section says.
 
   ```toml
   [[tool.heki.call-owners]]
