@@ -902,8 +902,12 @@ pub(crate) fn propagate_facts(
     let initializer = is_initializer(func);
     // Matched against the patterns only when a call writes a target.
     let mut exempt = None;
-    let mut exempt_of =
-        || *exempt.get_or_insert_with(|| contracts.exempt_writer(&func.fqn(), &func.qualname));
+    let overriding = (s.override_roles.as_deref()).map_or(0, |roles| roles.exempt_writer);
+    let mut exempt_of = || {
+        *exempt.get_or_insert_with(|| {
+            contracts.exempt_writer(&func.fqn(), &func.qualname) | overriding
+        })
+    };
     for (site_path, i) in sites {
         let site = &index.files[site_path].call_sites[*i];
         let Some(flow) = site.flow else {

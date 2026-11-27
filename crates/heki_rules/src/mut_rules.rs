@@ -1296,6 +1296,16 @@ fn names(entries: &[FunctionMatcher], key: &FuncKey) -> bool {
     entries.iter().any(|p| p.matches(key))
 }
 
+/// Whether an entry names the project function `key` as a method of the class family it names
+/// with `include-overrides` ([`FunctionMatcher::overrides_in`]).
+pub(crate) fn overrides_in(
+    entries: &[FunctionMatcher],
+    project: &ProjectDecls,
+    key: &FuncKey,
+) -> bool {
+    entries.iter().any(|p| p.overrides_in(project, key))
+}
+
 /// The matchers of the entries `texts` of a key naming places ([`FunctionMatcher::place`]).
 pub(crate) fn places(
     texts: &[String],
@@ -1401,7 +1411,7 @@ enum FamilyClasses {
     Listed(FxHashSet<String>),
     /// The class part, matched against the class of a method and its project bases: for the
     /// declared contracts the summaries read, which are built before the project's classes are
-    /// listed ([`FunctionMatcher::matches_in`]).
+    /// listed ([`FunctionMatcher::overrides_in`]).
     ByBases(DottedPattern),
 }
 
@@ -1429,6 +1439,15 @@ impl<'a, 'c> Overrides<'a, 'c> {
     ) -> Self {
         if include == Some(true) {
             Self::Listed(cx, all)
+        } else {
+            Self::Off
+        }
+    }
+
+    /// [`Self::ByBases`] when `include-overrides` is `true`.
+    pub(crate) fn by_bases(include: Option<bool>) -> Self {
+        if include == Some(true) {
+            Self::ByBases
         } else {
             Self::Off
         }
@@ -1656,24 +1675,18 @@ impl FunctionMatcher {
             })
     }
 
-    /// [`Self::matches`] of a matcher whose class family is told by the bases of a method's
-    /// class ([`Overrides::ByBases`]), read in `project`.
-    pub(crate) fn matches_in(
-        &self,
-        contracts: &dyn heki_effect::Contracts,
-        project: &ProjectDecls,
-        key: &FuncKey,
-    ) -> bool {
-        self.names_def(&key.fqn(), &key.qualname)
-            || self.method.as_ref().is_some_and(|m| match &m.classes {
-                FamilyClasses::Listed(family) => m.names(key, |owner| family.contains(owner)),
-                FamilyClasses::ByBases(holder) => m.names(key, |owner| {
-                    project.is_project_class(owner)
-                        && ContractClass::lineage(contracts, project, owner)
-                            .iter()
-                            .any(|c| holder.matches_class(c))
-                }),
-            })
+    /// Whether the project function `key` is a method of the class family the text names with
+    /// `include-overrides` ([`Overrides::ByBases`]), by the bases of its class in `project`.
+    pub(crate) fn overrides_in(&self, project: &ProjectDecls, key: &FuncKey) -> bool {
+        self.method.as_ref().is_some_and(|m| match &m.classes {
+            FamilyClasses::Listed(_) => false,
+            FamilyClasses::ByBases(holder) => m.names(key, |owner| {
+                project.is_project_class(owner)
+                    && std::iter::once(owner.to_owned())
+                        .chain(project.ancestors_of(owner))
+                        .any(|c| holder.matches_class(&ContractClass::with_qualname(project, c)))
+            }),
+        })
     }
 
     /// The class family of `Class.method` (empty for a function).
@@ -1777,23 +1790,13 @@ impl Allowance {
         names(&self.allowed, key)
     }
 
-    /// Whether the allowance allows `key` ([`Self::allows`]) and whether a `forbidden-*` pattern
-    /// names it, for an allowance built with [`Overrides::ByBases`], whose class families the
-    /// declarations `project` tell ([`FunctionMatcher::matches_in`]).
-    pub(crate) fn writer_context(
-        &self,
-        contracts: &dyn heki_effect::Contracts,
-        project: &ProjectDecls,
-        key: &FuncKey,
-    ) -> (bool, bool) {
-        let named = |entries: &[FunctionMatcher]| {
-            (entries.iter()).any(|p| p.matches_in(contracts, project, key))
-        };
-        let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
-        let allowed = self.exempt_names.contains(name)
-            || named(&self.exempt_patterns)
-            || named(&self.allowed)
-            || self.targets.as_ref().is_some_and(|t| t.any(key));
+    /// Whether an `exempt-methods` or `allowed-*` pattern, and whether a `forbidden-*` pattern,
+    /// names the project function `key` as a method of the class family it names with
+    /// `include-overrides`, for an allowance built with [`Overrides::ByBases`]
+    /// ([`FunctionMatcher::overrides_in`]).
+    pub(crate) fn overriding_context(&self, project: &ProjectDecls, key: &FuncKey) -> (bool, bool) {
+        let named = |entries: &[FunctionMatcher]| overrides_in(entries, project, key);
+        let allowed = named(&self.exempt_patterns) || named(&self.allowed);
         (allowed, named(&self.forbidden))
     }
 

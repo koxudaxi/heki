@@ -1297,6 +1297,7 @@ name = "graph-index"
 targets = ["DataType.data_types"]
 invalidators = ["GenerationStore.note_changed_models"]
 exempt-writers = ["pkg.parser.generation.*"]
+include-overrides = true
 message = "announce the change to the store"
 
 [[tool.heki.effect-boundaries]]
@@ -1347,6 +1348,7 @@ import-probes = "report"
                 own_receiver: Some("allow".into()),
                 allowed_protocols: vec!["*Host".into()],
                 protocol_subclasses: Some(false),
+                include_overrides: None,
                 fail: None,
             }
         );
@@ -1367,6 +1369,7 @@ import-probes = "report"
                 targets_call_each_other: Some("report".into()),
                 allowed_protocols: Vec::new(),
                 protocol_subclasses: None,
+                include_overrides: None,
                 fail: None,
             }
         );
@@ -1392,6 +1395,7 @@ import-probes = "report"
                 references: Some("calls".into()),
                 import_probes: Some("report".into()),
                 unresolved: None,
+                include_overrides: None,
                 fail: None,
             }
         );
@@ -1403,6 +1407,7 @@ import-probes = "report"
                 targets: vec!["DataType.data_types".into()],
                 invalidators: vec!["GenerationStore.note_changed_models".into()],
                 exempt_writers: vec!["pkg.parser.generation.*".into()],
+                include_overrides: Some(true),
                 message: Some("announce the change to the store".into()),
                 fail: None,
             }
