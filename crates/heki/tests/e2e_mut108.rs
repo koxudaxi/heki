@@ -974,3 +974,108 @@ fn mut108_fields_whose_every_value_rejects_changes_are_not_changed() {
         "{found:#?}"
     );
 }
+
+/// Constructions and replacements through an attribute of a module (`model.Segment(...)`,
+/// `dataclasses.replace(...)`), and calls heki cannot read.
+const QUALIFIED_MODEL: &str = r#"from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Segment:
+    meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Copied:
+    meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Quiet:
+    meta: Mapping[str, Any]
+"#;
+
+const QUALIFIED_MAKE: &str = r#"import dataclasses
+import dataclasses as dc
+from types import MappingProxyType
+
+from pkg import model
+import pkg.model
+
+
+def segments() -> list[model.Segment]:
+    return [model.Segment({}), model.Segment(MappingProxyType({}))]
+
+
+def copies(c: model.Copied) -> model.Copied:
+    return dataclasses.replace(c, meta={})
+
+
+def quiet(q: model.Quiet) -> list[model.Quiet]:
+    return [
+        pkg.model.Quiet(MappingProxyType({})),
+        dc.replace(q, meta=MappingProxyType({})),
+    ]
+"#;
+
+const QUALIFIED_WRITE: &str = r#"from typing import Any, cast
+
+from pkg.model import Copied, Quiet, Segment
+
+
+def write(s: Segment, c: Copied, q: Quiet) -> None:
+    cast("Any", s.meta)["n"] = 1
+    cast("Any", c.meta)["n"] = 1
+    cast("Any", q.meta)["n"] = 1
+"#;
+
+#[test]
+fn mut108_constructions_through_a_module_attribute_are_read() {
+    let p = Project::new("mut108_qualified");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", QUALIFIED_MODEL)
+        .write("pkg/make.py", QUALIFIED_MAKE)
+        .write("pkg/use.py", QUALIFIED_WRITE);
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diagnostics(&p, &["--select", "MUT108"])),
+        vec![
+            d(u, 7, "write", "Segment.meta"),
+            d(u, 8, "write", "Copied.meta")
+        ]
+    );
+}
+
+#[test]
+fn mut108_constructions_heki_cannot_read_leave_the_fields_open() {
+    let p = Project::new("mut108_unreadable");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", QUALIFIED_MODEL)
+        .write(
+            "pkg/make.py",
+            "from types import MappingProxyType\n\nfrom pkg.model import Quiet\n\n\ndef quiet() -> Quiet:\n    return Quiet(MappingProxyType({}))\n",
+        )
+        .write("pkg/use.py", QUALIFIED_WRITE);
+    let u = "pkg/use.py";
+    let quiet = |p: &Project| found(&diagnostics(p, &["--select", "MUT108"]));
+    assert!(!quiet(&p).contains(&d(u, 9, "write", "Quiet.meta")));
+    for (name, body) in [
+        (
+            "factory",
+            "def build(factory):\n    return factory(meta={})\n",
+        ),
+        (
+            "unpacked",
+            "def build(factory, fields):\n    return factory(**fields)\n",
+        ),
+    ] {
+        p.write("pkg/other.py", body);
+        let found = quiet(&p);
+        assert!(
+            found.contains(&d(u, 9, "write", "Quiet.meta")),
+            "{name}: {found:#?}"
+        );
+    }
+}

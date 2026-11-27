@@ -3044,6 +3044,19 @@ fn steps_mut108() -> Vec<Step> {
             vec![save("pkg/held/make.py", HELD_MAKE)],
         )
         .absent(&[("pkg/held/write.py", "MUT108")]),
+        Step::new(
+            "a construction through the module attribute fills it with a dict",
+            vec![Action::Save(
+                "pkg/held/make.py",
+                "from types import MappingProxyType\n\nfrom pkg.held import model\n\n\ndef make() -> model.Held:\n    return model.Held(MappingProxyType({}))\n\n\ndef other() -> model.Held:\n    return model.Held({})\n".to_owned(),
+            )],
+        )
+        .present(&[("pkg/held/write.py", "MUT108")]),
+        Step::new(
+            "the qualified constructions fill it with read-only views again",
+            vec![save("pkg/held/make.py", HELD_MAKE)],
+        )
+        .absent(&[("pkg/held/write.py", "MUT108")]),
     ]
 }
 

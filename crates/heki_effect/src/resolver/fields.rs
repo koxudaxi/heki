@@ -413,31 +413,20 @@ pub(super) fn field_values(input: &ModuleInput<'_>, cx: &TypeCtx<'_>) -> Option<
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             match &inst.kind {
                 InstKind::Call {
-                    callee_var: Some(c),
+                    callee_var,
                     args,
                     kwargs,
                     star_from,
                     ..
-                } => match types.ty(*c) {
-                    Some(Ty::Ref(class) | Ty::Class(class))
-                        if cx.project.is_project_class(class) =>
-                    {
-                        let fields = tracked_fields(cx.project, class, &mut tracked);
-                        values.constructed(class, fields, args, kwargs, *star_from, &mut out);
-                    }
-                    Some(Ty::Ref(fqn))
-                        if !args.is_empty()
-                            && cx.catalog(fqn).is_some_and(|e| e.copy_sanitizer.is_some()) =>
-                    {
-                        let replaced = Replaced {
-                            original: args[0],
-                            by_position: args.len() > 1 || star_from.is_some(),
-                            kwargs,
-                        };
-                        values.replaced(&replaced, &mut tracked, &mut out);
-                    }
-                    _ => {}
-                },
+                } => {
+                    let target = match callee_var.and_then(|c| types.ty(c)) {
+                        Some(Ty::Ref(fqn)) => Target::Named(fqn.clone()),
+                        Some(Ty::Class(class)) => Target::Class(class.clone()),
+                        Some(_) => Target::Other,
+                        None => Target::Unknown,
+                    };
+                    values.call(target, args, kwargs, *star_from, &mut tracked, &mut out);
+                }
                 InstKind::MethodCall {
                     recv,
                     method,
@@ -452,6 +441,25 @@ pub(super) fn field_values(input: &ModuleInput<'_>, cx: &TypeCtx<'_>) -> Option<
                         kwargs,
                     };
                     values.replaced(&replaced, &mut tracked, &mut out);
+                }
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    star_from,
+                    ..
+                } => {
+                    // `module.Class(...)` and `module.replace(...)` read as a method of the
+                    // module object.
+                    let target = match types.ty(*recv) {
+                        Some(Ty::Ref(module)) => {
+                            Target::Named(cx.project.canonical(&format!("{module}.{method}")))
+                        }
+                        Some(_) => Target::Other,
+                        None => Target::Unknown,
+                    };
+                    values.call(target, args, kwargs, *star_from, &mut tracked, &mut out);
                 }
                 _ => {}
             }
@@ -469,6 +477,9 @@ fn may_make_instances(
     cx: &TypeCtx<'_>,
     tracked: &mut FxHashMap<String, Vec<Box<str>>>,
 ) -> bool {
+    let defs: FxHashMap<VarId, &InstKind> = (f.blocks.iter().flat_map(|b| &b.insts))
+        .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
+        .collect();
     f.blocks
         .iter()
         .flat_map(|b| &b.insts)
@@ -481,9 +492,57 @@ fn may_make_instances(
                         || cx.catalog(&fqn).is_some_and(|e| e.copy_sanitizer.is_some())
                 }
             },
-            InstKind::MethodCall { method, .. } => method == "_replace",
+            InstKind::MethodCall { recv, method, .. } => {
+                method == "_replace" || may_name_instances(&defs, *recv, method, cx, tracked)
+            }
             _ => false,
         })
+}
+
+/// Whether `recv.method(...)` may call a class with tracked fields or a copy the catalog lists:
+/// the dotted name it reads resolves to one, or a name the module does not bind; a receiver
+/// that no instruction of the function defines (a parameter) may be anything.
+fn may_name_instances(
+    defs: &FxHashMap<VarId, &InstKind>,
+    recv: VarId,
+    method: &str,
+    cx: &TypeCtx<'_>,
+    tracked: &mut FxHashMap<String, Vec<Box<str>>>,
+) -> bool {
+    let Some(text) = dotted_text(defs, recv) else {
+        return !defs.contains_key(&recv);
+    };
+    match cx.module.resolve_dotted(&format!("{text}.{method}"), false) {
+        None => true,
+        Some(fqn) => {
+            let fqn = cx.project.canonical(&fqn);
+            !tracked_fields(cx.project, &fqn, tracked).is_empty()
+                || cx.catalog(&fqn).is_some_and(|e| e.copy_sanitizer.is_some())
+        }
+    }
+}
+
+/// The dotted name a chain of attribute reads of a name spells (`pkg.model`).
+fn dotted_text(defs: &FxHashMap<VarId, &InstKind>, v: VarId) -> Option<String> {
+    let mut attrs: Vec<&str> = Vec::new();
+    let mut at = v;
+    // Each step reads the object an earlier definition made, so the chain ends.
+    loop {
+        match defs.get(&at)? {
+            InstKind::LoadGlobal { name, .. }
+            | InstKind::LoadName { name, .. }
+            | InstKind::LoadDeref { name, .. } => {
+                attrs.push(name);
+                attrs.reverse();
+                return Some(attrs.join("."));
+            }
+            InstKind::AttrLoad { obj, attr, .. } => {
+                attrs.push(attr);
+                at = *obj;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// The read-only container fields ([`ProjectDecls::readonly_attr`]: of a frozen class, or
@@ -525,7 +584,76 @@ struct Values<'v, 'a> {
     types: &'v Inferred,
 }
 
+/// What a call's callee is, by the types of the function.
+enum Target {
+    /// A named object: a class, a function, a module attribute.
+    Named(String),
+    /// A class object that may be a subclass (`cls`).
+    Class(String),
+    /// Something heki types, that is no class object or named object.
+    Other,
+    /// Nothing heki knows: it may be a class of the project.
+    Unknown,
+}
+
 impl Values<'_, '_> {
+    /// What a call binds to the tracked fields, by its callee.
+    fn call(
+        &self,
+        target: Target,
+        args: &[VarId],
+        kwargs: &[(Option<String>, VarId)],
+        star_from: Option<u8>,
+        tracked: &mut FxHashMap<String, Vec<Box<str>>>,
+        out: &mut FieldValues,
+    ) {
+        match target {
+            Target::Named(fqn) | Target::Class(fqn) if self.cx.project.is_project_class(&fqn) => {
+                let fields = tracked_fields(self.cx.project, &fqn, tracked);
+                self.constructed(&fqn, fields, args, kwargs, star_from, out);
+            }
+            Target::Named(fqn)
+                if !args.is_empty()
+                    && self
+                        .cx
+                        .catalog(&fqn)
+                        .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+            {
+                let replaced = Replaced {
+                    original: args[0],
+                    by_position: args.len() > 1 || star_from.is_some(),
+                    kwargs,
+                };
+                self.replaced(&replaced, tracked, out);
+            }
+            Target::Unknown => self.unreadable(kwargs, star_from, out),
+            _ => {}
+        }
+    }
+
+    /// A call of a callee heki does not know, which may make an instance of any class: what it
+    /// binds by keyword may change the field of that name, and a `*` or `**` unpacking, any
+    /// field. Positions given to a callee heki cannot name at all are not read: that is a
+    /// callback or a function far more often than a class.
+    fn unreadable(
+        &self,
+        kwargs: &[(Option<String>, VarId)],
+        star_from: Option<u8>,
+        out: &mut FieldValues,
+    ) {
+        let unpacked = star_from.is_some() || kwargs.iter().any(|(k, _)| k.is_none());
+        if unpacked {
+            out.bind(ANY_CLASS, ANY_FIELD, Changeable::Maybe);
+        }
+        for (k, v) in kwargs {
+            if let Some(field) = k
+                && self.changeable(*v) == Changeable::Maybe
+            {
+                out.bind(ANY_CLASS, field, Changeable::Maybe);
+            }
+        }
+    }
+
     /// Whether the value `v` may be changed in place.
     fn changeable(&self, v: VarId) -> Changeable {
         let fixed = match self.types.ty(v) {
