@@ -339,7 +339,7 @@ pub(super) fn mut206(
             let own = s.typed_field_read_sites.iter();
             for read in own.filter(|r| r.counts_for_contracts()) {
                 for &(contract, rule) in &strict {
-                    let hits = |t: &ContractTarget| t.matches(&read.class_qualname, &read.attr);
+                    let hits = |t: &ContractTarget| t.matches_read(cx.decls, read);
                     if rule.allowance.names_place(key) && rule.targets.iter().any(hits) {
                         add_example(examples, contract, &read.attr, (key, path));
                     }
@@ -463,7 +463,7 @@ pub(super) fn mut207(
                     if !rule.allowance.names_place(key) {
                         continue;
                     }
-                    let called = rule.targets.called(site).into_iter().flatten();
+                    let called = rule.targets.called(cx.decls, site).into_iter().flatten();
                     for callee in called.flat_map(|i| rule.targets.called_at(i, site)) {
                         let method = callee.rsplit('.').next().unwrap_or(&callee);
                         add_example(examples, contract, method, (key, path));

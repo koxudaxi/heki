@@ -79,12 +79,15 @@ it advances, so an unadvanced generator binds nothing. A nested scope that rebin
 `nonlocal` makes its type unknown. A value typed with a project `Protocol` is an instance of the project
 classes that implement it structurally (having every member it defines; at most eight, counting
 a class and not its subclasses), but a read of a member the protocol declares is judged by the
-protocol, the type the code reads it through: it reads the protocol's member, not the
-implementations' (`def f(h: Host): h._m` reads `Host._m` when `Host` declares `_m`), and a
-private method of an implementation called through the protocol keeps its own reads instead of
-handing them to the caller (also when other callers call it through the class and take them
-over). An object whose class heki cannot see (an unannotated parameter or return, `Any`, a
-value of more than three classes) is not tied to the target.
+protocol, the type the code reads it through: it reads the protocol's member
+(`def f(h: Host): h._m` reads `Host._m` when `Host` declares `_m`), and a private method of an
+implementation called through the protocol keeps its own reads instead of handing them to the
+caller (also when other callers call it through the class and take them over). The read is one
+of a target `Model._m` too when heki lists the classes implementing the protocol, there is at
+least one, and each is `Model` or a subclass of it; a protocol that another class implements
+too, or that no project class implements, reads no target of `Model`'s. An object whose class
+heki cannot see (an unannotated parameter or return, `Any`, a value of more than three classes,
+a protocol implemented by more than eight) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call

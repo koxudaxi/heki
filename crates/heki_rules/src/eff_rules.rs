@@ -1107,13 +1107,18 @@ impl Boundary<'_> {
             .any(|p| p.names_within(symbol, symbol))
     }
 
-    /// Whether `allowed-callees` names everything `site` calls: the method the protocol typing
-    /// the receiver declares ([`CallSite::declared`], what the call targets judge the call by),
-    /// the class it constructs (or one of its modules / classes), or each of its project
-    /// callees.
+    /// Whether `allowed-callees` names everything `site` calls: the class it constructs (or one
+    /// of its modules / classes), or each of its project callees; for a call through a value
+    /// typed with a project protocol, also the method the protocol declares
+    /// ([`CallSite::declared`]): the call targets judge such a call by the declaration and by
+    /// the implementations it runs.
     fn allows_call(&self, cx: &CheckContext<'_>, site: &CallSite) -> bool {
+        let every_callee = || {
+            (site.project_callees().iter())
+                .all(|bc| names_function(&self.allowed_callees, &bc.callee))
+        };
         if let Some(declared) = site.declared() {
-            return names_function(&self.allowed_callees, declared);
+            return names_function(&self.allowed_callees, declared) || every_callee();
         }
         match &site.constructs {
             Some(class) => {
@@ -1122,10 +1127,7 @@ impl Boundary<'_> {
                     .iter()
                     .any(|p| p.names_within(class, qualname))
             }
-            None => site
-                .project_callees()
-                .iter()
-                .all(|bc| names_function(&self.allowed_callees, &bc.callee)),
+            None => every_callee(),
         }
     }
 
@@ -1636,7 +1638,7 @@ impl<'a> Reach<'a> {
                     path: path.to_path_buf(),
                 };
                 if b.calls && runs_body && !b.allows_call(cx, site) {
-                    reach.note_calls(b, i, &func, (path, site), false);
+                    reach.note_calls(cx, b, (i, &func), (path, site), false);
                 }
                 match &site.target {
                     CallTarget::Layer2 {
@@ -1686,7 +1688,7 @@ impl<'a> Reach<'a> {
                     .iter()
                     .filter(|(_, site)| b.references.counts(site) && !b.allows_call(cx, site));
                 for &entry in counted {
-                    reach.note_calls(b, i, &func, entry, true);
+                    reach.note_calls(cx, b, (i, &func), entry, true);
                 }
             }
             i += 1;
@@ -1788,13 +1790,13 @@ impl<'a> Reach<'a> {
     /// hands on (`reference`).
     fn note_calls(
         &mut self,
+        cx: &CheckContext<'_>,
         b: &Boundary<'_>,
-        i: usize,
-        func: &FuncKey,
+        (i, func): (usize, &FuncKey),
         (path, site): (&Path, &CallSite),
         reference: bool,
     ) {
-        for group in b.call_targets.called(site) {
+        for group in b.call_targets.called(cx.decls, site) {
             let nodes = &self.nodes;
             note(&mut self.calls, group, (func.fqn(), site.span), || {
                 let mut chain = chain_to(nodes, i);
@@ -2234,7 +2236,7 @@ impl<'a> Reach<'a> {
         for r in reads {
             let read: Vec<usize> = (b.read_targets.iter().enumerate())
                 .filter(|(_, t)| {
-                    t.matches(&r.class_qualname, &r.attr)
+                    t.matches_read(cx.decls, r)
                         && !self.initializes(cx, i, &t.classes, r.obj_params)
                 })
                 .map(|(ti, _)| ti)
