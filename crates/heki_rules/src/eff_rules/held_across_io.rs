@@ -207,7 +207,7 @@ fn held_managers(
             continue;
         };
         let lock = match types.get(&mgr) {
-            Some(Val::Inst(class)) if flagged(class) => Some((class.clone(), false)),
+            Some(Val::Inst(class, _)) if flagged(class) => Some((class.clone(), false)),
             _ => None,
         };
         let held = lock.or_else(|| {

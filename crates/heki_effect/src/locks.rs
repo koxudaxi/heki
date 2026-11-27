@@ -707,7 +707,7 @@ pub fn lock_class<'i>(
     var: VarId,
 ) -> Option<String> {
     let class = match types.get(&var) {
-        Some(Val::Inst(c)) => c.clone(),
+        Some(Val::Inst(c, _)) => c.clone(),
         _ => match def(through_copies(def, var)).map(|i| &i.kind) {
             Some(InstKind::LoadDeref { name, .. }) => tcx.captured(f, name)?.1?,
             _ => return None,

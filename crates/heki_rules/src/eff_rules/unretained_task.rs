@@ -174,7 +174,7 @@ fn makes_no_task(
     types: &FxHashMap<VarId, Val>,
     arg: VarId,
 ) -> bool {
-    if matches!(types.get(&arg), Some(Val::Inst(class)) if FUTURE_CLASSES.contains(&class.as_str()))
+    if matches!(types.get(&arg), Some(Val::Inst(class, _)) if FUTURE_CLASSES.contains(&class.as_str()))
     {
         return true;
     }

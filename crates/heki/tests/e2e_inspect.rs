@@ -555,6 +555,7 @@ fn effects_say_when_they_run_and_what_they_need() {
     let run = report(&p, "Mixin.run");
     let sleep = effect(&run, "sleep");
     assert_eq!(sleep["via_subclasses"][0]["class"], "m.Worker");
+    assert_eq!(sleep["via_subclasses"][0]["param"], "self");
     assert_eq!(
         hops(&sleep["via_subclasses"][0]["chain"]).last().unwrap().1,
         "time.sleep"
@@ -2091,7 +2092,7 @@ fn the_text_form_shows_every_kind_of_fact() {
     has(&text("m.only_with", &[]), "only when hasattr(x, \"url\")");
     has(&text("facts.Store.conn", &[]), "once per self");
     let run = text("facts.Mixin.run", &[]);
-    has(&run, "through subclass facts.Worker:");
+    has(&run, "through subclass facts.Worker of `self`:");
     has(
         &text("m.deep1", &[]),
         "global G       m.py:81 m.deep2 -> ... -> m.py:93 m.deep5 -> m.py:98",

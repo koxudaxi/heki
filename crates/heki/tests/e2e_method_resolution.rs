@@ -1110,6 +1110,140 @@ fn an_effect_through_self_and_a_plain_call_runs_for_every_receiver() {
     assert_eq!(hops, [(42, 14), (43, 19)], "{diags:#?}");
 }
 
+/// A helper calling a method on its parameter runs a subclass's override only when the argument
+/// may be an instance of the subclass: an object the caller constructs by calling the class by
+/// name (directly, through a copy, through its module) is exactly that class, and so is the
+/// object such a construction hands its `__init__`; a parameter, `cls(...)`, or an instance of
+/// the subclass may be one. The helpers handing the parameter on keep the question for their
+/// callers (`EffectSummary::provided_effects`).
+const EXACT_CORE: &str = r#"class Notes:
+    def __init__(self):
+        self.setup()
+
+    def setup(self):
+        pass
+
+    def preview(self):
+        return 1
+
+    def run(self):
+        return self.preview()
+
+
+def prepare(notes: Notes):
+    return notes.preview()
+
+
+def hand_on(notes: Notes):
+    return prepare(notes)
+
+
+async def concrete():
+    prepare(Notes())
+
+
+async def from_argument(notes: Notes):
+    prepare(notes)  # EFF101 [heuristic]
+
+
+async def direct():
+    Notes().preview()
+
+
+async def copied():
+    n = Notes()
+    n.run()
+
+
+async def handed_on():
+    hand_on(Notes())
+
+
+async def handed_on_open(notes: Notes):
+    hand_on(notes)  # EFF101 [heuristic]
+
+
+async def constructed():
+    return Notes()
+
+
+class Maker:
+    @classmethod
+    async def make(cls):
+        prepare(cls())  # EFF101 [heuristic]
+"#;
+
+const EXACT_GATE: &str = r#"import time
+
+from pkg import core
+from pkg.core import Notes, prepare
+
+
+class Gate(Notes):
+    def setup(self):
+        time.sleep(1)
+
+    def preview(self):
+        time.sleep(1)
+
+
+async def subclass():
+    g = Gate()  # EFF101 [heuristic]
+    prepare(g)  # EFF101 [heuristic]
+
+
+async def through_module():
+    core.prepare(core.Notes())
+"#;
+
+/// A class with a `__new__` of its own may hand out an instance of another class, and a class
+/// name the project binds to another class may construct that one: neither construction is
+/// exactly the class.
+const NOT_EXACT: &str = r#"import time
+
+
+class Plain:
+    def run(self):
+        return 1
+
+
+class Slow(Plain):
+    def run(self):
+        time.sleep(1)
+
+
+class Pooled(Plain):
+    def __new__(cls):
+        return object.__new__(Slow)
+
+
+def call(p: Plain):
+    return p.run()
+
+
+async def made():
+    call(Plain())  # EFF101 [heuristic]
+
+
+async def pooled():
+    call(Pooled())  # EFF101 [heuristic]
+
+
+def patch():
+    global Plain
+    Plain = Slow
+"#;
+
+#[test]
+fn an_exact_instance_runs_only_its_classs_implementations() {
+    check_marks(
+        "exact_instances",
+        &[("pkg/core.py", EXACT_CORE), ("pkg/gate.py", EXACT_GATE)],
+        &["EFF101"],
+    );
+    check_marks("not_exact", &[("pkg/plain.py", NOT_EXACT)], &["EFF101"]);
+}
+
 /// A class whose bases C3 cannot linearize keeps the depth-first, left-to-right order: a base
 /// order its subclass contradicts (Python rejects the class statement, as the test expects),
 /// and bases that name the class itself (a class extending an imported class of its own name

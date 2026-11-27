@@ -14,7 +14,8 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
     CellChange, Construction, ContractSharing, Delivery, EffectSummary, EntryKey, Facts, FuncKey,
-    KeptBy, LocalOrigins, MayGiven, NewArg, NewCond, NewFrom, NewKind, Origins, ProjectIndex,
+    KeptBy, LocalOrigins, MayGiven, NewArg, NewCond, NewFrom, NewKind, Origins, PROVIDED_CHAIN_LIMIT,
+    PROVIDED_LIMIT, ProjectIndex, Provided,
     ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole,
     Slot, TypedFieldWrite, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
@@ -472,15 +473,7 @@ fn must_reads_through_self_calls(
             }
             let reads = callee
                 .filter(|callee| {
-                    let bound_to_self = callee.owner_class_qualname.is_some()
-                        && !callee.decorators.iter().any(|d| {
-                            let head = d.split('(').next().unwrap_or(d).trim();
-                            matches!(
-                                head.rsplit('.').next(),
-                                Some("staticmethod" | "classmethod")
-                            )
-                        });
-                    bound_to_self
+                    callee.binds_self()
                         && !in_scc(&bc.callee)
                         && runs_at_call(callee, site)
                         && !callee.decorator_may_replace
@@ -1624,9 +1617,8 @@ fn transfer(
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the
     //    callee's undecided tests of caller inputs (except of an attribute the caller assigns
-    //    itself). On a receiver of known class, the effects only implementations of unrelated
-    //    classes reach do not run.
-    let receiver = site.receiver();
+    //    itself). The effects only implementations of classes the arguments cannot be reach do
+    //    not run ([`arrival`]).
     for e in facts
         .direct_exec_effects
         .iter()
@@ -1636,7 +1628,8 @@ fn transfer(
         if site.hides(*e) {
             continue;
         }
-        let Some(tail) = facts.effect_chain_for(*e, receiver) else {
+        let arrival = arrival(facts, callee, *e, site, bc);
+        let Some(tail) = arrival.tail() else {
             continue;
         };
         let Some(mut through) =
@@ -1656,7 +1649,7 @@ fn transfer(
         let had = !new || t.direct_exec_effects.contains(e);
         guards::add_occurrence(&mut t.exec_guards, *e, had, &through.guards);
         let chain = extend_chain(lead, tail, rewrite);
-        let kept = add_receiver_effect(t, *e, had, site, bc, facts, &chain, lead, rewrite);
+        let kept = add_provided_effect(t, *e, had, &arrival, lead, rewrite);
         let slot = t.exec_chains.entry(*e).or_default();
         let replaces = match kept {
             KeptChain::Replaced => true,
@@ -1967,86 +1960,158 @@ fn transfer_typed_writes(
 }
 
 /// What an arrival of an effect does to the chain `EffectSummary::exec_chains` keeps for it:
-/// that chain runs whatever the caller's `self` is when any chain does, so a receiver of any
-/// class sees a path it runs.
+/// that chain runs whatever the caller's parameters are when any chain does, so an argument of
+/// any class sees a path it runs.
 enum KeptChain {
-    /// The first chain that runs whatever `self` is replaces one through a subclass's override.
+    /// The first chain that runs whatever the parameters are replaces one through a subclass's
+    /// implementation.
     Replaced,
     /// The shorter of the two.
     Shorter,
-    /// A chain through a subclass's override leaves one that runs whatever `self` is.
+    /// A chain through a subclass's implementation leaves one that runs whatever the parameters
+    /// are.
     Kept,
 }
 
-/// Record in `t` whether effect `e`, arriving through `bc` at `site` with `chain` (the caller
-/// `had` it already), runs only for some classes of the caller's own `self`
-/// (`EffectSummary::receiver_effects`): through a call on `self`, the classes the callee's
-/// facts already depend on, or the subclass providing the callee. Any other arrival runs it
-/// whatever `self` is. Returns how the arrival's chain joins the kept one.
-#[allow(clippy::too_many_arguments)]
-fn add_receiver_effect(
+/// How an execution effect of a callee reaches the caller at one call ([`arrival`]).
+pub enum Arrival<'f> {
+    /// It does not: only implementations of classes the arguments cannot be reach it.
+    Never,
+    /// Whatever the caller's parameters are, by this chain of the callee.
+    Always(&'f [Arc<CallHop>]),
+    /// Only when a parameter of the caller is an instance of a class: each parameter and class,
+    /// with the callee's chain through the class's implementation.
+    Provided(Vec<(u8, SharedLine, &'f [Arc<CallHop>])>),
+}
+
+impl<'f> Arrival<'f> {
+    /// The callee's shortest chain to the effect, `None` when it does not arrive.
+    pub fn tail(&self) -> Option<&'f [Arc<CallHop>]> {
+        match self {
+            Self::Never => None,
+            Self::Always(tail) => Some(tail),
+            Self::Provided(ways) => ways.iter().map(|(_, _, c)| *c).min_by_key(|c| c.len()),
+        }
+    }
+}
+
+/// How the execution effect `e` that `facts` (of `callee`, or of iterating its result) reach
+/// arrives at the caller through `bc` at `site` ([`EffectSummary::provided_effects`]). An
+/// implementation a subclass `P` provides for the callee's parameter `k` runs when the argument
+/// bound to `k` may be a `P`: not when it is an instance of exactly a class without `P` on its
+/// MRO, nor, for the receiver of a call binding it to `self`, when the receiver's class and `P`
+/// derive not one from the other; when it is a parameter of the caller as itself, the caller's
+/// callers decide. A callee that is itself a subclass's override of a call on a parameter of
+/// the caller runs only when that parameter is an instance of the subclass.
+pub fn arrival<'f>(
+    facts: &'f EffectSummary,
+    callee: &EffectSummary,
+    e: ExecEffectKind,
+    site: &CallSite,
+    bc: &BoundCallee,
+) -> Arrival<'f> {
+    // What runs whatever the callee's parameters are runs at the call when the callee runs.
+    let runs_with_callee = |tail| match site.provider(bc) {
+        Some((param, line)) => Arrival::Provided(vec![(param, Arc::clone(line), tail)]),
+        None => Arrival::Always(tail),
+    };
+    let Some(ways) = facts.provided_effects.as_ref().and_then(|p| p.get(&e)) else {
+        return runs_with_callee(facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice));
+    };
+    let receiver = site
+        .receiver()
+        .filter(|_| site.binds_recv && callee.binds_self());
+    let mut always: Option<&'f [Arc<CallHop>]> = None;
+    let mut forwarded = Vec::new();
+    for way in ways {
+        let arg = bc.params.get(usize::from(way.param));
+        if let Some(exact) = arg.and_then(|a| a.exact.as_deref()) {
+            if !exact.derives_from(&way.provider) {
+                continue;
+            }
+        } else if way.param == 0 && receiver.is_some_and(|r| !way.provider.related(r)) {
+            continue;
+        } else if let Some(&(param, None)) = arg.and_then(|a| a.param.as_ref()) {
+            forwarded.push((param, Arc::clone(&way.provider), way.chain.as_slice()));
+            continue;
+        }
+        if always.is_none_or(|kept| way.chain.len() < kept.len()) {
+            always = Some(&way.chain);
+        }
+    }
+    match always {
+        Some(tail) => runs_with_callee(tail),
+        None if forwarded.is_empty() => Arrival::Never,
+        None => Arrival::Provided(forwarded),
+    }
+}
+
+/// Record in `t` whether effect `e`, arriving as `arrival` (the caller `had` it already), runs only when some parameter of the caller is an instance of some class
+/// (`EffectSummary::provided_effects`): an arrival that runs whatever the parameters are clears
+/// those ways. Past [`PROVIDED_LIMIT`] ways, or a way past [`PROVIDED_CHAIN_LIMIT`] calls, the
+/// effect is taken to run whatever they are. Returns how the arrival's chain joins the kept one.
+fn add_provided_effect(
     t: &mut EffectSummary,
     e: ExecEffectKind,
     had: bool,
-    site: &CallSite,
-    bc: &BoundCallee,
-    facts: &EffectSummary,
-    chain: &SharedChain,
+    arrival: &Arrival<'_>,
     lead: &[Arc<CallHop>],
     rewrite: bool,
 ) -> KeptChain {
-    let mut provided: Vec<(SharedLine, SharedChain)> = Vec::new();
-    if site.recv_is_self {
-        let inner = facts.receiver_effects.as_ref().and_then(|r| r.get(&e));
-        match (inner, site.provider(bc)) {
-            (Some(inner), _) => {
-                let receiver = site.receiver();
-                provided.extend(
-                    inner
-                        .iter()
-                        .filter(|(p, _)| receiver.is_none_or(|r| p.related(r)))
-                        .map(|(p, c)| (Arc::clone(p), extend_chain(lead, c, rewrite))),
-                );
-            }
-            (None, Some(p)) => provided.push((Arc::clone(p), chain.clone())),
-            (None, None) => {}
-        }
-    }
     let only_provided = t
-        .receiver_effects
+        .provided_effects
         .as_ref()
         .is_some_and(|r| r.contains_key(&e));
-    if provided.is_empty() {
-        if let Some(r) = &mut t.receiver_effects {
-            r.remove(&e);
-            if r.is_empty() {
-                t.receiver_effects = None;
-            }
+    let ways = match arrival {
+        Arrival::Provided(ways) if !(had && !only_provided) => ways,
+        // Already reached whatever the parameters are.
+        Arrival::Provided(_) => return KeptChain::Kept,
+        Arrival::Never | Arrival::Always(_) => {
+            clear_provided(t, e);
+            return if only_provided {
+                KeptChain::Replaced
+            } else {
+                KeptChain::Shorter
+            };
         }
-        return if only_provided {
-            KeptChain::Replaced
-        } else {
-            KeptChain::Shorter
-        };
-    }
-    // Already reached whatever `self` is.
-    if had && !only_provided {
-        return KeptChain::Kept;
-    }
+    };
     let slot = t
-        .receiver_effects
+        .provided_effects
         .get_or_insert_with(Box::default)
         .entry(e)
         .or_default();
-    for (p, c) in provided {
-        match slot.iter_mut().find(|(q, _)| *q == p) {
-            Some((_, kept)) if kept.len() <= c.len() => {}
-            Some((_, kept)) => *kept = c,
-            None => slot.push((p, c)),
+    for (param, provider, tail) in ways {
+        let c = extend_chain(lead, tail, rewrite);
+        match slot
+            .iter_mut()
+            .find(|w| w.param == *param && w.provider == *provider)
+        {
+            Some(kept) if kept.chain.len() <= c.len() => {}
+            Some(kept) => kept.chain = c,
+            None => slot.push(Provided {
+                param: *param,
+                provider: Arc::clone(provider),
+                chain: c,
+            }),
         }
     }
-    slot.sort();
+    if slot.len() > PROVIDED_LIMIT || slot.iter().any(|w| w.chain.len() > PROVIDED_CHAIN_LIMIT) {
+        clear_provided(t, e);
+    } else {
+        slot.sort();
+    }
     KeptChain::Shorter
+}
+
+/// Drop the ways `t` reaches `e` only through subclasses' implementations: it runs whatever the
+/// parameters are.
+fn clear_provided(t: &mut EffectSummary, e: ExecEffectKind) {
+    if let Some(r) = &mut t.provided_effects {
+        r.remove(&e);
+        if r.is_empty() {
+            t.provided_effects = None;
+        }
+    }
 }
 
 /// How a callee writes a typed field it does not know through an argument ([`IndirectWrite`]).

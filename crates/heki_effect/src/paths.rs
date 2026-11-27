@@ -27,7 +27,7 @@ pub fn with_paths<R>(
     let suppresses = |mgr: VarId| -> Answer<bool> {
         let catalogued = |symbol: &str| cx.kb.lookup(symbol).and_then(|e| e.exit_suppresses);
         let by_class = match types.get(&mgr) {
-            Some(Val::Inst(class)) => catalogued(class),
+            Some(Val::Inst(class, _)) => catalogued(class),
             _ => None,
         };
         let by_factory = || {
@@ -52,7 +52,7 @@ pub fn with_paths<R>(
     // A method of the value's class, by the catalog (R3) or the project's code (R2, which also
     // reads the project subclasses the value may be an instance of).
     let attribute = |obj: VarId, attr: &str| match types.get(&obj) {
-        Some(Val::Inst(class)) => {
+        Some(Val::Inst(class, _)) => {
             cx.kb.lookup(&format!("{class}.{attr}")).is_some()
                 || cx.project.method_read_runs_no_code(class, attr)
         }

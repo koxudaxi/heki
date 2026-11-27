@@ -132,7 +132,7 @@ pub fn render_text(r: &InspectReport) -> String {
             );
             chain_lines(&mut out, "    ", &e.chain);
             for s in &e.via_subclasses {
-                let _ = writeln!(out, "    through subclass {}:", s.class);
+                let _ = writeln!(out, "    through subclass {} of `{}`:", s.class, s.param);
                 chain_lines(&mut out, "      ", &s.chain);
             }
         }

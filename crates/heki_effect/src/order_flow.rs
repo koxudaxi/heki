@@ -664,7 +664,7 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
     fn holds_text(&self, v: VarId) -> bool {
         matches!(
             self.types.get(&v),
-            Some(Val::Inst(c)) if c == "builtins.str" || c == "builtins.bytes"
+            Some(Val::Inst(c, _)) if c == "builtins.str" || c == "builtins.bytes"
         )
     }
 

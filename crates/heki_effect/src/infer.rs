@@ -153,6 +153,90 @@ fn isinstance_classes(project: &ProjectDecls, t: &Ty) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// The variables of `f` holding an instance of exactly their class: the result of calling a
+/// project class by the name it is defined under (read as a global, imported, or as a member of
+/// its module), which makes one of that class and of no subclass when the class constructs
+/// exactly ([`ProjectDecls::constructs_exactly`]), and the copies of that result typed with the
+/// same class. A class object that may be a subclass (`cls(...)`, an attribute holding a class)
+/// constructs no exact instance, nor does a function returning one; a value that leaves the
+/// function (a store, a return, an item of a container, a phi) is typed again where it is read.
+fn exact_instances(
+    f: &IrFunction,
+    shape: &FnShape<'_>,
+    facts: &[Fact],
+    project: &ProjectDecls,
+) -> FxHashSet<VarId> {
+    let fact = |v: VarId| &facts[v.0 as usize];
+    let instance_class = |v: VarId| match fact(v) {
+        Fact::Known(Ty::Inst(o)) => Some(o.class.as_str()),
+        _ => None,
+    };
+    let named_class = |fqn: &str, made: &str| {
+        project.canonical(fqn) == made && project.constructs_exactly(made)
+    };
+    let module_named = |v: VarId| match fact(v) {
+        Fact::Known(Ty::Ref(m)) if project.module(m).is_some() => Some(m.as_str()),
+        _ => None,
+    };
+    let mut made: FxHashMap<VarId, &str> = FxHashMap::default();
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        let (dst, class) = match &inst.kind {
+            InstKind::Call {
+                dst,
+                callee_var: Some(c),
+                is_awaited: false,
+                ..
+            } => {
+                let read_by_name = match shape.inst(shape.copy_root(*c)).map(|i| &i.kind) {
+                    Some(InstKind::LoadGlobal { .. } | InstKind::LoadName { .. }) => true,
+                    Some(InstKind::Import { .. }) => true,
+                    Some(InstKind::AttrLoad { obj, .. }) => module_named(*obj).is_some(),
+                    _ => false,
+                };
+                let Fact::Known(Ty::Ref(fqn)) = fact(*c) else {
+                    continue;
+                };
+                let Some(class) = instance_class(*dst) else {
+                    continue;
+                };
+                if !read_by_name || !named_class(fqn, class) {
+                    continue;
+                }
+                (*dst, class)
+            }
+            InstKind::MethodCall {
+                dst,
+                recv,
+                method,
+                is_awaited: false,
+                ..
+            } => {
+                let (Some(module), Some(class)) = (module_named(*recv), instance_class(*dst))
+                else {
+                    continue;
+                };
+                if !named_class(&format!("{module}.{method}"), class) {
+                    continue;
+                }
+                (*dst, class)
+            }
+            _ => continue,
+        };
+        made.insert(dst, class);
+    }
+    if made.is_empty() {
+        return FxHashSet::default();
+    }
+    (0u32..)
+        .zip(facts)
+        .map(|(i, _)| VarId(i))
+        .filter(|v| {
+            instance_class(*v)
+                .is_some_and(|class| made.get(&shape.copy_root(*v)) == Some(&class))
+        })
+        .collect()
+}
+
 /// The types of one function's variables.
 pub(crate) struct Inferred {
     facts: Vec<Fact>,
@@ -168,6 +252,8 @@ pub(crate) struct Inferred {
     narrowed: FxHashMap<(BlockId, VarId), Ty>,
     /// [`Narrowing::value_of`].
     value_of: FxHashMap<VarId, VarId>,
+    /// The variables holding an instance of exactly their class ([`exact_instances`]).
+    exact: FxHashSet<VarId>,
 }
 
 /// A value no path binds (`None`) adds no item type.
@@ -262,12 +348,20 @@ impl Inferred {
         out
     }
 
-    /// The values consumers see, by variable.
+    /// The values consumers see, by variable: an instance of exactly its class says so.
     pub(crate) fn vals(&self) -> FxHashMap<VarId, Val> {
         (0u32..)
             .zip(&self.facts)
             .filter_map(|(i, f)| match f {
-                Fact::Known(t) => Some((VarId(i), t.val()?)),
+                Fact::Known(t) => {
+                    let v = VarId(i);
+                    match t.val()? {
+                        Val::Inst(class, _) if self.exact.contains(&v) => {
+                            Some((v, Val::Inst(class, true)))
+                        }
+                        val => Some((v, val)),
+                    }
+                }
                 Fact::Unset | Fact::Unknown => None,
             })
             .collect()
@@ -1001,7 +1095,7 @@ impl<'a> TypeCtx<'a> {
         let g = self.ir().function(*owner);
         let class = match self.infer_types(g).cell_fact(cell) {
             Fact::Known(t) => match t.val() {
-                Some(Val::Inst(c)) => Some(c),
+                Some(Val::Inst(c, _)) => Some(c),
                 _ => None,
             },
             Fact::Unset | Fact::Unknown => None,
@@ -1803,6 +1897,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 value_of = n.value_of;
             }
         }
+        let exact = exact_instances(self.f, shape, &facts, self.cx.project);
         Inferred {
             facts,
             declared: self.names,
@@ -1810,6 +1905,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             cells,
             narrowed,
             value_of,
+            exact,
         }
     }
 

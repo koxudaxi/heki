@@ -1976,7 +1976,7 @@ fn constructed_class(cx: &GuardInputs<'_, '_>, v: VarId, kind: &InstKind) -> Opt
     if let InstKind::Call {
         callee_var: None, ..
     } = kind
-        && let Some(Val::Inst(class)) = cx.types.get(&v)
+        && let Some(Val::Inst(class, _)) = cx.types.get(&v)
     {
         let kind = BuiltinKind::from_name(class.strip_prefix("builtins.")?)?;
         return ConstClass::of_builtin(kind);

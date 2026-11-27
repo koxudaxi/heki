@@ -44,7 +44,7 @@ fn show(v: &Val) -> String {
     match v {
         Val::Ref(f) => format!("ref {f}"),
         Val::Class(c) => format!("class {c}"),
-        Val::Inst(c) => c.clone(),
+        Val::Inst(c, _) => c.clone(),
         Val::Super(c) => format!("super {c}"),
         Val::Union(cs) => cs.join(" | "),
         Val::OneOf(fs) => format!("one of {}", fs.join(", ")),
@@ -1203,10 +1203,10 @@ fn calls_on_unions_and_protocols_resolve_class_by_class() {
         // A protocol dispatches to the classes implementing it; one without members to none,
         // and `typing.Protocol` is not known to define the method.
         assert_eq!(
-            method(&Val::Inst("m.Runner".into()), "run"),
+            method(&Val::Inst("m.Runner".into(), false), "run"),
             "project true A.run,B.run"
         );
-        assert_eq!(method(&Val::Inst("m.Marker".into()), "run"), "unresolved");
+        assert_eq!(method(&Val::Inst("m.Marker".into(), false), "run"), "unresolved");
         // Calling a union value, reading a property on one.
         assert_eq!(
             callee(&cx.resolve_call(Some(&union(&["A", "B"])))),

@@ -4161,7 +4161,7 @@ impl<'a> Mut202Fn<'a> {
             InstKind::Copy { src, .. } => self.ro.get(src).cloned(),
             InstKind::SubscriptLoad { obj, .. } => {
                 let class = match self.types.get(obj) {
-                    Some(Val::Inst(class)) => Some(class.as_str()),
+                    Some(Val::Inst(class, _)) => Some(class.as_str()),
                     _ => None,
                 };
                 let step = readonly::subscript_step(&self.ix.shape, inst, class);
@@ -4172,7 +4172,7 @@ impl<'a> Mut202Fn<'a> {
                     return r.derive(ReturnStep::ELEMENT);
                 }
                 // `readonly-returns` may name a property: `obj.schema`.
-                if let Some(Val::Inst(class)) = self.types.get(obj) {
+                if let Some(Val::Inst(class, _)) = self.types.get(obj) {
                     let class = ContractClass::with_qualname(self.cx.decls, class.clone());
                     let (fqn, qualname) = class.member(attr);
                     if let Some(c) = self.returns.producers.protecting(&fqn, &qualname) {
@@ -4421,7 +4421,7 @@ impl<'a> Mut202Fn<'a> {
                 lhs,
                 in_place: true,
                 ..
-            } if matches!(self.types.get(lhs), Some(Val::Inst(t)) if mutable_builtin(self.cx.decls, t)) => {
+            } if matches!(self.types.get(lhs), Some(Val::Inst(t, _)) if mutable_builtin(self.cx.decls, t)) => {
                 Some(*lhs)
             }
             _ => None,

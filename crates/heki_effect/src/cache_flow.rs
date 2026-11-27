@@ -302,7 +302,7 @@ impl KeptWrite {
 fn in_place_change(op: InPlaceOp<'_>, types: &FxHashMap<VarId, Val>) -> Option<InPlaceChange> {
     let (recv, method, by_name) = op;
     let kind = match types.get(&recv)? {
-        Val::Inst(class) => ContainerKind::ALL
+        Val::Inst(class, _) => ContainerKind::ALL
             .into_iter()
             .find(|k| k.class() == class.as_str())?,
         _ => return None,

@@ -74,7 +74,7 @@ impl<'a> Extractor<'a> {
     /// implementations are listed structurally.
     fn one_class(&self, var: VarId) -> bool {
         let project = self.cx.project;
-        matches!(self.val(var), Some(Val::Inst(c))
+        matches!(self.val(var), Some(Val::Inst(c, _))
             if project.is_project_class(c) && project.protocol_implementers(c).is_none())
     }
 

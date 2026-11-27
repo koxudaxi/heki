@@ -213,7 +213,7 @@ fn lookup_compares_items(
     h: &Handed<'_>,
 ) -> bool {
     let hashed = match h.val {
-        Some(Val::Inst(class)) => hashed_container(project, class),
+        Some(Val::Inst(class, _)) => hashed_container(project, class),
         Some(Val::Union(classes)) => classes.iter().any(|c| hashed_container(project, c)),
         _ => false,
     };
@@ -430,7 +430,7 @@ pub(crate) fn attribute_access_runs_project_code(
         }
     };
     match h.val {
-        Some(Val::Inst(class)) => instance(class),
+        Some(Val::Inst(class, _)) => instance(class),
         Some(Val::Union(classes)) => classes.iter().any(|c| instance(c)),
         Some(Val::Class(class) | Val::Ref(class)) if project.is_project_class(class) => {
             match access {
@@ -452,7 +452,7 @@ pub(crate) fn reads_own_namespace(
     kb: &EffectiveEcosystemKb,
     val: Option<&Val>,
 ) -> bool {
-    matches!(val, Some(Val::Inst(_) | Val::Union(_)))
+    matches!(val, Some(Val::Inst(_, _) | Val::Union(_)))
         && !attribute_access_runs_project_code(
             project,
             kb,
@@ -479,7 +479,7 @@ pub(crate) fn iterates_builtin(
     let iterates_own = || !ITERATION.iter().any(|m| may_define(project, kb, h, m));
     h.built
         || match h.val {
-            Some(Val::Inst(class)) => builtin(class) && iterates_own(),
+            Some(Val::Inst(class, _)) => builtin(class) && iterates_own(),
             Some(Val::Union(classes)) => classes.iter().all(|c| builtin(c)) && iterates_own(),
             _ => false,
         }
@@ -524,7 +524,7 @@ fn method_runs(
 /// The class of `h` when it is an instance of one.
 fn instance_class<'h>(h: &Handed<'h>) -> Option<&'h str> {
     match h.val {
-        Some(Val::Inst(class)) => Some(class.as_str()),
+        Some(Val::Inst(class, _)) => Some(class.as_str()),
         _ => None,
     }
 }
@@ -565,7 +565,7 @@ fn class_method_runs(
             && (name == "*" || project.special_method_owner(class, name) > MethodOwner::Builtin)
     };
     match h.val {
-        Some(Val::Inst(class)) => instance(class),
+        Some(Val::Inst(class, _)) => instance(class),
         Some(Val::Union(classes)) => classes.iter().any(|c| instance(c)),
         Some(Val::Class(class)) => class_object(class),
         Some(Val::Ref(symbol)) => {
@@ -587,7 +587,7 @@ fn replaced_in_project(
 ) -> bool {
     let replaced = |class: &str| !project.method_not_overridden(class, name, true);
     match h.val {
-        Some(Val::Inst(class)) if !h.built => replaced(class),
+        Some(Val::Inst(class, _)) if !h.built => replaced(class),
         Some(Val::Union(classes)) => classes.iter().any(|c| replaced(c)),
         _ => may_define(project, kb, h, name),
     }
@@ -631,7 +631,7 @@ fn element_runs(
 /// [`items_may_define`] of a value built nowhere heki sees, by its class.
 fn items_of_class(project: &ProjectDecls, h: &Handed<'_>, name: &str) -> bool {
     let class = match h.val {
-        Some(Val::Inst(class)) => class,
+        Some(Val::Inst(class, _)) => class,
         // A class object has items only through its metaclass's iteration (an enum's members).
         Some(Val::Class(class) | Val::Ref(class)) => {
             return project.is_project_class(class) && project.has_custom_metaclass(class);
@@ -699,7 +699,7 @@ pub(crate) fn interpreter_own(
                 })
     };
     match val {
-        Some(Val::Inst(class)) => established(class),
+        Some(Val::Inst(class, _)) => established(class),
         Some(Val::Union(classes)) => classes.iter().all(established),
         _ => false,
     }
@@ -718,7 +718,7 @@ pub(crate) fn may_keep_under(project: &ProjectDecls, h: &Handed<'_>, attr: &str)
             || project.binds_property(class, attr)
     };
     match h.val {
-        Some(Val::Inst(class)) => keeps(class),
+        Some(Val::Inst(class, _)) => keeps(class),
         Some(Val::Union(classes)) => classes.iter().any(|c| keeps(c)),
         _ => true,
     }
@@ -740,8 +740,8 @@ fn calls_project_code(project: &ProjectDecls, kb: &EffectiveEcosystemKb, h: &Han
         Some(Val::Ref(symbol)) => project_named(project, symbol),
         Some(Val::OneOf(symbols)) => symbols.iter().any(|s| project_named(project, s)),
         Some(Val::Class(class)) => project.is_project_class(class),
-        Some(Val::Inst(class)) if CALLABLE_CLASSES.contains(&class.as_str()) => true,
-        Some(Val::Inst(_) | Val::Union(_)) => may_define(project, kb, h, "__call__"),
+        Some(Val::Inst(class, _)) if CALLABLE_CLASSES.contains(&class.as_str()) => true,
+        Some(Val::Inst(_, _) | Val::Union(_)) => may_define(project, kb, h, "__call__"),
         Some(Val::Super(_)) | None => true,
     }
 }
@@ -771,7 +771,7 @@ fn of_library_class(project: &ProjectDecls, h: &Handed<'_>) -> bool {
             && project.value_classes(class).is_empty()
     };
     match h.val {
-        Some(Val::Inst(class)) => library(class),
+        Some(Val::Inst(class, _)) => library(class),
         Some(Val::Union(classes)) => classes.iter().all(|c| library(c)),
         _ => false,
     }

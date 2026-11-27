@@ -614,7 +614,12 @@ values with inference, which also follows closure cells and class-body aliases.
 A method called on an instance is the definition the class's MRO (Python's C3 linearization of
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
-`Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
+`Base.method(obj)` the `method` it finds; so is the instance a function makes by calling a
+project class by name (read as a global, imported, or as a member of its module), and the copies
+of it (`Val::Inst(class, true)`, `Inferred::exact`): a call on it runs what the MRO finds, and no
+subclass's override. A class with a `__new__` of its own along the MRO, or a name the project
+binds to another object, makes no exact instance, and exactness never leaves the function (a
+store, a return, an item of a container, or a join over paths is typed again where it is read); `cls` in a class method may be any subclass, so
 `cls()` and `cls.method()` dispatch like a call on an instance, and so do `type(obj)` of an
 instance of a project class that is not a protocol (`obj.__class__` is not: a class or a
 subclass may rebind it) and a value annotated `type[C]` or `typing.Type[C]` (`Ty::Class`; the
@@ -623,11 +628,15 @@ of a property's value (`obj.prop(...)`, the getter found first along the MRO, wi
 setter) runs the getter as reading `obj.prop` does and calls the value it gives, typed by the
 getter's return annotation (`self.data_type(is_dict=True)` of a property returning
 `type[DataType]` constructs `DataType`). A method's calls on its own
-`self` run the overrides of every subclass, so a mixin's summary holds the effects of every
-class sharing it; an execution effect reached only through the override of a subclass records
-that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
-only when that class and the receiver's derive one from the other (an unknown receiver runs them
-all). An async client sharing a command mixin with a sync one runs the async implementation.
+`self`, and a function's calls on a parameter as itself, run the overrides of every subclass, so
+a mixin's summary holds the effects of every class sharing it; an execution effect reached only
+through the override of a subclass records the parameter and that class
+(`EffectSummary::provided_effects`, `self` being parameter 0; at most `PROVIDED_LIMIT` per
+effect, past which it runs whatever the parameters are). A call passing an instance of exactly a
+class runs it only when the class has the subclass on its MRO, a call on a receiver of known
+class only when that class and the receiver's derive one from the other, and a call passing its
+own parameter as itself leaves it to its callers under that parameter (any other argument runs
+them all). An async client sharing a command mixin with a sync one runs the async implementation.
 Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Coroutine`): its return
 annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
 future or a task gives an untracked result. The catalog types an external awaitable by what

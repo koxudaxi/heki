@@ -150,7 +150,7 @@ impl IteratedContainer {
     /// besides `None` agree.
     pub(crate) fn of_val(val: &Val) -> Option<Self> {
         match val {
-            Val::Inst(class) => Self::of_class(class),
+            Val::Inst(class, _) => Self::of_class(class),
             Val::Union(classes) => {
                 let mut kinds = classes
                     .iter()

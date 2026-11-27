@@ -804,7 +804,7 @@ impl<'a> Extractor<'a> {
     fn library_offset(&self, call: &CallOperands<'_>) -> usize {
         usize::from(
             call.recv
-                .is_some_and(|r| matches!(self.val_in(call.at.0, r), Some(Val::Inst(_)))),
+                .is_some_and(|r| matches!(self.val_in(call.at.0, r), Some(Val::Inst(_, _)))),
         )
     }
 }

@@ -150,7 +150,7 @@ pub fn source<'k, 't>(
     kb: &EffectiveEcosystemKb,
 ) -> Option<Source<'k>> {
     let result_kind = || match result {
-        Some(Val::Inst(class)) => ContainerKind::of_class(class),
+        Some(Val::Inst(class, _)) => ContainerKind::of_class(class),
         _ => None,
     };
     match (inst, callee) {

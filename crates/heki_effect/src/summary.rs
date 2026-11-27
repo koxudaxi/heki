@@ -1495,7 +1495,7 @@ impl<'a> Extractor<'a> {
         ex.find_new_cells();
         ex.memo_fills = ex.memo_fills();
         let class_of = |v: VarId| match ex.types.get(&v) {
-            Some(Val::Inst(class)) => Some(class.as_str()),
+            Some(Val::Inst(class, _)) => Some(class.as_str()),
             _ => None,
         };
         if ex.summary.is_lru_cache {
@@ -1640,7 +1640,7 @@ impl<'a> Extractor<'a> {
         slot: usize,
         var: VarId,
     ) -> Option<(FuncKey, u8, CapacityOf)> {
-        let queue = matches!(self.types.get(&var), Some(Val::Inst(c)) if capacity::is_queue_class(self.cx.kb, c));
+        let queue = matches!(self.types.get(&var), Some(Val::Inst(c, _)) if capacity::is_queue_class(self.cx.kb, c));
         let slot = u8::try_from(slot).ok().filter(|_| queue)?;
         Some((callee.clone(), slot, self.capacity_of(var).capacity))
     }
@@ -1654,7 +1654,7 @@ impl<'a> Extractor<'a> {
                 return owner.clone();
             }
             match self.types.get(&v) {
-                Some(Val::Inst(c)) if self.cx.project.is_project_class(c) => Some(c.clone()),
+                Some(Val::Inst(c, _)) if self.cx.project.is_project_class(c) => Some(c.clone()),
                 _ => None,
             }
         };
@@ -1915,7 +1915,7 @@ impl<'a> Extractor<'a> {
     /// The class of `var` when it is an instance of one class.
     fn instance_of(&self, var: VarId) -> Option<String> {
         match self.val(var)? {
-            Val::Inst(class) => Some(class.clone()),
+            Val::Inst(class, _) => Some(class.clone()),
             _ => None,
         }
     }
@@ -1923,7 +1923,7 @@ impl<'a> Extractor<'a> {
     /// The project class of `var`, when it is an instance of one class.
     fn project_class(&self, var: VarId) -> Option<String> {
         match self.val(var)? {
-            Val::Inst(c) if self.cx.project.is_project_class(c) => Some(c.clone()),
+            Val::Inst(c, _) if self.cx.project.is_project_class(c) => Some(c.clone()),
             _ => None,
         }
     }
@@ -1933,7 +1933,7 @@ impl<'a> Extractor<'a> {
     fn project_classes(&self, var: VarId) -> Vec<String> {
         let project = self.cx.project;
         match self.val(var) {
-            Some(Val::Inst(c)) if project.is_project_class(c) => {
+            Some(Val::Inst(c, _)) if project.is_project_class(c) => {
                 let mut out = vec![c.clone()];
                 out.extend(
                     project
@@ -2035,7 +2035,7 @@ impl<'a> Extractor<'a> {
                                     .get(obj)
                                     .or_else(|| self.param_copy_alias.get(obj))
                                 && ownership::slice_copies(match self.val(*obj) {
-                                    Some(Val::Inst(class)) => Some(class.as_str()),
+                                    Some(Val::Inst(class, _)) => Some(class.as_str()),
                                     _ => None,
                                 })
                             {
@@ -2426,7 +2426,7 @@ impl<'a> Extractor<'a> {
                         project.symbol(fqn),
                         resolver::Symbol::Function(_, decl) if decl.returns_param.is_some()
                     ),
-                    Val::Inst(_) | Val::Union(_) => project.may_return_param("__call__"),
+                    Val::Inst(_, _) | Val::Union(_) => project.may_return_param("__call__"),
                     Val::Class(_) | Val::Super(_) | Val::OneOf(_) => false,
                 };
                 if !returns_attr {
@@ -2838,7 +2838,7 @@ impl<'a> Extractor<'a> {
                     self.bare_allocation(args)
                 }
                 // `self.factory(...)` of a class body binding `factory` to a class.
-                Val::Inst(class) | Val::Class(class)
+                Val::Inst(class, _) | Val::Class(class)
                     if let Some((named, _)) = project.class_alias(class, method) =>
                 {
                     let fqn = project.object_named(named);
@@ -2929,6 +2929,14 @@ impl<'a> Extractor<'a> {
         self.fresh.contains(&var)
     }
 
+    /// The class line of the class `var` is exactly an instance of ([`ArgOrigin::exact`]).
+    fn exact_line(&self, var: VarId) -> Option<SharedLine> {
+        match self.val(var)? {
+            Val::Inst(class, true) => Some(self.cx.project.lineage(class, false)),
+            _ => None,
+        }
+    }
+
     fn owner_of(&self, var: VarId) -> Owner {
         Owner {
             is_self: self.self_vars.contains(&var),
@@ -2972,6 +2980,7 @@ impl<'a> Extractor<'a> {
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             retyped: self.retyped.contains(&var),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
+            exact: self.exact_line(var),
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
@@ -3125,7 +3134,7 @@ impl<'a> Extractor<'a> {
             Some(crate::types::Elem::Of(crate::types::Ty::Ref(fqn))) => fqn.clone(),
             Some(_) => return None,
             None => match self.val(recv)? {
-                Val::Ref(owner) | Val::Inst(owner) | Val::Class(owner) => {
+                Val::Ref(owner) | Val::Inst(owner, _) | Val::Class(owner) => {
                     let partial = project.class_aliases(owner, method)?.partial?;
                     project.object_named(&partial.callable)
                 }
@@ -3595,7 +3604,7 @@ impl<'a> Extractor<'a> {
             return false;
         }
         match self.val(v) {
-            Some(Val::Inst(_) | Val::Union(_)) => false,
+            Some(Val::Inst(_, _) | Val::Union(_)) => false,
             Some(Val::Ref(class) | Val::Class(class))
                 if !self.cx.project.is_project_class(class) =>
             {
@@ -4802,7 +4811,7 @@ impl<'a> Extractor<'a> {
         let source_of = |inst: &'a Inst| self.ownership_source(inst, &callees);
         let slice_copies = |v: VarId| {
             ownership::slice_copies(match self.types.get(&v) {
-                Some(Val::Inst(c)) => Some(c.as_str()),
+                Some(Val::Inst(c, _)) => Some(c.as_str()),
                 _ => None,
             })
         };
@@ -4950,7 +4959,7 @@ impl<'a> Extractor<'a> {
     fn fresh_return(&self) -> Option<fresh::FreshReturn> {
         let shape = self.shape;
         let class_of = |v: VarId| match self.types.get(&v) {
-            Some(Val::Inst(class)) => Some(class.as_str()),
+            Some(Val::Inst(class, _)) => Some(class.as_str()),
             _ => None,
         };
         let source_of = |v: VarId| {
@@ -5205,7 +5214,7 @@ impl<'a> Extractor<'a> {
         let mut seeds: FxHashSet<VarId> = FxHashSet::default();
         for i in self.f.blocks.iter().flat_map(|b| &b.insts) {
             // Any instance result (a superset: the recorder learns the allocations).
-            let instance = |v: &VarId| matches!(self.types.get(v), Some(Val::Inst(_)));
+            let instance = |v: &VarId| matches!(self.types.get(v), Some(Val::Inst(_, _)));
             let maybe = match &i.kind {
                 InstKind::Call { dst, callee_var, .. } => {
                     (instance(dst)
@@ -5384,7 +5393,7 @@ impl<'a> Extractor<'a> {
     /// instance of a project class whose write of `attr` stores the value itself and runs no
     /// code (`ProjectDecls::attr_write_stores_value`).
     fn link_holder(&self, obj: VarId, attr: &str) -> Option<VarId> {
-        let Some(Val::Inst(class)) = self.types.get(&obj) else {
+        let Some(Val::Inst(class, _)) = self.types.get(&obj) else {
             return None;
         };
         (self.may_be_new(obj)
@@ -5522,7 +5531,7 @@ impl<'a> Extractor<'a> {
                 self.typed_read(owner, attr, ReadKind::DirectAttr, span);
                 // A returned attribute that `readonly-returns` names (`Class.attr`).
                 if let Some(step) = self.returned.get(dst).copied()
-                    && let Some(Val::Inst(class)) = self.val(*obj)
+                    && let Some(Val::Inst(class, _)) = self.val(*obj)
                     && let Some(c) = self.contracts
                 {
                     let class = ContractClass::with_qualname(self.cx.project, class.clone());
@@ -5559,7 +5568,7 @@ impl<'a> Extractor<'a> {
                 if self.opt_in.iterations
                     && !is_slice
                     && !crate::consumption::is_unpacking(self.shape, *index, span)
-                    && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
+                    && matches!(self.val(*obj), Some(Val::Inst(c, _)) if c == "collections.defaultdict")
                     && !self.key_present(bb, index_in_block, *obj, *index)
                 {
                     self.container_change(*obj, ContainerChange::Resizes, span);
@@ -6082,7 +6091,7 @@ impl<'a> Extractor<'a> {
         is_awaited: bool,
         span: Span,
     ) {
-        let Some(Val::Inst(class)) = self.val(value) else {
+        let Some(Val::Inst(class, _)) = self.val(value) else {
             return;
         };
         if class.starts_with("builtins.") || self.cx.project.is_project_class(class) {
@@ -6365,7 +6374,7 @@ impl<'a> Extractor<'a> {
         }
         let through_protocol = self.contracts.is_some_and(|c| c.write_protocols())
             && obj.holder.and_then(|v| self.val(v)).is_some_and(
-                |v| matches!(v, Val::Inst(p) if self.cx.project.protocol_declares(p, attr)),
+                |v| matches!(v, Val::Inst(p, _) if self.cx.project.protocol_declares(p, attr)),
             );
         let site = TypedFieldWriteSite {
             class_qualname: class,
@@ -6405,7 +6414,7 @@ impl<'a> Extractor<'a> {
         // A read through a protocol declaring the attribute is one of every class implementing
         // it; the read contracts judge it by the protocol, the type the code reads it through.
         let protocol = match val {
-            Some(Val::Inst(p)) if self.cx.project.protocol_declares(p, attr) => Some(p.clone()),
+            Some(Val::Inst(p, _)) if self.cx.project.protocol_declares(p, attr) => Some(p.clone()),
             _ => None,
         };
         let class_object = val
@@ -6464,7 +6473,7 @@ impl<'a> Extractor<'a> {
     fn unknown_class(&self, var: VarId) -> bool {
         match self.val(var) {
             None => true,
-            Some(Val::Inst(c)) => {
+            Some(Val::Inst(c, _)) => {
                 resolver::of_any_class(c) || self.cx.project.protocol(c) == Some(None)
             }
             Some(_) => false,
@@ -6504,7 +6513,7 @@ impl<'a> Extractor<'a> {
     /// ([`ProjectDecls::protocol_class`]).
     fn unknown_protocol(&self, var: VarId) -> Option<String> {
         match self.val(var) {
-            Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => Some(c.clone()),
+            Some(Val::Inst(c, _)) if self.cx.project.protocol(c) == Some(None) => Some(c.clone()),
             Some(_) => None,
             None => self.cx.project.protocol_class(&self.declared_type(var)?),
         }
@@ -6648,7 +6657,7 @@ impl<'a> Extractor<'a> {
     /// Whether `lhs op= ...` changes the built-in container `lhs` holds in place, whatever the
     /// result is stored to.
     fn has_in_place_operator(&self, lhs: VarId, op: BinOpKind) -> bool {
-        matches!(self.val(lhs), Some(Val::Inst(class)) if crate::types::changes_in_place(class, op))
+        matches!(self.val(lhs), Some(Val::Inst(class, _)) if crate::types::changes_in_place(class, op))
     }
 
     /// Whether the checked container of `self` that `obj` holds has the key `key` at instruction
@@ -6666,7 +6675,7 @@ impl<'a> Extractor<'a> {
         // A read of a missing key raises, or inserts it into a `defaultdict`; a `Counter` returns
         // 0 without inserting it.
         let counter = |c: &String| matches!(c.as_str(), "collections.Counter" | "typing.Counter");
-        let may_be_counter = matches!(self.val(obj), Some(Val::Inst(c)) if counter(c))
+        let may_be_counter = matches!(self.val(obj), Some(Val::Inst(c, _)) if counter(c))
             || matches!(self.val(obj), Some(Val::Union(cs)) if cs.iter().any(counter));
         let read_before = !may_be_counter
             && facts
@@ -6987,7 +6996,7 @@ impl<'a> Extractor<'a> {
                 // class's may not (a `Sequence` whose `append` returns a new one, or, under R2, a
                 // project subclass of the builtin whose `reverse` does nothing).
                 let class = match self.val(var) {
-                    Some(Val::Inst(class)) if BUILTIN_CONTAINERS.contains(&class.as_str()) => {
+                    Some(Val::Inst(class, _)) if BUILTIN_CONTAINERS.contains(&class.as_str()) => {
                         Some(class.clone())
                     }
                     _ => None,
@@ -7366,7 +7375,7 @@ impl<'a> Extractor<'a> {
             return reason;
         }
         match self.val(subject) {
-            Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => {
+            Some(Val::Inst(c, _)) if self.cx.project.protocol(c) == Some(None) => {
                 UnresolvedReason::UnlistedProtocol
             }
             Some(_) => UnresolvedReason::UnknownMember,
@@ -7391,7 +7400,7 @@ impl<'a> Extractor<'a> {
                 resolver::is_unbound_name(name).then_some(UnresolvedReason::UnboundName)
             }
             // `super()` is that of a project class, which says what it has.
-            Val::Inst(class) | Val::Class(class) | Val::Super(class) => of_class(class),
+            Val::Inst(class, _) | Val::Class(class) | Val::Super(class) => of_class(class),
             Val::Union(classes) => classes.iter().find_map(of_class),
             Val::OneOf(_) => None,
         }
@@ -7611,6 +7620,7 @@ impl<'a> Extractor<'a> {
                                 } else {
                                     NewArg::Old
                                 },
+                                exact: call.dst.and_then(|made| self.exact_line(made)),
                                 ..ArgOrigin::default()
                             }
                         } else {
@@ -7853,7 +7863,7 @@ impl<'a> Extractor<'a> {
     /// [`Dispatch::declared`]: the definition of the called method in the project protocol the
     /// receiver is typed with, when the protocol declares it.
     fn declared_method(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<FuncKey> {
-        let Some(Val::Inst(protocol)) = self.val(call.recv_var?) else {
+        let Some(Val::Inst(protocol, _)) = self.val(call.recv_var?) else {
             return None;
         };
         let name = heki_semantic::mangling::member_name(&callees.first()?.callee.qualname);
@@ -7866,7 +7876,8 @@ impl<'a> Extractor<'a> {
     /// What the receiver of `call` tells about the implementations `callees` run
     /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
     /// class, or the class a constructor call makes) when a callee is inherited from a proper
-    /// base of it, and, on `self`, the callees that are overrides of subclasses.
+    /// base of it, and, on a parameter of the caller as itself (`self` too), the callees that
+    /// are overrides of subclasses.
     fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
         let project = self.cx.project;
         let own;
@@ -7907,7 +7918,12 @@ impl<'a> Extractor<'a> {
             .any(|c| !is(c, class) && in_line(c))
             .then(|| Arc::clone(&line));
         let mut providers: Vec<(u16, SharedLine)> = Vec::new();
-        if call.recv_is_self {
+        let receiver_param = match call.recv.as_ref().and_then(|r| r.param.as_ref()) {
+            _ if call.recv_is_self => Some(0),
+            Some(&(param, None)) => Some(param),
+            _ => None,
+        };
+        if receiver_param.is_some() {
             for (i, bc) in callees.iter().enumerate() {
                 if let Some(c) = class_of(bc).filter(|c| !in_line(*c))
                     && let Ok(i) = u16::try_from(i)
@@ -7920,6 +7936,7 @@ impl<'a> Extractor<'a> {
         (receiver.is_some() || !providers.is_empty() || declared.is_some()).then(|| {
             Box::new(Dispatch {
                 receiver,
+                receiver_param: receiver_param.filter(|_| !providers.is_empty()).unwrap_or(0),
                 providers,
                 declared,
                 recv_params: 0,
@@ -8121,7 +8138,7 @@ impl<'a> Extractor<'a> {
             return false;
         };
         match self.val(executor) {
-            Some(Val::Inst(class)) => {
+            Some(Val::Inst(class, _)) => {
                 class == PROCESS_POOL
                     || self
                         .cx

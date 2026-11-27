@@ -137,7 +137,7 @@ fn changed(
 ) -> Option<Changed> {
     let made = &shape.inst(change.object)?.kind;
     let class_of = |v: VarId| match types.get(&v) {
-        Some(Val::Inst(class)) => Some(class.as_str()),
+        Some(Val::Inst(class, _)) => Some(class.as_str()),
         _ => None,
     };
     // What a call or a property read resolves to, and whether that is every implementation it

@@ -214,14 +214,41 @@ impl ClassLine {
     /// Whether an instance of one class may be an instance of the other: one derives from the
     /// other (a class is related to itself).
     pub fn related(&self, other: &ClassLine) -> bool {
-        self.mro.iter().any(|c| c == other.class()) || other.mro.iter().any(|c| c == self.class())
+        self.derives_from(other) || other.derives_from(self)
+    }
+
+    /// Whether an instance of exactly this class is an instance of `other`: `other` is on its
+    /// MRO (the class itself included).
+    pub fn derives_from(&self, other: &ClassLine) -> bool {
+        self.mro.iter().any(|c| c == other.class())
     }
 }
 
 pub type SharedLine = Arc<ClassLine>;
 
-/// [`EffectSummary::receiver_effects`].
-pub type ReceiverEffects = BTreeMap<ExecEffectKind, Vec<(SharedLine, SharedChain)>>;
+/// One way a function reaches an execution effect only through the implementation that a
+/// subclass of a parameter's class gives a call on that parameter
+/// ([`EffectSummary::provided_effects`]): it runs only when the parameter is an instance of
+/// `provider`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Provided {
+    /// The parameter (a method's `self` is 0).
+    pub param: u8,
+    pub provider: SharedLine,
+    /// The shortest chain through the provider's implementation.
+    pub chain: SharedChain,
+}
+
+/// [`EffectSummary::provided_effects`].
+pub type ProvidedEffects = BTreeMap<ExecEffectKind, Vec<Provided>>;
+
+/// Most ways one execution effect is kept as reached only through subclasses' implementations
+/// ([`EffectSummary::provided_effects`]), and most calls on the chain of one way: past either,
+/// the effect is taken to run whatever the parameters are. Each way keeps a chain of its own, so
+/// the two bound what a function keeps of them, also down a long chain of helpers handing a
+/// parameter on.
+pub const PROVIDED_LIMIT: usize = 16;
+pub const PROVIDED_CHAIN_LIMIT: usize = 32;
 
 /// The execution effects a function has run whenever it returns normally, each by a chain on
 /// which every call is made on every path that returns (exception edges included), every
@@ -444,16 +471,20 @@ pub const fn effect_bit(e: ExecEffectKind) -> u16 {
 }
 
 /// What a method call's receiver tells about the implementations its callees run
-/// ([`EffectSummary::receiver_effects`]).
+/// ([`EffectSummary::provided_effects`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dispatch {
     /// The receiver's class (a receiver of one project class, the class a constructor makes,
     /// or the caller's own `self`), when a callee is inherited from a proper base of it: the
     /// callee's facts may come from implementations of classes unrelated to it.
     pub receiver: Option<SharedLine>,
-    /// For a call on the caller's own `self`: the callees (by index) that are overrides of
-    /// subclasses, each with its class (it runs only when `self` is an instance of it).
+    /// For a call on a parameter of the caller as itself (its own `self`, or an annotated
+    /// parameter): the callees (by index) that are overrides of subclasses, each with its class
+    /// (it runs only when the parameter is an instance of it).
     pub providers: Vec<(u16, SharedLine)>,
+    /// The parameter of the caller the receiver is when there are `providers` (`self`: 0).
+    #[serde(default)]
+    pub receiver_param: u8,
     /// The method a project protocol declares, when the receiver is typed with the protocol
     /// (`h._helper()` with `h: Host`): the call contracts judge the call by that declaration,
     /// the type the code calls it through, while the callees are the implementations it runs.
@@ -1127,10 +1158,13 @@ pub struct EffectSummary {
     /// Shortest known call chain reaching each effect (direct or transitive).
     pub exec_chains: BTreeMap<ExecEffectKind, SharedChain>,
     /// The execution effects reached only through implementations that subclasses of a
-    /// method's class give its own `self` (a mixin method's `self.execute_command()`): per
-    /// effect, each class providing one, with the shortest chain through it. A call on a
-    /// receiver of known class runs only those of the classes related to it.
-    pub receiver_effects: Option<Box<ReceiverEffects>>,
+    /// parameter's class give a call on the parameter (a mixin method's
+    /// `self.execute_command()`, `helper(notes: Notes)` calling `notes.preview()`): per effect,
+    /// each parameter and class providing one, with the shortest chain through it. A call
+    /// passing an instance of exactly a class runs only those of the classes on its MRO, a call
+    /// on a receiver of known class only those of the classes related to it
+    /// ([`callgraph::arrival`]).
+    pub provided_effects: Option<Box<ProvidedEffects>>,
     /// What the function has run whenever it returns normally ([`MustExec`]); `None` when it
     /// established nothing, or when no enabled rule reads it ([`OptInFacts::must_effects`]).
     pub must_exec: Option<Box<MustExec>>,
@@ -1872,10 +1906,10 @@ impl EffectSummary {
         self.direct_exec_effects.retain(|e| !hidden.contains(e));
         self.transitive_exec_effects.retain(|e| !hidden.contains(e));
         self.exec_chains.retain(|e, _| !hidden.contains(e));
-        if let Some(r) = &mut self.receiver_effects {
+        if let Some(r) = &mut self.provided_effects {
             r.retain(|e, _| !hidden.contains(e));
             if r.is_empty() {
-                self.receiver_effects = None;
+                self.provided_effects = None;
             }
         }
         self.exec_guards.retain(|e, _| !hidden.contains(e));
@@ -1907,13 +1941,13 @@ impl EffectSummary {
         }) {
             zero_hop_spans(chain);
         }
-        for (_, chain) in out
-            .receiver_effects
+        for provided in out
+            .provided_effects
             .iter_mut()
             .flat_map(|r| r.values_mut())
             .flatten()
         {
-            zero_hop_spans(chain);
+            zero_hop_spans(&mut provided.chain);
         }
         out.typed_field_write_sites = out
             .typed_field_write_sites
@@ -2210,25 +2244,17 @@ impl EffectSummary {
         is_abstract_method(&self.decorators)
     }
 
-    /// The chain by which the function reaches execution effect `e` on a receiver of class
-    /// `receiver` (`None`: unknown), or `None` when only implementations of classes unrelated to
-    /// it reach `e` ([`Self::receiver_effects`]).
-    pub fn effect_chain_for(
-        &self,
-        e: ExecEffectKind,
-        receiver: Option<&ClassLine>,
-    ) -> Option<&[Arc<CallHop>]> {
-        match (
-            self.receiver_effects.as_ref().and_then(|r| r.get(&e)),
-            receiver,
-        ) {
-            (Some(provided), Some(r)) => provided
-                .iter()
-                .filter(|(p, _)| p.related(r))
-                .map(|(_, chain)| chain.as_slice())
-                .min_by_key(|chain| chain.len()),
-            _ => Some(self.exec_chains.get(&e).map_or(&[][..], Vec::as_slice)),
-        }
+    /// Whether a call binds the instance it is made on to the function's first parameter: a
+    /// method that is neither a static nor a class method.
+    pub fn binds_self(&self) -> bool {
+        self.owner_class_qualname.is_some()
+            && !self.decorators.iter().any(|d| {
+                let head = d.split('(').next().unwrap_or(d).trim();
+                matches!(
+                    head.rsplit('.').next(),
+                    Some("staticmethod" | "classmethod")
+                )
+            })
     }
 
     /// Which of the function's facts its own body is: a generator function's body runs when
@@ -2317,6 +2343,11 @@ pub struct ArgOrigin {
     pub retyped: bool,
     /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
     pub fresh: bool,
+    /// The class the argument is exactly an instance of, never a subclass's: the caller
+    /// constructs it by calling the class by name (`resolver::Val::Inst`), or it is the object a
+    /// construction of the class named so binds to its `__init__`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<SharedLine>,
     /// Where the argument comes from among the objects that existed before the call (`MUT208`;
     /// only computed when an `invalidation` contract is configured).
     pub reach: Reach,
@@ -2752,19 +2783,19 @@ impl CallSite {
         self.dispatch.as_ref()?.receiver.as_deref()
     }
 
-    /// The class of the subclass providing the callee `bc` of a call on the caller's own
-    /// `self` ([`Dispatch::providers`]).
-    pub fn provider(&self, bc: &BoundCallee) -> Option<&SharedLine> {
+    /// The parameter of the caller the receiver is and the class of the subclass providing the
+    /// callee `bc`, for a call on a parameter of the caller ([`Dispatch::providers`]).
+    pub fn provider(&self, bc: &BoundCallee) -> Option<(u8, &SharedLine)> {
         let i = self
             .project_callees()
             .iter()
             .position(|b| std::ptr::eq(b, bc))?;
-        self.dispatch
-            .as_ref()?
+        let dispatch = self.dispatch.as_ref()?;
+        dispatch
             .providers
             .iter()
             .find(|(k, _)| usize::from(*k) == i)
-            .map(|(_, line)| line)
+            .map(|(_, line)| (dispatch.receiver_param, line))
     }
 
     /// The resolved project callees (none for a Layer 2 API).
@@ -3519,7 +3550,8 @@ impl ProjectIndex {
                         if queue.is_some_and(|q| !self.param_capacities.bounded(&q)) {
                             continue;
                         }
-                        let Some(tail) = facts.effect_chain_for(e, site.receiver()) else {
+                        let Some(tail) = callgraph::arrival(facts, callee, e, site, bc).tail()
+                        else {
                             continue;
                         };
                         let chain = callgraph::extend_chain(&lead, tail, rewrite);

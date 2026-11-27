@@ -775,7 +775,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             ),
             Source::Slice(v) => {
                 let class = match self.types.get(&v) {
-                    Some(Val::Inst(c)) => Some(c.as_str()),
+                    Some(Val::Inst(c, _)) => Some(c.as_str()),
                     _ => None,
                 };
                 if ownership::slice_copies(class) {
@@ -1063,7 +1063,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 in_place: true,
                 ..
             } => {
-                let mutable = matches!(self.types.get(lhs), Some(Val::Inst(t)) if mutable_builtin(self.u.cx.decls, t));
+                let mutable = matches!(self.types.get(lhs), Some(Val::Inst(t, _)) if mutable_builtin(self.u.cx.decls, t));
                 return if mutable {
                     vec![own(*lhs, false)]
                 } else {
