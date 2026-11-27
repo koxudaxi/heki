@@ -6455,8 +6455,9 @@ impl ProjectDecls {
     /// (`objects = StreamManager()`), that class; where none binds it, the `type` of the row of
     /// `attr`, unless a class body along the MRO may bind an instance of a row's `type` under
     /// another name ([`Self::may_bind_instance_of`]: the base then gives no such attribute).
-    /// `None` when a class on the way binds the name otherwise or outside its body, has a
-    /// metaclass heki does not know, a project class follows the base, or no row applies.
+    /// `None` when a class on the way binds the name otherwise or stores it outside its body,
+    /// in its module or another ([`Self::lookup_rebound`]), has a metaclass heki does not know,
+    /// a project class follows the base, or no row applies.
     ///
     /// The answer is kept per class and name for the life of the indexes, as
     /// [`Self::catalog_attribute`]'s.
@@ -6493,7 +6494,8 @@ impl ProjectDecls {
     ) -> Option<&'s str> {
         let at = mro.iter().position(|c| !self.is_project_class(c))?;
         let base = &mro[at];
-        if mro[at..].iter().any(|c| self.is_project_class(c)) {
+        // A store of the name on a class along the MRO, in any module, replaces the manager.
+        if mro[at..].iter().any(|c| self.is_project_class(c)) || self.lookup_rebound(mro, attr) {
             return None;
         }
         let kept: Vec<&str> = kb
@@ -6504,7 +6506,7 @@ impl ProjectDecls {
         for c in &mro[..at] {
             self.read(|k| note(&mut k.class_facts, c));
             let d = self.class(c)?;
-            if d.custom_metaclass || d.rebound_attrs.contains(attr) {
+            if d.custom_metaclass {
                 return None;
             }
             if d.members.contains(attr) {

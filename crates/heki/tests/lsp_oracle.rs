@@ -10713,8 +10713,8 @@ const MANAGER_USE: &str = "from pkg.models import Stream\n\n\ndef fetch(ids: lis
 
 /// A model's manager is the class its body binds, which another module declares: the query per
 /// item through it goes when the manager class stops deriving from `models.Manager`, and when
-/// the model binds another value, is heuristic while the manager binds `get_queryset`, and
-/// comes back.
+/// the model binds another value or another module stores one as its `objects`, is heuristic
+/// while the manager binds `get_queryset`, and comes back.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
     let files = vec![
@@ -10769,6 +10769,19 @@ fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
         Step::new(
             "it binds the manager again",
             vec![save("pkg/models.py", MANAGER_MODELS)],
+        )
+        .present(queries),
+        Step::new(
+            "another module stores another object as the model's `objects`",
+            vec![Action::Create(
+                "pkg/patch.py",
+                "from pkg.models import Stream\n\nStream.objects = None\n".to_owned(),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "that module is deleted",
+            vec![Action::Delete("pkg/patch.py")],
         )
         .present(queries),
     ];
