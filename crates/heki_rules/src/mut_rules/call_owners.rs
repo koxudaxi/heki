@@ -8,10 +8,10 @@
 
 use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
-    MemberPattern, MergedReports, Named, References, Sites, allows_own_receiver, attribution,
-    binds_receiver, counts_references, delegated_reports, escaping_for, implemented_within,
-    matched_name, named_protocols, place_functions, project_classes, reports_unresolved,
-    targets_call_each_other,
+    MemberPattern, MergedReports, Named, Overrides, References, Sites, allows_own_receiver,
+    attribution, binds_receiver, counts_references, delegated_reports, escaping_for,
+    implemented_within, matched_name, named_protocols, place_functions, project_classes,
+    reports_unresolved, targets_call_each_other,
 };
 use crate::patterns::{ModuleIndex, PartIndex};
 use crate::{
@@ -986,11 +986,14 @@ pub(crate) fn mut204<'c>(
         rules.push(CallOwnerRule {
             label: heki_env::contract_label("call-owners", index, &rule.name),
             targets,
-            allowance: Allowance::new(&AllowanceKeys {
-                allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
-                forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
-                exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
-            })?
+            allowance: Allowance::new(
+                &AllowanceKeys {
+                    allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
+                    forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
+                    exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
+                },
+                Overrides::of(rule.include_overrides, cx, &all_classes),
+            )?
             .with_targets(guarded)
             .with_attribution(attribution(
                 rule.attribution.as_deref(),

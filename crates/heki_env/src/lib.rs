@@ -213,6 +213,10 @@ pub struct WriteOwnerRule {
     /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target of any
     /// `write-owners` contract covering the class names; `"ignore"` (default) does not.
     pub unlisted_dict_keys: Option<String>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
@@ -244,6 +248,10 @@ pub struct ReadOwnerRule {
     pub allowed_protocols: Vec<String>,
     /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
     pub protocol_subclasses: Option<bool>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
@@ -293,6 +301,10 @@ pub struct CallOwnerRule {
     pub allowed_protocols: Vec<String>,
     /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
     pub protocol_subclasses: Option<bool>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
     /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
     /// (default): they fail the run only as `lint.fail-on` says.
@@ -393,6 +405,10 @@ pub struct EffectBoundaryRule {
     /// write of an attribute `write-targets` or `write-universe` names on an object of unknown
     /// class; `"ignore"` (default) does not.
     pub unresolved: Option<String>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
@@ -427,6 +443,10 @@ pub struct InvalidationRule {
     /// Functions (dotted patterns) whose writes need no announcement of their own: the
     /// owner's operations, which announce or batch the change themselves.
     pub exempt_writers: Vec<String>,
+    /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
+    /// name places or callees also names the methods of that name in the project subclasses of
+    /// `Class`; `false` (default): it names the method of `Class` only.
+    pub include_overrides: Option<bool>,
     /// The help of every `MUT208` report of this contract.
     pub message: Option<String>,
     /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their

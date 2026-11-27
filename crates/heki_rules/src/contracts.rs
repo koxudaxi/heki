@@ -7,12 +7,12 @@
 //! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
 //! invalidator reached through calls are known across files without IR.
 
-use crate::eff_rules::{forbidden_effects, names_function};
+use crate::eff_rules::{forbidden_effects, names_function, scope_entries};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
     Allowance, AllowanceKeys, ContractTarget, EXTERNAL, FunctionMatcher, FunctionMatchers,
-    MemberPattern, ReadOnlyProducers, References, names_every_callee, parse_read_targets,
-    parse_targets, patterns, project_classes, split_arguments, split_item,
+    MemberPattern, Overrides, ReadOnlyProducers, References, names_every_callee,
+    parse_read_targets, parse_targets, patterns, project_classes, split_arguments, split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
@@ -258,11 +258,14 @@ impl ConfigContracts {
             .write_owners
             .iter()
             .map(|rule| {
-                Allowance::new(&AllowanceKeys {
-                    allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
-                    forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
-                    exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
-                })
+                Allowance::new(
+                    &AllowanceKeys {
+                        allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+                        forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+                        exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+                    },
+                    Overrides::Off,
+                )
             })
             .collect::<Result<_, _>>()?;
         let strict = |mode: &Option<String>| mode.as_deref() == Some("report");
@@ -654,7 +657,7 @@ pub(crate) struct Declared {
     write_targets: TargetsByClass,
     read_targets: TargetsByClass,
     /// The scopes of the effect boundaries forbidding every blocking effect.
-    blocking_scopes: Vec<DottedPattern>,
+    blocking_scopes: Vec<FunctionMatcher>,
 }
 
 /// `Class.attr` targets, looked up by the classes they cover.
@@ -703,7 +706,12 @@ impl Declared {
         for boundary in &config.effect_boundaries {
             let forbidden = forbidden_effects(boundary)?;
             if BLOCKING_EFFECTS.iter().all(|e| forbidden.contains(e)) {
-                blocking_scopes.extend(patterns(&boundary.scopes, "effect-boundaries.scopes")?);
+                let overrides = Overrides::of(boundary.include_overrides, cx, &all_classes);
+                blocking_scopes.extend(scope_entries(
+                    &boundary.scopes,
+                    "effect-boundaries.scopes",
+                    overrides,
+                )?);
             }
         }
         Ok(Self {
@@ -860,7 +868,7 @@ pub struct ContractRoles<'c> {
     /// Each `call-owners` contract's targets and callers.
     call_owners: Vec<(Vec<FunctionMatcher>, Allowance)>,
     /// Each `effect-boundaries` contract's scopes and allowed callees.
-    effect_boundaries: Vec<(Vec<DottedPattern>, Vec<DottedPattern>)>,
+    effect_boundaries: Vec<(Vec<FunctionMatcher>, Vec<FunctionMatcher>)>,
     /// Each `readonly-returns` contract's producers.
     readonly_returns: Vec<Vec<DottedPattern>>,
     /// The `invalidation` contracts' names.
@@ -870,38 +878,47 @@ pub struct ContractRoles<'c> {
 impl<'c> ContractRoles<'c> {
     pub(crate) fn new(cx: &CheckContext<'c>) -> Result<Self, RuleConfigError> {
         let config = cx.config;
+        let all_classes = crate::mut_rules::project_classes(cx);
         let write_owners = config
             .write_owners
             .iter()
             .map(|rule| {
-                Allowance::new(&AllowanceKeys {
-                    allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
-                    forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
-                    exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
-                })
+                Allowance::new(
+                    &AllowanceKeys {
+                        allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+                        forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+                        exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+                    },
+                    Overrides::of(rule.include_overrides, cx, &all_classes),
+                )
             })
             .collect::<Result<_, _>>()?;
         let read_owners = config
             .read_owners
             .iter()
             .map(|rule| {
-                Allowance::new(&AllowanceKeys {
-                    allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
-                    forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
-                    exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
-                })
+                Allowance::new(
+                    &AllowanceKeys {
+                        allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
+                        forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
+                        exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
+                    },
+                    Overrides::of(rule.include_overrides, cx, &all_classes),
+                )
             })
             .collect::<Result<_, _>>()?;
-        let all_classes = crate::mut_rules::project_classes(cx);
         let call_owners = config
             .call_owners
             .iter()
             .map(|rule| {
-                let callers = Allowance::new(&AllowanceKeys {
-                    allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
-                    forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
-                    exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
-                })?;
+                let callers = Allowance::new(
+                    &AllowanceKeys {
+                        allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
+                        forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
+                        exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
+                    },
+                    Overrides::of(rule.include_overrides, cx, &all_classes),
+                )?;
                 let targets = rule
                     .targets
                     .iter()
@@ -914,9 +931,14 @@ impl<'c> ContractRoles<'c> {
             .effect_boundaries
             .iter()
             .map(|rule| {
+                let overrides = Overrides::of(rule.include_overrides, cx, &all_classes);
                 Ok((
-                    patterns(&rule.scopes, "effect-boundaries.scopes")?,
-                    patterns(&rule.allowed_callees, "effect-boundaries.allowed-callees")?,
+                    scope_entries(&rule.scopes, "effect-boundaries.scopes", overrides)?,
+                    scope_entries(
+                        &rule.allowed_callees,
+                        "effect-boundaries.allowed-callees",
+                        overrides,
+                    )?,
                 ))
             })
             .collect::<Result<_, RuleConfigError>>()?;

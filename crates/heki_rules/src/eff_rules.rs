@@ -3,17 +3,16 @@
 //! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
-    allows_fresh, call_verb, contract_places, counts_references, group_texts, helper_changes_field,
-    initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
-    project_classes, reports_import_probes, reports_unresolved, site_callee, split_item,
-    write_hits,
+    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, Overrides, References, SiteId,
+    Subclasses, allows_fresh, call_verb, contract_places, counts_references, group_texts,
+    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
+    parse_targets, project_classes, reports_import_probes, reports_unresolved, site_callee,
+    split_item, write_hits,
 };
 use crate::opt_rules::{Creators, Sizes};
 use crate::premises::{self, OpenCause};
 use crate::{
-    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
-    split_last_dot,
+    CheckContext, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
@@ -1054,7 +1053,7 @@ struct Boundary<'r> {
     name: &'r str,
     /// How a report names the contract ([`heki_env::contract_label`]).
     label: String,
-    scopes: Vec<DottedPattern>,
+    scopes: Vec<FunctionMatcher>,
     effects: BTreeSet<ExecEffectKind>,
     mutates_params: bool,
     writes_targets: bool,
@@ -1070,7 +1069,7 @@ struct Boundary<'r> {
     call_targets: CallTargets,
     /// The references that count for `calls` (`references`).
     references: References,
-    allowed_callees: Vec<DottedPattern>,
+    allowed_callees: Vec<FunctionMatcher>,
     note: Option<&'r str>,
     /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
     allow_fresh: bool,
@@ -1081,10 +1080,22 @@ struct Boundary<'r> {
     report_unresolved: bool,
 }
 
-/// Whether a pattern names `key`, its qualname, or a module / class / function containing it.
-pub(crate) fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
-    let fqn = key.fqn();
-    patterns.iter().any(|p| p.names_within(&fqn, &key.qualname))
+/// Whether an entry names `key`, its qualname, or a module / class / function containing it
+/// ([`FunctionMatcher::names_within`]).
+pub(crate) fn names_function(entries: &[FunctionMatcher], key: &FuncKey) -> bool {
+    entries.iter().any(|p| p.names_within(key))
+}
+
+/// The matchers of the entries `texts` of a key covering the scopes nested in what it names
+/// (`scopes`, `allowed-callees`; [`FunctionMatcher::place`]).
+pub(crate) fn scope_entries(
+    texts: &[String],
+    context: &'static str,
+    overrides: Overrides<'_, '_>,
+) -> Result<Vec<FunctionMatcher>, RuleConfigError> {
+    (texts.iter())
+        .map(|t| FunctionMatcher::place(t, context, overrides, true))
+        .collect()
 }
 
 impl Boundary<'_> {
@@ -1097,14 +1108,14 @@ impl Boundary<'_> {
         let fqn = key.fqn();
         self.scopes
             .iter()
-            .any(|p| p.names_module_bodies() && p.names_within(&fqn, &key.qualname))
+            .any(|p| p.whole().names_module_bodies() && p.whole().names_within(&fqn, &key.qualname))
     }
 
     /// A Layer 2 symbol (or one of its modules / classes) that `allowed-callees` names.
     fn allows_symbol(&self, symbol: &str) -> bool {
         self.allowed_callees
             .iter()
-            .any(|p| p.names_within(symbol, symbol))
+            .any(|p| p.whole().names_within(symbol, symbol))
     }
 
     /// Whether `allowed-callees` names everything `site` calls: the class it constructs (or one
@@ -1125,7 +1136,7 @@ impl Boundary<'_> {
                 let qualname = cx.decls.class_qualname(class).unwrap_or(class);
                 self.allowed_callees
                     .iter()
-                    .any(|p| p.names_within(class, qualname))
+                    .any(|p| p.whole().names_within(class, qualname))
             }
             None => every_callee(),
         }
@@ -1269,10 +1280,11 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
         let targets = |texts: &[String], context: &'static str| {
             parse_targets(cx, &all_classes, texts, context, context)
         };
+        let overrides = Overrides::of(b.include_overrides, cx, &all_classes);
         out.push(Boundary {
             name: &b.name,
             label: boundary_label(index, &b.name),
-            scopes: patterns(&b.scopes, "effect-boundaries.scopes")?,
+            scopes: scope_entries(&b.scopes, "effect-boundaries.scopes", overrides)?,
             effects,
             mutates_params: forbids("mutates-params"),
             writes_targets: forbids("writes-targets"),
@@ -1297,7 +1309,11 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 Subclasses::Covered,
             )?,
             references: counts_references(b.references.as_deref(), "effect-boundaries", &b.name)?,
-            allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
+            allowed_callees: scope_entries(
+                &b.allowed_callees,
+                "effect-boundaries.allowed-callees",
+                overrides,
+            )?,
             note: b.message.as_deref(),
             allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
             reads_environment: forbids("reads-environment"),

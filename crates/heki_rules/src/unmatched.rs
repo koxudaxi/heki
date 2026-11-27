@@ -14,7 +14,7 @@
 //! symbols outside the project.
 
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, FunctionMatcher, Subclasses, class_set, parse_targets,
+    Allowance, AllowanceKeys, FunctionMatcher, Overrides, Subclasses, class_set, parse_targets,
     project_classes, split_arguments, split_item,
 };
 use crate::selection::RuleSelection;
@@ -838,20 +838,26 @@ fn names_definition<'a>(
     let classes = || names.candidate_classes(name);
     Ok(match definition {
         Definition::Function => {
-            let a = Allowance::new(&AllowanceKeys {
-                allowed: (&one, context),
-                forbidden: (&[], context),
-                exempt: (&[], context),
-            })?;
+            let a = Allowance::new(
+                &AllowanceKeys {
+                    allowed: (&one, context),
+                    forbidden: (&[], context),
+                    exempt: (&[], context),
+                },
+                Overrides::Off,
+            )?;
             let p = DottedPattern::new(name, context)?;
             functions.iter().any(|k| a.names_allowed(k)) || classes().any(|c| p.matches_class(c))
         }
         Definition::Exempt => {
-            let a = Allowance::new(&AllowanceKeys {
-                allowed: (&[], context),
-                forbidden: (&[], context),
-                exempt: (&one, context),
-            })?;
+            let a = Allowance::new(
+                &AllowanceKeys {
+                    allowed: (&[], context),
+                    forbidden: (&[], context),
+                    exempt: (&one, context),
+                },
+                Overrides::Off,
+            )?;
             functions.iter().any(|k| a.exempts(k))
         }
         Definition::CallTarget => {

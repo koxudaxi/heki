@@ -1291,10 +1291,20 @@ pub(crate) fn patterns(
         .collect()
 }
 
-/// Whether a pattern names `key` by its fully qualified name or its qualname.
-fn names(patterns: &[DottedPattern], key: &FuncKey) -> bool {
-    let fqn = key.fqn();
-    patterns.iter().any(|p| p.matches_def(&fqn, &key.qualname))
+/// Whether an entry names `key` ([`FunctionMatcher::matches`]).
+fn names(entries: &[FunctionMatcher], key: &FuncKey) -> bool {
+    entries.iter().any(|p| p.matches(key))
+}
+
+/// The matchers of the entries `texts` of a key naming places ([`FunctionMatcher::place`]).
+pub(crate) fn places(
+    texts: &[String],
+    context: &'static str,
+    overrides: Overrides<'_, '_>,
+) -> Result<Vec<FunctionMatcher>, RuleConfigError> {
+    (texts.iter())
+        .map(|t| FunctionMatcher::place(t, context, overrides, false))
+        .collect()
 }
 
 /// The functions a contract lets touch its targets: `allowed-*` patterns (matched against the
@@ -1304,11 +1314,11 @@ fn names(patterns: &[DottedPattern], key: &FuncKey) -> bool {
 /// accesses by them are reported, and the allowed functions stay exceptions inside them.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Allowance {
-    allowed: Vec<DottedPattern>,
+    allowed: Vec<FunctionMatcher>,
     exempt_names: FxHashSet<String>,
     /// `exempt-methods` entries with a dot or a glob.
-    exempt_patterns: Vec<DottedPattern>,
-    forbidden: Vec<DottedPattern>,
+    exempt_patterns: Vec<FunctionMatcher>,
+    forbidden: Vec<FunctionMatcher>,
     /// Functions the contract guards (`call-owners` targets): they are part of the guarded
     /// operation, whose calls are checked where they are made, so they may use each other.
     targets: Option<GuardedTargets>,
@@ -1360,7 +1370,7 @@ pub(crate) struct FunctionMatcher {
     /// The text split at its last dot when the last segment is a glob and the text has no module
     /// part: what holds the member (none for a text without a dot), and the member's name.
     member: Option<(Option<DottedPattern>, DottedPattern)>,
-    method: Option<(FxHashSet<String>, DottedPattern)>,
+    method: Option<MethodFamily>,
     /// `<external>.<name>`: the last name of the symbols outside the project the text names,
     /// whatever module or class holds them ([`Self::names_external`]).
     outside: Option<DottedPattern>,
@@ -1371,6 +1381,58 @@ pub(crate) struct FunctionMatcher {
     /// and may call its targets ([`GuardedTargets`]); not for a target naming every callee
     /// (`*(module="pkg.*")`), which names calls, not functions.
     guards: bool,
+}
+
+/// The methods a `Class.method` text names in the subclasses of what its class part names: the
+/// overrides of a call target, or of a place or callee entry with `include-overrides`.
+#[derive(Debug, Clone)]
+struct MethodFamily {
+    classes: FamilyClasses,
+    name: DottedPattern,
+    /// The scopes nested in the methods count too (a key covering nested scopes, a text ending
+    /// in [`NESTED_SCOPES`]).
+    nested: bool,
+}
+
+/// How a [`MethodFamily`] tells its classes.
+#[derive(Debug, Clone)]
+enum FamilyClasses {
+    /// The classes the class part names and their subclasses (fqn).
+    Listed(FxHashSet<String>),
+    /// The class part, matched against the class of a method and its project bases: for the
+    /// declared contracts the summaries read, which are built before the project's classes are
+    /// listed ([`FunctionMatcher::matches_in`]).
+    ByBases(DottedPattern),
+}
+
+/// The suffix of an entry that also names the scopes nested in what it names (`m:f{,.*}`).
+const NESTED_SCOPES: &str = "{,.*}";
+
+/// What an entry of a key naming places or callees (`allowed-*`, `scopes`, ...) takes the
+/// overrides of its methods from with `include-overrides` ([`FunctionMatcher::place`]).
+#[derive(Clone, Copy)]
+pub(crate) enum Overrides<'a, 'c> {
+    /// `include-overrides` is off.
+    Off,
+    /// The project classes, whose subclasses the declarations list.
+    Listed(&'a CheckContext<'c>, &'a [ContractClass]),
+    /// The bases of the class of each method ([`FamilyClasses::ByBases`]).
+    ByBases,
+}
+
+impl<'a, 'c> Overrides<'a, 'c> {
+    /// [`Self::Listed`] when `include-overrides` is `true`.
+    pub(crate) fn of(
+        include: Option<bool>,
+        cx: &'a CheckContext<'c>,
+        all: &'a [ContractClass],
+    ) -> Self {
+        if include == Some(true) {
+            Self::Listed(cx, all)
+        } else {
+            Self::Off
+        }
+    }
 }
 
 /// The holder standing for every module and class outside the project (`<external>._*`).
@@ -1400,10 +1462,58 @@ impl FunctionMatcher {
             let holder = DottedPattern::new(holder, context)?;
             let owners = class_set(cx, &holder, all_classes, Subclasses::Covered);
             if !owners.is_empty() {
-                out.method = Some((owners, DottedPattern::new(last, context)?));
+                out.method = Some(MethodFamily {
+                    classes: FamilyClasses::Listed(owners),
+                    name: DottedPattern::new(last, context)?,
+                    nested: false,
+                });
             }
         }
         Ok(out)
+    }
+
+    /// The matcher of an entry of a key naming places or callees (`allowed-*`, `forbidden-*`,
+    /// `exempt-methods` patterns, an effect boundary's `scopes` and `allowed-callees`, and
+    /// `invalidation`'s `invalidators` and `exempt-writers`): the whole text as a dotted pattern
+    /// and, with `include-overrides`, for `Class.method`, the methods of that name in the class
+    /// family the class part names. `nested`: the key covers the scopes nested in what it names
+    /// (`scopes`), which a text ending in [`NESTED_SCOPES`] does too.
+    pub(crate) fn place(
+        text: &str,
+        context: &'static str,
+        overrides: Overrides<'_, '_>,
+        nested: bool,
+    ) -> Result<Self, RuleConfigError> {
+        let whole = DottedPattern::new(text, context)?;
+        let (stem, nested) = text
+            .strip_suffix(NESTED_SCOPES)
+            .map_or((text, nested), |stem| (stem, true));
+        // A class part the whole text compiles but its own glob does not (`Base.{a,b.c}`)
+        // names no class family.
+        let method = split_last_dot(stem).and_then(|(holder, last)| {
+            let holder = DottedPattern::new(holder, context).ok()?;
+            let classes = match overrides {
+                Overrides::Off => return None,
+                Overrides::Listed(cx, all) => {
+                    FamilyClasses::Listed(class_set(cx, &holder, all, Subclasses::Covered))
+                }
+                Overrides::ByBases => FamilyClasses::ByBases(holder),
+            };
+            let name = DottedPattern::new(last, context).ok()?;
+            Some(MethodFamily {
+                classes,
+                name,
+                nested,
+            })
+        });
+        Ok(Self {
+            whole,
+            member: None,
+            method,
+            outside: None,
+            project_only: false,
+            guards: true,
+        })
     }
 
     /// The matcher of `text` without the methods of a class family: what names a symbol
@@ -1529,24 +1639,72 @@ impl FunctionMatcher {
 
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
         self.names_def(&key.fqn(), &key.qualname)
-            || self.method.as_ref().is_some_and(|(family, name)| {
-                key.qualname.rsplit_once('.').is_some_and(|(owner, _)| {
-                    // A method overrides by the name its class holds it under: a private name
-                    // (`__run`, held as `_Sub__run`) is its own class's, and overrides nothing.
-                    name.matches(&mangling::member_name(&key.qualname))
-                        && family.contains(&format!("{}.{owner}", key.module))
-                })
+            || self.method.as_ref().is_some_and(|m| match &m.classes {
+                FamilyClasses::Listed(family) => m.names(key, |owner| family.contains(owner)),
+                FamilyClasses::ByBases(_) => false,
+            })
+    }
+
+    /// Whether the text names `key` or a module, class, or function containing it
+    /// ([`DottedPattern::names_within`]), or, with `include-overrides`, `key` is in a method of
+    /// the class family the text names ([`Self::place`] with nested scopes).
+    pub(crate) fn names_within(&self, key: &FuncKey) -> bool {
+        self.whole.names_within(&key.fqn(), &key.qualname)
+            || self.method.as_ref().is_some_and(|m| match &m.classes {
+                FamilyClasses::Listed(family) => m.names(key, |owner| family.contains(owner)),
+                FamilyClasses::ByBases(_) => false,
+            })
+    }
+
+    /// [`Self::matches`] of a matcher whose class family is told by the bases of a method's
+    /// class ([`Overrides::ByBases`]), read in `project`.
+    pub(crate) fn matches_in(
+        &self,
+        contracts: &dyn heki_effect::Contracts,
+        project: &ProjectDecls,
+        key: &FuncKey,
+    ) -> bool {
+        self.names_def(&key.fqn(), &key.qualname)
+            || self.method.as_ref().is_some_and(|m| match &m.classes {
+                FamilyClasses::Listed(family) => m.names(key, |owner| family.contains(owner)),
+                FamilyClasses::ByBases(holder) => m.names(key, |owner| {
+                    project.is_project_class(owner)
+                        && ContractClass::lineage(contracts, project, owner)
+                            .iter()
+                            .any(|c| holder.matches_class(c))
+                }),
             })
     }
 
     /// The class family of `Class.method` (empty for a function).
     pub(crate) fn method_family(&self) -> Option<&FxHashSet<String>> {
-        self.method.as_ref().map(|(family, _)| family)
+        self.method.as_ref().and_then(|m| match &m.classes {
+            FamilyClasses::Listed(family) => Some(family),
+            FamilyClasses::ByBases(_) => None,
+        })
     }
 
     /// Whether the text is `<external>.<name>`, which names symbols outside the project only.
     pub(crate) fn names_outside_only(&self) -> bool {
         self.outside.is_some()
+    }
+}
+
+impl MethodFamily {
+    /// Whether `key` is a method of a class `in_family` (by its fqn) whose name the family's
+    /// name matches or, with nested scopes, a scope inside such a method.
+    fn names(&self, key: &FuncKey, in_family: impl Fn(&str) -> bool) -> bool {
+        let q = key.qualname.as_str();
+        let scopes = std::iter::once(q)
+            .chain((q.match_indices('.').map(|(i, _)| &q[..i])).filter(|_| self.nested));
+        scopes.into_iter().any(|scope| {
+            scope.rsplit_once('.').is_some_and(|(owner, _)| {
+                // A method overrides by the name its class holds it under: a private name
+                // (`__run`, held as `_Sub__run`) is its own class's, and overrides nothing.
+                self.name.matches(&mangling::member_name(scope))
+                    && in_family(&format!("{}.{owner}", key.module))
+            })
+        })
     }
 }
 
@@ -1559,12 +1717,17 @@ pub(crate) struct AllowanceKeys<'c> {
 }
 
 impl Allowance {
-    pub(crate) fn new(keys: &AllowanceKeys<'_>) -> Result<Self, RuleConfigError> {
+    /// `overrides`: where `include-overrides` takes the overrides of the methods the entries
+    /// name from.
+    pub(crate) fn new(
+        keys: &AllowanceKeys<'_>,
+        overrides: Overrides<'_, '_>,
+    ) -> Result<Self, RuleConfigError> {
         let mut out = Self {
-            allowed: patterns(keys.allowed.0, keys.allowed.1)?,
+            allowed: places(keys.allowed.0, keys.allowed.1, overrides)?,
             exempt_names: FxHashSet::default(),
             exempt_patterns: Vec::new(),
-            forbidden: patterns(keys.forbidden.0, keys.forbidden.1)?,
+            forbidden: places(keys.forbidden.0, keys.forbidden.1, overrides)?,
             targets: None,
             attribution: Attribution::CallGraph,
             own_receiver: false,
@@ -1573,8 +1736,12 @@ impl Allowance {
         };
         for e in keys.exempt.0 {
             if e.contains(['.', ':']) || has_glob_syntax(e) {
-                out.exempt_patterns
-                    .push(DottedPattern::new(e, keys.exempt.1)?);
+                out.exempt_patterns.push(FunctionMatcher::place(
+                    e,
+                    keys.exempt.1,
+                    overrides,
+                    false,
+                )?);
             } else {
                 out.exempt_names.insert(e.clone());
             }
@@ -1608,6 +1775,26 @@ impl Allowance {
     /// Whether an `allowed-*` pattern names `key`.
     pub(crate) fn names_allowed(&self, key: &FuncKey) -> bool {
         names(&self.allowed, key)
+    }
+
+    /// Whether the allowance allows `key` ([`Self::allows`]) and whether a `forbidden-*` pattern
+    /// names it, for an allowance built with [`Overrides::ByBases`], whose class families the
+    /// declarations `project` tell ([`FunctionMatcher::matches_in`]).
+    pub(crate) fn writer_context(
+        &self,
+        contracts: &dyn heki_effect::Contracts,
+        project: &ProjectDecls,
+        key: &FuncKey,
+    ) -> (bool, bool) {
+        let named = |entries: &[FunctionMatcher]| {
+            (entries.iter()).any(|p| p.matches_in(contracts, project, key))
+        };
+        let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
+        let allowed = self.exempt_names.contains(name)
+            || named(&self.exempt_patterns)
+            || named(&self.allowed)
+            || self.targets.as_ref().is_some_and(|t| t.any(key));
+        (allowed, named(&self.forbidden))
     }
 
     /// Whether the contract names `key` as a place to access its targets from: an `allowed-*`
@@ -3112,11 +3299,14 @@ pub(crate) fn mut201(
             "write-owners",
             "write-owners.targets",
         )?;
-        let allowance = Allowance::new(&AllowanceKeys {
-            allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
-            forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
-            exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
-        })?
+        let allowance = Allowance::new(
+            &AllowanceKeys {
+                allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+                forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+                exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+            },
+            Overrides::of(rule.include_overrides, cx, &all_classes),
+        )?
         .with_attribution(attribution(
             rule.attribution.as_deref(),
             "write-owners",
@@ -4917,11 +5107,14 @@ pub(crate) fn mut203<'c>(
             label: heki_env::contract_label("read-owners", index, &rule.name),
             targets,
             external: FunctionMatchers::new(external, context)?,
-            allowance: Allowance::new(&AllowanceKeys {
-                allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
-                forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
-                exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
-            })?
+            allowance: Allowance::new(
+                &AllowanceKeys {
+                    allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
+                    forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
+                    exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
+                },
+                Overrides::of(rule.include_overrides, cx, &all_classes),
+            )?
             .with_attribution(attribution(
                 rule.attribution.as_deref(),
                 "read-owners",
