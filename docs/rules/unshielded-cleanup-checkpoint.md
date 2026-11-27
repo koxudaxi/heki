@@ -39,8 +39,9 @@ It does not report:
 
 - a checkpoint inside a `with` over `CancelScope(shield=True)` or `move_on_after(...,
   shield=True)` (and the other `move_on_*` and `fail_*` calls) on every path to it, in the
-  cleanup or in any function on the way; a project function whose checkpoints are all shielded
-  reaches none;
+  cleanup or in any function on the way, also when the code names the scope by the module that
+  defines it (`anyio._core._tasks.CancelScope`); a project function whose checkpoints are all
+  shielded reaches none;
 - a checkpoint inside a cancel scope that may shield: one made with a `shield` argument that is
   not a constant, one whose `shield` attribute the function sets, or one made elsewhere;
 - a checkpoint on a branch the call's constant arguments never take (`await self._stop()` where

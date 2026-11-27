@@ -26,7 +26,8 @@ opaque_packages = [
     "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
     "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi", "asgiref", "asyncer",
     "channels", "asyncpg", "websockets", "yaml", "motor", "duckdb", "celery", "openai",
-    "anthropic", "google", "polars", "torch", "psutil", "fsspec",
+    "anthropic", "google", "polars", "torch", "psutil", "fsspec", "xinference_client", "supabase",
+    "postgrest",
 ]
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
@@ -899,6 +900,641 @@ opaque_to_layer3 = true
 symbol = "urllib3.poolmanager.proxy_from_url"
 effects = ["unpooled_client_alloc"]
 return_type = "urllib3.ProxyManager"
+opaque_to_layer3 = true
+
+# --- HTTP: xinference_client ---
+# The synchronous client of an Xinference server (`requests`-based). Building the client asks
+# the server whether the cluster is authenticated, so the constructor waits as well. Every
+# listed method sends one request and waits for the response; `get_model` gives a handle, whose
+# class the server's model type picks at run time, so the handle's methods are listed on the base
+# class (a call exists only on the handle class that has it) and on each handle class. The
+# asynchronous `AsyncRESTfulClient` is not listed.
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient"
+effects = ["blocking_net", "unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client"
+effects = ["blocking_net", "unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.vllm_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.login"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.list_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.launch_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_autostart_config"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_autostart_model_summary"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.upsert_autostart_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.remove_autostart_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.reload_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_model_runtime_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_model_reload_status"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_model_reload_config"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.terminate_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.add_model_replica"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.terminate_model_replica"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_launch_model_progress"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.cancel_launch_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_instance_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.describe_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.register_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.unregister_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.list_model_registrations"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.list_cached_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.list_deletable_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.confirm_and_remove_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_model_registration"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.query_engine_by_model_name"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.abort_request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_workers_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.check_component_update"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.relaunch_api"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_api_relaunch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.list_api_relaunches"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.relaunch_supervisor"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_supervisor_relaunch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.list_supervisor_relaunches"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.relaunch_worker"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_worker_relaunch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.list_worker_relaunches"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_supervisor_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_progress"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.abort_cluster"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.RESTfulClient.get_model"
+effects = ["blocking_net"]
+return_type = "xinference_client.client.restful.restful_client.RESTfulModelHandle"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.vllm_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.login"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.list_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.launch_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_autostart_config"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_autostart_model_summary"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.upsert_autostart_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.remove_autostart_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.reload_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_model_runtime_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_model_reload_status"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_model_reload_config"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.terminate_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.add_model_replica"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.terminate_model_replica"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_launch_model_progress"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.cancel_launch_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_instance_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.describe_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.register_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.unregister_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.list_model_registrations"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.list_cached_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.list_deletable_models"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.confirm_and_remove_model"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_model_registration"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.query_engine_by_model_name"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.abort_request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_workers_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.check_component_update"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.relaunch_api"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_api_relaunch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.list_api_relaunches"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.relaunch_supervisor"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_supervisor_relaunch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.list_supervisor_relaunches"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.relaunch_worker"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_worker_relaunch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.list_worker_relaunches"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_supervisor_info"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_progress"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.abort_cluster"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.Client.get_model"
+effects = ["blocking_net"]
+return_type = "xinference_client.client.restful.restful_client.RESTfulModelHandle"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.create_embedding"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.convert_ids_to_tokens"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.rerank"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.text_to_image"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.image_to_image"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.image_edit"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.inpainting"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.ocr"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.text_to_video"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.image_to_video"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.flf_to_video"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.generate"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.chat"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.transcriptions"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.translations"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.speech"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulModelHandle.infer"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulEmbeddingModelHandle.create_embedding"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulEmbeddingModelHandle.convert_ids_to_tokens"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulRerankModelHandle.rerank"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulImageModelHandle.text_to_image"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulImageModelHandle.image_to_image"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulImageModelHandle.image_edit"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulImageModelHandle.inpainting"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulImageModelHandle.ocr"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulVideoModelHandle.text_to_video"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulVideoModelHandle.image_to_video"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulVideoModelHandle.flf_to_video"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulWorldModelHandle.generate"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulGenerateModelHandle.generate"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulChatModelHandle.chat"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulChatModelHandle.generate"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulAudioModelHandle.create_embedding"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulAudioModelHandle.transcriptions"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulAudioModelHandle.translations"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulAudioModelHandle.speech"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "xinference_client.client.restful.restful_client.RESTfulFlexibleModelHandle.infer"
+effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 # --- AWS: boto3 ---
@@ -1990,6 +2626,34 @@ symbol = "anyio.fail_at"
 cancel_scope = { arg = 1, param = "shield" }
 opaque_to_layer3 = true
 
+# The same shields by the module that defines them (`anyio` re-exports these names from
+# `anyio._core._tasks`, and AnyIO's own modules and code importing it there use that path).
+
+[[entries]]
+symbol = "anyio._core._tasks.CancelScope"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio._core._tasks.move_on_after"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio._core._tasks.fail_after"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio._core._tasks.move_on_at"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio._core._tasks.fail_at"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
 [[entries]]
 symbol = "trio.sleep"
 effects = ["checkpoint"]
@@ -2144,6 +2808,38 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "trio.fail_at"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+# Trio's, by their defining modules (`trio._core` re-exports the class).
+
+[[entries]]
+symbol = "trio._core._run.CancelScope"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio._core.CancelScope"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio._timeouts.move_on_after"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio._timeouts.fail_after"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio._timeouts.move_on_at"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio._timeouts.fail_at"
 cancel_scope = { param = "shield" }
 opaque_to_layer3 = true
 
@@ -5864,6 +6560,887 @@ emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
+# --- DB: supabase-py and postgrest (sync) ---
+# `supabase.create_client(...)` and `supabase.Client(...)` build a client without any request;
+# `table()` / `from_()` / `schema()` / `rpc()` and the filter and modifier methods only build
+# the request, and `execute()` sends it to the PostgREST server and waits: one statement. The
+# builder classes are those of `postgrest._sync.request_builder`. `insert`, `upsert`, `update`
+# and `delete` give a `SyncSelectRequestBuilder` from postgrest 2; earlier releases gave the
+# query and filter builders, whose methods are a subset of it. The asynchronous clients
+# (`AsyncClient`, `acreate_client`) are not listed.
+
+[[entries]]
+symbol = "supabase.Client"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase._sync.client.Client"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase.create_client"
+effects = ["unpooled_client_alloc"]
+return_type = "supabase.Client"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase._sync.client.create_client"
+effects = ["unpooled_client_alloc"]
+return_type = "supabase.Client"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase.Client.table"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase.Client.from_"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase.Client.schema"
+return_type = "postgrest._sync.client.SyncPostgrestClient"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase.Client.rpc"
+return_type = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase._sync.client.Client.table"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase._sync.client.Client.from_"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase._sync.client.Client.schema"
+return_type = "postgrest._sync.client.SyncPostgrestClient"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "supabase._sync.client.Client.rpc"
+return_type = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest.SyncPostgrestClient"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.client.SyncPostgrestClient"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest.SyncPostgrestClient.schema"
+return_type = "postgrest._sync.client.SyncPostgrestClient"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest.SyncPostgrestClient.table"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest.SyncPostgrestClient.from_"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest.SyncPostgrestClient.from_table"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest.SyncPostgrestClient.rpc"
+return_type = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.client.SyncPostgrestClient.schema"
+return_type = "postgrest._sync.client.SyncPostgrestClient"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.client.SyncPostgrestClient.table"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.client.SyncPostgrestClient.from_"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.client.SyncPostgrestClient.from_table"
+return_type = "postgrest._sync.request_builder.SyncRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.client.SyncPostgrestClient.rpc"
+return_type = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRequestBuilder.select"
+return_type = "postgrest._sync.request_builder.SyncSelectRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRequestBuilder.insert"
+return_type = "postgrest._sync.request_builder.SyncSelectRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRequestBuilder.upsert"
+return_type = "postgrest._sync.request_builder.SyncSelectRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRequestBuilder.update"
+return_type = "postgrest._sync.request_builder.SyncSelectRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRequestBuilder.delete"
+return_type = "postgrest._sync.request_builder.SyncSelectRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.filter"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.eq"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.neq"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.gt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.gte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.lt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.lte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.is_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.like"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.like_all_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.like_any_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.ilike_all_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.ilike_any_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.ilike"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.or_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.fts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.plfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.phfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.wfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.in_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.cs"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.cd"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.contains"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.contained_by"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.ov"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.sl"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.sr"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.nxl"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.nxr"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.adj"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.range_gt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.range_gte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.range_lt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.range_lte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.range_adjacent"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.overlaps"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.match"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.max_affected"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.order"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.limit"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.offset"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.range"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.strip_nulls"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.select"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.filter"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.eq"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.neq"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.gt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.gte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.lt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.lte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.is_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.like"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.like_all_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.like_any_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.ilike_all_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.ilike_any_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.ilike"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.or_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.fts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.plfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.phfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.wfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.in_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.cs"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.cd"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.contains"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.contained_by"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.ov"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.sl"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.sr"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.nxl"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.nxr"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.adj"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.range_gt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.range_gte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.range_lt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.range_lte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.range_adjacent"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.overlaps"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.match"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.max_affected"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.order"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.limit"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.offset"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.range"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.strip_nulls"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.select"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.filter"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.eq"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.neq"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.gt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.gte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.lt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.lte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.is_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.like"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.like_all_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.like_any_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.ilike_all_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.ilike_any_of"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.ilike"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.or_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.fts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.plfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.phfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.wfts"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.in_"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.cs"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.cd"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.contains"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.contained_by"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.ov"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.sl"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.sr"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.nxl"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.nxr"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.adj"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.range_gt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.range_gte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.range_lt"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.range_lte"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.range_adjacent"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.overlaps"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.match"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.max_affected"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.order"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.limit"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.offset"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.range"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.strip_nulls"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.select"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.single"
+return_type = "postgrest._sync.request_builder.SyncSingleRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.maybe_single"
+return_type = "postgrest._sync.request_builder.SyncMaybeSingleRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.csv"
+return_type = "postgrest._sync.request_builder.SyncSingleRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.text_search"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.single"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.csv"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.maybe_single"
+return_type = "postgrest._sync.request_builder.SyncMaybeSingleRequestBuilder"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.execute"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.execute"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncQueryRequestBuilder.execute"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncSingleRequestBuilder.execute"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncMaybeSingleRequestBuilder.execute"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.execute"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
 # --- Task queues: Celery ---
 # `send_task()`, `Task.delay()` and `Task.apply_async()` publish the task message to the
 # broker and wait for the write, unless the app is configured otherwise: under
@@ -6076,6 +7653,11 @@ name = "google-genai"
 packages = ["google.genai"]
 verified = ">=1.0,<4"
 
+[[distributions]]
+name = "postgrest"
+packages = ["postgrest"]
+verified = ">=2.34,<3"
+
 [[attributes]]
 symbol = "openai.OpenAI.chat"
 type = "openai.resources.chat.Chat"
@@ -6151,6 +7733,18 @@ type = "google.genai.client.AsyncClient"
 [[attributes]]
 symbol = "google.genai.client.AsyncClient.models"
 type = "google.genai.models.AsyncModels"
+
+[[attributes]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.not_"
+type = "Self"
+
+[[attributes]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.not_"
+type = "Self"
+
+[[attributes]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.not_"
+type = "Self"
 
 [[entries]]
 symbol = "openai.OpenAI.with_options"
@@ -7295,6 +8889,19 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "numpy.insert"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+# `numpy.r_[...]` and `numpy.c_[...]` concatenate what the subscript lists into a new array: the
+# subscript is the call (`__getitem__` of the object).
+
+[[entries]]
+symbol = "numpy.r_.__getitem__"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "numpy.c_.__getitem__"
 effects = ["quadratic_realloc"]
 opaque_to_layer3 = true
 

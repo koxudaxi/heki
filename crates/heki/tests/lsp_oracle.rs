@@ -7308,6 +7308,23 @@ fn steps_configuration() -> Vec<Step> {
             )],
         )
         .present(&[("pkg/shapes.py", "MUT201")]),
+        // A report whose access matches an entry by its pattern points at that entry.
+        Step::new(
+            "contracts of an included file match by the globs of a group",
+            vec![
+                Action::Write("contracts/dials.toml", DIAL_CONTRACTS.to_owned()),
+                Action::Configure(with_included("contracts/dials.toml")),
+            ],
+        )
+        .present(DIAL_CONTRACT_REPORTS),
+        Step::new(
+            "the group moves down",
+            vec![Action::Write(
+                "contracts/dials.toml",
+                format!("# dials\n\n{DIAL_CONTRACTS}"),
+            )],
+        )
+        .present(DIAL_CONTRACT_REPORTS),
         Step::new(
             "the included file is gone from the configuration",
             vec![Action::Configure(CONFIG.to_owned())],
@@ -7316,15 +7333,49 @@ fn steps_configuration() -> Vec<Step> {
     ]
 }
 
+/// An effect boundary, an invalidation contract, and an import boundary of an included file
+/// whose reports match their entries by globs ([`DIAL_CONTRACT_REPORTS`]), two of them from a
+/// group.
+const DIAL_CONTRACTS: &str = "\
+[groups]
+levels = [\"Gauge.lev*\"]
+
+[[effect-boundaries]]
+name = \"turning\"
+scopes = [\"pkg.dial_user.turn\"]
+write-universe = [\"@levels\"]
+
+[[invalidation]]
+name = \"gauges\"
+targets = [\"Node.kids\", \"@levels\"]
+invalidators = [\"pkg.dials:recalibrate\"]
+
+[[import-boundaries]]
+name = \"dial-layers\"
+importers = [\"pkg.dial_user\"]
+forbidden-imports = [\"pkg.imp_db\", \"pkg.dial_o*\"]
+";
+
+const DIAL_CONTRACT_REPORTS: &[(&str, &str)] = &[
+    ("pkg/dial_user.py", "EFF201"),
+    ("pkg/dial_user.py", "MUT208"),
+    ("pkg/dial_user.py", "IMP201"),
+];
+
+/// [`CONFIG`] including `file`.
+fn with_included(file: &str) -> String {
+    CONFIG.replace(
+        "[tool.heki.lint]\n",
+        &format!("[tool.heki]\ninclude = [\"{file}\"]\n\n[tool.heki.lint]\n"),
+    )
+}
+
 /// A write owner of an included file ([`with_boxes`]).
 const BOXES: &str = "[[write-owners]]\nname = \"boxes\"\ntargets = [\"Box.items\"]\n";
 
 /// [`CONFIG`] including `contracts/boxes.toml`.
 fn with_boxes() -> String {
-    CONFIG.replace(
-        "[tool.heki.lint]\n",
-        "[tool.heki]\ninclude = [\"contracts/boxes.toml\"]\n\n[tool.heki.lint]\n",
-    )
+    with_included("contracts/boxes.toml")
 }
 
 const MEMBER_PYPROJECT: &str = "[project]\nname = \"member\"\n";

@@ -214,13 +214,13 @@ can miss a rule written in its instructions, but not a contract that `heki check
 3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and
    a CI step, and record today's findings in a
    [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only new ones
-   fail: `uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline`. The
+   fail: `uvx heki==0.11.0 check --baseline heki-baseline.toml --update-baseline`. The
    [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups ready
    to copy.
 
 > [!WARNING]
 > 🧪 **Pre-release.** Rules, configuration keys, and output formats can change in any release,
-> and the release notes list every change. Pin the version (`heki==0.10.0`, and the hook's `rev`)
+> and the release notes list every change. Pin the version (`heki==0.11.0`, and the hook's `rev`)
 > so upgrades happen only when you choose. The default rules are exact. Heuristic rules,
 > experimental rules, and experimental commands run only when you ask for them, and every output
 > labels heuristic reports. Please [report](https://github.com/koxudaxi/heki/issues) what heki
@@ -258,14 +258,14 @@ $ heki recommend                                # configuration advice (experime
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.10.0
+    rev: v0.11.0
     hooks:
       - id: heki
 ```
 
 ```yaml
 # A step of a GitHub Actions job that has uv
-- run: uvx heki==0.10.0 check
+- run: uvx heki==0.11.0 check
 ```
 
 The hook runs `heki check --touched` on the staged files, so old findings in other files don't

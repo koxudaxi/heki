@@ -448,6 +448,7 @@ mod tests {
                 )
                 .collect(),
             contracts: Vec::new(),
+            contract_entries: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
             key_target: None,

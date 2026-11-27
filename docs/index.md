@@ -209,7 +209,7 @@ in its instructions, but not a contract that `heki check` enforces:
 
 3. Keep it running with the [pre-commit hook](adoption.md#pre-commit) and a CI step, and record
    today's findings in a [Ratchet baseline](adoption.md#ratchet-baselines) so only new ones fail:
-   `uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline`. The
+   `uvx heki==0.11.0 check --baseline heki-baseline.toml --update-baseline`. The
    [starter recipes](adoption.md#starter-recipes) have these setups ready to copy.
 
 !!! warning "Pre-release"

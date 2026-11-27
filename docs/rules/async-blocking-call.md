@@ -8,7 +8,8 @@ A call in `async def` that always runs a network, database, subprocess, or sleep
 
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
-synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), host name lookups
+synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`, the synchronous `xinference_client.RESTfulClient`
+and its model handles, the `execute()` of a supabase-py / postgrest query), host name lookups
 (`socket.getaddrinfo` / `gethostbyname` / `getfqdn`; the event loop has `loop.getaddrinfo()`;
 `getaddrinfo` with the `AI_NUMERICHOST` flag only parses an address and is not reported),
 database drivers
