@@ -2301,6 +2301,35 @@ mod tests {
         EcosystemEntry { cases, ..e }
     }
 
+    /// The `str` path classes a function of `os.path` makes a `str` of.
+    const STR_PATHS: &[&str] = &[
+        "builtins.str",
+        "pathlib.Path",
+        "pathlib.PurePath",
+        "pathlib.PosixPath",
+        "pathlib.WindowsPath",
+        "pathlib.PurePosixPath",
+        "pathlib.PureWindowsPath",
+    ];
+
+    /// The cases of a call returning a path of the kind of the one it is passed: `str` for one
+    /// of `strs`, `bytes` for `bytes`.
+    fn path_kind(arg: Option<u8>, param: Option<&str>, strs: &[&str]) -> Vec<ArgCase> {
+        [
+            (strs, "builtins.str"),
+            (&["builtins.bytes"][..], "builtins.bytes"),
+        ]
+        .into_iter()
+        .map(|(given, class)| ArgCase {
+            arg,
+            param: param.map(Into::into),
+            instance_of: s(given),
+            return_type: Some(class.into()),
+            ..ArgCase::default()
+        })
+        .collect()
+    }
+
     /// Every Layer 2 entry (docs/ANALYSIS_AND_KB_SPEC.md section 4.2), as `(symbols, expected
     /// entry without symbol)`.
     /// The calls opening a file as `io.open` does, and the members of the classes of the file
@@ -2641,7 +2670,6 @@ mod tests {
                     "os.lchown",
                     "os.link",
                     "os.listxattr",
-                    "os.lstat",
                     "os.makedirs",
                     "os.mkdir",
                     "os.mkfifo",
@@ -2684,7 +2712,6 @@ mod tests {
                     "pathlib.Path.is_socket",
                     "pathlib.Path.is_symlink",
                     "pathlib.Path.lchmod",
-                    "pathlib.Path.lstat",
                     "pathlib.Path.mkdir",
                     "pathlib.Path.move",
                     "pathlib.Path.move_into",
@@ -2908,17 +2935,31 @@ mod tests {
                 ),
             ),
             (
-                s(&[
-                    "os.getcwd",
-                    "os.getcwdb",
-                    "os.path.abspath",
-                    "os.path.expanduser",
-                    "os.path.expandvars",
-                    "os.path.relpath",
-                ]),
+                s(&["os.path.expandvars"]),
                 EcosystemEntry {
                     environment: Some(EnvironmentAccess::Call),
                     ..entry(&[])
+                },
+            ),
+            (
+                s(&["os.getcwd"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning("builtins.str", entry(&[]))
+                },
+            ),
+            (
+                s(&["os.getcwdb"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning("builtins.bytes", entry(&[]))
+                },
+            ),
+            (
+                s(&["os.path.abspath", "os.path.expanduser", "os.path.relpath"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..with_cases(path_kind(Some(0), Some("path"), STR_PATHS), entry(&[]))
                 },
             ),
             (
@@ -3153,19 +3194,21 @@ mod tests {
     /// `EFF112`: the calls writing an argument in the order of its elements, with no other fact
     /// (the file writes of `pathlib` are in [`ORDERED_OUTPUTS`] too).
     fn ordered_outputs() -> Vec<(Vec<String>, EcosystemEntry)> {
-        vec![(
-            s(&[
-                "builtins.print",
-                "json.dumps",
-                "json.dump",
-                "pprint.pprint",
-                "pprint.pformat",
-                "pprint.pp",
-                "yaml.dump",
-                "yaml.safe_dump",
-            ]),
-            entry(&[]),
-        )]
+        vec![
+            (
+                s(&[
+                    "builtins.print",
+                    "json.dump",
+                    "pprint.pprint",
+                    "pprint.pformat",
+                    "pprint.pp",
+                    "yaml.dump",
+                    "yaml.safe_dump",
+                ]),
+                entry(&[]),
+            ),
+            (s(&["json.dumps"]), returning("builtins.str", entry(&[]))),
+        ]
     }
 
     /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
@@ -3242,7 +3285,7 @@ mod tests {
                         package: Some(slot(1, "package")),
                         level: None,
                     })),
-                    ..tagged(EnvironmentAccess::Import)
+                    ..returning("types.ModuleType", tagged(EnvironmentAccess::Import))
                 },
             ),
             (
@@ -3318,15 +3361,17 @@ mod tests {
             (
                 with_prefix(
                     "subprocess",
-                    &[
-                        "run",
-                        "call",
-                        "check_call",
-                        "check_output",
-                        "Popen.communicate",
-                    ],
+                    &["call", "check_call", "check_output", "Popen.communicate"],
                 ),
                 entry(&[BlockingSubprocess]),
+            ),
+            (
+                s(&["subprocess.run"]),
+                returning("subprocess.CompletedProcess", entry(&[BlockingSubprocess])),
+            ),
+            (
+                s(&["subprocess.CompletedProcess.check_returncode"]),
+                entry(&[]),
             ),
             (
                 s(&["subprocess.Popen.wait"]),
@@ -3368,29 +3413,66 @@ mod tests {
             ),
             (
                 s(&[
-                    "pathlib.Path.read_text",
-                    "pathlib.Path.read_bytes",
                     "pathlib.Path.write_text",
                     "pathlib.Path.write_bytes",
                     "os.listdir",
                     "os.scandir",
                     "os.walk().__iter__",
-                    "shutil.copy",
-                    "shutil.copy2",
-                    "shutil.copytree",
                     "shutil.rmtree",
-                    "os.stat",
                     "os.path.exists",
                     "os.path.isfile",
                     "os.path.isdir",
-                    "os.path.realpath",
                     "pathlib.Path.exists",
-                    "pathlib.Path.stat",
                     "pathlib.Path.is_file",
                     "pathlib.Path.is_dir",
                     "starlette.staticfiles.StaticFiles.lookup_path",
                 ]),
                 entry(&[BlockingFs]),
+            ),
+            (
+                s(&["pathlib.Path.read_text"]),
+                returning("builtins.str", entry(&[BlockingFs])),
+            ),
+            (
+                s(&["pathlib.Path.read_bytes"]),
+                returning("builtins.bytes", entry(&[BlockingFs])),
+            ),
+            (
+                s(&[
+                    "os.stat",
+                    "os.lstat",
+                    "pathlib.Path.stat",
+                    "pathlib.Path.lstat",
+                ]),
+                returning("os.stat_result", entry(&[BlockingFs])),
+            ),
+            (
+                s(&["os.path.realpath"]),
+                with_cases(path_kind(Some(0), None, STR_PATHS), entry(&[BlockingFs])),
+            ),
+            (
+                s(&["shutil.copy", "shutil.copy2"]),
+                with_cases(
+                    path_kind(Some(1), Some("dst"), &["builtins.str"]),
+                    entry(&[BlockingFs]),
+                ),
+            ),
+            (
+                s(&["shutil.copytree"]),
+                with_cases(
+                    [
+                        path_kind(Some(1), Some("dst"), &["builtins.str"]),
+                        vec![ArgCase {
+                            arg: Some(1),
+                            param: Some("dst".into()),
+                            instance_of: s(&["pathlib.Path"]),
+                            return_type: Some("pathlib.Path".into()),
+                            ..ArgCase::default()
+                        }],
+                    ]
+                    .concat(),
+                    entry(&[BlockingFs]),
+                ),
             ),
             (
                 s(&["pathlib.Path.resolve"]),
@@ -3555,6 +3637,50 @@ mod tests {
             (
                 s(&["importlib.util.module_from_spec"]),
                 returning("types.ModuleType", entry(&[])),
+            ),
+            (
+                s(&["logging.getLogger"]),
+                returning("logging.Logger", entry(&[])),
+            ),
+            (
+                s(&["threading.current_thread", "threading.main_thread"]),
+                returning("threading.Thread", entry(&[])),
+            ),
+            (s(&["re.compile"]), returning("re.Pattern", entry(&[]))),
+            (
+                with_prefix("re.Pattern", &["match", "search", "fullmatch", "finditer"]),
+                entry(&[]),
+            ),
+            (
+                with_prefix("re.Pattern", &["findall", "split"]),
+                returning("builtins.list", entry(&[])),
+            ),
+            (
+                s(&["urllib.parse.urlparse"]),
+                with_cases(
+                    [
+                        ("builtins.str", "urllib.parse.ParseResult"),
+                        ("builtins.bytes", "urllib.parse.ParseResultBytes"),
+                    ]
+                    .into_iter()
+                    .map(|(given, class)| ArgCase {
+                        arg: Some(0),
+                        param: Some("url".into()),
+                        instance_of: s(&[given]),
+                        return_type: Some(class.into()),
+                        ..ArgCase::default()
+                    })
+                    .collect(),
+                    entry(&[]),
+                ),
+            ),
+            (
+                s(&["urllib.parse.ParseResult.geturl"]),
+                returning("builtins.str", entry(&[])),
+            ),
+            (
+                s(&["urllib.parse.ParseResultBytes.geturl"]),
+                returning("builtins.bytes", entry(&[])),
             ),
             (
                 with_prefix(
@@ -5607,6 +5733,20 @@ mod tests {
         assert_eq!(seen.len(), ASYNC_NAMESPACES.len(), "{seen:?}");
     }
 
+    /// Whether a result of `class` is typed: the class has catalogued members (methods, or
+    /// attributes it types), is itself the fact, or is a builtin type.
+    fn types_a_result(kb: &EffectiveEcosystemKb, class: &str) -> bool {
+        let members = format!("{class}.");
+        kb.entries.keys().any(|k| k.starts_with(&members))
+            || kb.attributes.keys().any(|k| k.starts_with(&members))
+            || FUTURE_CLASSES.contains(&class)
+            || THREAD_LOCAL_CLASSES.contains(&class)
+            || class.starts_with("builtins.")
+            // Any module: the class says nothing of the names a value binds, and a call on one
+            // is unresolved by design (`resolver::is_any_module`).
+            || class == "types.ModuleType"
+    }
+
     /// A `return_type` naming a class without catalogued members (methods, or attributes it
     /// types) would leave the factory's result unresolved without any sign (a typo, or a class
     /// spelled another way), unless the class itself is the fact ([`FUTURE_CLASSES`]) or a
@@ -5618,16 +5758,8 @@ mod tests {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         for (symbol, e) in &kb.entries {
             if let Some(class) = e.return_type_in(None) {
-                let methods = format!("{class}.");
                 assert!(
-                    kb.entries.keys().any(|k| k.starts_with(&methods))
-                        || kb.attributes.keys().any(|k| k.starts_with(&methods))
-                        || FUTURE_CLASSES.contains(&class)
-                        || THREAD_LOCAL_CLASSES.contains(&class)
-                        || class.starts_with("builtins.")
-                        // Any module: the class says nothing of the names a value binds, and a
-                        // call on one is unresolved by design (`resolver::is_any_module`).
-                        || class == "types.ModuleType"
+                    types_a_result(&kb, class)
                         || (e.returns_receiver_items_in(None) && class.starts_with("typing.")),
                     "{symbol} -> {class}"
                 );
@@ -5690,11 +5822,7 @@ mod tests {
                     "{symbol}"
                 );
                 if let Some(class) = &case.return_type {
-                    let methods = format!("{class}.");
-                    assert!(
-                        kb.entries.keys().any(|k| k.starts_with(&methods)),
-                        "{symbol} -> {class}"
-                    );
+                    assert!(types_a_result(&kb, class), "{symbol} -> {class}");
                 }
             }
         }
