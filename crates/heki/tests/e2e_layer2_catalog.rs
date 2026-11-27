@@ -1365,6 +1365,50 @@ fn file_objects_wait_on_the_file_system_by_the_mode_they_are_opened_in() {
     );
 }
 
+/// A binary read returns `None` from a non-blocking file descriptor, and `open` sets
+/// `O_NONBLOCK` on no path: only a path argument gives the buffered class, whose `read` is
+/// `bytes`. An integer or unknown file gives the members every file class has.
+#[test]
+fn a_binary_read_of_a_file_that_may_be_a_descriptor_has_no_class() {
+    const SRC: &str = r#"from pathlib import Path
+
+
+async def from_path():
+    f = open("x.bin", "rb")
+    return f.read()
+
+
+async def from_path_object(p: Path):
+    f = open(p, "rb")
+    return f.read()
+
+
+async def from_descriptor(fd: int):
+    f = open(fd, "rb")
+    return f.read()
+
+
+async def from_unknown(x):
+    f = open(x, "rb")
+    return f.read()
+
+
+"#;
+    assert_eq!(
+        check("cat_files_fd", "app/fd.py", SRC, "EFF101,EFF105"),
+        vec![
+            d(5, "EFF105", "from_path", "builtins.open"),
+            d(6, "EFF105", "from_path", "io.BufferedReader.read"),
+            d(10, "EFF105", "from_path_object", "builtins.open"),
+            d(11, "EFF105", "from_path_object", "io.BufferedReader.read"),
+            d(15, "EFF105", "from_descriptor", "builtins.open"),
+            d(16, "EFF105", "from_descriptor", "io.open().read"),
+            d(20, "EFF105", "from_unknown", "builtins.open"),
+            d(21, "EFF105", "from_unknown", "io.open().read"),
+        ]
+    );
+}
+
 /// The calls on those file objects, and on what `read` returns, are all resolved: `heki
 /// recommend` counts no call it cannot see.
 #[test]

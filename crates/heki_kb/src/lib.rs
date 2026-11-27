@@ -485,6 +485,8 @@ pub struct EcosystemEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileArgs {
+    /// The file argument. Unset: the file is the receiver (`pathlib.Path.open`), a path.
+    pub file: ArgSlot,
     pub mode: ArgSlot,
     pub buffering: ArgSlot,
 }
@@ -512,6 +514,8 @@ impl FileArgs {
         mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> &'static str {
         let mut at = |slot: &ArgSlot| arg(slot.arg, slot.param.as_deref());
+        let names_path = (self.file == ArgSlot::default())
+            || at(&self.file).is_some_and(|fact| fact.is_path_like());
         let mode = match at(&self.mode) {
             None => Some("r".to_owned()),
             Some(fact) => match fact.literal {
@@ -527,7 +531,12 @@ impl FileArgs {
                 _ => None,
             },
         };
-        file_class(mode.as_deref(), buffering)
+        match file_class(mode.as_deref(), buffering) {
+            // `open` never sets `O_NONBLOCK` on a path it opens, so only an integer file
+            // descriptor can give a binary read that returns `None` instead of bytes.
+            "io.BufferedReader" | "io.BufferedRandom" if !names_path => ANY_FILE_CLASS,
+            class => class,
+        }
     }
 }
 
@@ -774,6 +783,27 @@ pub struct ArgFact {
     /// Whether the value is true, when the analysis knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truthy: Option<bool>,
+}
+
+impl ArgFact {
+    /// The value is known to be a path (a string, bytes, or a path object) and so no integer
+    /// file descriptor.
+    pub fn is_path_like(&self) -> bool {
+        self.names_file
+            || matches!(self.literal, Some(LiteralValue::Str(_)))
+            || self.class.as_deref().is_some_and(|c| {
+                matches!(
+                    c,
+                    "builtins.str"
+                        | "builtins.bytes"
+                        | "os.PathLike"
+                        | "pathlib.Path"
+                        | "pathlib.PurePath"
+                        | "pathlib.PosixPath"
+                        | "pathlib.WindowsPath"
+                )
+            })
+    }
 }
 
 /// A constant argument.
@@ -2264,8 +2294,12 @@ mod tests {
     /// The calls opening a file as `io.open` does, and the members of the classes of the file
     /// objects they return.
     fn file_objects() -> Vec<(Vec<String>, EcosystemEntry)> {
-        let opening = |mode: u8| EcosystemEntry {
+        let opening = |file: Option<u8>, mode: u8| EcosystemEntry {
             file_object: Some(Box::new(FileArgs {
+                file: ArgSlot {
+                    arg: file,
+                    param: file.map(|_| "file".into()),
+                },
                 mode: ArgSlot {
                     arg: Some(mode),
                     param: Some("mode".into()),
@@ -2278,8 +2312,8 @@ mod tests {
             ..entry(&[BlockingFs])
         };
         let mut out = vec![
-            (s(&["builtins.open", "io.open"]), opening(1)),
-            (s(&["pathlib.Path.open"]), opening(0)),
+            (s(&["builtins.open", "io.open"]), opening(Some(0), 1)),
+            (s(&["pathlib.Path.open"]), opening(None, 0)),
         ];
         for class in FILE_CLASSES.iter().copied().chain([ANY_FILE_CLASS]) {
             let reads = class != "io.BufferedWriter";
@@ -5265,6 +5299,10 @@ mod tests {
             assert_eq!(file_class(mode, buffering), class, "{mode:?} {buffering:?}");
         }
         let args = FileArgs {
+            file: ArgSlot {
+                arg: Some(0),
+                param: Some("file".into()),
+            },
             mode: ArgSlot {
                 arg: Some(1),
                 param: Some("mode".into()),
@@ -5278,12 +5316,32 @@ mod tests {
             literal: Some(v),
             ..ArgFact::default()
         };
-        let call = |mode: Option<ArgFact>, buffering: Option<ArgFact>| {
+        let path = lit(LiteralValue::Str("x.bin".into()));
+        let call_on = |file: ArgFact, mode: Option<ArgFact>, buffering: Option<ArgFact>| {
             args.class(|i, _| match i {
+                Some(0) => Some(file.clone()),
                 Some(1) => mode.clone(),
                 _ => buffering.clone(),
             })
         };
+        let call = |mode: Option<ArgFact>, buffering: Option<ArgFact>| {
+            call_on(path.clone(), mode, buffering)
+        };
+        let rb = || Some(lit(LiteralValue::Str("rb".into())));
+        assert_eq!(call_on(ArgFact::default(), rb(), None), ANY_FILE_CLASS);
+        assert_eq!(
+            call_on(lit(LiteralValue::Int(3)), rb(), None),
+            ANY_FILE_CLASS
+        );
+        assert_eq!(call_on(lit(LiteralValue::Int(3)), None, None), TEXT);
+        assert_eq!(
+            call_on(
+                lit(LiteralValue::Int(3)),
+                rb(),
+                Some(lit(LiteralValue::Int(0)))
+            ),
+            RAW
+        );
         assert_eq!(call(None, None), TEXT);
         assert_eq!(
             call(Some(lit(LiteralValue::Str("rb".into()))), None),

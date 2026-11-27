@@ -69,14 +69,14 @@ symbol = "builtins.open"
 effects = ["blocking_fs"]
 exit_suppresses = false
 items = "lines"
-file_object = { mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
+file_object = { file = { arg = 0, param = "file" }, mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.open"
 effects = ["blocking_fs"]
 items = "lines"
-file_object = { mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
+file_object = { file = { arg = 0, param = "file" }, mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
 opaque_to_layer3 = true
 
 [[entries]]
@@ -116,7 +116,10 @@ opaque_to_layer3 = true
 # has. A member waits on the file system when it can read, write, flush, or move on an
 # instance of the class; one that always raises `io.UnsupportedOperation` there (`write` of a
 # binary reader) or only asks the kernel (`fileno`, `isatty`, `tell` of a binary file) does
-# not. `FileIO.read` and `FileIO.write` return `None` in non-blocking mode.
+# not. `FileIO.read` and `FileIO.write` return `None` in non-blocking mode, and so do the
+# binary reads of a file opened from an integer file descriptor (`open` sets `O_NONBLOCK` on no
+# path): `file_object` gives `io.open()` for a binary read of a file that is not known to be a
+# path.
 
 [[entries]]
 symbol = "io.TextIOWrapper.read"

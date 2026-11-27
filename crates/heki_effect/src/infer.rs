@@ -52,9 +52,21 @@ pub(crate) struct Passed<'c> {
     args: &'c [VarId],
     kwargs: &'c [(Option<String>, VarId)],
     star_from: Option<u8>,
+    /// The call's arguments are not followed (a partial object's bound ones shift them), so
+    /// each is unknown, not omitted.
+    unknown: bool,
 }
 
 impl Passed<'_> {
+    /// A call whose arguments cannot be followed: the catalog's argument cases read each as
+    /// an unknown one.
+    fn unknown() -> Self {
+        Self {
+            unknown: true,
+            ..Self::default()
+        }
+    }
+
     /// What the call binds to the parameter at position `index` that `keyword` also names
     /// ([`resolver::bound_arg`]).
     fn bound(&self, index: u8, keyword: Option<&str>) -> BoundArg {
@@ -1172,6 +1184,7 @@ impl HandedArgs {
             args: &self.args,
             kwargs: &self.kwargs,
             star_from: self.star_from,
+            unknown: false,
         }
     }
 
@@ -2103,6 +2116,9 @@ impl<'e, 'a> Engine<'e, 'a> {
         index: Option<u8>,
         keyword: Option<&str>,
     ) -> Option<ArgFact> {
+        if call.unknown {
+            return Some(ArgFact::default());
+        }
         let class = |v: VarId| {
             self.need(v)
                 .ok()
@@ -2261,6 +2277,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     args,
                     kwargs,
                     star_from: *star_from,
+                    unknown: false,
                 };
                 return self.typed_call(Called::Value(*c), call);
             }
@@ -2288,6 +2305,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     args,
                     kwargs,
                     star_from: *star_from,
+                    unknown: false,
                 };
                 return self.typed_call(Called::Method(*recv, method), call);
             }
@@ -3233,7 +3251,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 self.cx.call_result(fqn, |i, k| self.passed(call, i, k))
             }
             // What the partial object binds shifts the arguments: they are not followed.
-            Ty::Partial(inner, _) => self.called(inner, Passed::default()),
+            Ty::Partial(inner, _) => self.called(inner, Passed::unknown()),
             Ty::OneOf(fqns) => join_all(
                 fqns.iter()
                     .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import importlib.machinery
 import importlib.util
@@ -60,9 +61,19 @@ def tokens() -> list[Any]:
     return [contextvars.ContextVar("sentinel").set(1)]
 
 
+# Closes the files this script opens, then removes their directories, whatever `main` ends with.
+CLEANUP = contextlib.ExitStack()
+
+
+def scratch_directory() -> Path:
+    """A new directory, removed when `CLEANUP` closes (after the files opened in it)."""
+    folder = CLEANUP.enter_context(tempfile.TemporaryDirectory(prefix="heki-sentinel-"))
+    return Path(folder)
+
+
 def paths() -> list[Any]:
     """A directory holding one file, kept for the life of the script."""
-    folder = Path(tempfile.mkdtemp(prefix="heki-sentinel-"))
+    folder = scratch_directory()
     (folder / "f.txt").write_text("x")
     return [folder]
 
@@ -71,13 +82,17 @@ def files(*modes: str) -> Callable[[], list[Any]]:
     """New files holding two lines, opened in each of `modes` (`"r+b0"`: with `buffering=0`)."""
 
     def make() -> list[Any]:
-        folder = Path(tempfile.mkdtemp(prefix="heki-sentinel-"))
+        folder = scratch_directory()
         opened = []
         for i, mode in enumerate(modes):
             path = folder / f"f{i}.txt"
             path.write_text("a\nb\n")
             unbuffered = mode.endswith("0")
-            opened.append(open(path, mode.removesuffix("0"), buffering=0 if unbuffered else -1))
+            opened.append(
+                CLEANUP.enter_context(
+                    open(path, mode.removesuffix("0"), buffering=0 if unbuffered else -1)
+                )
+            )
         return opened
 
     return make
@@ -277,6 +292,11 @@ def checked(symbol: str, check: Callable[[], list[str]]) -> list[str]:
 
 
 def main() -> int:
+    with CLEANUP:
+        return run()
+
+
+def run() -> int:
     data = tomllib.loads(KB.read_text())
     failures: list[str] = []
     for row in data.get("attributes", []):
