@@ -9,8 +9,9 @@
 use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
     MemberPattern, MergedReports, Named, References, Sites, allows_own_receiver, attribution,
-    binds_receiver, counts_references, delegated_reports, escaping_for, matched_name,
-    named_protocols, place_functions, project_classes, reports_unresolved, targets_call_each_other,
+    binds_receiver, counts_references, delegated_reports, escaping_for, implemented_within,
+    matched_name, named_protocols, place_functions, project_classes, reports_unresolved,
+    targets_call_each_other,
 };
 use crate::patterns::{ModuleIndex, PartIndex};
 use crate::{
@@ -20,7 +21,8 @@ use crate::{
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    AccessKind, ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole, UnboundCall,
+    AccessKind, ArgValue, CallHop, CallSite, ContractClass, FuncKey, ProjectDecls, SiteRole,
+    UnboundCall,
 };
 use heki_env::glob::AnyGlob;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -71,7 +73,7 @@ impl CallTargets {
     /// `obj: Base` whose `reset` is one of the two), one group of the targets the candidates
     /// match. Only the call itself calls (`SiteRole::Call`): the other sites of the object a
     /// call returns (where it is iterated, returned, or handed on) call nothing more.
-    pub(crate) fn called(&self, site: &CallSite) -> Vec<Vec<usize>> {
+    pub(crate) fn called(&self, decls: &ProjectDecls, site: &CallSite) -> Vec<Vec<usize>> {
         if site.role != SiteRole::Call {
             return Vec::new();
         }
@@ -80,13 +82,10 @@ impl CallTargets {
             let passing = hits.iter().filter(|&&i| self.passed(i, site));
             passing.map(|&i| vec![i]).collect()
         } else {
-            let per_callee: Vec<Vec<usize>> = judged_callees(site)
-                .map(|callee| {
-                    let mut matching = self.functions.matching(callee);
-                    matching.retain(|&i| self.passed(i, site));
-                    matching
-                })
-                .collect();
+            let mut per_callee = self.functions.judging(decls, site);
+            for matching in &mut per_callee {
+                matching.retain(|&i| self.passed(i, site));
+            }
             groups(&per_callee)
         };
         add_alone(&mut out, self.module_members(site));
@@ -243,6 +242,13 @@ fn judged_callees(site: &CallSite) -> Box<dyn Iterator<Item = &FuncKey> + '_> {
     }
 }
 
+/// The project class the receiver of `site` is typed with (the protocol of `h._helper()` with
+/// `h: Host`), as the first function it may call binds it.
+fn receiver_class(site: &CallSite) -> Option<&str> {
+    let bc = site.project_callees().first()?;
+    bc.params.first()?.typed_instance.as_deref()
+}
+
 /// Add to `groups` each of `targets` that none of them holds, as a group of its own.
 fn add_alone(groups: &mut Vec<Vec<usize>>, targets: Vec<usize>) {
     for t in targets {
@@ -315,7 +321,7 @@ impl<'t> ContractCalls<'t> {
     }
 
     /// [`CallTargets::called`] of every contract `site` calls a target of, by contract.
-    fn called(&self, site: &CallSite) -> Vec<(usize, Vec<Vec<usize>>)> {
+    fn called(&self, decls: &ProjectDecls, site: &CallSite) -> Vec<(usize, Vec<Vec<usize>>)> {
         if site.role != SiteRole::Call {
             return Vec::new();
         }
@@ -341,16 +347,16 @@ impl<'t> ContractCalls<'t> {
             }
             return by_contract.into_iter().collect();
         }
-        let callees: Vec<&FuncKey> = judged_callees(site).collect();
-        for (k, callee) in callees.iter().enumerate() {
-            for m in self.functions.matching(callee) {
+        let judged = self.functions.judging(decls, site);
+        for (k, matching) in judged.iter().enumerate() {
+            for &m in matching {
                 let (c, t) = self.owners[m];
                 if !passed(&(c, t)) {
                     continue;
                 }
                 let per_callee = by_contract
                     .entry(c)
-                    .or_insert_with(|| vec![Vec::new(); callees.len()]);
+                    .or_insert_with(|| vec![Vec::new(); judged.len()]);
                 per_callee[k].push(t);
             }
         }
@@ -439,6 +445,41 @@ impl FunctionMatchers {
         found.sort_unstable();
         found.dedup();
         found.retain(|&i| self.matchers[i].matches(key));
+        found
+    }
+
+    /// The matchers naming each function a call contract judges `site` by ([`judged_callees`]),
+    /// ascending: those it satisfies, and for the method the protocol typing the receiver
+    /// declares, also those of the classes implementing the protocol ([`Self::through_protocol`]).
+    fn judging(&self, decls: &ProjectDecls, site: &CallSite) -> Vec<Vec<usize>> {
+        let Some(declared) = site.declared() else {
+            let callees = site.project_callees().iter();
+            return callees.map(|bc| self.matching(&bc.callee)).collect();
+        };
+        let mut found = self.matching(declared);
+        found.extend(self.through_protocol(decls, site));
+        found.sort_unstable();
+        found.dedup();
+        vec![found]
+    }
+
+    /// The `Class.method` matchers a call through a value typed with a project protocol that
+    /// declares the method calls: the class family holds every class implementing the protocol
+    /// ([`implemented_within`]), and the matcher names every function the call runs, as a call
+    /// through a base class is one of a target only when each method it may run is.
+    fn through_protocol(&self, decls: &ProjectDecls, site: &CallSite) -> Vec<usize> {
+        let callees = site.project_callees();
+        let protocol = receiver_class(site);
+        // A matcher naming every function the call runs names the first.
+        let mut found = (callees.first())
+            .map(|bc| self.matching(&bc.callee))
+            .unwrap_or_default();
+        found.retain(|&i| {
+            let matcher = &self.matchers[i];
+            (matcher.method_family().zip(protocol))
+                .is_some_and(|(family, protocol)| implemented_within(decls, protocol, family))
+                && callees.iter().all(|bc| matcher.matches(&bc.callee))
+        });
         found
     }
 
@@ -775,10 +816,7 @@ pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
 /// protocol, and the method is the protocol's declaration ([`CallSite::declared`]) or, for a
 /// reference, which keeps none, the one the site names.
 fn through_allowed_protocol(cx: &CheckContext<'_>, allowance: &Allowance, site: &CallSite) -> bool {
-    let Some(bc) = site.project_callees().first() else {
-        return false;
-    };
-    let Some(protocol) = bc.params.first().and_then(|o| o.typed_instance.as_deref()) else {
+    let (Some(bc), Some(protocol)) = (site.project_callees().first(), receiver_class(site)) else {
         return false;
     };
     let method = site.declared().unwrap_or(&bc.callee);
@@ -1003,7 +1041,7 @@ pub(crate) fn mut204<'c>(
         let calls = sites.get(key).into_iter().flatten().map(|s| (s, false));
         let handed = references.get(key).into_iter().flatten().map(|s| (s, true));
         for (&(path, site), reference) in calls.chain(handed) {
-            let called = contracts.called(site).into_iter();
+            let called = contracts.called(cx.decls, site).into_iter();
             for (c, groups) in
                 called.filter(|(c, _)| !reference || rules[*c].references.counts(site))
             {
@@ -1146,7 +1184,7 @@ pub(crate) fn mut204<'c>(
                 }
             }
             for &(_, site) in sites.get(key).into_iter().flatten() {
-                for (c, groups) in contracts.called(site) {
+                for (c, groups) in contracts.called(cx.decls, site) {
                     let rule = &rules[c];
                     if !rule.allowance.names_place(key) {
                         continue;

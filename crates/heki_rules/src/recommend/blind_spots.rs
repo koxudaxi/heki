@@ -1263,6 +1263,22 @@ fn trial_order(s: &SymbolCalls) -> impl Ord + '_ {
     )
 }
 
+/// The library name without a catalog entry the text lists first: the first whose trial changes
+/// a report ([`trial_order`]), or else the one with the most reach.
+pub(super) fn first_uncatalogued(section: &BlindSpotsSection) -> Option<&str> {
+    (section.uncatalogued.iter())
+        .flat_map(|p| &p.symbols)
+        .min_by(|a, b| trial_order(a).cmp(&trial_order(b)))
+        .map(|s| s.symbol.as_str())
+}
+
+/// The name heki's catalog lacks in a package it covers that the text lists first.
+pub(super) fn first_catalog_may_miss(section: &BlindSpotsSection) -> Option<&str> {
+    (section.catalog_may_miss.iter())
+        .min_by(|a, b| trial_order(a).cmp(&trial_order(b)))
+        .map(|s| s.symbol.as_str())
+}
+
 /// The names of the packages the catalog does not cover, as the text prints them: those whose
 /// trial changes a report in a table ([`trial_order`]), then those whose trial changes none and
 /// those not tried, each counted on a line. Returns whether it printed a table.

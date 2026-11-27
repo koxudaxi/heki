@@ -90,10 +90,10 @@ pub use readonly::{
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, CapturedParams, ClassDecl, CopyMade, DeclKeys, DeclPasses, FamilyMembers, FamilyOpen,
-    FunctionDecl, HeldSentinel, ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val, aliases_of, detect_source_roots,
-    func_qualname, is_source_dir, module_name_for_path, module_prefix, resolve_relative_module,
-    self_aliases,
+    ForwardedReturn, ForwardingCall, FunctionDecl, HeldSentinel, ModuleDecls, ModuleLayout,
+    NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val,
+    aliases_of, detect_source_roots, func_qualname, is_source_dir, module_name_for_path,
+    module_prefix, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
 
@@ -946,7 +946,9 @@ pub struct TypedFieldReadSite {
 
 impl TypedFieldReadSite {
     /// Whether the read and call contracts count the read: one through a protocol declaring
-    /// the attribute counts as a read of the protocol only, not of its implementations.
+    /// the attribute counts as the read of the protocol, not as one of each implementation (the
+    /// contracts tie that read to a target's class when its family alone implements the
+    /// protocol).
     pub fn counts_for_contracts(&self) -> bool {
         !self.through_protocol
     }

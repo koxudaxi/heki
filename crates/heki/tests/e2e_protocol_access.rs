@@ -1,9 +1,10 @@
 //! Reads and calls through a value typed with a project protocol, end to end through the real
 //! binary: when the protocol declares the member, the read and call contracts judge the access
-//! by the protocol, not by the classes implementing it, and what an implementation's private
-//! method does inside stays with it. A write is one of the implementations either way. With
-//! `allowed-protocols`, an access through a protocol the key names that declares the member is
-//! allowed, also through a class object typed `type[P]` of it.
+//! by the protocol, and by a target's class when heki lists the classes implementing the
+//! protocol, at least one, and all of them are of the target's class family; what an
+//! implementation's private method does inside stays with it. A write is one of the
+//! implementations either way. With `allowed-protocols`, an access through a protocol the key
+//! names that declares the member is allowed, also through a class object typed `type[P]` of it.
 
 mod common;
 
@@ -93,9 +94,12 @@ fn accesses_through_a_protocol_declaring_the_member_are_judged_by_the_protocol()
     assert_eq!(
         found,
         vec![
-            // `Host` declares `_m` and `_helper`: reading and calling them through it is no
-            // access of `Concrete`'s, nor is what `Concrete._helper` reads inside. `_n` is no
-            // member of `Host`: the read is one of the class implementing it.
+            // `Host` declares `_m` and `_helper`, and `Concrete` is the one class implementing
+            // it: reading and calling them through it are accesses of `Concrete`'s, while what
+            // `Concrete._helper` reads inside stays with it.
+            (5, 12, "MUT203", "through_protocol"),
+            (5, 19, "MUT204", "through_protocol"),
+            // `_n` is no member of `Host`: the read is one of the class implementing it.
             (9, 12, "MUT203", "undeclared"),
             // Through the class itself, every access counts.
             (13, 12, "MUT203", "direct"),
@@ -1034,6 +1038,14 @@ fn allowed_protocols_allow_the_accesses_through_a_class_object_of_a_named_protoc
     let mut without = kept();
     without.extend([
         at(21, "MUT207", "through_class_object", "_items_constraints"),
+        // `Parser` is the one class implementing `KeywordsHost`: the call through an instance
+        // typed with it calls a target, named by the protocol's declaration.
+        at(
+            30,
+            "MUT204",
+            "through_instance",
+            "pkg.parser._keywords.KeywordsHost._instance_helper",
+        ),
         at(26, "MUT207", "through_optional", "_items_constraints"),
         at(47, "MUT207", "through_local", "_items_constraints"),
         at(
@@ -1156,5 +1168,297 @@ fn a_type_variable_without_a_bound_names_no_protocol() {
             "through_type_var".to_owned(),
             "_items_constraints".to_owned()
         )]
+    );
+}
+
+const FAMILY_HOST: &str = r#"from typing import Protocol
+
+
+class Host(Protocol):
+    table: dict[str, int]
+    size: int
+
+    def build(self) -> None: ...
+
+
+class Shared(Protocol):
+    table: dict[str, int]
+
+    def build(self) -> None: ...
+
+
+class Lonely(Protocol):
+    table: dict[str, int]
+    missing: int
+
+    def build(self) -> None: ...
+
+
+class ChildOnly(Protocol):
+    table: dict[str, int]
+    depth: int
+
+    def build(self) -> None: ...
+
+
+class Impl:
+    def __init__(self) -> None:
+        self.table = {}
+        self.size = 0
+
+    def build(self) -> None:
+        pass
+
+
+class Child(Impl):
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 1
+
+
+class Other:
+    def __init__(self) -> None:
+        self.table = {}
+
+    def build(self) -> None:
+        pass
+"#;
+
+const FAMILY_USE: &str = r#"from pkg.host import ChildOnly, Host, Lonely, Shared
+
+
+def one_implementation(h: Host) -> None:
+    h.build()
+    print(h.table)
+
+
+def a_subclass_implements(c: ChildOnly) -> None:
+    c.build()
+    print(c.table)
+
+
+def another_family_implements_too(s: Shared) -> None:
+    s.build()
+    print(s.table)
+
+
+def no_implementation(lonely: Lonely) -> None:
+    lonely.build()
+    print(lonely.table)
+"#;
+
+/// A project of `FAMILY_HOST` and `FAMILY_USE` with `contracts` (TOML tables) selecting `rules`.
+fn family_project(name: &str, rules: &str, contracts: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = {rules}\n\n{contracts}"),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/host.py", FAMILY_HOST)
+    .write("pkg/use.py", FAMILY_USE);
+    p
+}
+
+/// The report lines of the concise output of `p`.
+fn concise(p: &Project) -> Vec<String> {
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    (stdout.lines())
+        .filter(|l| l.starts_with("pkg/"))
+        .map(str::to_owned)
+        .collect()
+}
+
+const IMPL_OWNERS: &str = r#"[[tool.heki.call-owners]]
+name = "build"
+targets = ["pkg.host:Impl.build"]
+allowed-callers = ["pkg.host:*"]
+
+[[tool.heki.read-owners]]
+name = "table"
+targets = ["pkg.host.Impl.table"]
+allowed-readers = ["pkg.host:*"]
+"#;
+
+/// A `Class.attr` read target and a `Class.method` call target cover the accesses through a
+/// protocol declaring the member when heki lists the classes implementing it, at least one, and
+/// each is the class or a subclass of it. A protocol that a class outside the family implements
+/// too, and one no project class implements, are no type of the family's.
+#[test]
+fn a_target_covers_the_accesses_through_a_protocol_only_its_family_implements() {
+    let p = family_project("protocol_family", r#"["MUT203", "MUT204"]"#, IMPL_OWNERS);
+    assert_eq!(
+        concise(&p),
+        vec![
+            "pkg/use.py:5:5: MUT204 [heuristic] `one_implementation` calls `pkg.host:Impl.build` outside the call owners of `build`",
+            "pkg/use.py:6:11: MUT203 [heuristic] `one_implementation` reads `pkg.host.Impl.table` (by attribute) outside the read owners of `table`",
+            "pkg/use.py:10:5: MUT204 [heuristic] `a_subclass_implements` calls `pkg.host:Impl.build` outside the call owners of `build`",
+            "pkg/use.py:11:11: MUT203 [heuristic] `a_subclass_implements` reads `pkg.host.Impl.table` (by attribute) outside the read owners of `table`",
+        ]
+    );
+    // `allowed-protocols` still allows the accesses through the protocols it names.
+    let allowed = IMPL_OWNERS.replace(
+        "allowed-readers = [\"pkg.host:*\"]\n",
+        "allowed-readers = [\"pkg.host:*\"]\nallowed-protocols = [\"pkg.host.Host\"]\n",
+    );
+    let allowed = allowed.replace(
+        "allowed-callers = [\"pkg.host:*\"]\n",
+        "allowed-callers = [\"pkg.host:*\"]\nallowed-protocols = [\"pkg.host.Host\"]\n",
+    );
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\", \"MUT204\"]\n\n{allowed}"
+        ),
+    );
+    assert_eq!(
+        concise(&p),
+        vec![
+            "pkg/use.py:10:5: MUT204 [heuristic] `a_subclass_implements` calls `pkg.host:Impl.build` outside the call owners of `build`",
+            "pkg/use.py:11:11: MUT203 [heuristic] `a_subclass_implements` reads `pkg.host.Impl.table` (by attribute) outside the read owners of `table`",
+        ]
+    );
+}
+
+/// A target on a class and one on the protocol it alone implements, in one contract: an access
+/// through the protocol is one report, named by the target configured first, listing the other.
+#[test]
+fn a_class_target_and_a_protocol_target_of_one_contract_are_one_report() {
+    let owners = |first: &str, second: &str| {
+        format!(
+            "[[tool.heki.call-owners]]\nname = \"build\"\ntargets = [\"pkg.host:{first}.build\", \"pkg.host:{second}.build\"]\nallowed-callers = [\"pkg.host:*\"]\n\n[[tool.heki.read-owners]]\nname = \"table\"\ntargets = [\"pkg.host.{first}.table\", \"pkg.host.{second}.table\"]\nallowed-readers = [\"pkg.host:*\"]\n"
+        )
+    };
+    let p = family_project(
+        "protocol_family_both_targets",
+        r#"["MUT203", "MUT204"]"#,
+        &owners("Impl", "Host"),
+    );
+    let through_host = |p: &Project| -> Vec<String> {
+        (concise(p).into_iter())
+            .filter(|l| l.contains("`one_implementation`"))
+            .collect()
+    };
+    assert_eq!(
+        through_host(&p),
+        vec![
+            "pkg/use.py:5:5: MUT204 [heuristic] `one_implementation` calls `pkg.host:Impl.build` outside the call owners of `build` (also `pkg.host:Host.build`)",
+            "pkg/use.py:6:11: MUT203 [heuristic] `one_implementation` reads `pkg.host.Impl.table` (by attribute) outside the read owners of `table` (also `pkg.host.Host.table`)",
+        ]
+    );
+    let p = family_project(
+        "protocol_family_both_targets_swapped",
+        r#"["MUT203", "MUT204"]"#,
+        &owners("Host", "Impl"),
+    );
+    assert_eq!(
+        through_host(&p),
+        vec![
+            "pkg/use.py:5:5: MUT204 [heuristic] `one_implementation` calls `pkg.host:Host.build` outside the call owners of `build` (also `pkg.host:Impl.build`)",
+            "pkg/use.py:6:11: MUT203 [heuristic] `one_implementation` reads `pkg.host.Host.table` (by attribute) outside the read owners of `table` (also `pkg.host.Impl.table`)",
+        ]
+    );
+}
+
+/// A protocol with more implementations than heki lists is of a class heki cannot tell: an access
+/// through it is the strict rules' (`MUT206`, `MUT207`), as before.
+#[test]
+fn a_protocol_heki_cannot_list_leaves_the_accesses_to_the_strict_rules() {
+    let strict = IMPL_OWNERS.replace(
+        "allowed-readers = [\"pkg.host:*\"]\n",
+        "allowed-readers = [\"pkg.host:*\"]\nunresolved = \"report\"\n",
+    );
+    let strict = strict.replace(
+        "allowed-callers = [\"pkg.host:*\"]\n",
+        "allowed-callers = [\"pkg.host:*\"]\nunresolved = \"report\"\n",
+    );
+    let p = family_project(
+        "protocol_family_unlisted",
+        r#"["MUT203", "MUT204", "MUT206", "MUT207"]"#,
+        &strict,
+    );
+    let many: String = (0..8)
+        .map(|i| {
+            format!(
+                "\n\nclass Many{i}:\n    def __init__(self) -> None:\n        self.table = {{}}\n        self.size = {i}\n\n    def build(self) -> None:\n        pass\n"
+            )
+        })
+        .collect();
+    p.write("pkg/host.py", &format!("{FAMILY_HOST}{many}"));
+    let through_host: Vec<String> = (concise(&p).into_iter())
+        .filter(|l| l.contains("`one_implementation`"))
+        .collect();
+    assert_eq!(
+        through_host,
+        vec![
+            "pkg/use.py:5:5: MUT207 [heuristic] `one_implementation` calls `build` on an object of unknown class outside the call owners of `build`: heki cannot tell whether it calls `pkg.host:Impl.build`",
+            "pkg/use.py:6:11: MUT206 [heuristic] `one_implementation` reads `table` (by attribute) on an object of unknown class outside the read owners of `table`: heki cannot tell whether it reads `pkg.host.Impl.table`",
+        ]
+    );
+}
+
+/// An effect boundary's `read-targets` and `call-targets` of a class cover the accesses through a
+/// protocol only its family implements, and `allowed-callees` naming the implementation's method
+/// allows the call through the protocol as it allows the call through the class.
+#[test]
+fn a_boundary_covers_the_accesses_through_a_protocol_only_its_family_implements() {
+    let boundary = |allowed: &str| {
+        format!(
+            "[[tool.heki.effect-boundaries]]\nname = \"no-impl\"\nscopes = [\"pkg.use.*\"]\nforbid = [\"reads-targets\", \"calls\"]\nread-targets = [\"pkg.host.Impl.table\"]\ncall-targets = [\"pkg.host:Impl.*\"]\n{allowed}"
+        )
+    };
+    let p = family_project("protocol_family_boundary", r#"["EFF201"]"#, &boundary(""));
+    let at = |p: &Project| -> Vec<String> {
+        (concise(p).into_iter())
+            .map(|l| l.split(" [").next().unwrap_or(&l).to_owned())
+            .collect()
+    };
+    assert_eq!(
+        at(&p),
+        vec![
+            "pkg/use.py:5:5: EFF201",
+            "pkg/use.py:6:11: EFF201",
+            "pkg/use.py:10:5: EFF201",
+            "pkg/use.py:11:11: EFF201",
+        ]
+    );
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n{}",
+            boundary("allowed-callees = [\"pkg.host:Impl.build\"]\n")
+        ),
+    );
+    assert_eq!(
+        at(&p),
+        vec!["pkg/use.py:6:11: EFF201", "pkg/use.py:11:11: EFF201"]
+    );
+}
+
+/// A call through a protocol only the target's family implements calls the target only when
+/// each method it may run is one, as a call through the class does: `Impl` runs the `build` of
+/// a base outside the family, and only the override in `Sub` is a target.
+#[test]
+fn a_call_through_a_protocol_calls_a_target_only_when_each_method_it_runs_is_one() {
+    let p = Project::new("protocol_family_inherited_method");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"build\"\ntargets = [\"pkg.host:Impl.build\"]\nallowed-callers = [\"pkg.host:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/host.py",
+        "from typing import Protocol\n\n\nclass Host(Protocol):\n    table: dict[str, int]\n\n    def build(self) -> None: ...\n\n\nclass Base:\n    def build(self) -> None:\n        pass\n\n\nclass Impl(Base):\n    def __init__(self) -> None:\n        self.table = {}\n\n\nclass Sub(Impl):\n    def build(self) -> None:\n        pass\n",
+    )
+    .write(
+        "pkg/use.py",
+        "from pkg.host import Host, Impl, Sub\n\n\ndef through_protocol(h: Host) -> None:\n    h.build()\n\n\ndef through_class(i: Impl) -> None:\n    i.build()\n\n\ndef through_subclass(s: Sub) -> None:\n    s.build()\n",
+    );
+    assert_eq!(
+        concise(&p),
+        vec![
+            "pkg/use.py:13:5: MUT204 [heuristic] `through_subclass` calls `pkg.host:Impl.build` outside the call owners of `build`",
+        ]
     );
 }

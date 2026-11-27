@@ -884,6 +884,18 @@ impl ContractTarget {
         self.classes.contains(class) && self.attr.matches(attr)
     }
 
+    /// Whether `read` reads the target: its class and attribute, or, through a value typed with
+    /// a project protocol declaring the attribute, the attribute of the classes implementing the
+    /// protocol when all of them are of the target's class family ([`implemented_within`]).
+    pub(crate) fn matches_read(&self, decls: &ProjectDecls, read: &TypedFieldReadSite) -> bool {
+        let (class, attr) = (read.class_qualname.as_str(), read.attr.as_str());
+        self.matches(class, attr)
+            || !read.class_object
+                && self.attr.matches(attr)
+                && decls.protocol_declares(class, attr)
+                && implemented_within(decls, class, &self.classes)
+    }
+
     /// Whether the attribute pattern matches `attr`, whatever the class.
     pub fn matches_attr(&self, attr: &str) -> bool {
         self.attr.matches(attr)
@@ -906,6 +918,24 @@ impl ContractTarget {
                 .as_ref()
                 .is_none_or(|k| site.key.as_ref() == Some(k))
     }
+}
+
+/// Whether an access through a value typed with the project protocol `protocol`, of a member
+/// the protocol declares, is one of the class family `family` (a target's classes and their
+/// subclasses): heki lists the project classes implementing the protocol, there is at least
+/// one, and each is of the family. A protocol that classes outside the family implement too is
+/// a type the family shares with them, as a base class is, and one without an implementation
+/// in the project is no type of the family's. The lookup is one of the declarations' recorded
+/// reads, so the language server checks the access again when a class starts or stops
+/// implementing the protocol.
+pub(crate) fn implemented_within(
+    decls: &ProjectDecls,
+    protocol: &str,
+    family: &FxHashSet<String>,
+) -> bool {
+    decls
+        .protocol_implementers(protocol)
+        .is_some_and(|found| !found.is_empty() && found.iter().all(|c| family.contains(c)))
 }
 
 /// The member a contract target names after its last dot (`fields` of `pkg.Model.fields`),
@@ -4943,7 +4973,7 @@ pub(crate) fn mut203<'c>(
                     .iter()
                     .zip(inside.iter_mut())
                     .enumerate()
-                    .filter(|(_, (t, _))| t.matches(&read.class_qualname, &read.attr))
+                    .filter(|(_, (t, _))| t.matches_read(cx.decls, read))
                 {
                     let named = read_member(t, read);
                     let walk = || {
@@ -5034,8 +5064,7 @@ pub(crate) fn mut203<'c>(
                         continue;
                     }
                     let hits = rule.targets.iter().enumerate();
-                    for (k, t) in hits.filter(|(_, t)| t.matches(&read.class_qualname, &read.attr))
-                    {
+                    for (k, t) in hits.filter(|(_, t)| t.matches_read(cx.decls, read)) {
                         let named = format!("`{}`", read_member(t, read));
                         let name = Named {
                             target: &t.text,

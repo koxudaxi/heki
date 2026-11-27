@@ -29,7 +29,7 @@ and what it does when it cannot tell.
 | Tool | Looks at | Example |
 | ---- | -------- | ------- |
 | A linter such as [Ruff](https://docs.astral.sh/ruff/) | Syntax and style, one file at a time | `time.sleep()` written directly in an `async def`; a discarded `asyncio.create_task(...)` |
-| A type checker such as [ty](https://github.com/astral-sh/ty) | Whether values match their declared types | a `str` passed where an `int` is expected |
+| A type checker such as mypy, Pyright, Pyrefly, or ty | Whether values match their declared types | a `str` passed where an `int` is expected |
 | An import-graph checker such as [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter) | Which modules may import which | `app.api` importing `app.db` when the declared layers forbid it; planned in heki: these tools' contracts read as heki contracts, and which imports run while a module loads |
 | heki | What code does, not what types it has: effects and aliases, through any number of calls | an `async def` that reaches `requests.get` three helpers away; a model field written outside the store that owns it; an attribute `__hash__` reads changing after the object went into a `set` |
 
@@ -41,7 +41,9 @@ scope around it is a single-file linter's check (flake8-async's `ASYNC102`); `EF
 needs the call graph: which awaits reach a cancellation checkpoint through helpers, and which
 helpers and callers shield them.
 
-### Clean for Ruff, ty, and tach; broken all the same
+[Design Philosophy](philosophy.md) says why heki is built this way and what Python leaves open.
+
+### Clean for Ruff, mypy, Pyright, Pyrefly, ty, and tach; broken all the same
 
 ```python
 # app/clients.py
@@ -105,7 +107,7 @@ Each of these passes, because each tool sees one step:
 | Command | Sees | Does not see |
 | ------- | ---- | ------------ |
 | `ruff check --select ASYNC,B,RUF,PERF,PL,SIM,FURB,S` | `requests.get` only when it is written in the `async def` itself | the call three helpers down |
-| `ty check` | a `list[str]` passed where a `list[str]` is expected | that `add_default` changes `Model.fields` |
+| your type checker (`mypy app`, `pyright`, `pyrefly check`, `ty check`) | a `list[str]` passed where a `list[str]` is expected | that `add_default` changes `Model.fields` |
 | `tach check` (with `app.api` → `app.users` → `app.clients` declared) | `app.api` importing `app.users`, which is allowed | what `load_user` does |
 
 heki follows the call into `load_user` and the alias into `add_default`:
@@ -134,7 +136,7 @@ checker cover most of what matters, and heki reports little.
 | Check | Use instead |
 | ----- | ----------- |
 | Style, formatting, and syntax | a linter such as Ruff |
-| Type errors | a type checker such as ty |
+| Type errors | a type checker such as mypy, Pyright, Pyrefly, or ty |
 | Import order, required imports, import conventions, relative-import style, and the `lazy` policy of one file | a linter such as Ruff (`I`, `ICN`, `TID252`, `TID254`, `TID255`), or isort for the order |
 | Dead code and duplicated code | Ruff or [vulture](https://github.com/jendrikseipp/vulture) |
 | Constant-factor micro-optimizations, such as hoisting `re.compile` | no heki rule |
@@ -304,8 +306,10 @@ Missed findings close as heki learns more:
 - Typed: builtin classes, the builtin exception and warning classes among them
   (`error: ValueError`; not `IOError` or `EnvironmentError`, and not a name the module or the
   function binds itself), what a standard library call the catalog types gives, by its declared
-  return type (`importlib.util.module_from_spec(spec)` is a `types.ModuleType`, though a custom
-  loader's `create_module` may return another object), an annotation of a local that names an
+  return type (`importlib.util.module_from_spec(spec)` and `importlib.import_module(name)` are a
+  `types.ModuleType`, though a custom loader's `create_module` may return another object and a
+  module may put another object in `sys.modules`), or by the kind of path or URL it is passed
+  (`os.path.abspath(path)`, `urllib.parse.urlparse(url)`), an annotation of a local that names an
   import of its own function (not a name the function binds more than once or otherwise), a
   call of a value declared `type[C]` wherever the value is held (a parameter, a local, or an
   attribute annotated in `__init__` or the class body, read in a subclass too), and, in a
@@ -534,9 +538,9 @@ in order:
 
 1. **Can the syntax of one file decide it?** Then it belongs in a linter such as Ruff.
 2. **Is it a type error, or can an annotation express it?** Then it belongs in a type checker
-   such as ty. heki's part is to say where the code already keeps what such an annotation would
-   state, so that the annotation can be written and the type checker checks it from then on
-   (planned in [`heki recommend`](recommend.md),
+   such as mypy, Pyright, Pyrefly, or ty. heki's part is to say where the code already keeps
+   what such an annotation would state, so that the annotation can be written and the type
+   checker checks it from then on (planned in [`heki recommend`](recommend.md),
    [ADR-023](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-023)).
 3. **Can one import statement decide it?** Its order, its form, or a banned name: then it
    belongs in a linter such as Ruff.

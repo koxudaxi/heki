@@ -25,11 +25,20 @@ env:
 jobs:
   changes:
     name: changed files
-    # A pull request that changes CHANGELOG.md alone builds and tests nothing: no job below reads
-    # the file but the release scripts' tests, and the docs workflow builds the changelog page.
+    # Which jobs a pull request needs, by the files it changes (`class`):
+    # - `changelog`: CHANGELOG.md alone. No job below reads it but the release scripts' tests, and
+    #   the docs workflow builds the changelog page.
+    # - `docs`: documentation alone (`DOCS`, CHANGELOG.md included). Only the docs workflow
+    #   (`build_docs.py --check`, `build_llms_txt.py --check`, the site), the release scripts'
+    #   tests (the version pins of the pages), and the tests of the `docs-tests` job read these
+    #   files. `docs/schemas/` is not documentation here: `e2e_json_schemas` compares it with
+    #   what the binary writes.
+    # - `code`: anything else, every run that is not a pull request (a push to main, a release,
+    #   a manual run), and a pull request above the bottom of a stack, whose run is the only one
+    #   that tests the pull requests between it and the bottom.
     runs-on: ubuntu-24.04
     outputs:
-      code: ${{ steps.files.outputs.code }}
+      class: ${{ steps.files.outputs.class }}
     steps:
       # A pull request's checkout is its merge commit: the first parent is the base branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,14 +48,38 @@ jobs:
       - id: files
         env:
           EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          STACK_BASE: ${{ github.event.pull_request.stack.base.ref }}
+          # One extended regular expression per line, each matching a whole path.
+          DOCS: |-
+            docs/.*
+            README\.md
+            ARCHITECTURE\.md
+            AGENTS\.md
+            CHANGELOG\.md
+            CODE_OF_CONDUCT\.md
+            SECURITY\.md
+            zensical\.toml
+            \.github/CONTRIBUTING\.md
+            \.github/pull_request_template\.md
+            \.github/ISSUE_TEMPLATE/.*
+        # `--no-renames`: a file moved from the code into `docs/` lists its old path too.
+        # Here-strings, not pipes: with `pipefail`, `grep -q` closing a pipe early fails the
+        # writer, and `!` turns that failure into a match.
         run: |
-          code=true
-          if [ "$EVENT" = pull_request ]; then
-            files=$(git diff --name-only HEAD^1 HEAD)
+          class=code
+          if [ "$EVENT" = pull_request ] && { [ -z "$STACK_BASE" ] || [ "$STACK_BASE" = "$BASE" ]; }; then
+            files=$(git diff --name-only --no-renames HEAD^1 HEAD)
             echo "$files"
-            if [ -n "$files" ] && ! echo "$files" | grep -qvxF CHANGELOG.md; then code=false; fi
+            if [ -z "$files" ]; then
+              :
+            elif ! grep -qvxF CHANGELOG.md <<< "$files"; then
+              class=changelog
+            elif ! grep -qvxE -f <(printf '%s\n' "$DOCS") <<< "$files" && ! grep -q '^docs/schemas/' <<< "$files"; then
+              class=docs
+            fi
           fi
-          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          echo "class=$class" | tee -a "$GITHUB_OUTPUT"
 
   fmt:
     name: rustfmt
@@ -69,7 +102,7 @@ jobs:
     # merges a stack from its top, and the bottom is the next one to land on main.
     needs: changes
     if: &full-run >-
-      needs.changes.outputs.code == 'true'
+      needs.changes.outputs.class == 'code'
       && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
       || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
@@ -162,6 +195,32 @@ jobs:
         run: >-
           cargo nextest archive --workspace --locked --cargo-profile ci
           --manifest-path "$TREE/Cargo.toml" --archive-file tests.tar.zst
+      # A documentation pull request runs the tests of `docs-tests` from main's build when the code
+      # is the same. A push to main archives those binaries of the build above (`-E` selects
+      # binaries only and builds nothing more) and caches the archive under a hash of every file
+      # the build reads (the crates, the catalogs and the files they embed, the manifests, and
+      # this workflow: the toolchain pin, the profile, nextest's version). `test_ci_workflow.py`
+      # checks that the hash covers what the crates embed and no page but CHANGELOG.md, which
+      # `heki version` embeds. Only pushes save it: a pull request's cache is not shared with
+      # main or other pull requests.
+      - name: Archive the tests that read the documentation
+        if: runner.os == 'Linux' && github.event_name == 'push'
+        env:
+          BINARIES: >-
+            (package(heki) & (binary(e2e_readme_examples) | binary(e2e_agent_skill)
+            | binary(e2e_experimental) | binary(lsp_server) | binary(e2e_cli_errors)))
+            | (package(heki_rules) & kind(lib))
+        run: >-
+          cargo nextest archive --workspace --locked --cargo-profile ci
+          --manifest-path sdist-tree/Cargo.toml -E "$BINARIES" --archive-file docs-tests.tar.zst
+      - if: runner.os == 'Linux' && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: docs-tests.tar.zst
+          key: &docs-tests-key >-
+            docs-tests-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**',
+            'kb/**', 'skills/**', 'tests/**', 'CHANGELOG.md', 'pyproject.toml',
+            '.github/workflows/ci.yml') }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tests-${{ matrix.os }}
@@ -262,6 +321,79 @@ jobs:
         shards: [5]
     runs-on: ${{ matrix.os }}
     steps: *test-steps
+
+  docs-tests:
+    # A documentation change runs the tests that read the documentation and compare it with the
+    # binary, built and run as `test-linux` builds and runs them (from the source distribution, in
+    # the `ci` profile):
+    # - `e2e_readme_examples`: the examples of README.md, `docs/index.md`, and `docs/fixes.md`;
+    # - `e2e_agent_skill`: the pages the Agent Skill links (`docs/coding-agents.md`, llms.txt);
+    # - `e2e_experimental`: `build_docs.py` on copies of README.md, ARCHITECTURE.md,
+    #   zensical.toml, CHANGELOG.md, and the pages;
+    # - `lsp_server`: the site address in zensical.toml, which the server's rule links name;
+    # - `e2e_cli_errors`: the section of CHANGELOG.md `heki version --changelog` prints;
+    # - `heki_rules`, `docs_links`: the page and heading of every link heki prints.
+    # The binaries come from the archive main's `test-build-linux` caches for the same code; a
+    # pull request whose code main has not built (yet) builds them, restoring the cache main's
+    # `test-build-linux` saves. `build_docs.py --check` and `build_llms_txt.py --check` run in
+    # the docs workflow.
+    name: docs tests
+    needs: changes
+    if: >-
+      needs.changes.outputs.class == 'docs'
+      && (github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: docs-tests.tar.zst
+          key: *docs-tests-key
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
+      - name: Unpack the source distribution
+        run: *unpack-sdist
+      - if: steps.archive.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      - if: steps.archive.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: test-build-o1
+          workspaces: sdist-tree -> target
+          save-if: false
+      - *install-nextest
+      # One cargo run for both packages: cargo unifies the features of the packages it builds
+      # together, and a separate `-p heki_rules` run rebuilds the dependencies with fewer.
+      - name: Build and archive the tests that read the documentation
+        if: steps.archive.outputs.cache-hit != 'true'
+        run: >-
+          cargo nextest archive --locked --cargo-profile ci --manifest-path sdist-tree/Cargo.toml
+          -p heki -p heki_rules --lib
+          --test e2e_readme_examples --test e2e_agent_skill --test e2e_experimental
+          --test lsp_server --test e2e_cli_errors
+          --archive-file docs-tests.tar.zst
+      - id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+      - name: Run the tests that read the documentation
+        env:
+          HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: >-
+          cargo nextest run --archive-file docs-tests.tar.zst --extract-to sdist-tree
+          --extract-overwrite --workspace-remap sdist-tree --no-fail-fast
+          -E 'binary(e2e_readme_examples) | binary(e2e_agent_skill) | binary(e2e_experimental)
+          | (binary(lsp_server) & test(=lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries))
+          | (binary(e2e_cli_errors) & test(=version_prints_the_changelog_of_the_release))
+          | (package(heki_rules) & test(/^docs_links::/))'
 
   coverage-build:
     # The instrumented test binaries, in the `ci` profile. cargo-llvm-cov builds
@@ -597,9 +729,10 @@ jobs:
 
   gate:
     name: CI gate
-    # The one required check: every job passed, or, in the middle of a stack or for a change of
-    # CHANGELOG.md alone, every job but the always-on ones was skipped (the release scripts run
-    # for every change at a full stack position).
+    # The one required check: every job passed or was skipped as the stack position and the
+    # class of the change allow. In the middle of a stack only the always-on jobs run; at a full
+    # position the release scripts run for every class, the docs tests for `docs` alone, and
+    # every other job for `code` alone.
     if: always()
     needs:
       - changes
@@ -612,6 +745,7 @@ jobs:
       - test-linux
       - test-macos
       - test-windows
+      - docs-tests
       - coverage-build
       - coverage-test
       - coverage
@@ -629,9 +763,10 @@ jobs:
             ${{ github.event.pull_request.stack == null
             || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
             || github.event.pull_request.stack.position == github.event.pull_request.stack.size }}
-          CODE: ${{ needs.changes.outputs.code }}
+          CLASS: ${{ needs.changes.outputs.class }}
           ALWAYS_ON: changes fmt architecture workflow-lint
           STACK_ONLY: release-scripts
+          DOCS_ONLY: docs-tests
         shell: python
         run: |
           import json
@@ -641,14 +776,20 @@ jobs:
           results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
           print(json.dumps(results, sort_keys=True))
           stack_full = os.environ["STACK_FULL"] == "true"
-          full = stack_full and os.environ["CODE"] == "true"
+          change = os.environ["CLASS"]
           always_on = set(os.environ["ALWAYS_ON"].split())
           stack_only = set(os.environ["STACK_ONLY"].split())
+          docs_only = set(os.environ["DOCS_ONLY"].split())
 
           def expected(name):
               if name in always_on:
                   return "success"
-              ran = stack_full if name in stack_only else full
+              if name in stack_only:
+                  ran = stack_full
+              elif name in docs_only:
+                  ran = stack_full and change == "docs"
+              else:
+                  ran = stack_full and change == "code"
               return "success" if ran else "skipped"
 
           wrong = {name: result for name, result in results.items() if result != expected(name)}

@@ -802,8 +802,8 @@ fn reports_error(
                 None => return false,
             }
         }
-        // A logger of a class heki does not know (`logging.getLogger` has no return type in
-        // the catalog): a method named as a logging level.
+        // A logger of a class heki does not know (a parameter, an attribute, another library's
+        // logger): a method named as a logging level.
         (Callee::Unresolved, InstKind::MethodCall { method, .. })
             if LOG_LEVELS.contains(&method.as_str()) =>
         {

@@ -134,7 +134,8 @@ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonsche
   that makes a rule default or exact, updates the page that covers it in the same change, with
   its tier (default, opt-in, experimental, heuristic) as `heki rule --all` prints it.
 - A new user-facing capability, contract kind, or default rule also updates the "What heki can
-  do" table in `README.md` and `docs/index.md`, and `zensical.toml` when it adds a page.
+  do" section of `README.md` and `docs/index.md` (the default-rules table, the contracts table,
+  or the links to the feature pages), and `zensical.toml` when it adds a page.
   Regenerate `docs/llms.txt` and `docs/llms-full.txt` with `scripts/build_llms_txt.py`. A new
   page opens with a sentence that says which problems, contracts, and commands it covers: that
   sentence is its line in `llms.txt`.

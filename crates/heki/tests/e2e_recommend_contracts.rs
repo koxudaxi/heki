@@ -1708,3 +1708,42 @@ fn a_group_in_the_defaults_table_gives_the_candidate_trials_the_patterns_written
     assert_ne!(written_out["contracts"], none["contracts"]);
     assert_eq!(grouped["contracts"], written_out["contracts"]);
 }
+
+/// The takeaway of `heki recommend <args>` on the wall for a coding agent.
+fn wall(p: &Project, args: &[&str]) -> String {
+    let mut all = vec!["recommend"];
+    all.extend_from_slice(args);
+    let (_, out, _) = p.heki(&all);
+    (out.lines())
+        .find_map(|l| l.split_once(". Smallest wall for a coding agent: "))
+        .map(|(_, wall)| wall.to_owned())
+        .unwrap_or_else(|| panic!("{out}"))
+}
+
+#[test]
+fn the_wall_for_an_agent_is_the_high_block_with_the_most_modules_around_it() {
+    let p = owners("recommend_contract_wall");
+    // `Order` is used in more modules than any attribute of a write-owners block is read in.
+    assert_eq!(
+        wall(&p, &[]),
+        "the read-owners table \"Order._cache readers\" (high): 4 other module(s) use the class \
+         of app.models:Order._cache, where an edit could read it; with fail = true, heki check \
+         fails on such a read (Contract candidates; the table is in the keys at the end)"
+    );
+    // Without read-owners candidates, the write-owners block with the most readers.
+    assert_eq!(
+        wall(&p, &["--ignore", "MUT203"]),
+        "the write-owners table \"attributes written by app.store:Store.*\" (high): 2 other \
+         module(s) read app.models:Base.x and 1 more, where an edit could write them; with fail = \
+         true, heki check fails on such a write (Contract candidates; the table is in the keys at \
+         the end)"
+    );
+    let q = layers("recommend_contract_wall_boundary");
+    assert_eq!(
+        wall(&q, &[]),
+        "the effect-boundaries table \"scopes without blocking calls\" (medium): 12 function(s) \
+         of app.domain and 3 more reach no blocking call heki sees, called from 2 other \
+         module(s); with fail = true, heki check fails on an edit that makes one reach a \
+         blocking call (Contract candidates; the table is in the keys at the end)"
+    );
+}

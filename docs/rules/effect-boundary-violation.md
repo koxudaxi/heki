@@ -53,7 +53,11 @@ count for a read.
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
-    call is a target. An entry with an argument list names only the calls passing its
+    call is a target. A call through a value typed with a project protocol is matched as for
+    `MUT204`, by the protocol's declaration and by a target whose class family alone implements
+    the protocol, and `allowed-callees` naming the declaration or every method the call may run
+    allows it; `reads-targets` reads through such a value as `MUT203` does. An entry with an
+    argument list names only the calls passing its
     constants, as for `MUT204`. An entry also names a function or class outside the project by
     its full dotted name (`os.getenv`, `platform.*`), or every private member outside the project
     (`<external>._*`, as for `MUT204`); a dotted suffix, a leading glob, a module part, or an

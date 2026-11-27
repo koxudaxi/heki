@@ -133,9 +133,13 @@ nothing uses. A load handing a target on is reported as a hand-on only, and a re
 construction is.
 
 A call through a value typed with a project `Protocol` that declares the method is judged by the
-protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
-implementations it runs, and what an implementation's private method calls inside stays with it
-(also when other callers call the method through the class and take its calls over).
+protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), and what an
+implementation's private method calls inside stays with it (also when other callers call the
+method through the class and take its calls over). The call is one of a target `Model._helper`
+too when heki lists the classes implementing the protocol, there is at least one, each is
+`Model` or a subclass of it, and every method the call may run is a target, as for a call
+through a base class; a protocol that another class implements too, or that no project class
+implements, calls no target of `Model`'s.
 
 A target's last segment names the function, method, or class: a glob there matches within that
 name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,

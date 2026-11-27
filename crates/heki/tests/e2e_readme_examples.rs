@@ -1,7 +1,8 @@
-//! The examples at the top of `README.md` and `docs/index.md`, run through the binary: each
-//! example's files are written to a project of their own, and the `heki check` command of the
-//! console block that follows them must print exactly the rest of the block. The excerpt of
-//! "Try it in 5 minutes" is run on the sample project in `tests/sample_service/`.
+//! The examples at the top of `README.md` and `docs/index.md`, run through the binary: the files
+//! of all of them are written to one project, and `heki check` on it reports each example's rule.
+//! The image at the top of the pages shows that run, and `build_docs.py --check` compares it with
+//! the run. The excerpts of the sample project in `tests/sample_service/`, in "Try it in 5
+//! minutes" and in `docs/getting-started.md`, are run on it.
 
 mod common;
 
@@ -13,7 +14,7 @@ use common::{Project, repo_file, repo_root};
 fn examples(doc: &str) -> &str {
     let start = doc.find("\n### ").expect("an example heading");
     let end = doc[start..]
-        .find("\nRuff, ty, Pyrefly, pyright, and mypy")
+        .find("\nThe image at the top is `heki check` on these examples")
         .expect("the sentence after the examples");
     &doc[start..start + end]
 }
@@ -33,7 +34,7 @@ fn fenced(example: &str) -> Vec<(&str, &str)> {
 }
 
 #[test]
-fn the_readme_examples_print_what_the_readme_shows() {
+fn the_readme_examples_report_what_the_image_shows() {
     let readme = repo_file("README.md");
     let index = repo_file("docs/index.md");
     assert_eq!(
@@ -42,35 +43,41 @@ fn the_readme_examples_print_what_the_readme_shows() {
         "README.md and docs/index.md show the same examples"
     );
     let sections: Vec<&str> = examples(&readme).split("\n### ").skip(1).collect();
-    assert_eq!(sections.len(), 2, "{sections:#?}");
-    for (i, section) in sections.iter().enumerate() {
-        let p = Project::new(&format!("readme_example_{i}"));
-        let mut console = None;
+    // A bug found with no configuration, and a wall written as a contract.
+    let rules = [
+        "EFF101 (async-blocking-call) [error]",
+        "MUT201 (write-owner-violation) [error, heuristic]",
+    ];
+    assert_eq!(sections.len(), rules.len(), "{sections:#?}");
+    let p = Project::new("readme_examples");
+    let mut written = Vec::new();
+    for section in &sections {
+        let mut files = Vec::new();
         for (lang, text) in fenced(section) {
             match lang {
-                "python" => {
-                    // The first line names the file: `# app/users.py`.
+                // The first line names the file: `# app/users.py`, `# heki.toml`.
+                "python" | "toml" => {
                     let path = text.lines().next().unwrap().strip_prefix("# ").unwrap();
+                    assert!(!written.contains(&path), "two examples write {path}");
                     p.write(path, text);
+                    written.push(path);
+                    files.push(path);
                 }
-                "console" => console = Some(text),
                 other => panic!("unexpected block `{other}` in {section}"),
             }
         }
-        let console = console.expect("a console block");
-        let (command, expected) = console.split_once('\n').unwrap();
-        let args: Vec<&str> = command
-            .strip_prefix("$ heki ")
-            .unwrap()
-            .split_whitespace()
-            .collect();
-        assert_eq!(args[0], "check", "{command}");
-        let (code, stdout, stderr) = p.heki(&args);
-        // An example whose report is an exact error fails the run; a warning is printed, and
-        // the run passes.
-        let fails = expected.lines().any(|line| line.contains(") [error] "));
-        assert_eq!(code, i32::from(fails), "{stderr}");
-        assert_eq!(format!("{stdout}{stderr}"), expected, "{section}");
+        assert!(!files.is_empty(), "{section}");
+    }
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    // Both reports are errors: an exact one, and one of a contract with `fail = true`.
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let reports: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("app/"))
+        .collect();
+    assert_eq!(reports.len(), rules.len(), "{stdout}");
+    for (report, rule) in reports.iter().zip(rules) {
+        assert!(report.contains(&format!(": {rule} ")), "{rule}: {stdout}");
     }
 }
 
@@ -171,7 +178,7 @@ fn assert_excerpt(expected: &str, output: &str, command: &str) {
 }
 
 #[test]
-fn the_sample_service_prints_the_excerpt_the_pages_show() {
+fn the_sample_service_prints_the_excerpts_the_pages_show() {
     let readme = sample_excerpt(&repo_file("README.md"));
     assert_eq!(
         readme,
@@ -180,23 +187,33 @@ fn the_sample_service_prints_the_excerpt_the_pages_show() {
     );
     let p = Project::new("readme_sample_service");
     copy_project(&repo_root().join("tests/sample_service"), Path::new(""), &p);
-    // Each command, with the lines of the block up to the next one.
-    let mut commands: Vec<(&str, String)> = Vec::new();
-    for line in readme.lines() {
-        match (line.strip_prefix("$ "), commands.last_mut()) {
-            (Some(command), _) => commands.push((command, String::new())),
-            (None, Some((_, expected))) => expected.push_str(&format!("{line}\n")),
-            (None, None) => panic!("the excerpt starts with a command: {readme}"),
+    for excerpt in [
+        readme,
+        sample_excerpt(&repo_file("docs/getting-started.md")),
+    ] {
+        // Each command, with the lines of the block up to the next one.
+        let mut commands: Vec<(&str, String)> = Vec::new();
+        for line in excerpt.lines() {
+            match (line.strip_prefix("$ "), commands.last_mut()) {
+                (Some(command), _) => commands.push((command, String::new())),
+                (None, Some((_, expected))) => expected.push_str(&format!("{line}\n")),
+                (None, None) => panic!("the excerpt starts with a command: {excerpt}"),
+            }
         }
-    }
-    assert_eq!(commands.len(), 2, "{readme}");
-    for (command, expected) in &commands {
-        // `uvx heki==<version> check` runs the release the page pins: this build.
-        assert!(command.starts_with("uvx heki=="), "{command}");
-        let args: Vec<&str> = command.split_whitespace().skip(2).collect();
-        let (code, stdout, stderr) = p.heki(&args);
-        // Nothing fails the run on the sample: it is a project `heki check` passes.
-        assert_eq!(code, 0, "{command}: {stderr}");
-        assert_excerpt(expected, &format!("{stdout}{stderr}"), command);
+        assert_eq!(commands.len(), 2, "{excerpt}");
+        for (command, expected) in &commands {
+            // `uvx heki check` (a try without installing) and `heki check` run this build.
+            let args: Vec<&str> = command
+                .strip_prefix("uvx ")
+                .unwrap_or(command)
+                .strip_prefix("heki ")
+                .unwrap_or_else(|| panic!("{command}"))
+                .split_whitespace()
+                .collect();
+            let (code, stdout, stderr) = p.heki(&args);
+            // Nothing fails the run on the sample: it is a project `heki check` passes.
+            assert_eq!(code, 0, "{command}: {stderr}");
+            assert_excerpt(expected, &format!("{stdout}{stderr}"), command);
+        }
     }
 }

@@ -1008,14 +1008,25 @@ fn judge_attribute<'a>(
     };
     // A target without a dot is the configuration error `parse_targets` reports.
     let (class_part, attr) = split_last_dot(base).unwrap_or(("", base));
-    let classes: Vec<ContractClass> = names.candidate_classes(class_part).cloned().collect();
+    let holders = holder_alternatives(class_part);
+    let mut classes: Vec<ContractClass> = holders
+        .iter()
+        .flat_map(|holder| names.candidate_classes(holder))
+        .cloned()
+        .collect();
+    classes.dedup_by(|a, b| a.fqn == b.fqn);
     let parsed = parse_targets(cx, &classes, &[entry.to_owned()], section, context)?;
     let target = &parsed[0];
     let mut family: Vec<&String> = target.classes.iter().collect();
     family.sort();
-    if family.is_empty() && glob_holder_named(names, class_part, context)? == Some(true)
-        || !family.is_empty() && has_glob_syntax(attr)
-    {
+    let glob_holder = family.is_empty() && {
+        let mut named = false;
+        for holder in &holders {
+            named |= glob_holder_named(names, holder, context)? == Some(true);
+        }
+        named
+    };
+    if glob_holder || !family.is_empty() && has_glob_syntax(attr) {
         return Ok(None);
     }
     if family.is_empty() {
@@ -1060,6 +1071,20 @@ fn judge_attribute<'a>(
         nearest,
         named_at_run_time,
     }))
+}
+
+/// The holders a `Class.attr` entry's class part stands for: the part itself, or, when a `{...}`
+/// group of it holds a dot or colon (`pkg.{a.Base,a.Sub}`), its alternatives as matching expands
+/// them ([`heki_env::glob::alternatives`]), each judged by its own last part.
+fn holder_alternatives(class_part: &str) -> Vec<String> {
+    let dotted_group = class_part.split('{').skip(1).any(|group| {
+        let inside = group.split('}').next().unwrap_or(group);
+        inside.contains(['.', ':'])
+    });
+    if !dotted_group {
+        return vec![class_part.to_owned()];
+    }
+    heki_env::glob::alternatives(class_part).unwrap_or_else(|| vec![class_part.to_owned()])
 }
 
 /// The forms a class may be written in: its qualname, its fqn, and `module:qualname`.
