@@ -7361,7 +7361,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     decls.rebound_definitions = rebound_definitions(input, &stores, &decls, &bindings);
     let stars = runtime_star_imports(input);
-    decls.late_stars = late_stars(&decls, &bindings, &stars);
+    let late = late_stars(&decls, &bindings, &stars);
+    decls.late_stars = (!late.is_empty()).then(|| Box::new(late));
     decls.private_members = (decls.classes.keys())
         .chain(decls.functions.keys())
         .any(|qualname| mangling::member_path(qualname).is_some());
@@ -9151,11 +9152,11 @@ fn late_stars(
     decls: &ModuleDecls,
     bindings: &BodyBindings<'_>,
     stars: &[(Span, String)],
-) -> Option<Box<BTreeMap<String, u32>>> {
+) -> BTreeMap<String, u32> {
     if stars.is_empty() {
-        return None;
+        return BTreeMap::new();
     }
-    let late: BTreeMap<String, u32> = (decls.classes.keys())
+    (decls.classes.keys())
         .chain(decls.functions.keys())
         .filter(|q| !q.contains('.'))
         .filter_map(|q| {
@@ -9168,8 +9169,7 @@ fn late_stars(
             };
             Some((q.clone(), u32::try_from(from).ok()?))
         })
-        .collect();
-    (!late.is_empty()).then(|| Box::new(late))
+        .collect()
 }
 
 /// [`ModuleDecls::rebound_definitions`]. A `def` or `class` statement binds its name to the
