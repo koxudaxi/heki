@@ -63,38 +63,56 @@ pub fn add_to_set(set: &mut GlobSetBuilder, pattern: &str) -> Result<(), Error> 
     Ok(())
 }
 
-/// The patterns without a `{...}` group that `pattern` stands for: every group is written out
-/// as one pattern per alternative (`pkg.{a.Base,a.Sub}` is `pkg.a.Base` and `pkg.a.Sub`), the
-/// same alternatives [`globs`] gives `globset` to match. `None` for text `globset` rejects (an
-/// unclosed group or class), and when it stands for more than [`MAX_GLOBS`].
-pub fn alternatives(pattern: &str) -> Option<Vec<String>> {
+/// The names `pattern` lists, each as the patterns without a `{...}` group it is written out
+/// as, the same alternatives [`globs`] gives `globset` to match. A group without an empty
+/// alternative lists one name per alternative (`Base.{a,c}` lists `Base.a` and `Base.c`,
+/// `pkg.{a.Base,a.Sub}` lists `pkg.a.Base` and `pkg.a.Sub`). A group with one is one name and its
+/// extensions, written out with the name first (`m:f{,.*}` is `m:f` and `m:f.*`). `None` for
+/// text `globset` rejects (an unclosed group or class), and when it stands for more than
+/// [`MAX_GLOBS`] patterns.
+pub fn alternatives(pattern: &str) -> Option<Vec<Vec<String>>> {
     let mut at = 0;
     let alternatives = parse(pattern, &mut at, false)?;
     let sequence: Vec<Piece<'_>> = alternatives.into_iter().flatten().collect();
     write_out(&sequence)
 }
 
-fn write_out(sequence: &[Piece<'_>]) -> Option<Vec<String>> {
-    let mut done = vec![String::new()];
+fn write_out(sequence: &[Piece<'_>]) -> Option<Vec<Vec<String>>> {
+    let mut done = vec![vec![String::new()]];
     for piece in sequence {
         let options = match piece {
-            Piece::Text(text) => vec![(*text).to_owned()],
+            Piece::Text(text) => vec![vec![(*text).to_owned()]],
             Piece::Group(alternatives) => {
-                let mut all = Vec::new();
+                let mut names = Vec::new();
                 for alternative in alternatives {
-                    all.extend(write_out(alternative)?);
+                    names.extend(write_out(alternative)?);
                 }
-                all
+                if names.iter().flatten().any(String::is_empty) {
+                    let mut forms: Vec<String> = names.into_iter().flatten().collect();
+                    forms.sort_by_key(|form| !form.is_empty());
+                    forms.dedup();
+                    vec![forms]
+                } else {
+                    names
+                }
             }
         };
-        if done.len() * options.len() > MAX_GLOBS {
+        let count = |names: &[Vec<String>]| names.iter().map(Vec::len).sum::<usize>();
+        if count(&done) * count(&options) > MAX_GLOBS {
             return None;
         }
         done = (done.iter())
-            .flat_map(|head| options.iter().map(move |option| format!("{head}{option}")))
+            .flat_map(|head| options.iter().map(move |tail| joined(head, tail)))
             .collect();
     }
     Some(done)
+}
+
+/// The forms of a name followed by a name: each form of `head` followed by each of `tail`.
+fn joined(head: &[String], tail: &[String]) -> Vec<String> {
+    (head.iter())
+        .flat_map(|h| tail.iter().map(move |t| format!("{h}{t}")))
+        .collect()
 }
 
 /// The patterns without an empty alternative that `pattern` stands for: the pattern itself
@@ -236,17 +254,27 @@ mod tests {
     }
 
     #[test]
-    fn alternatives_write_out_every_group() {
+    fn alternatives_list_names_with_their_extensions() {
         for (pattern, written) in [
-            ("pkg.f", vec!["pkg.f"]),
-            ("pkg.{a.Base,a.Sub}", vec!["pkg.a.Base", "pkg.a.Sub"]),
-            ("x{a{,b},c}", vec!["xa", "xab", "xc"]),
+            ("pkg.f", vec![vec!["pkg.f"]]),
+            (
+                "pkg.{a.Base,a.Sub}",
+                vec![vec!["pkg.a.Base"], vec!["pkg.a.Sub"]],
+            ),
+            ("x{a{,b},c}", vec![vec!["xa", "xab"], vec!["xc"]]),
+            ("m:f{.*,}", vec![vec!["m:f", "m:f.*"]]),
+            ("x{y,{,z}}", vec![vec!["x", "xy", "xz"]]),
+            ("a{,}", vec![vec!["a"]]),
+            ("{a,b}{,.*}", vec![vec!["a", "a.*"], vec!["b", "b.*"]]),
         ] {
-            let written: Vec<String> = written.into_iter().map(str::to_owned).collect();
+            let written: Vec<Vec<String>> = (written.into_iter())
+                .map(|forms| forms.into_iter().map(str::to_owned).collect())
+                .collect();
             assert_eq!(alternatives(pattern), Some(written), "{pattern}");
         }
         assert_eq!(alternatives("x{a"), None);
         assert_eq!(alternatives(&"{a,b}".repeat(9)), None);
+        assert_eq!(alternatives(&"{,a}".repeat(9)), None);
     }
 
     #[cfg(not(windows))]

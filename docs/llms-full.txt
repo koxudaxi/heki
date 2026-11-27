@@ -2002,7 +2002,7 @@ changes meaning.
 | `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
 | `rejected_contracts` | the candidates a run reported for, each alone, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
-| `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
+| `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, the names a `{...}` group of it lists that name nothing (`alternatives`, when it lists several), and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
 | `content` | the report as the text output prints it |
@@ -2850,8 +2850,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   included.
 - A `{...}` group may hold dotted alternatives, in the holder of a `Class.attr` target too:
   `pkg.{a.Base,a.Sub}.only_sub` is `pkg.a.Base.only_sub` and `pkg.a.Sub.only_sub`, and
-  `heki check` judges the entry by the alternatives, so it names no class only when none of
-  them does ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)).
+  `heki check` judges each of them ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
@@ -3891,9 +3890,17 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   `exempt-methods`, `allowed-protocols`, and `forbid-cached-property-on` of `write-owners`,
   `read-owners`, and `call-owners`; the `scopes`, `write-targets`, `write-universe`, and
   `allow-writes` of `effect-boundaries`; and the `targets`, `invalidators`, and
-  `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
-  `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
-  symbols outside the project, and are not judged.
+  `exempt-writers` of `invalidation`.
+- The `read-targets`, `call-targets`, and `allowed-callees` of an effect boundary, the
+  `producers` of `readonly-returns`, and the keys of `import-boundaries` (`importers`,
+  `exempt-importers`, `allowed-imports`, `forbidden-imports`, `relative-imports`, and both sides
+  of an `ignored-imports` pair) may name code outside the project by its full name
+  (`os.getenv`, `sys.platform`, `<stdlib>`). Their entries are judged when the first name is a
+  module of the project (`pkg` of `pkg.store:run` or `pkg.db:Session`), and are not judged
+  otherwise (`sys.platform`, `Store.save`, `<stdlib>`, `tests.*` where `tests` is not
+  analyzed). A producer names a function, a method, or an attribute of a class. A module
+  pattern names a module of the analyzed files or a package holding one, a namespace package
+  without `__init__.py` included; with a name (`pkg.db:Session`) it needs the module.
 - A `call-owners` or `read-owners` target whose first name is no module of the project may name
   code outside it. It is matched when the analyzed files call or read a symbol outside the
   project it names, and it is not judged when it is an `<external>` entry or its first name is a
@@ -3902,6 +3909,14 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   cannot list what such a module has. Any other entry is judged as above, so a misspelled class
   (`Feild.removed`) is still reported, and so is an entry naming project code a run over some
   files leaves out.
+- Braces are taken first. A `{...}` group without an empty alternative lists names, each judged
+  on its own: `pkg.store:Base.{a,c}` is `pkg.store:Base.a` and `pkg.store:Base.c`, and the
+  warning lists those that name nothing (`pkg.store:Base.c` when the class has no `c`), in one
+  line for each kind of name they name none of (no class, no attribute of a class). A group
+  with an empty alternative is one name with its extensions, which names something when
+  one of them does: `pkg.run:outer{,.*}` when `outer` or a scope inside it does, and
+  `pkg.zz{,.*}:*` when `pkg.zz` or a module below it does, so a namespace package without
+  `__init__.py` is not reported.
 - Each entry is matched as its rule matches it, against the definitions of the analyzed files:
   a function pattern names a function, method, class, or module body; a call target a function,
   method, or class (or, with a module part, a name the module imports), and one with an
@@ -3937,8 +3952,10 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
 - An entry whose last part is a glob is a rule about every name it may match, later ones
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
-  `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
-  not judged.
+  `Field._*`, the function of `run.*`). A holder that is a glob itself is judged by the parts
+  written out before it: `pkg.zz.*:*` needs a module `pkg.zz` or one below it, and
+  `pkg.*.run_*` needs `pkg`. A glob with no part written out before it (`*_helper`, `__*__`,
+  `*.run_*`) is not judged.
 - The names offered are found by comparing an entry with the names that share its holder or its
   last part. A run makes at most 64 such comparisons per function and class of the project (at
   least 4,096) for all its entries, so of thousands of entries that name nothing in a large

@@ -862,8 +862,9 @@ fn each_kind_of_entry_is_judged_by_what_its_rule_matches() {
 }
 
 /// A `{...}` group in the holder of a `Class.attr` target may hold dotted alternatives, as a
-/// module glob can: `pkg.{a.Base,a.Sub}.only_sub` names the attribute of both classes and is no
-/// error, while a group none of whose alternatives is a class is one.
+/// module glob can: `pkg.{a.Base,a.Sub}.only_sub` names the attribute of both classes (of
+/// `Base` through its subclass) and is no error, while each alternative that is no class is
+/// one.
 #[test]
 fn a_holder_brace_may_hold_dotted_alternatives() {
     let p = Project::new("unmatched_dotted_brace_holder");
@@ -890,7 +891,7 @@ fn a_holder_brace_may_hold_dotted_alternatives() {
     assert_eq!(
         lines(&stderr, "error: "),
         [
-            "`targets` entry `pkg.{a.Gone,a.Nope}.only_sub` of read-owners `gone` names no class in the analyzed files"
+            "`targets` entry `pkg.{a.Gone,a.Nope}.only_sub` of read-owners `gone` lists `pkg.a.Gone.only_sub` and `pkg.a.Nope.only_sub`, which name no class in the analyzed files"
         ],
         "{stdout}{stderr}"
     );
@@ -898,6 +899,226 @@ fn a_holder_brace_may_hold_dotted_alternatives() {
         stdout.contains("outside the read owners of `dotted`"),
         "{stdout}{stderr}"
     );
+}
+
+const BRACES_STORE: &str = "\
+class Base:
+    a = 1
+    b = 2
+
+    def op(self) -> None:
+        pass
+
+
+def run(base: Base) -> None:
+    base.op()
+
+
+def outer() -> None:
+    def inner() -> None:
+        pass
+
+    inner()
+";
+
+/// A project of `pkg.store`, a class `pkg.dyn:Dyn` the code gives attributes named at run time,
+/// and a namespace package `pkg.zz` (no `__init__.py`) with a module below it, judging the
+/// contracts `contracts` under `unmatched-contract-entries = "error"`.
+fn braces_project(name: &str, select: &str, contracts: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = {select}\n\
+             unmatched-contract-entries = \"error\"\n\n{contracts}"
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/store.py", BRACES_STORE)
+    .write(
+        "pkg/dyn.py",
+        "class Dyn:\n    def __init__(self, name: str) -> None:\n        setattr(self, name, 1)\n",
+    )
+    .write("pkg/zz/mod.py", "def f() -> None:\n    pass\n");
+    p
+}
+
+const BRACES_CONTRACTS: &str = r#"
+[[tool.heki.write-owners]]
+name = "writes"
+targets = ["pkg.store:Base.{a,zz}[\"k\"]"]
+allowed-writers = ["pkg.store:run"]
+
+[[tool.heki.read-owners]]
+name = "reads"
+targets = ["pkg.store:Base.{a,c}", "pkg.{store,gone}:Base.{a,zz}", "pkg.dyn:Dyn.{x,y}"]
+allowed-readers = ["pkg.store:run"]
+
+[[tool.heki.call-owners]]
+name = "calls"
+targets = ["pkg.store:Base.op", "pkg.store:{run,gone}(base=1)"]
+allowed-callers = [
+    "pkg.store:outer{,.*}",
+    "pkg{,.zz.mod}:f",
+    "pkg.zz{,.*}:*",
+    "pkg.store:missing{,.*}",
+    "pkg.gone{,.*}:*",
+    "pkg.store:Base.{c,d}",
+    "pkg.store:{outr,outter}",
+    "pkg.store:{run,gone_a,gone_b,gone_c,gone_d}",
+]
+"#;
+
+/// Braces are taken first. A group without an empty alternative lists names, each judged
+/// (in a call target without its argument list, in a `Class.attr` target without its key):
+/// the error lists those naming nothing, one line per what they name none of. A group with an
+/// empty alternative is one name with its extensions, which names something when one of them
+/// does: `outer` or a scope inside it, `pkg:f` or `pkg.zz.mod:f`, the namespace package
+/// `pkg.zz` or a module below it.
+#[test]
+fn braces_list_names_or_extend_one() {
+    let p = braces_project(
+        "unmatched_braces",
+        "[\"MUT201\", \"MUT203\", \"MUT204\"]",
+        BRACES_CONTRACTS,
+    );
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(
+        lines(&stderr, "error: "),
+        [
+            "`targets` entry `pkg.store:Base.{a,zz}[\"k\"]` of write-owners `writes` lists `pkg.store:Base.zz[\"k\"]`, which names no attribute, method, or `__dict__` key of `pkg.store:Base` in the analyzed files",
+            "`targets` entry `pkg.store:Base.{a,c}` of read-owners `reads` lists `pkg.store:Base.c`, which names no attribute, method, or `__dict__` key of `pkg.store:Base` in the analyzed files",
+            "`targets` entry `pkg.{store,gone}:Base.{a,zz}` of read-owners `reads` lists `pkg.store:Base.zz`, which names no attribute, method, or `__dict__` key of `pkg.store:Base` in the analyzed files",
+            "`targets` entry `pkg.{store,gone}:Base.{a,zz}` of read-owners `reads` lists `pkg.gone:Base.a` and `pkg.gone:Base.zz`, which name no class in the analyzed files; `pkg.store:Base.a` exists",
+            "`targets` entry `pkg.dyn:Dyn.{x,y}` of read-owners `reads` lists `pkg.dyn:Dyn.x` and `pkg.dyn:Dyn.y`, which name no attribute, method, or `__dict__` key of `pkg.dyn:Dyn` in the analyzed files, unless they are ones the code names at run time",
+            "`targets` entry `pkg.store:{run,gone}(base=1)` of call-owners `calls` lists `pkg.store:gone(base=1)`, which names no function, method, or class in the analyzed files",
+            "`allowed-callers` entry `pkg.store:missing{,.*}` of call-owners `calls` names no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.gone{,.*}:*` of call-owners `calls` names no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.store:Base.{c,d}` of call-owners `calls` lists `pkg.store:Base.c` and `pkg.store:Base.d`, which name no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.store:{outr,outter}` of call-owners `calls` lists `pkg.store:outr` and `pkg.store:outter`, which name no function or method in the analyzed files; `pkg.store:outer` exists",
+            "`allowed-callers` entry `pkg.store:{run,gone_a,gone_b,gone_c,gone_d}` of call-owners `calls` lists `pkg.store:gone_a`, `pkg.store:gone_b`, `pkg.store:gone_c`, and 1 more, which name no function or method in the analyzed files",
+        ],
+        "{stdout}{stderr}"
+    );
+}
+
+/// A glob holder is judged by the parts written out before its first glob: `pkg.zz.*:*` needs
+/// a module `pkg.zz` or one below it (the namespace package has one), and `pkg.*.run_*` needs
+/// `pkg`. A glob without a written-out part (`*_helper`, `*.run_*`) is not judged, and a glob in
+/// the last part needs what holds it.
+#[test]
+fn a_glob_holder_is_judged_by_its_written_out_prefix() {
+    let contracts = r#"
+[[tool.heki.call-owners]]
+name = "calls"
+targets = ["pkg.store:Base.op"]
+allowed-callers = [
+    "pkg.zz.*:*",
+    "pkg.*.run_*",
+    "*_helper",
+    "*.run_*",
+    "pkg.store:Base.*",
+    "pkg.gone.*:*",
+    "gone.*.x*",
+    "pkg.store:Gone.*",
+]
+"#;
+    let p = braces_project("unmatched_glob_holder", "[\"MUT204\"]", contracts);
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(
+        lines(&stderr, "error: "),
+        [
+            "`allowed-callers` entry `pkg.gone.*:*` of call-owners `calls` names no function or method in the analyzed files",
+            "`allowed-callers` entry `gone.*.x*` of call-owners `calls` names no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.store:Gone.*` of call-owners `calls` names no function or method in the analyzed files",
+        ],
+        "{stdout}{stderr}"
+    );
+}
+
+const PROJECT_FIRST_CONTRACTS: &str = r#"
+[[tool.heki.effect-boundaries]]
+name = "pure"
+scopes = ["pkg.store"]
+forbid = ["reads-targets", "calls"]
+read-targets = ["pkg.store:Base.a", "sys.platform", "Base.nothing", "pkg.store:Base.gone"]
+call-targets = ["pkg.store:run", "os.getenv", "pkg.store:gone"]
+allowed-callees = ["pkg.store", "json.*", "pkg.gone"]
+
+[[tool.heki.readonly-returns]]
+name = "shared"
+producers = [
+    "pkg.store:run",
+    "pkg.store:Base.a",
+    "json.loads",
+    "Base.whatever",
+    "pkg.store:Base.gone",
+    "pkg.gone",
+    "pkg.store:gone",
+]
+
+[[tool.heki.import-boundaries]]
+name = "imports"
+importers = ["pkg.store", "pkg.zz", "tests.*", "pkg.gone"]
+exempt-importers = ["pkg.dyn", "pkg.gone_exempt"]
+allowed-imports = ["<stdlib>", "os", "pkg.store:Base", "pkg.zz.mod", "pkg.*", "pkg.gone_module:Name"]
+relative-imports = ["pkg.store", "pkg.gone_relative.*"]
+ignored-imports = [
+    "pkg.store -> os",
+    "tests -> pkg.store",
+    "pkg.store -> pkg.gone_pair",
+    "pkg.gone_importer -> os",
+]
+
+[[tool.heki.import-boundaries]]
+name = "forbidden"
+forbidden-imports = ["pkg.store", "pkg.gone_forbidden"]
+"#;
+
+/// The keys that may name code outside the project by its full name are judged when an entry's
+/// first name is a module of the project: an effect boundary's read and call targets and
+/// allowed callees, the producers of `readonly-returns` (a function or an attribute), and the
+/// module patterns of `import-boundaries` (each side of an `ignored-imports` pair, a namespace
+/// package naming a module). `sys.platform`, `Base.nothing`, `<stdlib>`, and `tests.*` are not
+/// judged. A baseline records none of them and hides none.
+#[test]
+fn entries_whose_first_name_is_a_project_module_are_judged() {
+    let p = braces_project(
+        "unmatched_project_first",
+        "[\"EFF201\", \"MUT202\", \"IMP201\"]",
+        PROJECT_FIRST_CONTRACTS,
+    );
+    let expected = [
+        "`read-targets` entry `pkg.store:Base.gone` of effect-boundaries `pure` names no attribute, method, or `__dict__` key of `pkg.store:Base` in the analyzed files",
+        "`call-targets` entry `pkg.store:gone` of effect-boundaries `pure` names no function, method, or class in the analyzed files",
+        "`allowed-callees` entry `pkg.gone` of effect-boundaries `pure` names no module, class, or function in the analyzed files",
+        "`producers` entry `pkg.store:Base.gone` of readonly-returns `shared` names no function, method, or attribute in the analyzed files",
+        "`producers` entry `pkg.gone` of readonly-returns `shared` names no function, method, or attribute in the analyzed files",
+        "`producers` entry `pkg.store:gone` of readonly-returns `shared` names no function, method, or attribute in the analyzed files",
+        "`importers` entry `pkg.gone` of import-boundaries `imports` names no module in the analyzed files",
+        "`exempt-importers` entry `pkg.gone_exempt` of import-boundaries `imports` names no module in the analyzed files",
+        "`allowed-imports` entry `pkg.gone_module:Name` of import-boundaries `imports` names no module in the analyzed files",
+        "`relative-imports` entry `pkg.gone_relative.*` of import-boundaries `imports` names no module in the analyzed files",
+        "`ignored-imports` entry `pkg.store -> pkg.gone_pair` of import-boundaries `imports` names no module in the analyzed files",
+        "`ignored-imports` entry `pkg.gone_importer -> os` of import-boundaries `imports` names no module in the analyzed files",
+        "`forbidden-imports` entry `pkg.gone_forbidden` of import-boundaries `forbidden` names no module in the analyzed files",
+    ];
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(lines(&stderr, "error: "), expected, "{stdout}{stderr}");
+
+    let baseline = ["--baseline", "heki-baseline.toml"];
+    let (code, stdout, stderr) = p.heki(&[&["check", "--update-baseline"][..], &baseline].concat());
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        !p.read("heki-baseline.toml").contains("gone"),
+        "{stdout}{stderr}"
+    );
+    let (code, stdout, stderr) = p.heki(&[&["check"][..], &baseline].concat());
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(lines(&stderr, "error: "), expected, "{stdout}{stderr}");
 }
 
 /// An entry many contracts hold is one line, naming the first three contracts and counting the
