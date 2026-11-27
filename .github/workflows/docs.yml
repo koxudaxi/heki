@@ -82,12 +82,12 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
         with:
           key: ci-profile
-          save-if: ${{ github.event_name == 'push' }}
+          save-if: true
       # The `ci` profile (see Cargo.toml) optimizes the workspace crates less than a release
       # build, which the pages do not depend on.
       - if: env.PRODUCTION != 'true' && steps.heki.outputs.cache-hit != 'true'
         run: cargo build --locked --profile ci -p heki
-      - if: github.event_name == 'push' && steps.heki.outputs.cache-hit != 'true'
+      - if: steps.heki.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/ci/heki
