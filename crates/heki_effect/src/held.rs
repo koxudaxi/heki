@@ -90,6 +90,9 @@ impl<T> Acquisitions<T> {
 pub enum Change {
     Take(usize),
     Give(Vec<usize>),
+    /// The function hands control to code it does not see, which may give back anything it
+    /// holds (a generator's consumer, at a `yield`), then takes the acquisition given, if any.
+    Suspend(Option<usize>),
 }
 
 /// The acquisitions held, a bit each.
@@ -120,6 +123,12 @@ impl HeldSet {
             Some(Change::Give(ks)) => {
                 for k in ks {
                     self.0[k / 64] &= !(1u64 << (k % 64));
+                }
+            }
+            Some(Change::Suspend(take)) => {
+                self.0.fill(0);
+                if let Some(k) = take {
+                    self.0[k / 64] |= 1u64 << (k % 64);
                 }
             }
             None => {}

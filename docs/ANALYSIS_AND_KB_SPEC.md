@@ -2383,7 +2383,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    that no decorator replaces, `FunctionDecl::called_as_defined`; never a class's `__init__`),
    or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
    `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
-8. **`EFF109`** (opt-in): a non-reentrant lock taken again while it is held.
+8. **`EFF109`** (exact, default): a non-reentrant lock taken again while it is held.
    - A lock is an instance of a Layer 2 class flagged `non_reentrant_lock` (`threading.Lock`,
      `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`), named by where the function
      reaches it (`heki_effect::locks::ObjRef`): parameter `i` or its attribute (`self._lock`), a
@@ -2551,8 +2551,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      that is no async generator, worded as certain when every one is an `async def` no decorator
      replaces, and as possible otherwise. Only catalog APIs count: a project function taking a
      callable resolves to the project and is never one, whatever it does with the coroutine.
-13. **`EFF116`** (opt-in): a call of a project generator function whose generator nothing
-   iterates, so its body does not run.
+13. **`EFF116`** (exact, default, `warning`): a call of a project generator function whose
+   generator nothing iterates, so its body does not run.
    - The rule (`eff_rules::never_iterated`) reads each function's IR: a call (not awaited)
      whose result has no name and whose every reader is a truth test (a branch's condition,
      `not`, or a call of the builtin `bool` the resolver confirms) is a candidate, one with no

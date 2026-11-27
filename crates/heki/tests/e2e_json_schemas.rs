@@ -957,14 +957,8 @@ fn the_rule_output_meets_its_schema() {
     ] {
         let seen = seen_properties(&schema, &values);
         let used = seen.get(name).cloned().unwrap_or_default();
-        // No rule is certified on the rare-failure path yet, so no record carries its real bugs.
-        let unused_today: &[&str] = match name {
-            "Certification" => &["real_bugs"],
-            _ => &[],
-        };
         let missing: BTreeSet<_> = declared_properties(&schema, name)
             .difference(&used)
-            .filter(|p| !unused_today.contains(&p.as_str()))
             .cloned()
             .collect();
         assert!(

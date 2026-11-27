@@ -171,8 +171,8 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
          no: slower code, not a bug\n\
          \x20 see the 3 report(s): heki check --extend-select EFF101,OPT101,OPT110\n\
-         \x20 No reports here: 33 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
-         experimental and exact: MUT101, MUT111; heki recommend --all names the 26 heuristic \
+         \x20 No reports here: 31 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
+         experimental and exact: MUT101, MUT111; heki recommend --all names the 24 heuristic \
          one(s)\n\
          \n\
          Contract candidates\n\
@@ -670,7 +670,7 @@ fn the_count_of_files_left_out_stops_at_its_caps() {
 }
 
 /// Reports of opt-in rules: `MUT106` and `EFF107` (bugs, not measured), `MUT107` (a bug whose
-/// measurement shows real harm below 10%), and the experimental `EFF109`.
+/// measurement shows real harm below 10%), and the experimental `EFF110`.
 const OPT_IN: &str = "\
 import asyncio
 import threading
@@ -700,10 +700,11 @@ class Point:
     def move(self, dx):
         self.x += dx
 
-def twice():
-    with lock:
-        with lock:
-            pass
+async def read_line(reader: asyncio.StreamReader):
+    return await reader.readline()
+
+async def both(reader: asyncio.StreamReader):
+    return await asyncio.gather(read_line(reader), read_line(reader))
 ";
 
 fn shop_with_opt_in(name: &str) -> Project {
@@ -755,10 +756,10 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug (on now: naming it adds its heuristic reports)\n\
         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 Optional (experimental, never in the block)\n\
-        \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 see the 7 report(s): heki check --extend-select EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF109\n\
-        \x20 No reports here: 29 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
-        experimental and exact: MUT101, MUT111; heki recommend --all names the 22 heuristic one(s)"
+        \x20 EFF110        1      -  bug          not measured                      -          no: experimental\n\
+        \x20 see the 7 report(s): heki check --extend-select EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF110\n\
+        \x20 No reports here: 27 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
+        experimental and exact: MUT101, MUT111; heki recommend --all names the 20 heuristic one(s)"
     );
     assert!(
         out.contains(
@@ -781,8 +782,8 @@ fn rules_worth_enabling_follow_the_policy() {
     let listed = quiet_lines(&["--all"]);
     assert!(
         listed[0].ends_with(
-            "; experimental and exact: MUT101, MUT111; heuristic: EFF102, EFF105, EFF106, EFF110, \
-             EFF112, EFF114, EFF115, EFF116, EFF117, EFF118, IMP101, IMP102, IMP104, IMP301, \
+            "; experimental and exact: MUT101, MUT111; heuristic: EFF102, EFF105, EFF106, \
+             EFF112, EFF114, EFF115, EFF117, EFF118, IMP101, IMP102, IMP104, IMP301, \
              IMP302, MUT108, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112"
         ),
         "{listed:?}"
@@ -948,12 +949,12 @@ fn command_shown(p: &Project, args: &[&str]) -> Vec<String> {
 fn the_command_under_the_rules_shows_every_report_they_count() {
     let p = shop_with_opt_in("recommend_rules_command");
     for (args, codes) in [
-        (vec![], "EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF109"),
+        (vec![], "EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF110"),
         // The paths given are the command's; a rule the configuration ignores stays out of it,
         // since `ignore` wins over `extend-select`.
         (
             vec!["app", "--ignore", "MUT106"],
-            "EFF101,EFF107,MUT107,OPT101,OPT110,EFF109",
+            "EFF101,EFF107,MUT107,OPT101,OPT110,EFF110",
         ),
     ] {
         let (_, report, _) = recommend_json(&p, &args);
