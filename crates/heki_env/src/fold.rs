@@ -7,7 +7,7 @@
 
 use crate::defaults::SUFFIX;
 use crate::problem::{line_column, settings_root, table_items};
-use crate::{ConfigError, ConfigLayout, Docs, HekiConfig, Problem};
+use crate::{ConfigError, ConfigLayout, Docs, HekiConfig, Problem, Setting};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -88,14 +88,14 @@ impl ConfigSources {
 /// Why the files or groups of a configuration do not fold into one.
 #[derive(Debug, Error)]
 pub enum FoldProblem {
-    #[error("`@{0}` names no group")]
-    UnknownGroup(String),
+    #[error("{}", unknown_group(chain))]
+    UnknownGroup { chain: Vec<String> },
     #[error("a cycle between groups: {}", chain.iter().map(|g| format!("`@{g}`")).collect::<Vec<_>>().join(" -> "))]
     GroupCycle { chain: Vec<String> },
     #[error("the group `{0}` is empty")]
     EmptyGroup(String),
-    #[error("the entry `{0}` has `@` after its start")]
-    GroupInsideEntry(String),
+    #[error("`@{group}` writes more than {MAX_GROUP_ENTRIES} entries from groups into one list")]
+    TooManyEntries { group: String },
     #[error("the group `{name}` is defined twice; it is first defined at {first}")]
     GroupTwice { name: String, first: String },
     #[error("`include` lists `{0}`, the main configuration file")]
@@ -108,6 +108,8 @@ pub enum FoldProblem {
     IncludedTwice(String),
     #[error("`include` entry `{0}` is a glob")]
     Glob(String),
+    #[error("`include` entry `{0}` is not a relative path")]
+    Rooted(String),
     #[error("`{0}` in an included file")]
     MainSetting(String),
 }
@@ -115,7 +117,7 @@ pub enum FoldProblem {
 impl FoldProblem {
     pub(crate) fn explain(&self, problem: Problem) -> Problem {
         let (help, docs) = match self {
-            Self::UnknownGroup(_) => (
+            Self::UnknownGroup { .. } => (
                 "define the group under `[groups]` in the main configuration file or an included one, or remove the entry".to_owned(),
                 Docs::Groups,
             ),
@@ -127,8 +129,8 @@ impl FoldProblem {
                 "an empty group would empty every key that uses it, and an empty `forbidden-*` key means every function: list its entries, or remove the group and its uses".to_owned(),
                 Docs::Groups,
             ),
-            Self::GroupInsideEntry(_) => (
-                "a group is named by a whole entry, `\"@name\"`: list it as an entry of its own".to_owned(),
+            Self::TooManyEntries { .. } => (
+                "a group that names another group twice doubles it: list the entries once, or split the contract".to_owned(),
                 Docs::Groups,
             ),
             Self::GroupTwice { .. } => (
@@ -151,6 +153,10 @@ impl FoldProblem {
                 "globs are not accepted: list the files, so that adding one is an edit of this file".to_owned(),
                 Docs::Include,
             ),
+            Self::Rooted(_) => (
+                "write the path from the directory of the file that holds `include`, so the configuration reads the same in every checkout".to_owned(),
+                Docs::Include,
+            ),
             Self::MainSetting(key) => (
                 format!(
                     "an included file holds contract tables, their `<kind>-defaults` tables, and `[groups]`: move `{key}` into the main configuration file"
@@ -160,6 +166,20 @@ impl FoldProblem {
         };
         problem.help(help).docs(docs)
     }
+}
+
+/// How many entries the groups of one list may write into it: a few lines of groups that each
+/// name the one before twice would otherwise write out more entries than memory holds.
+const MAX_GROUP_ENTRIES: u64 = 10_000;
+
+/// The message of an unknown group: the name, and the groups that lead to it.
+fn unknown_group(chain: &[String]) -> String {
+    let missing = chain.last().map_or("", String::as_str);
+    if chain.len() < 2 {
+        return format!("`@{missing}` names no group");
+    }
+    let names: Vec<String> = chain.iter().map(|g| format!("`@{g}`")).collect();
+    format!("`@{missing}` names no group: {}", names.join(" -> "))
 }
 
 /// A configuration file of the fold: the main file, then the files its `include` lists.
@@ -181,12 +201,24 @@ impl File {
 }
 
 /// The file `entry` of `include` names, from the directory of `main`, the file that holds it.
-fn included_path(main: &Path, entry: &str) -> PathBuf {
+/// An entry is a plain relative path: a rooted or drive-prefixed one names a place on one
+/// machine, whatever the platform the configuration is read on.
+fn included_path(main: &Path, entry: &str) -> Result<PathBuf, FoldProblem> {
+    if entry.contains(['*', '?', '[', ']', '{', '}']) {
+        return Err(FoldProblem::Glob(entry.to_owned()));
+    }
+    let drive = entry
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|b| b[0].is_ascii_alphabetic() && b[1] == b':');
+    if drive || entry.starts_with(['/', '\\']) {
+        return Err(FoldProblem::Rooted(entry.to_owned()));
+    }
     let joined = main.parent().unwrap_or(Path::new("")).join(entry);
-    joined
+    Ok(joined
         .components()
         .filter(|c| *c != Component::CurDir)
-        .collect()
+        .collect())
 }
 
 /// The entries of `include` in the configuration `text` of `layout`, with their offsets; none
@@ -203,12 +235,13 @@ fn include_entries(text: &str, layout: ConfigLayout) -> Vec<(String, Option<usiz
 }
 
 /// The files the `include` of the configuration file `path` lists, resolved as the loader
-/// resolves them; none when the file cannot be read or is not valid TOML. The language server
-/// watches them, also while the configuration does not load.
+/// resolves them, leaving out the entries it rejects; none when the file cannot be read or is
+/// not valid TOML. The language server watches them, also while the configuration does not
+/// load.
 pub fn included_files(path: &Path) -> Vec<PathBuf> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     (include_entries(&text, ConfigLayout::of(path)).into_iter())
-        .map(|(entry, _)| included_path(path, &entry))
+        .filter_map(|(entry, _)| included_path(path, &entry).ok())
         .collect()
 }
 
@@ -229,10 +262,7 @@ pub(crate) fn read_files(
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut included = Vec::new();
     for (entry, at) in include_entries(text, layout) {
-        if entry.contains(['*', '?', '[', ']', '{', '}']) {
-            return Err(main.error(at, FoldProblem::Glob(entry)));
-        }
-        let file = included_path(path, &entry);
+        let file = included_path(path, &entry).map_err(|problem| main.error(at, problem))?;
         let read = std::fs::canonicalize(&file)
             .and_then(|identity| Ok((identity, std::fs::read_to_string(&file)?)));
         let (identity, text) = read.map_err(|cause| {
@@ -309,11 +339,12 @@ enum Meaning<'e> {
 }
 
 impl Entry {
-    fn meaning(&self) -> Result<Meaning<'_>, FoldProblem> {
-        match self.text.find('@') {
-            None => Ok(Meaning::Text),
-            Some(0) if !self.text[1..].contains('@') => Ok(Meaning::Group(&self.text[1..])),
-            Some(_) => Err(FoldProblem::GroupInsideEntry(self.text.clone())),
+    /// A group is named by a whole entry that starts with `@`; an `@` anywhere else is part of
+    /// the entry, as in the item key of `'Model.fields["user@example.com"]'`.
+    fn meaning(&self) -> Meaning<'_> {
+        match self.text.strip_prefix('@') {
+            Some(name) => Meaning::Group(name),
+            None => Meaning::Text,
         }
     }
 }
@@ -444,12 +475,13 @@ fn settings_of(index: usize, file: &File) -> Settings {
     }
 }
 
-/// The groups of every file, each with its entries written out.
+/// The groups of every file, checked over the whole graph; their entries are written out only
+/// into the lists that use them.
 struct Groups<'s> {
     defs: Vec<&'s Group>,
     by_name: HashMap<&'s str, usize>,
-    /// By group: its entries written out, and the groups it reaches (itself included).
-    expanded: Vec<Option<(Vec<Entry>, BTreeSet<usize>)>>,
+    /// By group: how many entries it writes out, saturated at `u64::MAX`.
+    sizes: Vec<u64>,
 }
 
 impl<'s> Groups<'s> {
@@ -482,80 +514,59 @@ impl<'s> Groups<'s> {
             defs.push(group);
         }
         let mut groups = Self {
-            expanded: vec![None; defs.len()],
+            sizes: Vec::new(),
             defs,
             by_name,
         };
+        let mut sizes = vec![None; groups.defs.len()];
         for g in 0..groups.defs.len() {
-            groups.resolve(files, g, &mut Vec::new())?;
+            groups.size_of(files, g, &mut Vec::new(), &mut sizes)?;
         }
+        groups.sizes = (sizes.into_iter())
+            .map(|size| size.expect("every group is sized"))
+            .collect();
         Ok(groups)
     }
 
-    /// Write out the entries of the group `g`; `chain` holds the groups whose entries are being
-    /// written out, the outermost first.
-    fn resolve(
-        &mut self,
+    /// How many entries the group `g` writes out, each of its references checked on the way;
+    /// `chain` holds the groups being sized, the outermost first.
+    fn size_of(
+        &self,
         files: &[File],
         g: usize,
         chain: &mut Vec<usize>,
-    ) -> Result<(), ConfigError> {
-        if self.expanded[g].is_some() {
-            return Ok(());
+        sizes: &mut [Option<u64>],
+    ) -> Result<u64, ConfigError> {
+        if let Some(size) = sizes[g] {
+            return Ok(size);
         }
         chain.push(g);
-        let mut out = Vec::new();
-        let mut reached = BTreeSet::from([g]);
+        let mut size = 0u64;
         for entry in &self.defs[g].entries {
             let at = |problem| files[entry.file].error(entry.offset, problem);
-            match entry.meaning().map_err(at)? {
-                Meaning::Text => out.push(entry.clone()),
-                Meaning::Group(name) => {
-                    let inner = self.index(name).map_err(at)?;
-                    if let Some(start) = chain.iter().position(|c| *c == inner) {
-                        let chain = (chain[start..].iter().chain([&inner]))
-                            .map(|c| self.defs[*c].name.clone())
-                            .collect();
-                        return Err(at(FoldProblem::GroupCycle { chain }));
-                    }
-                    self.resolve(files, inner, chain)?;
-                    let (entries, reaches) = self.expanded[inner].as_ref().expect("resolved above");
-                    out.extend(entries.iter().cloned());
-                    reached.extend(reaches.iter().copied());
-                }
+            let Meaning::Group(name) = entry.meaning() else {
+                size = size.saturating_add(1);
+                continue;
+            };
+            let names = |groups: &[usize]| -> Vec<String> {
+                (groups.iter())
+                    .map(|c| self.defs[*c].name.clone())
+                    .collect()
+            };
+            let Some(&inner) = self.by_name.get(name) else {
+                let mut chain = names(chain);
+                chain.push(name.to_owned());
+                return Err(at(FoldProblem::UnknownGroup { chain }));
+            };
+            if let Some(start) = chain.iter().position(|c| *c == inner) {
+                let chain = names(&[&chain[start..], &[inner]].concat());
+                return Err(at(FoldProblem::GroupCycle { chain }));
             }
+            size = size.saturating_add(self.size_of(files, inner, chain, sizes)?);
         }
         chain.pop();
-        self.expanded[g] = Some((out, reached));
-        Ok(())
-    }
-
-    fn index(&self, name: &str) -> Result<usize, FoldProblem> {
-        (self.by_name.get(name).copied()).ok_or_else(|| FoldProblem::UnknownGroup(name.to_owned()))
-    }
-
-    /// `entries` with each `@name` written out, and the groups that took part.
-    fn expand(
-        &self,
-        files: &[File],
-        entries: &[Entry],
-    ) -> Result<(Vec<Entry>, BTreeSet<usize>), ConfigError> {
-        let mut out = Vec::new();
-        let mut used = BTreeSet::new();
-        for entry in entries {
-            let at = |problem| files[entry.file].error(entry.offset, problem);
-            match entry.meaning().map_err(at)? {
-                Meaning::Text => out.push(entry.clone()),
-                Meaning::Group(name) => {
-                    let g = self.index(name).map_err(at)?;
-                    let (entries, reaches) =
-                        self.expanded[g].as_ref().expect("every group is resolved");
-                    out.extend(entries.iter().cloned());
-                    used.extend(reaches.iter().copied());
-                }
-            }
-        }
-        Ok((out, used))
+        sizes[g] = Some(size);
+        Ok(size)
     }
 
     /// `field` with its list written out; the groups it uses join `used`.
@@ -565,14 +576,45 @@ impl<'s> Groups<'s> {
         field: &Field,
         used: &mut BTreeSet<usize>,
     ) -> Result<Field, ConfigError> {
-        Ok(match field {
-            Field::List(entries) => {
-                let (entries, groups) = self.expand(files, entries)?;
-                used.extend(groups);
-                Field::List(entries)
+        let Field::List(entries) = field else {
+            return Ok(field.clone());
+        };
+        // Sized before anything is written out, so a list past the limit costs nothing.
+        let mut from_groups = 0u64;
+        for entry in entries {
+            if let Meaning::Group(name) = entry.meaning() {
+                let at = |problem| files[entry.file].error(entry.offset, problem);
+                let Some(&g) = self.by_name.get(name) else {
+                    let chain = vec![name.to_owned()];
+                    return Err(at(FoldProblem::UnknownGroup { chain }));
+                };
+                from_groups = from_groups.saturating_add(self.sizes[g]);
+                if from_groups > MAX_GROUP_ENTRIES {
+                    let group = name.to_owned();
+                    return Err(at(FoldProblem::TooManyEntries { group }));
+                }
             }
-            Field::Value(v) => Field::Value(v.clone()),
-        })
+        }
+        let mut out = Vec::new();
+        for entry in entries {
+            self.write_out(entry, &mut out, used);
+        }
+        Ok(Field::List(out))
+    }
+
+    /// `entry`, or the entries of the group it names, onto `out`; the groups it reaches join
+    /// `used`. Every reference is known and acyclic ([`Groups::new`]).
+    fn write_out(&self, entry: &Entry, out: &mut Vec<Entry>, used: &mut BTreeSet<usize>) {
+        match entry.meaning() {
+            Meaning::Text => out.push(entry.clone()),
+            Meaning::Group(name) => {
+                let g = self.by_name[name];
+                used.insert(g);
+                for inner in &self.defs[g].entries {
+                    self.write_out(inner, out, used);
+                }
+            }
+        }
     }
 }
 
@@ -594,46 +636,12 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
         .collect();
     let shown: Vec<String> = files.iter().map(|f| shown_path(&f.path, root)).collect();
     let groups = Groups::new(files, &shown, &settings)?;
+    let Merged {
+        tables: merged,
+        main_defaults,
+        used,
+    } = merge(files, &settings, &groups)?;
     let kinds = HekiConfig::CONTRACT_KEYS;
-    let mut used: BTreeSet<usize> = BTreeSet::new();
-    // By file and kind: the defaults table with its lists written out, each key with the groups
-    // it uses, which a table that takes the key uses.
-    let mut defaults: Vec<Vec<Option<Defaults>>> = Vec::new();
-    for s in &settings {
-        let of_file = (s.defaults.iter().map(|table| {
-            let Some(table) = table else { return Ok(None) };
-            let keys = table.iter().map(|(key, field)| {
-                let mut used = BTreeSet::new();
-                let field = groups.expand_field(files, field, &mut used)?;
-                Ok((key.clone(), (field, used)))
-            });
-            keys.collect::<Result<Defaults, ConfigError>>().map(Some)
-        }))
-        .collect::<Result<_, _>>()?;
-        defaults.push(of_file);
-    }
-    let mut merged: Vec<Vec<Table>> = vec![Vec::new(); kinds.len()];
-    for (f, s) in settings.iter().enumerate() {
-        for (k, tables) in s.tables.iter().enumerate() {
-            for table in tables {
-                let mut expanded = Table::new();
-                for (key, field) in table {
-                    expanded.insert(key.clone(), groups.expand_field(files, field, &mut used)?);
-                }
-                // A table's own key, else its file's default, else the main file's.
-                for keys in [&defaults[f][k], &defaults[0][k]].into_iter().flatten() {
-                    for (key, (field, groups_of_key)) in keys {
-                        if !expanded.contains_key(key) {
-                            expanded.insert(key.clone(), field.clone());
-                            used.extend(groups_of_key.iter().copied());
-                        }
-                    }
-                }
-                let table = expanded;
-                merged[k].push(table);
-            }
-        }
-    }
     let mut sources = ConfigSources {
         included: files[1..].iter().map(|f| f.path.clone()).collect(),
         unused_groups: (groups.defs.iter().enumerate())
@@ -678,8 +686,102 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
         || settings
             .iter()
             .any(|s| !s.groups.is_empty() || s.defaults.iter().any(Option::is_some));
-    let text = folds.then(|| written_out(&files[0], &merged, &defaults[0]));
+    let text = folds.then(|| written_out(&files[0], &merged, &main_defaults));
     Ok(Folded { text, sources })
+}
+
+/// The contract tables of every file with their lists written out.
+struct Merged {
+    /// By kind, the main file's tables, then each included file's.
+    tables: Vec<Vec<Table>>,
+    /// By kind, the main file's defaults table with its lists written out.
+    main_defaults: Vec<Option<Defaults>>,
+    /// The groups a table uses.
+    used: BTreeSet<usize>,
+}
+
+fn merge(files: &[File], settings: &[Settings], groups: &Groups) -> Result<Merged, ConfigError> {
+    let kinds = HekiConfig::CONTRACT_KEYS;
+    let mut used: BTreeSet<usize> = BTreeSet::new();
+    // By file and kind: the defaults table with its lists written out, each key with the groups
+    // it uses, which a table that takes the key uses.
+    let mut defaults: Vec<Vec<Option<Defaults>>> = Vec::new();
+    for s in settings {
+        let of_file = (s.defaults.iter().map(|table| {
+            let Some(table) = table else { return Ok(None) };
+            let keys = table.iter().map(|(key, field)| {
+                let mut used = BTreeSet::new();
+                let field = groups.expand_field(files, field, &mut used)?;
+                Ok((key.clone(), (field, used)))
+            });
+            keys.collect::<Result<Defaults, ConfigError>>().map(Some)
+        }))
+        .collect::<Result<_, _>>()?;
+        defaults.push(of_file);
+    }
+    let mut merged: Vec<Vec<Table>> = vec![Vec::new(); kinds.len()];
+    for (f, s) in settings.iter().enumerate() {
+        for (k, tables) in s.tables.iter().enumerate() {
+            for table in tables {
+                let mut expanded = Table::new();
+                for (key, field) in table {
+                    expanded.insert(key.clone(), groups.expand_field(files, field, &mut used)?);
+                }
+                // A table's own key, else its file's default, else the main file's.
+                for keys in [&defaults[f][k], &defaults[0][k]].into_iter().flatten() {
+                    for (key, (field, groups_of_key)) in keys {
+                        if !expanded.contains_key(key) {
+                            expanded.insert(key.clone(), field.clone());
+                            used.extend(groups_of_key.iter().copied());
+                        }
+                    }
+                }
+                merged[k].push(expanded);
+            }
+        }
+    }
+    let main_defaults = defaults.swap_remove(0);
+    Ok(Merged {
+        tables: merged,
+        main_defaults,
+        used,
+    })
+}
+
+/// Where the entry `setting` names is written in a group, when a list of its contract took it
+/// from one. The fold records where each entry it writes out comes from, so a group that holds
+/// the same text but that no list of the contract uses is never named.
+pub(crate) fn group_origin(main: &Path, setting: &Setting) -> Option<(PathBuf, (u32, u32))> {
+    let kind = (HekiConfig::CONTRACT_KEYS.iter()).position(|k| *k == setting.table)?;
+    let value = setting.value.as_deref()?;
+    let text = std::fs::read_to_string(main).ok()?;
+    let layout = ConfigLayout::of(main);
+    // The project root only gives metadata that the places of entries do not depend on.
+    let root = main.parent().unwrap_or(Path::new(""));
+    layout.read(main, &text, root).ok()?;
+    let files = read_files(layout, main, &text, root).ok()?;
+    let settings: Vec<Settings> = (files.iter().enumerate())
+        .map(|(i, f)| settings_of(i, f))
+        .collect();
+    let shown: Vec<String> = files.iter().map(|f| shown_path(&f.path, root)).collect();
+    let groups = Groups::new(&files, &shown, &settings).ok()?;
+    let merged = merge(&files, &settings, &groups).ok()?;
+    let named = |table: &&Table| {
+        setting.entry.as_deref().is_none_or(|name| {
+            matches!(table.get("name"), Some(Field::Value(toml::Value::String(n))) if n == name)
+        })
+    };
+    let entry = (merged.tables[kind].iter().filter(named))
+        .flat_map(|table| table.iter())
+        .filter(|(key, _)| setting.key.as_deref().is_none_or(|k| k == key.as_str()))
+        .filter_map(|(_, field)| match field {
+            Field::List(entries) => Some(entries),
+            Field::Value(_) => None,
+        })
+        .flatten()
+        .find(|e| e.group.is_some() && e.text == value)?;
+    let file = &files[entry.file];
+    Some((file.path.clone(), line_column(&file.text, entry.offset?)))
 }
 
 /// The main file with its contract tables replaced by `merged`, its groups removed, and its

@@ -2982,15 +2982,20 @@ allowed-callers = ["@parser", "tests.*"]
   `allowed-writers` above is `["pkg.parser.*", "pkg.cli:parse", "pkg.store.*"]`.
 - A group is a list of strings. Its entries are neither sorted nor merged: an entry listed twice
   stays twice.
+- Only a whole entry that starts with `@` names a group. An `@` anywhere else is part of the
+  entry, as in the item key of `'pkg.model:Model.fields["user@example.com"]'`.
+- The groups of one list write at most 10,000 entries into it. A group that names another twice
+  doubles it, so a few lines could otherwise write out more entries than memory holds.
 - Group names are shared by the main configuration file and the files it
   [includes](https://heki.koxudaxi.dev/configuration/#several-configuration-files).
 - A group that no contract uses is reported as an
   [entry that matches nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing) is.
-- Errors (exit code 2), each at its file and line: an `@name` that names no group; a cycle
-  between groups (`@a` in `b` and `@b` in `a`, or a group that names itself), with the chain of
-  names; an empty group, which would empty every key that uses it (and an empty `forbidden-*`
-  key means every function); `@` anywhere but at the start of a whole entry (`"pkg.@parser"`);
-  and a group name defined twice.
+- Errors (exit code 2), each at its file and line: an `@name` that names no group, with the
+  chain of groups that leads to it (`@a` -> `@b` -> `@missing`); a cycle between groups (`@a` in
+  `b` and `@b` in `a`, or a group that names itself), with the chain of names; an empty group,
+  which would empty every key that uses it (and an empty `forbidden-*` key means every
+  function); groups that write more than 10,000 entries into one list; and a group name defined
+  twice.
 
 ### Several configuration files
 
@@ -3017,7 +3022,8 @@ allowed-writers = ["@store"]
 ```
 
 - A path is relative to the file that holds `include`. It is a plain path, not a glob, so adding
-  a file is an edit of the main file.
+  a file is an edit of the main file, and not a rooted or drive-prefixed one (`/etc/c.toml`,
+  `C:\c.toml`), so the configuration reads the same in every checkout.
 - An included file holds contract tables, their `<kind>-defaults` tables, and `[groups]`, at its
   top level. Every other setting (`lint`, `src`, `baseline`, `required-version`, ...) stays in
   the main file, and an included file includes nothing.
@@ -3030,8 +3036,8 @@ allowed-writers = ["@store"]
   main file does. The pre-commit hook passes it when it is staged, and naming it in `--touched`
   shows every report. Protect it in review as you protect the main file, for example with its
   own `CODEOWNERS` line: a contract it drops or an entry it adds changes what heki allows.
-- Errors (exit code 2), each at its file and line: a file that cannot be read, a glob, a file
-  listed twice, the main file listed, `include` in an included file, and any setting but the
+- Errors (exit code 2), each at its file and line: a file that cannot be read, a glob, a path
+  that is not relative, a file listed twice, the main file listed, `include` in an included file, and any setting but the
   tables above in an included file. An error in the TOML or a value of an included file names
   that file.
 

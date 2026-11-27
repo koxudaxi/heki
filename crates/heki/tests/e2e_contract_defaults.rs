@@ -727,9 +727,9 @@ fn files_and_groups_that_do_not_fold_are_configuration_errors_at_their_line() {
             "configuration/#named-groups",
         ),
         (
-            "[tool.heki.write-owners-defaults]\nallowed-writers = [\"pkg.@a\"]\n",
+            "[tool.heki.groups]\na = [\"@b\"]\nb = [\"x\", \"@missing\"]\n",
             "",
-            "pyproject.toml:5:20: the entry `pkg.@a` has `@` after its start",
+            "pyproject.toml:6:11: `@missing` names no group: `@a` -> `@b` -> `@missing`",
             "configuration/#named-groups",
         ),
         (
@@ -769,6 +769,24 @@ fn files_and_groups_that_do_not_fold_are_configuration_errors_at_their_line() {
             "configuration/#several-configuration-files",
         ),
         (
+            "[tool.heki]\ninclude = [\"/c.toml\"]\n",
+            "",
+            "pyproject.toml:5:12: `include` entry `/c.toml` is not a relative path",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = ['C:c.toml']\n",
+            "",
+            "pyproject.toml:5:12: `include` entry `C:c.toml` is not a relative path",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = ['\\\\server\\c.toml']\n",
+            "",
+            "pyproject.toml:5:12: `include` entry `\\\\server\\c.toml` is not a relative path",
+            "configuration/#several-configuration-files",
+        ),
+        (
             "[tool.heki]\ninclude = [\"c.toml\"]\n",
             "[[write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\n\n[lint]\nselect = [\"MUT\"]\n",
             "c.toml:5:2: `lint` in an included file",
@@ -792,6 +810,33 @@ fn files_and_groups_that_do_not_fold_are_configuration_errors_at_their_line() {
             "pyproject.toml:5:6: invalid write-owners target `fields`",
             "configuration/#write-owners",
         ),
+        // The group the list took the entry from, not another one with the same text.
+        (
+            "[tool.heki.groups]\nu = [\"fields\"]\nt = [\"fields\"]\n\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"@t\"]\n",
+            "",
+            "pyproject.toml:6:6: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"@t\"]\n",
+            "[groups]\nt = [\"fields\"]\n",
+            "c.toml:2:6: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
+        // The group of the contract the error names, not that of another contract.
+        (
+            "[tool.heki.groups]\nok = [\"sleep\"]\nbad = [\"slep\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"a\"\nscopes = [\"pkg.m:napper\"]\nforbid = [\"@ok\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"b\"\nscopes = [\"pkg.m:napper_too\"]\nforbid = [\"@bad\"]\n",
+            "",
+            "pyproject.toml:6:8: unknown `forbid` token `slep` in effect-boundaries `b`",
+            "configuration/#effect-boundaries",
+        ),
+        // The included file that writes the entry, not a group of the main file with its text.
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n\n[tool.heki.groups]\nt = [\"fields\"]\n",
+            "[[write-owners]]\nname = \"w\"\ntargets = [\"fields\"]\n",
+            "c.toml:3:12: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
     ];
     for (main, included, error, docs) in cases {
         let p = project("fold_errors", main);
@@ -806,6 +851,79 @@ fn files_and_groups_that_do_not_fold_are_configuration_errors_at_their_line() {
         );
         assert!(stderr.contains(docs), "{docs}\n{stderr}");
     }
+}
+
+#[test]
+fn an_existing_file_named_by_a_rooted_path_is_not_included() {
+    let p = project("fold_rooted_include", "");
+    p.write("c.toml", "[groups]\na = [\"x\"]\n");
+    let rooted = p.dir.join("c.toml").display().to_string();
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n[tool.heki]\ninclude = ['{rooted}']\n"),
+    );
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    let error = format!("pyproject.toml:5:12: `include` entry `{rooted}` is not a relative path");
+    assert!(stderr.contains(&error), "{error}\n{stderr}");
+}
+
+#[test]
+fn an_at_sign_inside_an_entry_is_part_of_it() {
+    let module = "class Model:\n    def __init__(self) -> None:\n        self.extras: dict[str, int] = {}\n\n\ndef ok_write(m: Model) -> None:\n    m.extras[\"user@example.com\"] = 1\n\n\ndef bad_write(m: Model) -> None:\n    m.extras[\"user@example.com\"] = 2\n";
+    let config = |key: &str| {
+        format!(
+            "[[tool.heki.write-owners]]\nname = \"w\"\ntargets = ['pkg.e:Model.extras[\"{key}\"]']\nallowed-writers = [\"pkg.e:ok_write\"]\n"
+        )
+    };
+    let shown = |key: &str| {
+        let p = project(&format!("fold_at_sign_{}", key.contains('@')), &config(key));
+        p.write("pkg/e.py", &module.replace("user@example.com", key));
+        let found: Vec<String> = (reports(&p).iter())
+            .map(|d| serde_json::to_string(d).unwrap().replace(key, "KEY"))
+            .filter(|d| d.contains("extras"))
+            .collect();
+        found.join("\n")
+    };
+    let with_at = shown("user@example.com");
+    assert!(with_at.contains("bad_write"), "{with_at}");
+    assert_eq!(with_at, shown("user-example.com"));
+}
+
+#[test]
+fn groups_that_double_write_out_only_what_a_list_uses_and_stop_at_the_limit() {
+    // Each group names the one before twice: 2^64 entries once written out.
+    let doubling: String = (1..=64)
+        .map(|n| format!("g{n} = [\"@g{}\", \"@g{}\"]\n", n - 1, n - 1))
+        .collect();
+    let groups = format!("[tool.heki.groups]\ng0 = [\"pkg.m:ok_write\"]\n{doubling}");
+    let unused = project("fold_doubling_unused", &groups);
+    let (code, stdout, stderr) = unused.check(&[]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("the group `g64` (pyproject.toml:69) is used by no contract"),
+        "{stderr}"
+    );
+    let used = project(
+        "fold_doubling_used",
+        &format!(
+            "{groups}\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"@g13\", \"@g20\"]\n"
+        ),
+    );
+    let (code, stdout, stderr) = used.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    let error =
+        "pyproject.toml:74:28: `@g20` writes more than 10000 entries from groups into one list";
+    assert!(stderr.contains(error), "{error}\n{stderr}");
+    // 2^13 entries are within the limit.
+    let within = project(
+        "fold_doubling_within",
+        &format!(
+            "{groups}\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"@g13\"]\n"
+        ),
+    );
+    let (code, stdout, stderr) = within.check(&[]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
 }
 
 #[test]

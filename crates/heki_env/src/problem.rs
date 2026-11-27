@@ -322,8 +322,9 @@ impl Problem {
         self
     }
 
-    /// The location of its configuration value in `config_file`, the file the run read its
-    /// configuration from, else in a file its `include` lists.
+    /// The location of its configuration value: where `config_file`, the file the run read its
+    /// configuration from, or a file its `include` lists writes it, else the group a list took
+    /// it from.
     pub fn locate(self, config_file: Option<&Path>) -> Self {
         let wanted = self.setting.as_ref().filter(|_| self.location.is_none());
         let found = wanted.zip(config_file).and_then(|(setting, main)| {
@@ -335,6 +336,7 @@ impl Problem {
                     let at = locate_setting(&text, layout, setting)?;
                     Some((path, line_column(&text, at.start)))
                 })
+                .or_else(|| crate::fold::group_origin(main, setting))
         });
         match found {
             Some((path, (line, column))) => self.at(&path, line, column),
@@ -390,23 +392,16 @@ fn to_u32(n: usize) -> u32 {
 }
 
 /// The span of `setting` in the configuration `text`: in its own table, else, for a key an
-/// entry of a contract leaves to its defaults, in the contract's defaults table, else, for a
-/// value a group gives, in the group.
+/// entry of a contract leaves to its defaults, in the contract's defaults table.
 fn locate_setting(text: &str, layout: ConfigLayout, setting: &Setting) -> Option<Range<usize>> {
     let doc = toml_edit::Document::parse(text).ok()?;
     let root = settings_root(doc.as_table(), layout)?;
-    locate_in(root, &setting.table, setting.entry.as_deref(), setting)
-        .or_else(|| {
-            let defaults = format!("{}{}", setting.table, crate::defaults::SUFFIX);
-            // Only a key can be defaulted: a setting without one is not found in the defaults.
-            setting.key.as_ref()?;
-            locate_in(root, &defaults, None, setting)
-        })
-        .or_else(|| {
-            let value = setting.value.as_deref()?;
-            let groups = root.get(crate::fold::GROUPS)?.as_table_like()?;
-            groups.iter().find_map(|(_, item)| value_span(item, value))
-        })
+    locate_in(root, &setting.table, setting.entry.as_deref(), setting).or_else(|| {
+        let defaults = format!("{}{}", setting.table, crate::defaults::SUFFIX);
+        // Only a key can be defaulted: a setting without one is not found in the defaults.
+        setting.key.as_ref()?;
+        locate_in(root, &defaults, None, setting)
+    })
 }
 
 /// The span of the key and value of `setting` in the tables of `table`, those of the entry named
