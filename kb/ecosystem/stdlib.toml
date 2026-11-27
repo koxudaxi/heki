@@ -69,12 +69,14 @@ symbol = "builtins.open"
 effects = ["blocking_fs"]
 exit_suppresses = false
 items = "lines"
+file_object = { file = { arg = 0, param = "file" }, mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.open"
 effects = ["blocking_fs"]
 items = "lines"
+file_object = { file = { arg = 0, param = "file" }, mode = { arg = 1, param = "mode" }, buffering = { arg = 2, param = "buffering" } }
 opaque_to_layer3 = true
 
 [[entries]]
@@ -104,6 +106,623 @@ opaque_to_layer3 = true
 symbol = "pathlib.Path.open"
 effects = ["blocking_fs"]
 items = "lines"
+file_object = { mode = { arg = 0, param = "mode" }, buffering = { arg = 1, param = "buffering" } }
+opaque_to_layer3 = true
+
+# --- File objects ---
+# The classes `io.open` returns (`file_object`: a text mode gives `io.TextIOWrapper`, a binary
+# one the buffered class of its kind, `buffering=0` `io.FileIO`), and `io.open()`, the class
+# of a file object of a mode or a buffering heki does not know: the members every one of them
+# has. A member waits on the file system when it can read, write, flush, or move on an
+# instance of the class; one that always raises `io.UnsupportedOperation` there (`write` of a
+# binary reader) or only asks the kernel (`fileno`, `isatty`, `tell` of a binary file) does
+# not. `FileIO.read` and `FileIO.write` return `None` in non-blocking mode, and so do the
+# binary reads of a file opened from an integer file descriptor (`open` sets `O_NONBLOCK` on no
+# path): `file_object` gives `io.open()` for a binary read of a file that is not known to be a
+# path.
+
+[[entries]]
+symbol = "io.TextIOWrapper.read"
+effects = ["blocking_fs"]
+return_type = "builtins.str"
+items = "text"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.str"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.write"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.tell"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.flush"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.str"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.TextIOWrapper.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.read"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.write"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.writelines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.truncate"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.flush"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedReader.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.readline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.readlines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.write"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.flush"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__iter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__next__"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedWriter.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.read"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.write"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.flush"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.BufferedRandom.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.read"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.readline"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.readlines"
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.write"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.writelines"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.seek"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.tell"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.truncate"
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.flush"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.close"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.fileno"
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.readable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.writable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.seekable"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.isatty"
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__iter__"
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__next__"
+effects = ["blocking_fs"]
+return_type = "builtins.bytes"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__enter__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.FileIO.__exit__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().read'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().readline'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().readlines'
+effects = ["blocking_fs"]
+return_type = "builtins.list"
+items = "lines"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().write'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().writelines'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().seek'
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().tell'
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().truncate'
+effects = ["blocking_fs"]
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().flush'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().close'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().fileno'
+return_type = "builtins.int"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().readable'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().writable'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().seekable'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().isatty'
+return_type = "builtins.bool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__iter__'
+effects = ["blocking_fs"]
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__next__'
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__enter__'
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'io.open().__exit__'
+effects = ["blocking_fs"]
 opaque_to_layer3 = true
 
 [[entries]]

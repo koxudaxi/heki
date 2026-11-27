@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import importlib.machinery
 import importlib.util
@@ -60,11 +61,41 @@ def tokens() -> list[Any]:
     return [contextvars.ContextVar("sentinel").set(1)]
 
 
+# Closes the files this script opens, then removes their directories, whatever `main` ends with.
+CLEANUP = contextlib.ExitStack()
+
+
+def scratch_directory() -> Path:
+    """A new directory, removed when `CLEANUP` closes (after the files opened in it)."""
+    folder = CLEANUP.enter_context(tempfile.TemporaryDirectory(prefix="heki-sentinel-"))
+    return Path(folder)
+
+
 def paths() -> list[Any]:
     """A directory holding one file, kept for the life of the script."""
-    folder = Path(tempfile.mkdtemp(prefix="heki-sentinel-"))
+    folder = scratch_directory()
     (folder / "f.txt").write_text("x")
     return [folder]
+
+
+def files(*modes: str) -> Callable[[], list[Any]]:
+    """New files holding two lines, opened in each of `modes` (`"r+b0"`: with `buffering=0`)."""
+
+    def make() -> list[Any]:
+        folder = scratch_directory()
+        opened = []
+        for i, mode in enumerate(modes):
+            path = folder / f"f{i}.txt"
+            path.write_text("a\nb\n")
+            unbuffered = mode.endswith("0")
+            opened.append(
+                CLEANUP.enter_context(
+                    open(path, mode.removesuffix("0"), buffering=0 if unbuffered else -1)
+                )
+            )
+        return opened
+
+    return make
 
 
 # Instances of each class whose rows are checked, by the symbol the rows name it with.
@@ -73,6 +104,13 @@ RECEIVERS: dict[str, Callable[[], list[Any]]] = {
     "contextvars.ContextVar": context_variables,
     "contextvars.Token": tokens,
     "pathlib.Path": paths,
+    "io.TextIOWrapper": files("r+"),
+    "io.BufferedReader": files("rb"),
+    "io.BufferedWriter": files("ab"),
+    "io.BufferedRandom": files("r+b"),
+    "io.FileIO": files("r+b0"),
+    # A file object of a mode heki does not know: one of each class whose members all work.
+    "io.open()": files("r+", "r+b", "r+b0"),
 }
 
 # Calls of the functions of a module whose `return_type` is checked, by symbol.
@@ -95,6 +133,15 @@ ARGUMENTS: dict[str, tuple[Any, ...]] = {
     "pathlib.Path.__rtruediv__": ("x",),
     "pathlib.Path.glob": ("*",),
     "pathlib.Path.rglob": ("*",),
+    "io.TextIOWrapper.write": ("x",),
+    "io.BufferedWriter.write": (b"x",),
+    "io.BufferedRandom.write": (b"x",),
+    "io.TextIOWrapper.seek": (0,),
+    "io.BufferedReader.seek": (0,),
+    "io.BufferedWriter.seek": (0,),
+    "io.BufferedRandom.seek": (0,),
+    "io.FileIO.seek": (0,),
+    "io.open().seek": (0,),
 }
 
 
@@ -245,6 +292,11 @@ def checked(symbol: str, check: Callable[[], list[str]]) -> list[str]:
 
 
 def main() -> int:
+    with CLEANUP:
+        return run()
+
+
+def run() -> int:
     data = tomllib.loads(KB.read_text())
     failures: list[str] = []
     for row in data.get("attributes", []):

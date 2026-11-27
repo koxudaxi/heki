@@ -3101,7 +3101,14 @@ where `only_from_dict` says so: `pydantic.BaseModel.model_construct`, `model_val
 instance built without a field starts from the field's default itself when it is hashable, and
 from a deep copy of an unhashable one, then holds what validating the default returns where the
 field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
-`sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
+`sqlite3.connect`), `file_object` (the call opens a file as `io.open` does: the positions and
+keywords of its `file`, `mode`, and `buffering`, which select the class of the file object it returns
+(`heki_kb::FileArgs::class`): `io.TextIOWrapper` for a text mode, `io.BufferedReader`,
+`io.BufferedWriter`, or `io.BufferedRandom` for a binary one, `io.FileIO` for `buffering=0`,
+and `io.open()`, the class of the members every one of them has, for a mode or a buffering heki
+does not know, or for a binary read of a file that is not known to be a path, which an integer
+file descriptor may make non-blocking so that `read` returns `None`; `open`, `io.open`,
+`pathlib.Path.open`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
