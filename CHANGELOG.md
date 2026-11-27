@@ -7,6 +7,250 @@ configuration keys, diagnostics, and output formats, except what the
 [stability policy](docs/adoption.md#stability-on-the-way-to-10) keeps stable; each change is listed
 under "Breaking changes".
 
+## [0.10.0] - Unreleased
+
+### Breaking changes
+
+- `EFF109` (`lock-reacquired-while-held`) and `EFF116` (`generator-never-iterated`) are on by
+  default (see Changed), so a default run can show new reports. An exact `EFF109` report is an error
+  and fails the run like any exact bug report; `EFF116` reports are warnings. (#605)
+- `EFF101` (and the other rules that follow a call on a container item) now reports calls on the
+  items of an attribute with a bare container annotation, of a `collections.deque`, and of
+  `dict(a=x)` or `dict(**m)`, where it reported nothing. (#561, #575)
+- On the corpus of 378 projects, the default output of 0.10.0 holds 275 reports where 0.9.0 held
+  259. All 16 new ones are `EFF109` (6) and `EFF116` (10), exact, from the census set; nothing else
+  in the default output changes. With every rule selected, the other changes are heuristic reports
+  of opt-in rules, and one exact `MUT101` report moves to no report where a computed name may
+  install `__setattr__` (#574). To turn the new rules off, write `ignore = ["EFF109", "EFF116"]` in
+  `[tool.heki.lint]`, or run with `--ignore EFF109` or `--ignore EFF116`.
+- Reports on what a name a module `__getattr__` serves holds or runs change where heki now follows
+  the hook: `MUT205`, `MUT206`, and `MUT207` no longer report writes, reads, and calls on instances
+  of a class based on it as on an object of unknown class, the contracts of the class (`MUT201`,
+  `MUT203`, `MUT204`) judge them, and the rules that follow calls (`EFF101`, `EFF103`, ...) follow
+  calls of the served function and the methods of a class based on the served class, exactly where
+  the hook serves a named object. Where a module also binds the name under `if TYPE_CHECKING:`, what
+  the hook serves now decides what a call runs, and an annotation naming the name still reads the
+  `TYPE_CHECKING` import. (#581, #593)
+- Writes, reads, and calls on the result of `importlib.util.module_from_spec(...)` and of a call of
+  a `type[C]` attribute are judged on its class: `MUT205`, `MUT206`, and `MUT207` no longer report
+  them as on an object of unknown class, the contracts of `C` (`MUT201`, `MUT203`, `MUT204`) judge
+  them, and the rules that follow method calls (`EFF101`, `EFF103`, ...) now follow calls on such an
+  object and into `C.__init__`. (#517, #582, #592)
+- A write through a value that may be a class object, under a name built at run time that may be `__setattr__`
+  (or another hook: `__delattr__`, `__getattribute__`, `__getattr__`, a copy hook), leaves the claim open, so
+  an exact `MUT101` report on such a class is no report. `MUT115` says "may share" for a change below a copy
+  of it. (#568, #574)
+
+### Added
+
+- `EFF118` (`unshielded-cleanup-checkpoint`, heuristic, off unless selected or `--heuristic`): a
+  `finally` body, an `except` clause taking the cancellation, or an `__aexit__` that awaits a call
+  reaching an AnyIO or Trio cancellation checkpoint (`anyio.sleep`, `to_thread.run_sync`, a lock's
+  acquisition, `Event.wait`, a memory stream's `send`, their Trio counterparts, ...) with no shield
+  on the way. In a cancelled scope the await raises the cancellation and the rest of the cleanup
+  does not run. The report names the checkpoint and the calls down to it. `CancelScope(shield=True)`
+  and `move_on_after(..., shield=True)` on the way, a project function whose checkpoints are all
+  shielded, a branch the call's constant arguments never take, a lock made with `fast_acquire=True`,
+  the re-delivery idiom (`await lowlevel.checkpoint()` last), and a function every call of which
+  runs it shielded are not reported. The catalog gains a `checkpoint` effect and a `cancel_scope`
+  key. (#594)
+- A JSON Schema for every JSON format heki writes, in `docs/schemas/` and published at
+  `https://heki.koxudaxi.dev/schemas/<name>.json`: the diagnostics of `heki check --output-format
+  json` (`check-1`), the file of `--report-suppressed` (`report-suppressed-1`), the summary snapshot
+  (`summary-snapshot-1`), the Ratchet baseline in each version heki reads (`baseline-1`,
+  `baseline-2`, `baseline-3`), `heki inspect` (`inspect-1`, and `inspect-imports-1` with
+  `--imports`), `heki rule` (`rule-1`), `heki assumptions --json` (`assumptions-1`), and the object
+  a failed command writes with `--output-format json` (`error-1`). `heki check
+  --output-format-json-schema <name>` prints one, and the new [Output
+  Formats](https://heki.koxudaxi.dev/output-formats/) page lists them and says how their versions
+  change. The schemas are derived from the types that write the output, and tests check the real
+  output of every format against them. No output changed. (#591)
+
+### Changed
+
+- `EFF109` is a default exact rule at error severity: a report is exact when the lock is of a
+  non-reentrant class no project class changes the acquisition of (`threading.Lock`, `asyncio.Lock`,
+  or a class the configuration names), it is held on every path to the call, both sides name it the
+  same way, and every implementation of each call on the way attempts the acquisition whenever it
+  returns. A report is heuristic where one of these is open (a branch around the acquisition in a
+  helper, a method a subclass overrides, a decorator that may replace the helper, a project class
+  derived from the lock class). A helper that gives its caller's lock back is followed: the caller
+  no longer holds it after the call. `anyio.Lock` stays out of the rule: it raises on a second
+  acquisition by the holder instead of waiting. (#605)
+- `EFF116` is a default exact rule at warning severity (a generator whose body never runs shows in
+  the first test that uses it): a report is exact when every function the call runs is a generator
+  function bound once and they are every implementation it can run, and heuristic where the name is
+  bound to more than one definition or the receiver is typed by a protocol. (#605)
+- Neither rule is experimental any more. (#605)
+- `heki recommend` (experimental), text output: the report starts with up to three first steps
+  ("Start here"), each repeating what a later part says, and then a new section, "Types the code
+  already keeps", which lists the exact read-only parameter groups (the first 3 by rank, every group
+  with `--all`, the heuristic ones last with the premises they leave open), what each group states,
+  its guards, and whether a type checker is configured. "Rules worth enabling here" comes next and
+  ends with the `heki check --extend-select` command that shows the reports it counts; a rule that
+  runs now says that naming it adds its heuristic reports, and the rules without reports are counted
+  on one short line (`--all` names the heuristic ones; the `MUT103` line shows with `--all` or a
+  saved summary snapshot). In "What heki cannot see", the source-root lines come first, library
+  names whose trial would change a report come before the others, which are counted, and unresolved
+  calls in test code come after the rest. "What keeps reports heuristic" moves after the contract
+  candidates. The hint at the end of a clean `heki check` names the parameter types. The JSON object
+  is unchanged but for `content`. (#578)
+- Calls on what common standard library functions return are resolved by the class of the result:
+  `subprocess.run` gives a `subprocess.CompletedProcess`, `os.stat`, `os.lstat`, `Path.stat` and
+  `Path.lstat` an `os.stat_result`, `re.compile` a `re.Pattern`, `logging.getLogger` a
+  `logging.Logger`, `threading.current_thread` and `main_thread` a `threading.Thread`,
+  `importlib.import_module` a `types.ModuleType` (calls on it stay unresolved), and `os.getcwd`,
+  `os.getcwdb`, `json.dumps`, `Path.read_text` and `Path.read_bytes` a `str` or `bytes`.
+  `os.path.abspath`, `realpath`, `relpath` and `expanduser` give a path of the kind they are passed,
+  `shutil.copy` and `copy2` one of the kind of their destination, `shutil.copytree` the destination
+  itself, and `urllib.parse.urlparse` a `ParseResult` or a `ParseResultBytes`; an argument heki
+  knows nothing of gives no class. `heki recommend` counts fewer unresolved calls. (#614)
+
+### Fixed
+
+- An attribute annotated with a bare container class (`self.handlers: list = []`, also `dict`, `set`
+  and `deque`) keeps the class of its items from the stores into it
+  (`self.handlers.append(Handler())`), as it does without the annotation, so a call on an item in
+  `async def` reports like one on `list[Handler]`, also when other modules and subclasses store into
+  it. `deque()` and `deque(items)` now give the items they hold, as `list(...)` does.
+  `deque(iterable=items)` and `enumerate(iterable=items)` read the keyword, `dict(a=x)` and
+  `dict(**m)` hold the entries they are given, and an iterable that `*` or `**` unpacking may pass
+  leaves the items unknown where it read as empty. (#561, #575)
+- A name a module binds no other way (or only under `if TYPE_CHECKING:`) but serves from its
+  module-level `__getattr__` is what the hook returns for that name, where heki can follow it: a
+  branch testing the name against the literal (`if name == "Base":`, `name in ("Base", "Model")`,
+  also negated), or a value read from a module-level dict by the name (`_EXPORTS[name]`,
+  `_EXPORTS.get(name)` with an `is None` test), also called (`_EXPORTS[name]()`). A call gives what
+  the function of the module returns by its declarations: a class it defines in its body, also
+  behind `functools.lru_cache`, or the class object its return annotation names. So `from pkg.lazy
+  import Base` and `pkg.lazy.Base` are that class, a class based on it has its methods (`obj.copy()`
+  returning `Self` is typed), and calling it constructs it. A served class object of a class or a
+  subclass (`-> type[Base]`) types calls as a `TYPE_CHECKING` import does, with heuristic targets. A
+  hook heki cannot follow (`importlib.import_module`, `getattr`, a `return` of anything else or of
+  different objects for one name, a factory another module defines), a module caching what it serves
+  in `globals()`, and a module whose hook another module may change (it rebinds the table, the
+  factory, or the hook, or stores into the module under a name heki cannot read) leave the name
+  unknown, as before. (#581, #593)
+- A standard library call returns the class its declared return type names, through the catalog's
+  `return_type`: `importlib.util.module_from_spec(spec)` gives a `types.ModuleType`, also when
+  `importlib.util` is imported inside the function, under another name, or the function is imported
+  by name. A custom loader's `create_module` may return another object; the declaration wins in the
+  Advisory lane, as an annotation does. (#517, #582, #592)
+- A call of a value declared `type[C]` constructs a `C` whatever holds the value: an attribute
+  annotated in `__init__` (`self.field_type: type[Field] = field_type`) or in the class body, read
+  on `self` in the class or in a subclass or on another instance, or stored from such a parameter,
+  as a parameter `field_type: type[Field]` already did. Keyword unpacking in the call (`**{...}`)
+  changes nothing. The call runs the class's constructor (an effect boundary sees what `__init__`
+  does), and it constructs the object, so `fresh-objects = "allow"` allows a write on it. A call of
+  any other value an attribute declares gives what calling that value gives, as for a parameter.
+  (#517, #582, #592)
+- A hook bound on a class after its body is no longer missed. A store through a value that may be a
+  class object (`Child.__setattr__ = hook`, `setattr(Child, "__setattr__", hook)`, a helper handed
+  the class, a class decorator or an `__init_subclass__` storing on `cls`, also in another module)
+  now leaves the claim open when the name stored may be `__setattr__`, `__delattr__`,
+  `__getattribute__`, `__getattr__`, or a copy hook. A constant name decides; a name built at run
+  time (an f-string, `+`, `%`, `.format()`) counts only when the constant text at its ends may be
+  the hook's (`f"__attr_{name}"` never is). A name of unknown value (a parameter, a loop variable
+  over `dir()`, `vars()`, or a mapping's keys, a value read from data) binds no hook, and neither
+  does code heki does not read (a class decorator outside the project, a call or a closure the class
+  is handed to): exact claims now assume that a special method is bound under its own name by a
+  store heki reads (R1), which gives up `setattr(cls, name, hook)` binding `__setattr__` through
+  such a `name`. A store through a value heki establishes as an instance (`self`, what a class call
+  makes, a parameter annotated with a class other than `type`) binds no hook, as Python looks
+  special methods up on the type. `MUT115` says "may share" for a change below a copy of such a
+  class, and `MUT101` no longer takes a write on it for a plain store. (#568, #574)
+- `fresh-objects = "allow"`: new objects a function stores in one another stay new (`copied, part =
+  Node(), Node(); part.parent = copied; copied.flag = True` is no longer reported) when the
+  attribute write runs no code (for a pydantic model: no `model_config`, `Config`, or class keyword
+  on a class the object may be), and so do the targets of an unpacked display (`a, b = X(), Y()`).
+  Links are directed: keeping an object keeps what it holds, not the objects holding it. Storing
+  `part`, or a value read out of it (`part.parent`, `-part` with a project `__neg__`,
+  `registry[part]` with a project `__getitem__`), elsewhere, yielding it, capturing it, or handing
+  it to a call that may keep it ends `copied`'s freshness, also where `part` came from a project
+  function whose result holds itself; storing `copied` leaves `part` new. A store into an object the
+  function did not make, or into one of its own that was kept before, still ends the freshness of
+  what it stores. (#416, #567)
+- `fresh-objects = "allow"`: a new object stored into a list, set, or dict that its holder's
+  constructor made for it stays new (`copied = Node(); copied.children.append(part); part.flag =
+  True` is no longer reported, and neither is the issue's `pass_factory`), through `append`,
+  `appendleft`, `insert`, `add`, `setdefault`, and item stores that run no project code. The
+  `__init__` the class runs must bind the attribute once, on every path, to a new display or
+  `list()`, `dict()`, `set()`, and use `self` only to store attributes and to call
+  `super().__init__(...)` into an `__init__` that does the same, with no store running a property's
+  setter or other code. A shallow copy's lists, an attribute rebound or written by name before the
+  store, a list kept or handed to a helper that may keep it, a constructor calling a method of
+  `self` or a base replacing the namespace, and classes whose attribute access runs code stay
+  reported. (#416, #588)
+- A class statement unpacking a mapping of keywords heki cannot read (`class C(**options)`) may pass
+  a metaclass, so the class's metaclass is unknown; the entries of a dict display with string keys
+  count as keywords (`**{"metaclass": Meta}` passes `Meta`). (#416, #588)
+- `fresh-objects = "allow"`: a construction keeps what the class's `__init__` keeps of `self`, its
+  own or a base's reached through `super().__init__()` in another module: an `__init__` storing
+  `self` somewhere older (`REGISTRY.append(self)`) or handing it to a helper that keeps it no longer
+  gives a new object, so a later write to it is reported. A class with a metaclass other than `type`
+  or `abc.ABCMeta`, a decorated `__init__`, or an `__init__` the project rebinds outside its class
+  body gives no new object either. An `__init__` handing `self` to a helper that only stores
+  attributes, and one of a class outside the project, keep nothing. (#589, #600)
+- `fresh-objects = "allow"`: a container a constructor made for a new instance is no longer taken to
+  be held by the instance alone when a base `__init__` reached through `super()` is rebound, when a
+  star import of the module may bind `list`, `dict`, `set`, or `super`, after a slice store into it
+  (`h.children[:] = part` iterates `part`), or after a write through `getattr(h, "__dict__")` or
+  `object.__getattribute__(h, "__dict__")`. (#598, #600)
+- The members of `unittest.TestCase` and `unittest.IsolatedAsyncioTestCase` are in the catalog: the
+  `assert*` methods, `fail`, `skipTest`, `subTest`, `id`, `shortDescription`, the `setUp` and
+  `tearDown` hooks, and the cleanup methods. A call such as `self.assertEqual(...)` in a test class
+  is no longer an unresolved call, so these names no longer fill the "What heki cannot see" table of
+  `heki recommend`. (#579)
+- `open`, `io.open` and `pathlib.Path.open` give their result the file class its mode and buffering
+  select, as CPython does: `io.TextIOWrapper` for a text mode, `io.BufferedReader`,
+  `io.BufferedWriter` or `io.BufferedRandom` for a binary one, and `io.FileIO` for `buffering=0`. A
+  mode or a buffering heki does not know gives a class with the members every file class has. The
+  members `read`, `readline`, `readlines`, `write`, `writelines`, `seek`, `tell`, `truncate`,
+  `flush`, `close`, `fileno`, `readable`, `writable`, `seekable`, `isatty`, `__iter__`, `__next__`,
+  `__enter__` and `__exit__` are in the catalog with what they return (`read` gives `str` or `bytes`
+  by mode). A call such as `f.read()` or `f.close()` on a file object, or `with open(...) as f`, is
+  no longer an unresolved call in `heki recommend`, and the members that read, write, flush, seek,
+  or close the file wait on the file system (`EFF105`) as `open` does. (#599)
+- `MUT201`, `EFF201`, `MUT208`: a helper handed a target's container that writes an attribute of an
+  entry of a project class (`set_attr_all(model.fields)` doing `for field in fields: field.name = v`
+  with `fields: list[Field]`, also by handing each entry to a function typing it, `rename(field,
+  v)`, or below one of the entry's attributes, `field.tags.append(v)`) no longer writes the
+  container (`Model.fields`, "inside an item, through a helper"). The write is the entry class's
+  (`Field.name`), judged by that attribute's contracts, as the same write made directly or through a
+  helper handed the owner already was. An in-place change of an entry (`box["k"].add(v)`, `for group
+  in groups: group.clear()`) and an attribute write on an entry heki ties to no project class
+  (`fields: list`) still write the container. (#580, #590)
+- `MUT110`, and every reader of what a call hands back as itself (`MUT108`, `MUT201`, `MUT205`): a
+  project function returning what another project function returns of its parameter (`def
+  forwarded(x): return identity(x)`) now hands the argument back as itself, through any number of
+  such calls and across modules, by name, through an imported module (`ops.same(x)`), or by keyword.
+  `change(forwarded(items))` with `items: Sequence[int]` is reported where the change runs. A
+  function returning another parameter on some path, a copy (`list(x)`, `copy.copy(x)`), a method's
+  result, or the result of a call cycle that never returns (`a(x)` returning `b(x)`, which returns
+  `a(x)`) stays open. (#609)
+
+### Documentation
+
+- Feature pages group heki's capabilities by problem: State Ownership and Mutation, Async and
+  Execution Effects, and Imports and Module Boundaries. Each lists the rules that run by default and
+  the opt-in, heuristic, and experimental ones, the contracts that go with them, and an example.
+  (#584)
+- State Ownership and Mutation covers who may change, read, or call what, not breaking a value you
+  borrowed or share, and single-use values, with a table mapping ownership, borrowing, move, and
+  lifetime to the closest rules. Async and Execution Effects adds exclusive use and lock safety, and
+  resource and cancellation lifetimes. (#608)
+- Adoption recipes: blocking and database-write contracts for a web service, a layered application,
+  and the `--report-suppressed` audit for agent walls. Prebuilt wheels need no Rust toolchain, and
+  what stays stable on the way to 1.0 is written down. (#586)
+- Rule Precision opens with the three outcomes, an exact report, a heuristic report, and no report,
+  with one run of each. (#611)
+- Rule Precision gains a "Rare failures" path: a rule with fewer than 10 exact reports in the census
+  and holdout run can run by default with no false claim, a run-time oracle on generated programs,
+  and at least two real bugs. The certifications table gets a "Real bugs" column, and
+  `build_docs.py` checks it. (#585)
+- Community files: code of conduct, security policy, contributing guide, issue templates, and a pull
+  request template. (#610)
+
 ## [0.9.0] - 2026-11-26
 
 ### Breaking changes
