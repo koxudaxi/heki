@@ -869,6 +869,8 @@ const EXACT_BASE_QUIET_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef 
 const EXACT_FETCH: &str = "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n";
 const EXACT_FETCH_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nif os.environ.get(\"QUIET\"):\n    fetch = _quiet\n";
 const EXACT_FETCH_REBOUND: &str = "import requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nfetch = _quiet\n";
+const EXACT_STAR: &str = "TIMEOUT = 1\n";
+const EXACT_STAR_REBINDING: &str = "TIMEOUT = 1\n\n\ndef fetch(url):\n    return url\n";
 const EXACT_FETCH_USE: &str =
     "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
 // A class a function binds under `global` (`ModuleDecls::made_in`): the module's name holds it
@@ -1634,7 +1636,9 @@ fn steps_kept_values() -> Vec<Step> {
 /// Exact effect reports follow every implementation of a call across modules (the targets of
 /// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
 /// (`EffectSummary::must_exec`, compared by Early Cutoff), and every binding of the name called
-/// that may be its last in the module or class body of another file.
+/// that may be its last in the module or class body of another file, a star import after the
+/// definition included, which binds what the module it imports defines
+/// (`ProjectDecls::star_rebound`).
 fn steps_exact_effects() -> Vec<Step> {
     vec![
         Step::new(
@@ -1725,6 +1729,30 @@ fn steps_exact_effects() -> Vec<Step> {
             ("pkg/exact_fetch_use.py", "EFF101"),
             ("pkg/exact_fetch_use.py", "EFF101 [heuristic]"),
         ]),
+        Step::new(
+            "the function's module star-imports a module binding no such name after the function",
+            vec![
+                save(
+                    "pkg/exact_fetch.py",
+                    &format!("{EXACT_FETCH}\n\nfrom pkg.exact_star import *\n"),
+                ),
+                Action::Create("pkg/exact_star.py", EXACT_STAR.to_owned()),
+            ],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the star-imported module starts defining the function's name",
+            vec![save("pkg/exact_star.py", EXACT_STAR_REBINDING)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101")]),
+        Step::new(
+            "the star-imported module stops defining it",
+            vec![save("pkg/exact_star.py", EXACT_STAR)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "a module binds a class under `global` in a function it runs on every path",
             vec![
