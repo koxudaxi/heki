@@ -10,6 +10,9 @@
 //!
 //! [`EffectSummary::return_origins`]: crate::EffectSummary::return_origins
 
+mod slots;
+pub use slots::{SlotRead, Slots};
+
 use crate::readonly::{self, COPY_METHODS, SLICE_COPYING_TYPES};
 use crate::resolver::Callee;
 use heki_ast::Span;

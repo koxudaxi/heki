@@ -1596,3 +1596,259 @@ def int_or_shared(shared, fresh):
         vec![d("m.py", 10, "subclass_cast_back", "x")]
     );
 }
+
+/// Values stored at constant keys of builtin containers and read back: a key holding a value new
+/// on one path and the caller's on another is followed as a variable is, through a display, `get`,
+/// a branch, a loop, an unpacking before it, and a `try`. Not followed: another key, a negative
+/// one, a key opened between the store and the read (a store with an unknown key or `True`, a
+/// deletion, `update`, `|=`, a call the container is handed to, any call or `yield` for a
+/// parameter or a container stored elsewhere, a store through another container that may be it,
+/// an unpacking after it), a container of unknown class, a key overwritten, and a new object
+/// stored in the caller's state (`opts["s"] = {}` where the key is missing), which is that
+/// state's on every path.
+const CONSTANT_KEYS: &str = r#"def log():
+    pass
+
+
+def prepare(d):
+    pass
+
+
+def local_slot(headers=None):
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def param_slot(opts: dict, headers=None):
+    opts["headers"] = headers or {}
+    opts["headers"]["X"] = "1"
+
+
+def display_slot(headers=None):
+    kwargs = {"timeout": 1, "headers": headers or {}}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def read_by_get(headers=None):
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    kwargs.get("headers")["X"] = "1"
+    return kwargs
+
+
+def list_item(rows=None):
+    table = [None]
+    table[0] = rows or []
+    table[0].append(1)
+    return table
+
+
+def after_branch(flag, headers=None):
+    kwargs = {}
+    if flag:
+        kwargs["headers"] = headers or {}
+    else:
+        kwargs["headers"] = {"X": "0"}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def unpacked_before(extra, headers=None):
+    kwargs = {**extra, "headers": headers or {}}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def in_loop(items, headers=None):
+    out = []
+    for item in items:
+        kwargs = {}
+        kwargs["headers"] = headers or {}
+        kwargs["headers"][item] = "1"
+        out.append(kwargs)
+    return out
+
+
+def configure(opts: dict):
+    if "stream" not in opts:
+        opts["stream"] = {}
+    opts["stream"]["usage"] = True
+
+
+def new_stored():
+    kwargs = {}
+    kwargs["headers"] = {}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def settled(opts: dict):
+    opts["s"] = opts.get("s") or {}
+    opts["s"]["u"] = 1
+
+
+def any_key(name, headers=None):
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    kwargs[name] = "1"
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def updated_between(extra, headers=None):
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    kwargs.update(extra)
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def handed(headers=None):
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    prepare(kwargs)
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def param_then_call(opts: dict, headers=None):
+    opts["headers"] = headers or {}
+    log()
+    opts["headers"]["X"] = "1"
+
+
+def untyped_param(opts, headers=None):
+    opts["headers"] = headers or {}
+    opts["headers"]["X"] = "1"
+
+
+class Client:
+    def escaped_then_call(self, headers=None):
+        kwargs = {}
+        self.kwargs = kwargs
+        kwargs["headers"] = headers or {}
+        log()
+        kwargs["headers"]["X"] = "1"
+
+    def through_another(self, headers=None):
+        kwargs = {}
+        self.kwargs = kwargs
+        kwargs["headers"] = headers or {}
+        self.kwargs["headers"] = {}
+        kwargs["headers"]["X"] = "1"
+
+
+def other_key(headers=None):
+    kwargs = {}
+    kwargs["a"] = headers or {}
+    kwargs["b"] = {}
+    kwargs["b"]["X"] = "1"
+    return kwargs
+
+
+def overwritten(headers=None):
+    kwargs = {}
+    kwargs["h"] = headers or {}
+    kwargs["h"] = {}
+    kwargs["h"]["X"] = "1"
+    return kwargs
+
+
+def negative_index(rows=None):
+    table = [None]
+    table[0] = rows or []
+    table[-1].append(1)
+    return table
+
+
+def unpacked_after(extra, headers=None):
+    kwargs = {"headers": headers or {}, **extra}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def aliased(flag, headers=None):
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    other = kwargs if flag else {}
+    other["headers"] = {}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def deleted_between(headers=None):
+    kwargs = {"timeout": 1}
+    kwargs["headers"] = headers or {}
+    del kwargs["timeout"]
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def param_then_unknown_key(opts: dict, cache: dict, name, headers=None):
+    opts["headers"] = headers or {}
+    del cache[name]
+    opts["headers"]["X"] = "1"
+
+
+def merged_in_place(extra, headers=None):
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    kwargs |= extra
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def streamed(opts: dict, headers=None):
+    opts["headers"] = headers or {}
+    yield
+    opts["headers"]["X"] = "1"
+
+
+def flag_key(headers=None):
+    kwargs = {1: headers or {}}
+    kwargs[True] = {}
+    kwargs[1]["X"] = "1"
+    return kwargs
+
+
+def in_try(headers=None):
+    kwargs = {}
+    try:
+        kwargs["headers"] = headers or {}
+        log()
+    except ValueError:
+        kwargs["headers"] = {}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+"#;
+
+#[test]
+fn mut112_follows_values_stored_at_constant_keys() {
+    let p = Project::new("mut112_constant_keys");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/keys.py", CONSTANT_KEYS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let k = "pkg/keys.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(k, 12, "local_slot", "kwargs[\"headers\"]"),
+            d(k, 18, "param_slot", "opts[\"headers\"]"),
+            d(k, 23, "display_slot", "kwargs[\"headers\"]"),
+            d(k, 30, "read_by_get", "kwargs.get(\"headers\")"),
+            d(k, 37, "list_item", "table[0]"),
+            d(k, 47, "after_branch", "kwargs[\"headers\"]"),
+            d(k, 53, "unpacked_before", "kwargs[\"headers\"]"),
+            d(k, 62, "in_loop", "kwargs[\"headers\"]"),
+            d(k, 216, "in_try", "kwargs[\"headers\"]"),
+        ],
+        "{diags:#?}"
+    );
+    assert_eq!(
+        message(at(&diags, k, 12)),
+        "`local_slot` changes `kwargs[\"headers\"]` in place, which is a new object on one path and the parameter `headers` on another"
+    );
+}
