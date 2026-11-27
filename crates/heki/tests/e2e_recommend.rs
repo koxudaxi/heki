@@ -1086,7 +1086,7 @@ fn the_takeaways_come_first_one_of_each_kind() {
             "Quickest safety win: fix EFF101 at app/api.py:4 (get_user), the one exact report of \
              a bug shown now, through 4 place(s): heki check (Reports now)",
             "Smallest wall for a coding agent: the effect-boundaries table \"scopes of app \
-             without blocking calls\" (medium): 10 function(s) of app.lists and 1 more reach no \
+             without blocking calls\" (medium): 11 function(s) of app.lists and 1 more reach no \
              blocking call heki sees; with fail = true, heki check fails on an edit that makes \
              one reach a blocking call (Contract candidates; the table is in the keys at the end)",
             "Biggest blind spot: 1 call(s) heki does not resolve through a parameter without \
