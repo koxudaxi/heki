@@ -264,8 +264,6 @@ enum Binding {
     Copy(VarId),
     /// The class's own `def name(...)`.
     Def,
-    /// A call made under the name (`name = models.CharField(...)`).
-    Call(VarId),
     /// Anything else: an import, an augmented assignment, an `except` clause, a nested class.
     Other,
 }
@@ -302,9 +300,6 @@ fn class_body_names(
                 }
                 InstKind::Copy { src, .. } => Binding::Copy(*src),
                 InstKind::MakeClosure { .. } => Binding::Def,
-                InstKind::Call { dst, .. } | InstKind::MethodCall { dst, .. } => {
-                    Binding::Call(*dst)
-                }
                 _ => Binding::Other,
             };
             let Some(name) = inst
@@ -368,19 +363,8 @@ fn class_body_names(
         let (field, validates_default) = fields.get(name).copied().unwrap_or((false, false));
         let attr = match reaching[..] {
             [i] => {
-                let value = match binds[i].2 {
-                    Binding::Copy(value) => value,
-                    Binding::Call(value) => {
-                        if let Some(callee) = called_name(&shape, value, decls, stores) {
-                            let attr = NamedAttr {
-                                body_call: Some(callee),
-                                ..NamedAttr::default()
-                            };
-                            found.push((body.qualname.clone(), name.to_owned(), attr));
-                        }
-                        continue;
-                    }
-                    Binding::Def | Binding::Other => continue,
+                let Binding::Copy(value) = binds[i].2 else {
+                    continue;
                 };
                 // `attr: T = field(default=NAME)`: a stdlib dataclass makes `NAME` the class
                 // attribute, and `init=False` leaves the field out of `__init__`.
@@ -478,7 +462,7 @@ fn bound_on_paths(
                 continue;
             }
             Binding::Copy(value) => value,
-            Binding::Call(_) | Binding::Other => return None,
+            Binding::Other => return None,
         };
         let (value, is_static) = match static_method_of(shape, value, staticmethod_trusted) {
             Some(wrapped) => (wrapped, true),

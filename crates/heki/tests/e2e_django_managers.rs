@@ -142,17 +142,45 @@ class Related(models.Model):
     tags = models.ManyToManyField(Vendored)
 
 
+def make_manager():
+    return Books.as_manager()
+
+
+class Made(models.Model):
+    custom = make_manager()
+
+
+class Helper:
+    pass
+
+
+class Mixed(models.Model, Helper):
+    pass
+
+
+class Rebound(models.Model):
+    pass
+
+
+Rebound.objects = VendorManager()
+
+
 def tn_unknown_managers(ids: list[int], related: list[Related]) -> None:
     for i in ids:
         Vendored.objects.get(id=i)
         FromQuerySet.objects.get(id=i)
         Built.objects.get(id=i)
+        Made.objects.get(id=i)
+        Mixed.objects.get(id=i)
+        Rebound.objects.get(id=i)
     for r in related:
         r.tags.count()
 "#;
 
 /// A manager of a class heki does not know, one `as_manager()` builds, a model whose body may
-/// declare one, and a related manager leave the calls unknown.
+/// declare one (through a call of a project function too), a project class after the model base,
+/// a manager stored on the class outside its body, and a related manager leave the calls
+/// unknown.
 #[test]
 fn unknown_managers_stay_unknown() {
     assert_eq!(
