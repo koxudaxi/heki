@@ -100,6 +100,14 @@ class Cache:
         self.client = redis.Redis.from_url(url)
 ```
 
+## How to fix
+Import the module only inside the functions that use it, catch its `ImportError` and name the
+extra to install, or declare the distribution in `[project] dependencies`. When the import is in
+a module a base module loads, and one import carries every chain from a base module to it, the
+help names that import instead, the one nearest the reported import: moved into the functions
+that use it, or made `lazy` on Python 3.15 and later, it takes the report away. heki names it
+only after one search of what the base modules load without it no longer reaches the module.
+
 ## Fix safety
 No automatic fix.
 

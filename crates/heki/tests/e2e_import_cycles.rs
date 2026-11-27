@@ -895,3 +895,111 @@ fn a_group_is_unused_only_where_the_rule_runs_on_all_its_files() {
     );
     assert!(!err.contains("`pkg.a, pkg.b` matched no report"), "{err}");
 }
+
+/// The help of the one report.
+fn the_help(p: &Project, args: &[&str]) -> String {
+    let found = diagnostics(p, args);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    found[0]["help"].as_str().unwrap().to_owned()
+}
+
+/// A ring `r.a` -> ... -> `r.f` -> `r.a` with an inner cycle `r.b` -> `r.c` -> `r.d` -> `r.b`:
+/// only the imports of `r.c` in `r.b` and of `r.d` in `r.c` are on both cycles.
+fn ring_with_inner_cycle() -> Project {
+    let mut files = vec![("r/__init__.py", "")];
+    files.extend([
+        ("r/a.py", "import r.b\n"),
+        ("r/b.py", "import r.c\n"),
+        ("r/c.py", "import r.d\n"),
+        ("r/d.py", "import r.e\nimport r.b\n"),
+        ("r/e.py", "import r.f\n"),
+        ("r/f.py", "import r.a\n"),
+    ]);
+    project("import_cycles_cut", &files)
+}
+
+/// The help names the first import of the reported cycle that every cycle of the group goes
+/// through, which heki checked with one search: moved into a function, or made lazy on Python
+/// 3.15, it leaves the modules without a cycle. The import closing the reported cycle is not on
+/// the inner cycle, so it is not named.
+#[test]
+fn the_import_on_every_cycle_of_a_group_is_named() {
+    let p = ring_with_inner_cycle();
+    assert_eq!(
+        the_help(&p, &[]),
+        "every import cycle of these modules goes through the import of `r.c` in `r.b`: move it \
+         into the functions of `r.b` that use it"
+    );
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        "every import cycle of these modules goes through the import of `r.c` in `r.b`: move it \
+         into the functions of `r.b` that use it, or make it `lazy`"
+    );
+    p.write("r/b.py", "def load():\n    import r.c\n\n    return r.c\n");
+    assert!(reports(&p, &[]).is_empty());
+    p.write(
+        "r/b.py",
+        "lazy import r.c\n\n\ndef load():\n    return r.c\n",
+    );
+    assert!(reports(&p, &["--target-version", "py315"]).is_empty());
+}
+
+/// The import closing the reported cycle is named as this import when every cycle goes through
+/// it; one inside a `try` statement, where Python rejects `lazy`, is only to be moved.
+#[test]
+fn the_reported_import_on_every_cycle_is_this_import() {
+    let p = h7();
+    let py315 = ["--target-version", "py315"];
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through this import: move it into the \
+         functions that use it, or make it `lazy`"
+    );
+    p.write(
+        "pkg/b.py",
+        &format!(
+            "try:\n    from pkg.a import helper_a\nexcept ImportError:\n    raise\n{}",
+            &H7_B[26..]
+        ),
+    );
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through this import: move it into the \
+         functions that use it"
+    );
+}
+
+/// When no one import is on every cycle, or the change would make the import one that
+/// `cycle-edges` counts, the help stays the general one.
+#[test]
+fn a_group_without_one_import_on_every_cycle_keeps_the_general_help() {
+    const GENERAL: &str = "break the cycle at one of its imports: move what the modules share \
+        into a module none of them imports, or import the name only where it is used";
+    let p = project(
+        "import_cycles_no_cut",
+        &[
+            ("q/__init__.py", ""),
+            ("q/a.py", "import q.b\nimport q.c\n"),
+            ("q/b.py", "import q.a\n"),
+            ("q/c.py", "import q.a\n"),
+        ],
+    );
+    assert_eq!(the_help(&p, &["--target-version", "py315"]), GENERAL);
+    let p = project(
+        "import_cycles_counted_cut",
+        &[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", H7_A),
+            ("pkg/b.py", H7_B),
+        ],
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.imports]\ncycle-edges = [\"body\", \"function\"]\n",
+    );
+    assert_eq!(the_help(&p, &[]), GENERAL);
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        "every import cycle of these modules goes through this import: make it `lazy`"
+    );
+}

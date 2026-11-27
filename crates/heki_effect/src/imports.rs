@@ -7,10 +7,12 @@
 //! check from them and the project declarations, and never kept in the index (ADR-017).
 
 mod circular;
+mod cuts;
 mod distributions;
 mod handlers;
 
 pub use circular::CircularFailure;
+pub use cuts::{ChainStep, path_cuts};
 pub use distributions::{DeclaredOnly, Distributions, Only};
 pub use handlers::ImportFailure;
 pub(crate) use handlers::ImportHandlers;
@@ -175,6 +177,10 @@ pub struct ImportSite {
     /// written.
     #[serde(default)]
     pub lazy: bool,
+    /// PEP 810 allows `lazy` on the statement ([`heki_semantic::ModuleImport::lazy_allowed`]);
+    /// never on a star import or a call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lazy_allowed: bool,
 }
 
 impl ImportSite {
@@ -883,6 +889,7 @@ fn statement_site(
     let mut unconditional = at.unconditional && !at.in_class;
     let mut handled = at.handled;
     let is_lazy = matches!(statement, Statement::Import(imp) if imp.is_lazy);
+    let lazy_allowed = matches!(statement, Statement::Import(imp) if imp.lazy_allowed);
     let timing = match statement {
         _ if in_type_checking => Answer::Known(Timing::TypeChecking),
         _ if !runner.is_module_body => Answer::Known(Timing::Function),
@@ -925,6 +932,7 @@ fn statement_site(
         handled,
         unconditional,
         lazy: is_lazy,
+        lazy_allowed,
     }
 }
 
@@ -1428,18 +1436,13 @@ impl<'i> ImportGraph<'i> {
             &Budget::unmetered("import_dependencies"),
             starts,
             |m, next| {
-                for (j, (site, _)) in self.sites(m).into_iter().flatten().enumerate() {
-                    if !site.always_imports_leaving(ImportFailure::MissingModule) {
+                for hop in self.loading_hops(m, &enters) {
+                    if is_start.contains(&hop.to) {
                         continue;
                     }
-                    for hop in self.hops(m, j) {
-                        if is_start.contains(&hop.to) || !enters(hop.to) {
-                            continue;
-                        }
-                        if let Entry::Vacant(entry) = into.entry(hop.to) {
-                            entry.insert(hop);
-                            next.push(hop.to);
-                        }
+                    if let Entry::Vacant(entry) = into.entry(hop.to) {
+                        entry.insert(hop);
+                        next.push(hop.to);
                     }
                 }
             },
@@ -1450,6 +1453,35 @@ impl<'i> ImportGraph<'i> {
         )
         .open_means(None);
         LoadedFrom { order, into }
+    }
+
+    /// The hops [`Self::loaded_from`] takes from the project module `m`: of its imports a missing
+    /// module below them fails along with `m`, into the modules `enters` takes.
+    fn loading_hops(&self, m: u32, enters: &impl Fn(u32) -> bool) -> Vec<ImportHop> {
+        let sites = self.sites(m).into_iter().flatten().enumerate();
+        (sites.filter(|(_, (site, _))| site.always_imports_leaving(ImportFailure::MissingModule)))
+            .flat_map(|(j, _)| self.hops(m, j))
+            .filter(|hop| enters(hop.to))
+            .collect()
+    }
+
+    /// The hops of `chain`, a chain [`Self::loaded_from`] finds from one of `starts` (with the
+    /// same `enters`), whose site carries every chain from `starts` to the module it ends at
+    /// ([`cuts::path_cuts`]), by index into `chain`.
+    pub fn loaded_from_cuts(
+        &self,
+        budget: &Budget,
+        starts: impl IntoIterator<Item = u32>,
+        enters: impl Fn(u32) -> bool,
+        chain: &[ImportHop],
+    ) -> Answer<Vec<usize>> {
+        let steps: Vec<cuts::ChainStep<u32>> = chain
+            .iter()
+            .map(|hop| (hop.from, hop.site, hop.to))
+            .collect();
+        cuts::path_cuts(budget, starts, &steps, |m, out| {
+            out.extend((self.loading_hops(m, &enters).into_iter()).map(|hop| (hop.site, hop.to)));
+        })
     }
 
     /// [`ImportTime`] of every project module, each asked in the order of the modules.

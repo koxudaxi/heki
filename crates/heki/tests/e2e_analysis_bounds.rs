@@ -7660,6 +7660,12 @@ fn a_ring_of_modules_importing_each_other_is_one_report() {
     assert_eq!(reports.len(), 1, "{reports:#?}");
     assert_eq!(reports[0]["path"], "c/m9999.py");
     assert_eq!(reports[0]["related"].as_array().unwrap().len(), modules - 1);
+    // Every import of the ring is on its one cycle: one search over the ring shows it.
+    assert_eq!(
+        reports[0]["help"],
+        "every import cycle of these modules goes through this import: move it into the \
+         functions that use it"
+    );
 }
 
 /// Every module of a clique imports every other: one group, whose shortest cycle the search
@@ -7709,10 +7715,22 @@ fn failing_ring(modules: usize) -> Project {
 fn the_runs_of_the_entries_of_one_cycle_share_one_budget() {
     let modules = 10_000;
     let diags = check_past_budgets(modules, &["import_failures"], failing_ring);
-    let reports = (diags.iter())
+    let reports: Vec<&Value> = (diags.iter())
         .filter(|d| d["rule_code"] == "IMP102")
-        .count();
-    assert!(0 < reports && reports < modules, "{reports}");
+        .collect();
+    assert!(
+        !reports.is_empty() && reports.len() < modules,
+        "{}",
+        reports.len()
+    );
+    // The imports on every cycle of the ring are found by one search, shared by its reports.
+    assert!(
+        (reports.iter()).all(|d| d["help"]
+            == "every import cycle of these modules goes through this import: move it into \
+                the functions that use it"),
+        "{:#?}",
+        reports[0]
+    );
 }
 
 /// A package whose `__init__` imports thousands of submodules, each importing `json`.
@@ -7876,19 +7894,50 @@ fn what_a_long_chain_loads_from_the_package_is_walked_once() {
     );
     let extra = (diags.iter()).find(|d| d["rule_code"] == "IMP302").unwrap();
     assert_eq!(extra["related"].as_array().unwrap().len(), modules);
+    // One search over what the base module loads shows every import of the chain carries it.
+    assert_eq!(
+        extra["help"],
+        "every chain of imports from a top-level package or an entry point's module to \
+         `d.m9999` goes through the import of `d.m9999` in `d.m9998`: move it into the \
+         functions of `d.m9998` that use it"
+    );
 }
 
 /// [`import_chain`] with an `import-boundaries` contract walking what `importers` import, which
 /// forbids the module at the end of the chain.
 fn import_chain_with_contract(modules: usize, importers: &str) -> Project {
+    import_chain_reaching(modules, importers, "all")
+}
+
+/// [`import_chain_with_contract`] with `reach`.
+fn import_chain_reaching(modules: usize, importers: &str, reach: &str) -> Project {
     let p = import_chain(modules);
     p.write(
         "pyproject.toml",
         &format!(
-            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"all\"\n"
+            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"{reach}\"\n"
         ),
     );
     p
+}
+
+/// With `reach = "import-time"`, the import every chain to the forbidden module goes through is
+/// found by one search over what the importer loads.
+#[test]
+fn the_import_a_long_chain_of_a_contract_goes_through_is_found_once() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &[], |n| {
+        import_chain_reaching(n, "c.m0", "import-time")
+    });
+    let report: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .collect();
+    assert_eq!(report.len(), 1, "{report:#?}");
+    assert_eq!(
+        report[0]["help"],
+        "every chain of imports from `c.m0` to `json` goes through the import of `json` in \
+         `c.m9999`: move it into the functions of `c.m9999` that use it"
+    );
 }
 
 /// The walk of an `import-boundaries` contract with `reach` from the head of a long chain of

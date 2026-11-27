@@ -9338,6 +9338,54 @@ fn lsp_diagnostics_equal_a_full_check_through_import_cycles() {
     run_steps(s, &steps);
 }
 
+const CUTS_CONFIG: &str = "[project]\nname = \"acme\"\ndependencies = []\n\n[project.optional-dependencies]\nplot = [\"matplotlib\"]\n\n[tool.heki.lint]\nselect = [\"IMP101\", \"IMP302\"]\n";
+
+/// The help of `IMP101` and `IMP302` names the one import every cycle or every chain goes
+/// through, which the imports of other modules decide: a second cycle, or a second chain, that
+/// an edit of another module adds takes the name away, and the edit undone brings it back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_import_cuts() {
+    let files = vec![
+        ("acme/__init__.py", "from acme import api\n".to_owned()),
+        ("acme/api.py", "from acme import viz\n".to_owned()),
+        ("acme/viz.py", "import matplotlib\n".to_owned()),
+        ("acme/ra.py", "import acme.rb\n".to_owned()),
+        ("acme/rb.py", "import acme.rc\n".to_owned()),
+        ("acme/rc.py", "import acme.ra\n".to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_import_cuts", CUTS_CONFIG, files, false);
+    let both = &[("acme/rc.py", "IMP101"), ("acme/viz.py", "IMP302")];
+    let steps = [
+        Step::new(
+            "one import closes every cycle and carries every chain",
+            Vec::new(),
+        )
+        .present(both),
+        Step::new(
+            "a module of the ring closes a second cycle through another module",
+            vec![
+                Action::Create("acme/rd.py", "import acme.rb\n".to_owned()),
+                save("acme/rb.py", "import acme.rc\nimport acme.rd\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "the package imports the module with the extra directly too",
+            vec![save("acme/__init__.py", "from acme import api, viz\n")],
+        )
+        .present(both),
+        Step::new(
+            "the second cycle and the second chain are gone",
+            vec![
+                save("acme/rb.py", "import acme.rc\n"),
+                save("acme/__init__.py", "from acme import api\n"),
+            ],
+        )
+        .present(both),
+    ];
+    run_steps(s, &steps);
+}
+
 /// A baseline whose one entry records the `IMP101` group of the modules `target` lists.
 fn group_baseline(target: &str) -> String {
     format!(

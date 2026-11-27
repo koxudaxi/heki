@@ -47,7 +47,13 @@ pkg/b.py:1:19: IMP102 [heuristic] `<module>` imports `make_a` from `pkg.a` while
 Found 3 diagnostic(s) in 3 file(s).
 ```
 
-This output is from heki 0.9.0. The full format adds the source line and a `help` that names the ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the cyclic import.
+This output is from heki 0.9.0. The full format adds the source line and a `help`. When one import is on every cycle of the modules, the help names it, as here, where each of the two imports is:
+
+```text
+  = help: every import cycle of these modules goes through this import: move it into the functions that use it, or make it `lazy`
+```
+
+heki names an import only after one search of the import graph without it finds the cycle gone, and only a change that takes it out of what the rule counts: `lazy` from Python 3.15 on, where Python allows the keyword, and neither change for a class of imports `cycle-edges` counts. Otherwise the help names the general ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the import of the cycle. `IMP301` and `IMP302` name the one import every chain from the package to the reported module goes through, and `IMP201` with `reach = "import-time"` the one every chain to the forbidden module goes through, each checked the same way.
 
 ## 📦 What package code loads while it loads
 

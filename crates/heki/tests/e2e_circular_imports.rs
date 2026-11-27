@@ -766,3 +766,99 @@ fn a_submodule_a_from_import_may_load_stops_the_run() {
     p.write("pkg/__init__.py", "");
     assert_eq!(reports(&p), ["pkg/b.py:1 [pkg.a.helper_a] pkg.a"]);
 }
+
+/// The help of each report, in the order of the reports.
+fn helps(p: &Project, args: &[&str]) -> Vec<String> {
+    let mut all = vec!["--select", "IMP102", "--output-format", "json"];
+    all.extend_from_slice(args);
+    let (code, out, err) = p.check(&all);
+    assert!(code == 0 || code == 1, "{code}: {out}\n{err}");
+    let found: Vec<Value> = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    (found.iter())
+        .map(|d| d["help"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The ring of three of `ring.a`, `ring.b` and `ring.c`, which fails at `ring/c.py`, with
+/// `extra` added to the files.
+fn failing_ring(name: &str, extra: &[(&str, &str)]) -> Project {
+    let mut files = vec![
+        ("ring/__init__.py", ""),
+        (
+            "ring/a.py",
+            "import ring.b\n\n\ndef helper_a():\n    return 1\n",
+        ),
+        ("ring/b.py", "import ring.c\n"),
+        ("ring/c.py", "from ring.a import helper_a\n"),
+    ];
+    files.extend_from_slice(extra);
+    project(name, &files)
+}
+
+/// Every import cycle of the group goes through the failing import: the help names it, and
+/// made lazy on Python 3.15 (or moved into a function) it leaves no cycle and no failure.
+#[test]
+fn a_failing_import_on_every_cycle_is_named() {
+    let p = failing_ring("circular_imports_cut_here", &[]);
+    let py315 = ["--target-version", "py315"];
+    assert_eq!(
+        helps(&p, &py315),
+        [
+            "every import cycle of these modules goes through this import: move it into the \
+          functions that use it, or make it `lazy`"
+        ]
+    );
+    p.write(
+        "ring/c.py",
+        "lazy from ring.a import helper_a\n\n\ndef use():\n    return helper_a()\n",
+    );
+    assert!(helps(&p, &py315).is_empty());
+}
+
+/// A second cycle through `ring.b`, `ring.c` and `ring.d` leaves the failing import off it: the
+/// help names the one import both cycles go through, which moved into a function ends both.
+#[test]
+fn the_import_every_cycle_of_the_failure_goes_through_is_named() {
+    let p = failing_ring(
+        "circular_imports_cut_elsewhere",
+        &[
+            ("ring/c.py", "from ring.a import helper_a\nimport ring.d\n"),
+            ("ring/d.py", "import ring.b\n"),
+        ],
+    );
+    assert_eq!(reports(&p), ["ring/c.py:1 [ring.a.helper_a] ring.a"]);
+    assert_eq!(
+        helps(&p, &[]),
+        [
+            "every import cycle of these modules goes through the import of `ring.c` in `ring.b`: \
+          move it into the functions of `ring.b` that use it"
+        ]
+    );
+    p.write(
+        "ring/b.py",
+        "def load():\n    import ring.c\n\n    return ring.c\n",
+    );
+    assert!(reports(&p).is_empty());
+}
+
+/// When no one import is on every cycle of the group, the help lists the ways out of the
+/// failure itself.
+#[test]
+fn a_failure_without_one_import_on_every_cycle_keeps_its_help() {
+    let p = failing_ring(
+        "circular_imports_no_cut",
+        &[
+            ("ring/c.py", "from ring.a import helper_a\nimport ring.d\n"),
+            ("ring/d.py", "import ring.c\n"),
+        ],
+    );
+    assert_eq!(reports(&p), ["ring/c.py:1 [ring.a.helper_a] ring.a"]);
+    assert_eq!(
+        helps(&p, &["--target-version", "py315"]),
+        [
+            "import `helper_a` inside the function that uses it, import the module `ring.a` and \
+          read `ring.a.helper_a` where it is used, or bind `helper_a` in `ring.a` before it \
+          imports `ring.b`"
+        ]
+    );
+}
