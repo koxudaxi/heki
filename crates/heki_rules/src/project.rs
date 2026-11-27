@@ -173,6 +173,29 @@ pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path).map(without_verbatim_prefix)
 }
 
+/// [`canonical`] for a path that need not exist: the longest existing ancestor is resolved and
+/// the missing rest is appended, so a place a configuration names (a generated file not yet
+/// written) is in the same form as the files that exist.
+pub fn canonical_allowing_missing(path: &Path) -> std::io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        match canonical(existing) {
+            Ok(mut resolved) => {
+                resolved.extend(missing.iter().rev());
+                return Ok(resolved);
+            }
+            Err(error) => match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) => {
+                    missing.push(name);
+                    existing = parent;
+                }
+                _ => return Err(error),
+            },
+        }
+    }
+}
+
 #[cfg(windows)]
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     use std::ffi::OsString;
@@ -1542,5 +1565,24 @@ mod tests {
                 "{given}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    #[test]
+    fn a_missing_path_is_resolved_through_its_existing_ancestor() {
+        let dir =
+            std::env::temp_dir().join(format!("heki_canonical_missing_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = super::canonical(&dir).unwrap();
+        let missing = dir.join("gen").join("tables.py");
+        assert_eq!(
+            super::canonical_allowing_missing(&missing).unwrap(),
+            base.join("gen").join("tables.py")
+        );
+        assert_eq!(super::canonical_allowing_missing(&dir).unwrap(), base);
+        assert!(super::canonical_allowing_missing(std::path::Path::new("")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

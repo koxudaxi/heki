@@ -17,8 +17,8 @@ use heki_effect::ProjectIndex;
 use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
 use heki_rules::project::{
     CommandPaths, Facts, FileError, Hidden, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv,
-    ProjectOptions, RulesRun, baseline_key, canonical, imports_left_out, paths_leave_out,
-    rel_posix,
+    ProjectOptions, RulesRun, baseline_key, canonical, canonical_allowing_missing,
+    imports_left_out, paths_leave_out, rel_posix,
 };
 use heki_rules::{
     RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, find_rule, fixes_unconditionally,
@@ -245,7 +245,7 @@ pub(crate) fn shown_path(p: &Path) -> PathBuf {
         .ok()
         .map(Path::to_path_buf)
         .or_else(|| {
-            let abs = canonical(p).ok()?;
+            let abs = canonical_allowing_missing(p).ok()?;
             let rel = abs.strip_prefix(canonical(&cwd).ok()?).ok()?;
             Some(rel.to_path_buf())
         })
