@@ -695,6 +695,27 @@ impl Nesting {
     }
 }
 
+/// The closure cells of the module's nested scopes that an enclosing function binds only as one
+/// of its parameters, which no nested scope rebinds ([`Nesting::captured_param`]).
+pub(crate) struct ParamCells(Nesting);
+
+impl ParamCells {
+    pub(crate) fn of(ir: &ModuleIr) -> Self {
+        Self(Nesting::of(ir))
+    }
+
+    /// The function enclosing `f` whose parameter the cell `name` that `f` reads holds, and
+    /// that parameter's position.
+    pub(crate) fn param<'m>(
+        &self,
+        ir: &'m ModuleIr,
+        f: &IrFunction,
+        name: &str,
+    ) -> Option<(&'m IrFunction, u8)> {
+        self.0.captured_param(ir, f, name)
+    }
+}
+
 /// The parameters of enclosing functions that the nested scopes of the module read through
 /// closure cells ([`resolver::CapturedParams`]), by the scope's qualname. A parameter of a function
 /// that one scope nested in it reads is a parameter of every scope nested in it, so a scope can

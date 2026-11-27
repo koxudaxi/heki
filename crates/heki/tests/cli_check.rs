@@ -1577,7 +1577,8 @@ fn naming_a_configuration_file_shows_every_report() {
         "{stderr}"
     );
     // A `heki.toml` holds the configuration then, and its `pyproject.toml` is still read; a
-    // TOML file heki does not read is no analyzed file.
+    // TOML file heki does not read changes no report and is passed over, as the pre-commit hook
+    // passes every staged one.
     p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n");
     for named in ["heki.toml", "pyproject.toml"] {
         let (code, stdout, stderr) = p.heki(&["--output-format", "concise", "--touched", named]);
@@ -1590,7 +1591,7 @@ fn naming_a_configuration_file_shows_every_report() {
     p.write("ruff.toml", "");
     let (code, stdout, stderr) = p.heki(&["--output-format", "concise", "--touched", "ruff.toml"]);
     assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
-    assert!(stderr.contains("`--touched` names 1 path(s)"), "{stderr}");
+    assert!(!stderr.contains("`--touched` names"), "{stderr}");
 }
 
 /// A project that keeps files heki cannot parse on purpose (the fixtures of a parser): a run

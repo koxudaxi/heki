@@ -5,9 +5,10 @@
 # the workspace.) heki follows calls across files, so the hook analyzes the whole project and
 # passes the files of the commit to `--touched`: it shows and fails on the reports in those files
 # and the reports whose call chain reaches them, and on every regression of a baseline. A
-# configuration file at the root can change any report: the hook passes it too, and naming it
-# shows every report. pre-commit appends the files after `args`, so `--touched` stays the last of
-# `args`.
+# configuration file can change any report: the hook passes every TOML file, since a file the
+# configuration includes may have any name; naming a configuration file shows every report, and
+# heki passes over the other TOML files. pre-commit appends the files after `args`, so
+# `--touched` stays the last of `args`.
 - id: heki
   name: heki
   description: Check side effects and mutations across function calls
@@ -15,7 +16,7 @@
   args: [--touched]
   language: python
   types_or: [python, toml]
-  files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
+  files: '\.(py|toml)$'
   pass_filenames: true
   require_serial: true
   # Warnings do not fail `heki check`, and pre-commit hides the output of a hook that passes.

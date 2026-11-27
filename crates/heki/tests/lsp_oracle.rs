@@ -822,6 +822,12 @@ const SERVED_USE: &str = "from pkg.served_models import Waiter\n\n\nclass Served
 const SERVED_PATCH: &str =
     "import pkg.served_models\n\n\ndef patch() -> None:\n    pkg.served_models._EXPORTS = {}\n";
 const SERVED_PATCH_NONE: &str = "def patch() -> None:\n    return None\n";
+// A base another module serves from the `__getattr__` a factory of a third module makes
+// (`GetattrExports::made_by`, `ModuleDecls::hook_factories`): served while the factory's hook
+// stores nothing into the module, and not while its `cache` default is true.
+const HOOK_FACTORY: &str = "def _load(name, entry):\n    if isinstance(entry, str):\n        raise ImportError(name)\n    return entry()\n\n\ndef module_hooks(module_name, table, *, cache=False):\n    def module_getattr(name):\n        if name not in table:\n            raise AttributeError(name)\n        value = _load(name, table[name])\n        if cache:\n            setattr(__import__(module_name), name, value)\n        return value\n\n    return module_getattr, None\n";
+const MADE_SERVED: &str = "from pkg.hook_factory import module_hooks\n\n\ndef _waiter() -> type:\n    from pkg.made_models import Waiter\n\n    class _Made(Waiter):\n        pass\n\n    return _Made\n\n\n_EXPORTS = {\"Waiter\": _waiter}\n__getattr__, __dir__ = module_hooks(__name__, _EXPORTS)\n";
+const MADE_SERVED_USE: &str = "from pkg.made_served import Waiter\n\n\nclass MadeWaiter(Waiter):\n    pass\n\n\nasync def serve_made(w: MadeWaiter) -> None:\n    w.wait()\n";
 // A factory function and a class attribute annotated with the callable they hold
 // (`Callable[..., Waiter]`, `FunctionDecl::return_type`, `ClassDecl` attribute types): calling
 // what they hold in other files gives a `Waiter` while the annotation names that one class.
@@ -1025,6 +1031,12 @@ const ORDER_USE: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order
 const ORDER_USE_SORTED: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d), sort_keys=True))\n";
 // A clause around a call into another module (`EFF114`): the call cycle closes and opens there.
 const REC_HANDLER: &str = "from pkg.rec_walk import descend\n\n\ndef visit(node):\n    return descend(node)\n\n\ndef measure(node):\n    try:\n        return visit(node)\n    except Exception:\n        return 0\n";
+// A handler reporting the error and returning its exit status through a constant of another
+// module (`EFF114`): the status is an integer, a string, or bound twice.
+const REC_STATUS_CODES: &str = "FAILED = 4\n";
+const REC_STATUS_CODES_TEXT: &str = "FAILED = \"4\"\n";
+const REC_STATUS_CODES_REBOUND: &str = "FAILED = 4\nFAILED = 5\n";
+const REC_STATUS: &str = "import sys\n\nfrom pkg.rec_status_codes import FAILED\n\n\ndef visit(node):\n    return sum(visit(child) for child in node)\n\n\ndef main(node):\n    try:\n        visit(node)\n        return 0\n    except Exception as error:\n        print(error, file=sys.stderr)\n        return FAILED\n";
 const REC_WALK: &str = "def descend(node):\n    return len(node)\n";
 const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):\n    return sum(rec_handler.visit(child) for child in node)\n";
 // A function of another module handed to a thread and to `filter` (`EFF115`): it changes between
@@ -1187,6 +1199,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/order_use.py", ORDER_USE),
         ("pkg/rec_handler.py", REC_HANDLER),
         ("pkg/rec_walk.py", REC_WALK),
+        ("pkg/rec_status.py", REC_STATUS),
+        ("pkg/rec_status_codes.py", REC_STATUS_CODES),
         ("pkg/coro_jobs.py", CORO_JOBS),
         ("pkg/coro_use.py", CORO_USE),
         ("pkg/locked_base.py", LOCKED_BASE),
@@ -1959,13 +1973,15 @@ fn steps_returned_types() -> Vec<Step> {
 /// class based on a name another module binds only under `if TYPE_CHECKING:`, while that module
 /// binds it no other way: the wait its method makes is heuristic until the module imports the
 /// name at run time; and a class based on a name another module's `__getattr__` serves, exact
-/// while no file rebinds what the hook reads and heuristic while it serves a class object.
+/// while no file rebinds what the hook reads and heuristic while it serves a class object, also
+/// where the hook is what a factory of a third module makes, while that hook stores nothing.
 fn steps_declared_types() -> Vec<Step> {
     const SITE: &[(&str, &str)] = &[("pkg/generic_site_use.py", "EFF101")];
     const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101 [heuristic]")];
     const LAZY_EXACT: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
     const SERVED: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101")];
     const SERVED_HEURISTIC: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101 [heuristic]")];
+    const MADE: &[(&str, &str)] = &[("pkg/made_use.py", "EFF101")];
     vec![
         Step::new(
             "an attribute typed by the class's type parameter holds the waiting class",
@@ -2049,6 +2065,28 @@ fn steps_declared_types() -> Vec<Step> {
         )
         .present(SERVED)
         .absent(SERVED_HEURISTIC),
+        Step::new(
+            "a base served by the __getattr__ a factory of another module makes",
+            vec![
+                Action::Create("pkg/hook_factory.py", HOOK_FACTORY.to_owned()),
+                Action::Create("pkg/made_served.py", MADE_SERVED.to_owned()),
+                Action::Create("pkg/made_use.py", MADE_SERVED_USE.to_owned()),
+            ],
+        )
+        .present(MADE),
+        Step::new(
+            "the factory's hook stores what it serves by default",
+            vec![save(
+                "pkg/hook_factory.py",
+                &HOOK_FACTORY.replace("cache=False", "cache=True"),
+            )],
+        )
+        .absent(MADE),
+        Step::new(
+            "the factory's hook stores nothing by default again",
+            vec![save("pkg/hook_factory.py", HOOK_FACTORY)],
+        )
+        .present(MADE),
     ]
 }
 
@@ -5959,6 +5997,26 @@ fn steps_eff114() -> Vec<Step> {
             vec![save("pkg/rec_walk.py", REC_WALK)],
         )
         .absent(&[("pkg/rec_handler.py", "EFF114")]),
+        Step::new(
+            "the exit status constant of another module becomes a string",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES_TEXT)],
+        )
+        .present(&[("pkg/rec_status.py", "EFF114")]),
+        Step::new(
+            "it is an integer again",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES)],
+        )
+        .absent(&[("pkg/rec_status.py", "EFF114")]),
+        Step::new(
+            "it is bound twice",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES_REBOUND)],
+        )
+        .present(&[("pkg/rec_status.py", "EFF114")]),
+        Step::new(
+            "it is bound once again",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES)],
+        )
+        .absent(&[("pkg/rec_status.py", "EFF114")]),
     ]
 }
 
@@ -6975,6 +7033,73 @@ fn steps_allowed_examples() -> Vec<Step> {
             ("pkg/purse_use.py", "MUT201"),
             ("pkg/purse_use.py", "MUT203"),
         ]),
+    ]
+}
+
+// `include-overrides`: a write owner and an invalidation contract whose method entries name
+// the overrides in the subclasses of their classes. The classes are in one module, a middle
+// class in a second, the subclasses in a third, and a private helper in a fourth.
+const OVERRIDE_CONTRACTS: &str = "\n[[tool.heki.write-owners]]\nname = \"shelf\"\ntargets = [\"Shelf.items\"]\nallowed-writers = [\"pkg.ov_base:Keeper.store\"]\ninclude-overrides = true\n\n[[tool.heki.invalidation]]\nname = \"catalog\"\ntargets = [\"Leaf.kids\"]\ninvalidators = [\"Catalog.refresh\"]\ninclude-overrides = true\n";
+const OV_BASE: &str = "class Shelf:\n    def __init__(self) -> None:\n        self.items: list[int] = []\n\n\nclass Keeper:\n    def store(self, shelf: Shelf) -> None:\n        shelf.items.append(1)\n\n\nclass Leaf:\n    def __init__(self) -> None:\n        self.kids: list[int] = []\n\n\nclass Catalog:\n    def refresh(self) -> None:\n        pass\n";
+const OV_MID: &str = "from pkg.ov_base import Catalog, Keeper\n\n\nclass Mid(Keeper):\n    pass\n\n\nclass MidCatalog(Catalog):\n    pass\n";
+const OV_MID_BASELESS: &str = "from pkg.ov_base import Catalog, Keeper\n\n\nclass Mid:\n    pass\n\n\nclass MidCatalog:\n    pass\n";
+const OV_HELP: &str = "from pkg.ov_base import Shelf\n\n\ndef _fill(shelf: Shelf) -> None:\n    shelf.items.append(2)\n";
+const OV_SUB_WRITING: &str = "from pkg.ov_base import Shelf\nfrom pkg.ov_mid import Mid\n\n\nclass Sub(Mid):\n    def store(self, shelf: Shelf) -> None:\n        shelf.items.append(3)\n";
+const OV_SUB_HELPED: &str = "from pkg.ov_base import Shelf\nfrom pkg.ov_help import _fill\nfrom pkg.ov_mid import Mid\n\n\nclass Sub(Mid):\n    def store(self, shelf: Shelf) -> None:\n        _fill(shelf)\n";
+const OV_GROW: &str = "from pkg.ov_base import Leaf\nfrom pkg.ov_mid import MidCatalog\n\n\nclass FastCatalog(MidCatalog):\n    def refresh(self) -> None:\n        pass\n\n\ndef grow(leaf: Leaf, catalog: FastCatalog) -> None:\n    leaf.kids.append(1)\n    catalog.refresh()\n";
+
+/// `include-overrides`: an override added in a new subclass, a helper that runs only inside an
+/// override, a base removed from a class above the override in another module, and an
+/// invalidation contract whose invalidator's override announces a write.
+fn steps_include_overrides() -> Vec<Step> {
+    vec![
+        Step::new(
+            "contracts with the key, and a private helper no function calls",
+            vec![
+                Action::Configure(format!("{CONFIG}{OVERRIDE_CONTRACTS}")),
+                Action::Create("pkg/ov_base.py", OV_BASE.to_owned()),
+                Action::Create("pkg/ov_mid.py", OV_MID.to_owned()),
+                Action::Create("pkg/ov_help.py", OV_HELP.to_owned()),
+            ],
+        )
+        .present(&[("pkg/ov_help.py", "MUT201")]),
+        Step::new(
+            "a new subclass in another module overrides the allowed writer",
+            vec![Action::Create("pkg/ov_sub.py", OV_SUB_WRITING.to_owned())],
+        )
+        .absent(&[("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the override hands its write to the private helper",
+            vec![save("pkg/ov_sub.py", OV_SUB_HELPED)],
+        )
+        .absent(&[("pkg/ov_help.py", "MUT201"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the class between the override and the allowed writer drops its base",
+            vec![save("pkg/ov_mid.py", OV_MID_BASELESS)],
+        )
+        .present(&[("pkg/ov_sub.py", "MUT201")]),
+        Step::new("the base is back", vec![save("pkg/ov_mid.py", OV_MID)])
+            .absent(&[("pkg/ov_help.py", "MUT201"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "a write announced by an override of the invalidator",
+            vec![Action::Create("pkg/ov_grow.py", OV_GROW.to_owned())],
+        )
+        .absent(&[("pkg/ov_grow.py", "MUT208")]),
+        Step::new(
+            "the class between the override and the invalidator drops its base",
+            vec![save("pkg/ov_mid.py", OV_MID_BASELESS)],
+        )
+        .present(&[("pkg/ov_grow.py", "MUT208"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the base is back again",
+            vec![save("pkg/ov_mid.py", OV_MID)],
+        )
+        .absent(&[("pkg/ov_grow.py", "MUT208"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the override is removed",
+            vec![Action::Delete("pkg/ov_sub.py")],
+        )
+        .present(&[("pkg/ov_help.py", "MUT201")]),
     ]
 }
 
@@ -8084,6 +8209,7 @@ sessions!(editing, Session::start, {
     contracts: steps_contracts,
     allowed_examples: steps_allowed_examples,
     contract_extensions: steps_contract_extensions,
+    include_overrides: steps_include_overrides,
     references: steps_references,
     class_bodies: steps_class_bodies,
     bases_and_attribution: steps_bases_and_attribution,

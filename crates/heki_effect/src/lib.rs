@@ -67,7 +67,7 @@ pub use cache_flow::{
     self_attr_writes,
 };
 pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
-pub use contracts::{ContractClass, Contracts};
+pub use contracts::{ContractClass, Contracts, OverrideRoles};
 pub use environment::{AccessKind, ExternalAccess};
 pub use invalidation::{
     CoveredAfter, FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
@@ -1457,6 +1457,10 @@ pub struct EffectSummary {
     /// [`OptInFacts::set_order`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_order: Option<Box<order_flow::SetOrderFacts>>,
+    /// What the contracts with `include-overrides` say of the function as an override
+    /// ([`Contracts::override_roles`]; a local fact, `None` while they say nothing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_roles: Option<Box<OverrideRoles>>,
 }
 
 /// The shared state a function changes ([`EffectSummary::shared_state`]). The lists are sorted

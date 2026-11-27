@@ -121,7 +121,9 @@ a name another module binds only under `if TYPE_CHECKING:` (serving it from a mo
 `__getattr__`) is the class that import names, also as a base class, and a name a module
 serves only from its `__getattr__` is what the hook returns for it where heki follows the hook
 (a branch testing the name against the literal, a factory read from a module-level dict by the
-name and called), as an import of it would be, and a class object a factory annotated `-> type[C]`
+name and called, also through a function of the module calling what it is handed, and the hook
+a project factory returns, `__getattr__, __dir__ = make_hooks(__name__, _EXPORTS)`), as an import
+of it would be, and a class object a factory annotated `-> type[C]`
 returns is `C` as a `TYPE_CHECKING` import is; a copy (`copy.copy`,
 `copy.deepcopy`, `dataclasses.replace`, `model_copy`) has its original's class, calling a `functools.partial` object returns what the
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
@@ -352,5 +354,9 @@ No automatic fix.
     bases, is allowed, for the protocol's member and each implementation's attribute alike.
   - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
     names the subprotocols of the protocols it matches, or those protocols only.
+  - `include-overrides`: `true` or `false` (default): whether an entry naming a method
+    (`Class.method`, `module:Class.method`) in `allowed-writers`, `forbidden-writers`, and the `exempt-methods`
+    patterns also names the methods of that name in the
+    project subclasses of `Class` (a private name overrides nothing).
   - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
     key of a target's class that no target of any `write-owners` contract names.

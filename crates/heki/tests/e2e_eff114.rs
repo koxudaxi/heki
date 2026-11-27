@@ -833,3 +833,130 @@ fn heki_rule_explains_it() {
     assert!(stdout.contains("Completes normally"));
     assert!(stdout.contains("experimental"));
 }
+
+const STATUS: &str = r#"import sys
+import traceback
+
+import codes
+from codes import FAILED as IMPORTED_ERROR
+
+PYTHON_ERROR = 4
+REBOUND_ERROR = 5
+OPEN_ERROR = int(sys.argv[0])
+TEXT_ERROR = "4"
+REBOUND_ERROR = 6
+
+
+def visit(children):
+    for group in children:
+        visit(group)
+
+
+def named_status(children):
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return PYTHON_ERROR
+
+
+def rebound_status(children):
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return REBOUND_ERROR
+
+
+def open_status(children):
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return OPEN_ERROR
+
+
+def text_status(children):
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return TEXT_ERROR
+
+
+def attribute_status(children):
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return codes.FAILED
+
+
+class Config:
+    status = 4
+
+
+def parameter_status(children, config):
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return config.status
+
+
+def instance_status(children):
+    config = Config()
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return config.status
+
+
+def imported_status(children):
+    try:
+        visit(children)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return IMPORTED_ERROR
+
+
+def fallback_value(children):
+    try:
+        visit(children)
+    except RuntimeError:
+        return []
+    return children
+"#;
+
+/// A name bound once to an integer is an exit status like the literal; a name bound twice or to
+/// a value heki cannot read, and a returned list, are not.
+#[test]
+fn a_module_constant_status_is_a_cli_boundary() {
+    let p = Project::new("eff114_status");
+    p.write("codes.py", "FAILED = 3\n")
+        .write("status.py", STATUS);
+    let reported: Vec<String> = found(&diagnostics(&p, SELECT))
+        .into_iter()
+        .map(|(_, _, qualname)| qualname)
+        .collect();
+    assert_eq!(
+        reported,
+        [
+            "rebound_status",
+            "open_status",
+            "text_status",
+            "parameter_status",
+            "instance_status",
+            "fallback_value"
+        ]
+    );
+}

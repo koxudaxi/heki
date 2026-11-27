@@ -1,6 +1,7 @@
-//! `<contract>-defaults` tables: the keys a defaults table sets apply to every table of its
-//! contract kind that does not set them, so a configuration reports what the same configuration
-//! with every table written out reports (end to end, through the real binary).
+//! The configuration fold: the keys a `<contract>-defaults` table sets apply to every table of
+//! its contract kind that does not set them, the files `include` lists join the main file, and an
+//! `@name` entry stands for the entries of its group, so a configuration reports what the same
+//! configuration written out in one file reports (end to end, through the real binary).
 
 mod common;
 
@@ -374,6 +375,11 @@ fn inspect_and_recommend_read_the_effective_values() {
     let with_defaults: String = KINDS.iter().map(with_defaults_table).collect();
     let longhand = project("defaults_inspect_expanded", &written_out);
     let shorthand = project("defaults_inspect_table", &with_defaults);
+    assert_inspect_and_recommend_agree(&longhand, &shorthand);
+}
+
+/// `heki inspect` and `heki recommend` print the same JSON for both projects.
+fn assert_inspect_and_recommend_agree(longhand: &Project, shorthand: &Project) {
     for symbol in [
         "pkg.m.bad_write",
         "pkg.m.napper",
@@ -494,4 +500,456 @@ fn a_default_a_contract_cannot_use_is_reported_at_the_defaults_table() {
         "{out}"
     );
     assert!(out.contains("pyproject.toml:5:20"), "{out}");
+}
+
+/// `text`, written for a `pyproject.toml`, as a file `include` lists writes it: at its top level.
+fn at_top_level(text: &str) -> String {
+    text.replace("[tool.heki.", "[")
+}
+
+/// The table of `kind` at `position`, without the defaults.
+fn kind_table(kind: &Kind, position: usize) -> String {
+    format!(
+        "[[tool.heki.{}]]\n{}\n",
+        kind.key,
+        lines(kind.tables[position])
+    )
+}
+
+/// The tables of `kind` from position `from` on, without the defaults.
+fn tables_from(kind: &Kind, from: usize) -> String {
+    (kind.tables[from..].iter())
+        .map(|table| format!("[[tool.heki.{}]]\n{}\n", kind.key, lines(table)))
+        .collect()
+}
+
+/// The configuration of [`KINDS`] in three files, with groups: the main file holds the
+/// `write-owners` defaults and first table and the `read-owners`, a group file the rest of the
+/// `write-owners` (with the main file's defaults) and two more kinds, and a third file the other
+/// kinds and the group `napper`, which the second file uses.
+fn split_project(name: &str) -> Project {
+    let [write, read, call, effect, readonly, invalidation, import] = KINDS else {
+        panic!("seven contract kinds");
+    };
+    let main = format!(
+        "[tool.heki]\ninclude = [\"contracts/owners.toml\", \"contracts/./boundaries.toml\"]\n\n\
+         [tool.heki.groups]\nok-writers = [\"pkg.m:ok_write\"]\nreaders = [\"@ok-readers\"]\n\n\
+         [tool.heki.write-owners-defaults]\n{}\n{}{}",
+        lines(write.defaults).replace("[\"pkg.m:ok_write\"]", "[\"@ok-writers\"]"),
+        kind_table(write, 0),
+        with_defaults_table(read).replace("[\"pkg.m:ok_read\"]", "[\"@readers\"]"),
+    );
+    let owners = at_top_level(&format!(
+        "{}{}{}",
+        tables_from(write, 1),
+        with_defaults_table(call),
+        with_defaults_table(effect).replace("[\"pkg.m:napper\"]", "[\"@napper\"]"),
+    ));
+    let boundaries = at_top_level(&format!(
+        "[tool.heki.groups]\nnapper = [\"pkg.m:napper\"]\nok-readers = [\"pkg.m:ok_read\"]\n\n{}{}{}",
+        with_defaults_table(readonly),
+        with_defaults_table(invalidation),
+        with_defaults_table(import),
+    ));
+    let p = project(name, &main);
+    p.write("contracts/owners.toml", &owners);
+    p.write("contracts/boundaries.toml", &boundaries);
+    p
+}
+
+#[test]
+fn a_split_configuration_with_groups_reports_and_keys_a_baseline_as_its_one_file_form() {
+    let written_out: String = KINDS.iter().map(expanded).collect();
+    let longhand = project("fold_one_file", &written_out);
+    let shorthand = split_project("fold_split");
+    let args = ["--output-format", "json"];
+    let (code, expected, err) = longhand.check(&args);
+    assert_eq!(code, 1, "{expected}{err}");
+    assert_eq!(shorthand.check(&args), (code, expected.clone(), err));
+    for code in ["MUT201", "MUT203", "EFF201", "IMP201"] {
+        let found: Vec<Value> = serde_json::from_str(&expected).unwrap();
+        assert!(!of_rule(&found, code).is_empty(), "{code}: {expected}");
+    }
+    let update = ["--baseline", "heki-baseline.toml", "--update-baseline"];
+    let expected = longhand.check(&update);
+    assert_eq!(shorthand.check(&update), expected);
+    assert_eq!(
+        shorthand.read("heki-baseline.toml"),
+        longhand.read("heki-baseline.toml")
+    );
+    assert_inspect_and_recommend_agree(&longhand, &shorthand);
+}
+
+#[test]
+fn a_table_takes_its_own_key_else_its_files_default_else_the_main_files() {
+    let main = r#"[tool.heki]
+include = ["contracts/w.toml"]
+
+[tool.heki.write-owners-defaults]
+allowed-writers = ["pkg.m:ok_write"]
+message = "help of the main file"
+
+[[tool.heki.write-owners]]
+name = "main"
+targets = ["pkg.m:Model.fields"]
+"#;
+    let included = r#"[write-owners-defaults]
+message = "help of the included file"
+
+[[write-owners]]
+name = "file-default"
+targets = ["pkg.m:Model.secret"]
+
+[[write-owners]]
+name = "own"
+targets = ["pkg.m:Model.count"]
+allowed-writers = ["pkg.m:ok_write", "pkg.m:bump"]
+message = "its own help"
+"#;
+    let written_out = r#"[[tool.heki.write-owners]]
+name = "main"
+targets = ["pkg.m:Model.fields"]
+allowed-writers = ["pkg.m:ok_write"]
+message = "help of the main file"
+
+[[tool.heki.write-owners]]
+name = "file-default"
+targets = ["pkg.m:Model.secret"]
+allowed-writers = ["pkg.m:ok_write"]
+message = "help of the included file"
+
+[[tool.heki.write-owners]]
+name = "own"
+targets = ["pkg.m:Model.count"]
+allowed-writers = ["pkg.m:ok_write", "pkg.m:bump"]
+message = "its own help"
+"#;
+    let split = project("fold_defaults_precedence", main);
+    split.write("contracts/w.toml", included);
+    let expected = reports(&project("fold_defaults_written_out", written_out));
+    let found = reports(&split);
+    assert_eq!(found, expected);
+    let helps: Vec<&str> = (found.iter()).filter_map(|d| d["help"].as_str()).collect();
+    for help in ["help of the main file", "help of the included file"] {
+        assert!(helps.iter().any(|h| h.contains(help)), "{help}: {helps:?}");
+    }
+}
+
+#[test]
+fn an_unmatched_entry_names_its_group_and_file_and_an_unused_group_is_warned_about() {
+    let main = r#"[tool.heki]
+include = ["contracts/w.toml"]
+
+[tool.heki.groups]
+writers = ["pkg.m:ok_write", "@more-writers"]
+unused = ["pkg.m:ok_write"]
+
+[[tool.heki.write-owners]]
+name = "main"
+targets = ["pkg.m:Model.fields", "pkg.m:Model.gone"]
+allowed-writers = ["@writers"]
+"#;
+    let included = r#"[groups]
+more-writers = ["pkg.m:gone_writer"]
+
+[[write-owners]]
+name = "included"
+targets = ["pkg.m:Model.secret", "pkg.m:Model.missing"]
+allowed-writers = ["@more-writers"]
+"#;
+    let p = project("fold_unmatched", main);
+    p.write("contracts/w.toml", included);
+    let (_, stdout, stderr) = p.check(&[]);
+    let warned: Vec<&str> = (stderr.lines())
+        .filter_map(|l| l.strip_prefix("warning: "))
+        .collect();
+    for expected in [
+        "the group `unused` (pyproject.toml:9) is used by no contract",
+        "`targets` entry `pkg.m:Model.gone` of write-owners `main` names no attribute, method, or `__dict__` key of `pkg.m:Model` in the analyzed files",
+        "`targets` entry `pkg.m:Model.missing` of write-owners `included` (from contracts/w.toml:6) names no attribute, method, or `__dict__` key of `pkg.m:Model` in the analyzed files",
+    ] {
+        assert!(warned.contains(&expected), "{expected}\n{stdout}{stderr}");
+    }
+    assert!(
+        warned.iter().any(|w| w.starts_with(
+            "`allowed-writers` entry `pkg.m:gone_writer` of write-owners `main` and `included` (from group `more-writers` at contracts/w.toml:2) names no function or method"
+        )),
+        "{stdout}{stderr}"
+    );
+    let (code, json, err) = p.heki(&["recommend", "--output-format", "json"]);
+    assert_eq!(code, 0, "{json}{err}");
+    let report: Value = serde_json::from_str(&json).unwrap();
+    let from_group = (report["unmatched_entries"].as_array().unwrap().iter())
+        .find(|e| e["entry"] == "pkg.m:gone_writer")
+        .unwrap_or_else(|| panic!("{json}"));
+    assert_eq!(
+        from_group["written_at"],
+        serde_json::json!([{"file": "contracts/w.toml", "line": 2, "group": "more-writers"}])
+    );
+    // Under `"error"`, an unused group fails the run as an unmatched entry does.
+    let p = project(
+        "fold_unused_group_fails",
+        "[tool.heki.lint]\nunmatched-contract-entries = \"error\"\n\n[tool.heki.groups]\nunused = [\"x\"]\n",
+    );
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("error: the group `unused` (pyproject.toml:8) is used by no contract"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn files_and_groups_that_do_not_fold_are_configuration_errors_at_their_line() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "[tool.heki.groups]\na = [\"x\"]\n\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"@b\"]\n",
+            "",
+            "pyproject.toml:10:20: `@b` names no group",
+            "configuration/#named-groups",
+        ),
+        (
+            "[tool.heki.groups]\na = [\"@b\"]\nb = [\"x\", \"@a\"]\n",
+            "",
+            "pyproject.toml:6:11: a cycle between groups: `@a` -> `@b` -> `@a`",
+            "configuration/#named-groups",
+        ),
+        (
+            "[tool.heki.groups]\na = [\"@a\"]\n",
+            "",
+            "pyproject.toml:5:6: a cycle between groups: `@a` -> `@a`",
+            "configuration/#named-groups",
+        ),
+        (
+            "[tool.heki.groups]\na = []\n",
+            "",
+            "pyproject.toml:5:1: the group `a` is empty",
+            "configuration/#named-groups",
+        ),
+        (
+            "[tool.heki.groups]\na = [\"@b\"]\nb = [\"x\", \"@missing\"]\n",
+            "",
+            "pyproject.toml:6:11: `@missing` names no group: `@a` -> `@b` -> `@missing`",
+            "configuration/#named-groups",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n\n[tool.heki.groups]\na = [\"x\"]\n",
+            "[groups]\na = [\"y\"]\n",
+            "c.toml:2:1: the group `a` is defined twice; it is first defined at pyproject.toml:8",
+            "configuration/#named-groups",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"pyproject.toml\"]\n",
+            "",
+            "pyproject.toml:5:12: `include` lists `pyproject.toml`, the main configuration file",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n",
+            "include = [\"d.toml\"]\n",
+            "c.toml:1:1: `include` in an included file",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"missing.toml\"]\n",
+            "",
+            "pyproject.toml:5:12: cannot read the included file `missing.toml`",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\", \"./c.toml\"]\n",
+            "[groups]\na = [\"x\"]\n",
+            "pyproject.toml:5:22: `include` lists `./c.toml` twice",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"*.toml\"]\n",
+            "",
+            "pyproject.toml:5:12: `include` entry `*.toml` is a glob",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"/c.toml\"]\n",
+            "",
+            "pyproject.toml:5:12: `include` entry `/c.toml` is not a relative path",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = ['C:c.toml']\n",
+            "",
+            "pyproject.toml:5:12: `include` entry `C:c.toml` is not a relative path",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = ['\\\\server\\c.toml']\n",
+            "",
+            "pyproject.toml:5:12: `include` entry `\\\\server\\c.toml` is not a relative path",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n",
+            "[[write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\n\n[lint]\nselect = [\"MUT\"]\n",
+            "c.toml:5:2: `lint` in an included file",
+            "configuration/#several-configuration-files",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n",
+            "[[write-owners]]\nname = \"w\"\ntargets = \"pkg.m:Model.fields\"\n",
+            "c.toml:3:11: invalid `targets` in [[write-owners]]",
+            "configuration/#write-owners",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n",
+            "[[write-owners]]\nname = \"w\"\ntargets = [\"fields\"]\n",
+            "c.toml:3:12: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
+        (
+            "[tool.heki.groups]\nt = [\"fields\"]\n\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"@t\"]\n",
+            "",
+            "pyproject.toml:5:6: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
+        // The group the list took the entry from, not another one with the same text.
+        (
+            "[tool.heki.groups]\nu = [\"fields\"]\nt = [\"fields\"]\n\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"@t\"]\n",
+            "",
+            "pyproject.toml:6:6: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"@t\"]\n",
+            "[groups]\nt = [\"fields\"]\n",
+            "c.toml:2:6: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
+        // The group of the contract the error names, not that of another contract.
+        (
+            "[tool.heki.groups]\nok = [\"sleep\"]\nbad = [\"slep\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"a\"\nscopes = [\"pkg.m:napper\"]\nforbid = [\"@ok\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"b\"\nscopes = [\"pkg.m:napper_too\"]\nforbid = [\"@bad\"]\n",
+            "",
+            "pyproject.toml:6:8: unknown `forbid` token `slep` in effect-boundaries `b`",
+            "configuration/#effect-boundaries",
+        ),
+        // The included file that writes the entry, not a group of the main file with its text.
+        (
+            "[tool.heki]\ninclude = [\"c.toml\"]\n\n[tool.heki.groups]\nt = [\"fields\"]\n",
+            "[[write-owners]]\nname = \"w\"\ntargets = [\"fields\"]\n",
+            "c.toml:3:12: invalid write-owners target `fields`",
+            "configuration/#write-owners",
+        ),
+    ];
+    for (main, included, error, docs) in cases {
+        let p = project("fold_errors", main);
+        if !included.is_empty() {
+            p.write("c.toml", included);
+        }
+        let (code, stdout, stderr) = p.check(&[]);
+        assert_eq!(code, 2, "{main}\n{stdout}{stderr}");
+        assert!(
+            stderr.contains(&format!("error: {error}")),
+            "{error}\n{stderr}"
+        );
+        assert!(stderr.contains(docs), "{docs}\n{stderr}");
+    }
+}
+
+#[test]
+fn an_existing_file_named_by_a_rooted_path_is_not_included() {
+    let p = project("fold_rooted_include", "");
+    p.write("c.toml", "[groups]\na = [\"x\"]\n");
+    let rooted = p.dir.join("c.toml").display().to_string();
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n[tool.heki]\ninclude = ['{rooted}']\n"),
+    );
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    let error = format!("pyproject.toml:5:12: `include` entry `{rooted}` is not a relative path");
+    assert!(stderr.contains(&error), "{error}\n{stderr}");
+}
+
+#[test]
+fn an_at_sign_inside_an_entry_is_part_of_it() {
+    let module = "class Model:\n    def __init__(self) -> None:\n        self.extras: dict[str, int] = {}\n\n\ndef ok_write(m: Model) -> None:\n    m.extras[\"user@example.com\"] = 1\n\n\ndef bad_write(m: Model) -> None:\n    m.extras[\"user@example.com\"] = 2\n";
+    let config = |key: &str| {
+        format!(
+            "[[tool.heki.write-owners]]\nname = \"w\"\ntargets = ['pkg.e:Model.extras[\"{key}\"]']\nallowed-writers = [\"pkg.e:ok_write\"]\n"
+        )
+    };
+    let shown = |key: &str| {
+        let p = project(&format!("fold_at_sign_{}", key.contains('@')), &config(key));
+        p.write("pkg/e.py", &module.replace("user@example.com", key));
+        let found: Vec<String> = (reports(&p).iter())
+            .map(|d| serde_json::to_string(d).unwrap().replace(key, "KEY"))
+            .filter(|d| d.contains("extras"))
+            .collect();
+        found.join("\n")
+    };
+    let with_at = shown("user@example.com");
+    assert!(with_at.contains("bad_write"), "{with_at}");
+    assert_eq!(with_at, shown("user-example.com"));
+}
+
+#[test]
+fn groups_that_double_write_out_only_what_a_list_uses_and_stop_at_the_limit() {
+    // Each group names the one before twice: 2^64 entries once written out.
+    let doubling: String = (1..=64)
+        .map(|n| format!("g{n} = [\"@g{}\", \"@g{}\"]\n", n - 1, n - 1))
+        .collect();
+    let groups = format!("[tool.heki.groups]\ng0 = [\"pkg.m:ok_write\"]\n{doubling}");
+    let unused = project("fold_doubling_unused", &groups);
+    let (code, stdout, stderr) = unused.check(&[]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("the group `g64` (pyproject.toml:69) is used by no contract"),
+        "{stderr}"
+    );
+    let used = project(
+        "fold_doubling_used",
+        &format!(
+            "{groups}\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"@g13\", \"@g20\"]\n"
+        ),
+    );
+    let (code, stdout, stderr) = used.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    let error =
+        "pyproject.toml:74:28: `@g20` writes more than 10000 entries from groups into one list";
+    assert!(stderr.contains(error), "{error}\n{stderr}");
+    // 2^13 entries are within the limit.
+    let within = project(
+        "fold_doubling_within",
+        &format!(
+            "{groups}\n[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"@g13\"]\n"
+        ),
+    );
+    let (code, stdout, stderr) = within.check(&[]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+}
+
+#[test]
+fn a_touched_included_file_shows_every_report_and_other_toml_files_are_passed_over() {
+    let p = project(
+        "fold_touched",
+        "[tool.heki]\ninclude = [\"contracts/w.toml\"]\n",
+    );
+    p.write(
+        "contracts/w.toml",
+        "[[write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"pkg.m:ok_write\"]\n",
+    );
+    p.write("other.toml", "[tool.other]\nx = 1\n");
+    let (_, every, _) = p.check(&["--select", "MUT201"]);
+    assert!(every.contains("pkg/m.py:"), "{every}");
+    // As the pre-commit hook passes the staged TOML files.
+    let (_, touched, stderr) = p.check(&[
+        "--select",
+        "MUT201",
+        "--touched",
+        "contracts/w.toml",
+        "other.toml",
+    ]);
+    assert_eq!(touched, every);
+    assert!(!stderr.contains("`--touched` names"), "{stderr}");
+    let (_, none, stderr) = p.check(&["--select", "MUT201", "--touched", "other.toml"]);
+    assert!(!none.contains("pkg/m.py:"), "{none}");
+    assert!(!stderr.contains("`--touched` names"), "{stderr}");
 }
