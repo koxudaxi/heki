@@ -1185,94 +1185,11 @@ Source: https://heki.koxudaxi.dev/ownership/
 
 heki finds in-place changes of read-only parameters, cached results, and frozen fields, and enforces your own rules about who may change, read, or call what.
 
-Type checkers see a change made on a value of a read-only type. heki follows the value through aliases and helper calls, so it also sees the change that a function three calls below makes. This page lists what runs without configuration, what you have to switch on, and which contract fits which rule. [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) has every key, and [Rules](https://heki.koxudaxi.dev/rules/) has one page per rule.
+Python has no owner for a value: any code that reaches an object can change it. Type checkers see a change made on a value of a read-only type. heki follows the value through aliases and helper calls, so it also sees the change that a function three calls below makes. This page has three parts: who may change, read, or call what, how to leave a borrowed or shared value alone, and values that may be used only once. A table at the end maps the ideas to the words Rust uses for them. [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) has every key, and [Rules](https://heki.koxudaxi.dev/rules/) has one page per rule.
 
-## 🔍 What runs without configuration
+Each entry names its rule and its tier, as `heki rule --all` gives it. An exact rule states a fact about the code. A heuristic rule can be wrong about the code, runs with `--heuristic` (or `lint.heuristic = true`) when it is on by default, and its reports count as warnings. An opt-in rule is off until you name it in `extend-select`, for example `--extend-select MUT115`; a prefix such as `MUT` or `ALL` never enables it. An experimental rule can change or go away between releases, and [Experimental Features](https://heki.koxudaxi.dev/experimental/) says why each one is marked.
 
-These rules need no `heki.toml`. The first three are exact: a report states a fact about the code, and an error fails `heki check`.
-
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | a `Sequence`, `Mapping`, `AbstractSet`, or `ReadOnly` parameter handed, as itself, to a function that changes it in place | exact, default |
-| [`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/) | an in-place change of the list, dict, or set that an `lru_cache` or `cache` function returned | exact, default |
-| [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) | an in-place change of a new container that nothing keeps, such as `list(xs).sort()`: the change is lost | exact, default |
-| [`MUT118`](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/) | `copy.deepcopy` of an instance whose `object()` sentinel a function tests by identity | heuristic, runs with `--heuristic` |
-
-Heuristic rules can be wrong about the code. They run with `--heuristic` (or `lint.heuristic = true`), and their reports count as warnings.
-
-A function that hands its `Sequence` parameter to a helper that sorts it, and a function that appends to a cached list:
-
-```python
-# app/stock.py
-from collections.abc import Sequence
-from functools import lru_cache
-
-
-def sort_names(names) -> None:
-    if isinstance(names, list):
-        names.sort()
-
-
-def prepare(names: Sequence[str]) -> list[str]:
-    sort_names(names)
-    return list(names)
-
-
-@lru_cache(maxsize=None)
-def default_tags(shop: str) -> list[str]:
-    return ["new", shop]
-
-
-def tag(shop: str, item: str) -> list[str]:
-    tags = default_tags(shop)
-    tags.append(item)
-    return tags
-```
-
-```console
-$ heki check
-app/stock.py:11:5: MUT110 (readonly-param-mutation) [warning] `prepare` passes its read-only parameter `names` to `app.stock.sort_names`; whenever line 7 of `sort_names` runs, it changes the caller's object in place
-   |
-11 |     sort_names(names)
-   |     ^
-  = related: app/stock.py:11:5: `prepare` calls `app.stock.sort_names`
-  = related: app/stock.py:7:9: `sort_names` changes the object in place here
-  = help: pass a copy (`list(names)` / `dict(names)` / `set(names)`), or annotate the helper's parameter with a mutable type
-
-app/stock.py:22:5: MUT114 (cached-result-mutation) [error] `tag` changes in place the list that `default_tags` returned; `default_tags` is cached by `functools.lru_cache`
-   |
-22 |     tags.append(item)
-   |     ^
-  = help: change a copy (`list(...)`) instead
-...
-```
-
-This output is from heki 0.9.0. `MUT110` is a warning because the bug it reports is rarely harmful, and `MUT114` is an error, so only `MUT114` fails the run.
-
-## 🔧 Rules to switch on
-
-These rules are off by default. Name one in `extend-select`, or on the command line with `--extend-select MUT108`. A prefix such as `MUT` or `ALL` never enables them.
-
-```toml
-# heki.toml
-[lint]
-extend-select = ["MUT108", "MUT115"]
-```
-
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | an in-place change of a field that a standard type declares read-only: a frozen dataclass, a `NamedTuple`, `Final` and `ReadOnly` attributes, `ReadOnly` `TypedDict` keys | heuristic, opt-in |
-| [`MUT115`](https://heki.koxudaxi.dev/rules/shallow-copy-nested-mutation/) | a change below a shallow copy (`dict(x)`, `x.copy()`, `copy.copy(x)`) of state that outlives the call: the copy holds the same inner object | heuristic, opt-in |
-| [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | a single-pass iterator or generator consumed a second time, which sees no items | heuristic, opt-in |
-| [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | a method other than an initializer that changes an attribute the class's `__hash__` reads | heuristic, opt-in |
-| [`MUT120`](https://heki.koxudaxi.dev/rules/readonly-view-mutation/) | a change of a value held through a read-only view (a protocol of properties without setters) that a type checker does not see | heuristic, experimental, opt-in |
-| [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | an in-place change of a value that is new on one path and borrowed state on another | heuristic, experimental, opt-in |
-| [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | a dict, set, or deque of the instance changed while a method iterates it | heuristic, experimental, opt-in |
-| [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/), [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | an attribute that a `@cached_property` reads, changed without invalidating the cache, and a read of such a stale property | exact, experimental, opt-in |
-
-Experimental rules can change or go away between releases. [Experimental Features](https://heki.koxudaxi.dev/experimental/) says why each one is marked.
-
-## 📜 Contracts: your own ownership rules
+## 📜 Who may change, read, or call what
 
 Some rules belong to your project, not to Python: only `app.store` may append to `Order.items`, only `app.billing` reads a card token, nothing changes the settings object that `load_settings` returns. Write them down once and `heki check` enforces them across files, aliases, and helpers.
 
@@ -1354,6 +1271,193 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 `lru_cache` and `cache` results are protected without a contract. A `readonly-returns` entry adds the producers that are not cached, such as a function that returns a module-level dict.
 
+## 🤝 Not breaking a value you borrowed or share
+
+A function that receives a list did not make it, and a function that gets a cached result did not make that either. Changing such a value changes it for everyone who holds it. These rules report the change.
+
+```toml
+# heki.toml
+[lint]
+extend-select = ["MUT113", "MUT115"]
+```
+
+### A read-only parameter changed by a helper
+
+A parameter annotated `Sequence`, `Mapping`, or `AbstractSet` promises that the function only reads it. `MUT110` reports a call that hands such a parameter, as itself, to a function that changes it in place. Tier: exact, default ([`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/)).
+
+```python
+# app/stock.py
+from collections.abc import Sequence
+
+
+def sort_names(names) -> None:
+    if isinstance(names, list):
+        names.sort()
+
+
+def prepare(names: Sequence[str]) -> list[str]:
+    sort_names(names)
+    return list(names)
+```
+
+```console
+$ heki check
+app/stock.py:10:5: MUT110 (readonly-param-mutation) [warning] `prepare` passes its read-only parameter `names` to `app.stock.sort_names`; whenever line 6 of `sort_names` runs, it changes the caller's object in place
+   |
+10 |     sort_names(names)
+   |     ^
+  = related: app/stock.py:10:5: `prepare` calls `app.stock.sort_names`
+  = related: app/stock.py:6:9: `sort_names` changes the object in place here
+  = help: pass a copy (`list(names)` / `dict(names)` / `set(names)`), or annotate the helper's parameter with a mutable type
+...
+```
+
+`MUT110` is a warning, because the bug it reports is rarely harmful, so it does not fail the run. Pass a copy (`list(names)`), or annotate the helper's parameter with a mutable type.
+
+### A cached result changed in place
+
+A function under `lru_cache` or `cache` hands the same list, dict, or set to every caller with the same arguments. `MUT114` reports a change of that object. Tier: exact, default ([`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/)).
+
+```python
+# app/stock.py
+from functools import lru_cache
+
+
+@lru_cache(maxsize=None)
+def default_tags(shop: str) -> list[str]:
+    return ["new", shop]
+
+
+def tag(shop: str, item: str) -> list[str]:
+    tags = default_tags(shop)
+    tags.append(item)
+    return tags
+```
+
+```console
+$ heki check
+app/stock.py:11:5: MUT114 (cached-result-mutation) [error] `tag` changes in place the list that `default_tags` returned; `default_tags` is cached by `functools.lru_cache`
+   |
+11 |     tags.append(item)
+   |     ^
+  = help: change a copy (`list(...)`) instead
+...
+```
+
+
+`MUT114` is an error, so it fails the run. A producer that is not cached, such as a function that returns a module-level dict, is covered by a `readonly-returns` contract.
+
+### A shared return value changed
+
+For a value that is shared without a cache, name its producers in a `readonly-returns` contract, with `deep = true` to cover what is below the result. `MUT202` reports a change of what a producer returned, directly or through the functions that return it. Tier: heuristic, contract ([`MUT202`](https://heki.koxudaxi.dev/rules/readonly-return-mutation/)).
+
+```toml
+# heki.toml
+[[readonly-returns]]
+name = "schemas"
+producers = ["registry.schema"]
+deep = true
+```
+
+```python
+# app/m.py
+from registry import schema
+
+
+def schema_of(name: str) -> dict[str, list[str]]:
+    return schema(name)
+
+
+def extend(name: str) -> None:
+    s = schema_of(name)
+    s["fields"].append("extra")
+```
+
+heki reports: `extend` mutates the shared object returned by read-only producer `registry.schema` through `app.m.schema_of`. Change a `copy.deepcopy` of the value instead.
+
+### A shallow copy shares its items
+
+`dict(x)`, `x.copy()`, and `copy.copy(x)` copy one level. The inner lists are the same objects, so a change below the copy changes the original too. `MUT115` reports it when the original is state that outlives the call. Tier: heuristic, opt-in ([`MUT115`](https://heki.koxudaxi.dev/rules/shallow-copy-nested-mutation/)).
+
+```python
+def with_base(options: dict[str, list[str]], base: str) -> dict[str, list[str]]:
+    result = options.copy()
+    result["bases"].append(base)  # changes the list `options["bases"]` holds
+    return result
+```
+
+heki reports: `with_base` changes in place an object that its shallow copy of `options` (`.copy()`, line 2) shares with `options`. Rebuild the inner value instead: `result["bases"] = [*result["bases"], base]`.
+
+### A container changed while it is iterated
+
+A dict, set, or deque that a loop is iterating raises `RuntimeError` at the next step once something changes it. `MUT113` reports a method that suspends at a `yield` inside such a loop while another method changes the container. Tier: heuristic, experimental, opt-in ([`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/)).
+
+```python
+class Subscriptions:
+    def __init__(self) -> None:
+        self.by_node: dict[str, object] = {}
+        self._cursor = self._cycle()
+
+    def _cycle(self):
+        while True:
+            yield from self.by_node.values()  # MUT113
+
+    def next_subscriber(self) -> object:
+        return next(self._cursor)
+
+    def drop(self, node: str) -> None:
+        self.by_node.pop(node, None)
+```
+
+heki reports: `Subscriptions._cycle` suspends at a `yield` while iterating `self.by_node`, which `Subscriptions.drop` changes in place, so resuming it after that change raises `RuntimeError`. Iterate over a snapshot: `yield from list(self.by_node.values())`.
+
+### Other rules about values that change under you
+
+| Rule | Reports | Tier |
+| --- | --- | --- |
+| [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) | an in-place change of a new container that nothing keeps, such as `list(xs).sort()`: the change is lost | exact, default |
+| [`MUT118`](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/) | `copy.deepcopy` of an instance whose `object()` sentinel a function tests by identity | heuristic, runs with `--heuristic` |
+| [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | an in-place change of a field that a standard type declares read-only: a frozen dataclass, a `NamedTuple`, `Final` and `ReadOnly` attributes, `ReadOnly` `TypedDict` keys | heuristic, opt-in |
+| [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | a method other than an initializer that changes an attribute the class's `__hash__` reads | heuristic, opt-in |
+| [`MUT120`](https://heki.koxudaxi.dev/rules/readonly-view-mutation/) | a change of a value held through a read-only view (a protocol of properties without setters) that a type checker does not see | heuristic, experimental, opt-in |
+| [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | an in-place change of a value that is new on one path and borrowed state on another | heuristic, experimental, opt-in |
+| [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/), [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | an attribute that a `@cached_property` reads, changed without invalidating the cache, and a read of such a stale property | exact, experimental, opt-in |
+
+## 🔂 Single-use values used twice or not at all
+
+An iterator or a generator gives each item once. Reading it a second time sees nothing, and a generator that nobody iterates never runs its body.
+
+### An iterator consumed twice
+
+`rows` below is a generator expression. `sum` uses it up, and the list comprehension after it sees no items. `MUT106` reports the second pass. Tier: heuristic, opt-in ([`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/)).
+
+```python
+def summarize(lines: list[str]) -> tuple[int, list[str]]:
+    rows = (line.strip() for line in lines)
+    count = sum(1 for _ in rows)
+    kept = [r for r in rows if r]  # MUT106: `rows` was consumed by `sum`
+    return count, kept
+```
+
+heki reports: `rows` is a single-pass iterator already consumed at line 3, so this pass sees no items. Build a list when the value is read more than once.
+
+### A generator that is never iterated
+
+Calling a generator function only creates the generator. Its body runs when something iterates it. `EFF116` reports a call whose generator is dropped: a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate. Tier: heuristic, experimental, opt-in ([`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/)).
+
+```python
+def parse_extra(text: str):
+    for line in text.splitlines():
+        yield line.strip()
+
+
+def check(text: str) -> None:
+    if not parse_extra(text):  # EFF116
+        print("nothing to parse")
+```
+
+heki reports: only a truth test reads what `parse_extra` returns, and `parse_extra` is a generator function: a generator is always true, and the body does not run. Iterate it, as in `if not list(parse_extra(text))`.
+
 ## 👉 Next steps
 
 - [Configuration: contracts](https://heki.koxudaxi.dev/configuration/#contracts) lists every key of the five contracts.
@@ -1361,6 +1465,18 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 - [Adoption recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have contracts to copy for a web service and a layered application.
 - [Coding agents](https://heki.koxudaxi.dev/coding-agents/) shows how the same contracts keep an agent out of the files it must not change.
 - `heki inspect app.cart.remove` (experimental) shows what one function changes, keeps, and returns.
+
+## 🦀 If you know Rust
+
+Nothing here is enforced when Python compiles the code. heki reports the places where the code breaks the expectation that a Rust compiler would hold it to.
+
+| Rust | Closest in heki | How Python differs |
+| --- | --- | --- |
+| Ownership: one owner decides who may change a value | `write-owners`, `read-owners`, `call-owners` (`MUT201`, `MUT203`, `MUT204`) | Any code can reach any object. A contract names the owners, and heki reports the code outside them. |
+| Shared borrow `&T` | `Sequence`, `Mapping`, `AbstractSet`, and `ReadOnly` parameters (`MUT110`); shared return values (`MUT114`, `MUT202`) | The annotation promises nothing at run time. heki reports the helper that changes the value anyway. |
+| Exclusive borrow `&mut T`, no change while borrowed | a container changed while it is iterated (`MUT113`); a shallow copy that shares its items (`MUT115`) | Nothing stops the change, and it shows up later as a `RuntimeError` or a surprising value. |
+| Move: a moved value cannot be used again | a single-use iterator or generator (`MUT106`, `EFF116`) | The name stays usable after the value is used up, and the second use sees nothing. |
+| Lifetime: a reference does not outlive what it points to | cleanup that cancellation cuts short ([`EFF118`](https://heki.koxudaxi.dev/effects/#resource-and-cancellation-lifetimes)) | A Python object stays alive while a name refers to it, so nothing dangles. What can end early is the work around a resource. |
 
 
 ---
@@ -1384,27 +1500,124 @@ Two rules are exact and run by default. Their reports show the call chain, and a
 
 `EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
 
-Three more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
+One more rule runs by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because it can be wrong about the code:
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
-| [`EFF117`](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | state that one writer changes holding a thread lock and another changes holding none, where both can run on threads heki resolves | heuristic, runs with `--heuristic` |
-| [`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/) | a `finally` body, an `except` taking the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way, so in a cancelled scope the cleanup stops there | heuristic, runs with `--heuristic` |
+
+Two more rules that run the same way are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](https://heki.koxudaxi.dev/effects/#resource-and-cancellation-lifetimes).
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
 
 ## 🔧 Rules to switch on
 
-These rules are off by default. Name one in `extend-select` or with `--extend-select EFF106`. A prefix such as `EFF` or `ALL` never enables them.
+These rules are off by default. Name one in `extend-select` or with `--extend-select EFF105`. A prefix such as `EFF` or `ALL` never enables them.
 
 ```toml
 # heki.toml
 [lint]
-extend-select = ["EFF106"]
+extend-select = ["EFF105", "EFF107"]
 ```
 
-A function that makes a request while it holds a lock:
+| Rule | Reports | Tier |
+| --- | --- | --- |
+| [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
+| [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
+| [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
+| [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
+| [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
+
+Experimental rules can change or go away between releases. [Experimental Features](https://heki.koxudaxi.dev/experimental/) says why each one is marked.
+
+`EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/#a-generator-that-is-never-iterated), with the other single-use values.
+
+## 🔒 Exclusive use and lock safety
+
+Some objects allow one user at a time: a lock, a stream reader, a database connection. These rules report code that breaks that. The opt-in ones are off until you name them in `extend-select`, for example `--extend-select EFF106`. A prefix such as `EFF` or `ALL` never enables them.
+
+```toml
+# heki.toml
+[lint]
+extend-select = ["EFF106", "EFF109", "EFF110"]
+```
+
+### An exclusive object used by tasks started together
+
+A stream reader, an asyncpg connection, or a WebSocket runs one operation at a time. `EFF110` reports tasks started together (`asyncio.gather`, a task group) that all use the same one, so the second call raises. Tier: heuristic, experimental, opt-in ([`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/)).
+
+```python
+import asyncio
+
+
+class FrameClient:
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self._reader = reader
+
+    async def read_frame(self) -> bytes:
+        return await self._reader.readexactly(4)
+
+    async def read_frames(self, count: int) -> list[bytes]:
+        return await asyncio.gather(*(self.read_frame() for _ in range(count)))  # EFF110
+```
+
+heki reports: `FrameClient.read_frames` starts a task for every item, each using `self._reader` (`asyncio.gather`); `asyncio.StreamReader` allows one operation at a time, so the second task's call raises. Read the frames one after another instead.
+
+### A lock taken again while it is held
+
+`threading.Lock` and `asyncio.Lock` are not reentrant. A method that holds the lock and calls another method that takes it waits for itself. `EFF109` reports the second take, directly or through a call. Tier: heuristic, experimental, opt-in ([`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/)).
+
+```python
+# app/m.py
+import threading
+
+
+class Registry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, int] = {}
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def add(self, key: str) -> int:
+        with self._lock:
+            self._items[key] = 1
+            return self.size()  # EFF109
+```
+
+heki reports: `Registry.add` calls `app.m.Registry.size`, which takes `self._lock` while `Registry.add` holds it (taken at line 14); `threading.Lock` is not reentrant, so this waits forever. Move the body of `size` into a helper that does not take the lock, and call that one.
+
+### A write without the lock its other writes hold
+
+When one method changes a field holding a lock, every method that changes it needs the same lock. `EFF117` reports a write that holds none while another write of the same state holds a thread lock, and a thread heki resolves can run one of them. An update can be lost. Tier: heuristic, runs with `--heuristic` ([`EFF117`](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/)).
+
+```python
+import threading
+
+
+class Stats:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.received = 0
+
+    def start(self) -> None:
+        threading.Thread(target=self._read).start()
+
+    def _read(self) -> None:
+        with self._lock:
+            self.received += 1
+
+    def reset(self) -> None:
+        self.received = 0  # EFF117
+```
+
+heki reports: `Stats.reset` assigns `self.received` where heki finds no lock held, while `Stats._read` assigns it holding `self._lock`; `Stats._read` can run on another thread, so the two writes can interleave and one can lose the other's update. Take the lock in `reset` too.
+
+### I/O while holding a lock
+
+A lock held across a network call or an `await` makes every other user of the lock wait for the slow call. `EFF106` reports an `await` or blocking network I/O while a `threading` lock or a database transaction is held. Tier: heuristic, opt-in ([`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/)).
 
 ```python
 # app/sync.py
@@ -1433,21 +1646,41 @@ Found 1 diagnostic(s) in 2 file(s).
 ...
 ```
 
-This output is from heki 0.9.0. The other opt-in rules:
+Make the request before taking the lock and hold it only for the update.
 
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
-| [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | an `await` or blocking network I/O while a `threading` lock or a database transaction is held | heuristic, opt-in |
-| [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
-| [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | a lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | heuristic, experimental, opt-in |
-| [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | an object that allows one operation at a time (a stream reader, an asyncpg connection, a WebSocket) used by tasks started together | heuristic, experimental, opt-in |
-| [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
-| [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
-| [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
-| [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | a call of a generator function whose generator nothing iterates, so its body never runs | heuristic, experimental, opt-in |
+## ⏳ Resource and cancellation lifetimes
 
-Experimental rules can change or go away between releases. [Experimental Features](https://heki.koxudaxi.dev/experimental/) says why each one is marked.
+Work around a resource can end early. A cancelled task stops at its next checkpoint, and cleanup that runs after the cancellation can be stopped the same way, so the resource is never released. Each rule in this part reports one way the end of a scope leaves a resource in the wrong state. The rules are listed as entries of their own, so a new one is one more entry.
+
+### Cleanup that stops at a cancellation checkpoint
+
+A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. Tier: heuristic, runs with `--heuristic` ([`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/)).
+
+```python
+# app/m.py
+import anyio
+
+
+async def delete_group(name: str) -> None:
+    await anyio.to_thread.run_sync(delete_container_group, name)
+
+
+async def run(name: str) -> None:
+    try:
+        await watch(name)
+    finally:
+        await delete_group(name)  # EFF118
+        log_deleted(name)
+```
+
+heki reports: `run` awaits `app.m.delete_group` in a `finally` body, which reaches the cancellation checkpoint `anyio.to_thread.run_sync` 2 calls down with no shield on the way: in a cancelled scope the await raises the cancellation and the rest of the cleanup does not run. Shield the cleanup:
+
+```python
+    finally:
+        with anyio.CancelScope(shield=True):
+            await delete_group(name)
+        log_deleted(name)
+```
 
 ## 📜 Contracts for execution effects
 
@@ -1514,7 +1747,7 @@ The run exits with code 1. When the new effect is intended, refresh the snapshot
 - [Configuration: effect-boundaries](https://heki.koxudaxi.dev/configuration/#effect-boundaries) lists every key and `forbid` token.
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](https://heki.koxudaxi.dev/adoption/#an-async-web-or-database-service) to copy.
 - `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental).
-- [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) covers the contracts about who may change, read, or call a thing.
+- [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) covers the contracts about who may change, read, or call a thing, and the rules for borrowed, shared, and single-use values.
 
 
 ---

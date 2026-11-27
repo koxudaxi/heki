@@ -15,27 +15,124 @@ Two rules are exact and run by default. Their reports show the call chain, and a
 
 `EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
 
-Three more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
+One more rule runs by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because it can be wrong about the code:
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF102`](rules/loop-unpooled-client.md) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
-| [`EFF117`](rules/unlocked-write-of-guarded-state.md) | state that one writer changes holding a thread lock and another changes holding none, where both can run on threads heki resolves | heuristic, runs with `--heuristic` |
-| [`EFF118`](rules/unshielded-cleanup-checkpoint.md) | a `finally` body, an `except` taking the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way, so in a cancelled scope the cleanup stops there | heuristic, runs with `--heuristic` |
+
+Two more rules that run the same way are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](#resource-and-cancellation-lifetimes).
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
 
 ## 🔧 Rules to switch on
 
-These rules are off by default. Name one in `extend-select` or with `--extend-select EFF106`. A prefix such as `EFF` or `ALL` never enables them.
+These rules are off by default. Name one in `extend-select` or with `--extend-select EFF105`. A prefix such as `EFF` or `ALL` never enables them.
 
 ```toml
 # heki.toml
 [lint]
-extend-select = ["EFF106"]
+extend-select = ["EFF105", "EFF107"]
 ```
 
-A function that makes a request while it holds a lock:
+| Rule | Reports | Tier |
+| --- | --- | --- |
+| [`EFF105`](rules/async-blocking-fs.md) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
+| [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
+| [`EFF112`](rules/set-order-output.md) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
+| [`EFF114`](rules/recursion-error-as-value.md) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
+| [`EFF115`](rules/async-def-as-sync-callback.md) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
+
+Experimental rules can change or go away between releases. [Experimental Features](experimental.md) says why each one is marked.
+
+`EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](ownership.md#a-generator-that-is-never-iterated), with the other single-use values.
+
+## 🔒 Exclusive use and lock safety
+
+Some objects allow one user at a time: a lock, a stream reader, a database connection. These rules report code that breaks that. The opt-in ones are off until you name them in `extend-select`, for example `--extend-select EFF106`. A prefix such as `EFF` or `ALL` never enables them.
+
+```toml
+# heki.toml
+[lint]
+extend-select = ["EFF106", "EFF109", "EFF110"]
+```
+
+### An exclusive object used by tasks started together
+
+A stream reader, an asyncpg connection, or a WebSocket runs one operation at a time. `EFF110` reports tasks started together (`asyncio.gather`, a task group) that all use the same one, so the second call raises. Tier: heuristic, experimental, opt-in ([`EFF110`](rules/exclusive-object-fanout.md)).
+
+```python
+import asyncio
+
+
+class FrameClient:
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self._reader = reader
+
+    async def read_frame(self) -> bytes:
+        return await self._reader.readexactly(4)
+
+    async def read_frames(self, count: int) -> list[bytes]:
+        return await asyncio.gather(*(self.read_frame() for _ in range(count)))  # EFF110
+```
+
+heki reports: `FrameClient.read_frames` starts a task for every item, each using `self._reader` (`asyncio.gather`); `asyncio.StreamReader` allows one operation at a time, so the second task's call raises. Read the frames one after another instead.
+
+### A lock taken again while it is held
+
+`threading.Lock` and `asyncio.Lock` are not reentrant. A method that holds the lock and calls another method that takes it waits for itself. `EFF109` reports the second take, directly or through a call. Tier: heuristic, experimental, opt-in ([`EFF109`](rules/lock-reacquired-while-held.md)).
+
+```python
+# app/m.py
+import threading
+
+
+class Registry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, int] = {}
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def add(self, key: str) -> int:
+        with self._lock:
+            self._items[key] = 1
+            return self.size()  # EFF109
+```
+
+heki reports: `Registry.add` calls `app.m.Registry.size`, which takes `self._lock` while `Registry.add` holds it (taken at line 14); `threading.Lock` is not reentrant, so this waits forever. Move the body of `size` into a helper that does not take the lock, and call that one.
+
+### A write without the lock its other writes hold
+
+When one method changes a field holding a lock, every method that changes it needs the same lock. `EFF117` reports a write that holds none while another write of the same state holds a thread lock, and a thread heki resolves can run one of them. An update can be lost. Tier: heuristic, runs with `--heuristic` ([`EFF117`](rules/unlocked-write-of-guarded-state.md)).
+
+```python
+import threading
+
+
+class Stats:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.received = 0
+
+    def start(self) -> None:
+        threading.Thread(target=self._read).start()
+
+    def _read(self) -> None:
+        with self._lock:
+            self.received += 1
+
+    def reset(self) -> None:
+        self.received = 0  # EFF117
+```
+
+heki reports: `Stats.reset` assigns `self.received` where heki finds no lock held, while `Stats._read` assigns it holding `self._lock`; `Stats._read` can run on another thread, so the two writes can interleave and one can lose the other's update. Take the lock in `reset` too.
+
+### I/O while holding a lock
+
+A lock held across a network call or an `await` makes every other user of the lock wait for the slow call. `EFF106` reports an `await` or blocking network I/O while a `threading` lock or a database transaction is held. Tier: heuristic, opt-in ([`EFF106`](rules/lock-or-tx-held-across-io.md)).
 
 ```python
 # app/sync.py
@@ -64,21 +161,41 @@ Found 1 diagnostic(s) in 2 file(s).
 ...
 ```
 
-This output is from heki 0.9.0. The other opt-in rules:
+Make the request before taking the lock and hold it only for the update.
 
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`EFF105`](rules/async-blocking-fs.md) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
-| [`EFF106`](rules/lock-or-tx-held-across-io.md) | an `await` or blocking network I/O while a `threading` lock or a database transaction is held | heuristic, opt-in |
-| [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
-| [`EFF109`](rules/lock-reacquired-while-held.md) | a lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | heuristic, experimental, opt-in |
-| [`EFF110`](rules/exclusive-object-fanout.md) | an object that allows one operation at a time (a stream reader, an asyncpg connection, a WebSocket) used by tasks started together | heuristic, experimental, opt-in |
-| [`EFF112`](rules/set-order-output.md) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
-| [`EFF114`](rules/recursion-error-as-value.md) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
-| [`EFF115`](rules/async-def-as-sync-callback.md) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
-| [`EFF116`](rules/generator-never-iterated.md) | a call of a generator function whose generator nothing iterates, so its body never runs | heuristic, experimental, opt-in |
+## ⏳ Resource and cancellation lifetimes
 
-Experimental rules can change or go away between releases. [Experimental Features](experimental.md) says why each one is marked.
+Work around a resource can end early. A cancelled task stops at its next checkpoint, and cleanup that runs after the cancellation can be stopped the same way, so the resource is never released. Each rule in this part reports one way the end of a scope leaves a resource in the wrong state. The rules are listed as entries of their own, so a new one is one more entry.
+
+### Cleanup that stops at a cancellation checkpoint
+
+A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. Tier: heuristic, runs with `--heuristic` ([`EFF118`](rules/unshielded-cleanup-checkpoint.md)).
+
+```python
+# app/m.py
+import anyio
+
+
+async def delete_group(name: str) -> None:
+    await anyio.to_thread.run_sync(delete_container_group, name)
+
+
+async def run(name: str) -> None:
+    try:
+        await watch(name)
+    finally:
+        await delete_group(name)  # EFF118
+        log_deleted(name)
+```
+
+heki reports: `run` awaits `app.m.delete_group` in a `finally` body, which reaches the cancellation checkpoint `anyio.to_thread.run_sync` 2 calls down with no shield on the way: in a cancelled scope the await raises the cancellation and the rest of the cleanup does not run. Shield the cleanup:
+
+```python
+    finally:
+        with anyio.CancelScope(shield=True):
+            await delete_group(name)
+        log_deleted(name)
+```
 
 ## 📜 Contracts for execution effects
 
@@ -145,4 +262,4 @@ The run exits with code 1. When the new effect is intended, refresh the snapshot
 - [Configuration: effect-boundaries](configuration.md#effect-boundaries) lists every key and `forbid` token.
 - [Adopting heki in a code base](adoption.md) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](adoption.md#an-async-web-or-database-service) to copy.
 - `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](coding-agents.md#what-a-function-does-heki-inspect-experimental).
-- [State Ownership and Mutation](ownership.md) covers the contracts about who may change, read, or call a thing.
+- [State Ownership and Mutation](ownership.md) covers the contracts about who may change, read, or call a thing, and the rules for borrowed, shared, and single-use values.

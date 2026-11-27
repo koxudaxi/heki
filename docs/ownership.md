@@ -2,94 +2,11 @@
 
 heki finds in-place changes of read-only parameters, cached results, and frozen fields, and enforces your own rules about who may change, read, or call what.
 
-Type checkers see a change made on a value of a read-only type. heki follows the value through aliases and helper calls, so it also sees the change that a function three calls below makes. This page lists what runs without configuration, what you have to switch on, and which contract fits which rule. [Contracts](configuration.md#contracts) has every key, and [Rules](rules/index.md) has one page per rule.
+Python has no owner for a value: any code that reaches an object can change it. Type checkers see a change made on a value of a read-only type. heki follows the value through aliases and helper calls, so it also sees the change that a function three calls below makes. This page has three parts: who may change, read, or call what, how to leave a borrowed or shared value alone, and values that may be used only once. A table at the end maps the ideas to the words Rust uses for them. [Contracts](configuration.md#contracts) has every key, and [Rules](rules/index.md) has one page per rule.
 
-## 🔍 What runs without configuration
+Each entry names its rule and its tier, as `heki rule --all` gives it. An exact rule states a fact about the code. A heuristic rule can be wrong about the code, runs with `--heuristic` (or `lint.heuristic = true`) when it is on by default, and its reports count as warnings. An opt-in rule is off until you name it in `extend-select`, for example `--extend-select MUT115`; a prefix such as `MUT` or `ALL` never enables it. An experimental rule can change or go away between releases, and [Experimental Features](experimental.md) says why each one is marked.
 
-These rules need no `heki.toml`. The first three are exact: a report states a fact about the code, and an error fails `heki check`.
-
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`MUT110`](rules/readonly-param-mutation.md) | a `Sequence`, `Mapping`, `AbstractSet`, or `ReadOnly` parameter handed, as itself, to a function that changes it in place | exact, default |
-| [`MUT114`](rules/cached-result-mutation.md) | an in-place change of the list, dict, or set that an `lru_cache` or `cache` function returned | exact, default |
-| [`MUT119`](rules/change-lost-on-new-object.md) | an in-place change of a new container that nothing keeps, such as `list(xs).sort()`: the change is lost | exact, default |
-| [`MUT118`](rules/sentinel-lost-in-deepcopy.md) | `copy.deepcopy` of an instance whose `object()` sentinel a function tests by identity | heuristic, runs with `--heuristic` |
-
-Heuristic rules can be wrong about the code. They run with `--heuristic` (or `lint.heuristic = true`), and their reports count as warnings.
-
-A function that hands its `Sequence` parameter to a helper that sorts it, and a function that appends to a cached list:
-
-```python
-# app/stock.py
-from collections.abc import Sequence
-from functools import lru_cache
-
-
-def sort_names(names) -> None:
-    if isinstance(names, list):
-        names.sort()
-
-
-def prepare(names: Sequence[str]) -> list[str]:
-    sort_names(names)
-    return list(names)
-
-
-@lru_cache(maxsize=None)
-def default_tags(shop: str) -> list[str]:
-    return ["new", shop]
-
-
-def tag(shop: str, item: str) -> list[str]:
-    tags = default_tags(shop)
-    tags.append(item)
-    return tags
-```
-
-```console
-$ heki check
-app/stock.py:11:5: MUT110 (readonly-param-mutation) [warning] `prepare` passes its read-only parameter `names` to `app.stock.sort_names`; whenever line 7 of `sort_names` runs, it changes the caller's object in place
-   |
-11 |     sort_names(names)
-   |     ^
-  = related: app/stock.py:11:5: `prepare` calls `app.stock.sort_names`
-  = related: app/stock.py:7:9: `sort_names` changes the object in place here
-  = help: pass a copy (`list(names)` / `dict(names)` / `set(names)`), or annotate the helper's parameter with a mutable type
-
-app/stock.py:22:5: MUT114 (cached-result-mutation) [error] `tag` changes in place the list that `default_tags` returned; `default_tags` is cached by `functools.lru_cache`
-   |
-22 |     tags.append(item)
-   |     ^
-  = help: change a copy (`list(...)`) instead
-...
-```
-
-This output is from heki 0.9.0. `MUT110` is a warning because the bug it reports is rarely harmful, and `MUT114` is an error, so only `MUT114` fails the run.
-
-## 🔧 Rules to switch on
-
-These rules are off by default. Name one in `extend-select`, or on the command line with `--extend-select MUT108`. A prefix such as `MUT` or `ALL` never enables them.
-
-```toml
-# heki.toml
-[lint]
-extend-select = ["MUT108", "MUT115"]
-```
-
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`MUT108`](rules/readonly-type-mutation.md) | an in-place change of a field that a standard type declares read-only: a frozen dataclass, a `NamedTuple`, `Final` and `ReadOnly` attributes, `ReadOnly` `TypedDict` keys | heuristic, opt-in |
-| [`MUT115`](rules/shallow-copy-nested-mutation.md) | a change below a shallow copy (`dict(x)`, `x.copy()`, `copy.copy(x)`) of state that outlives the call: the copy holds the same inner object | heuristic, opt-in |
-| [`MUT106`](rules/iterator-double-consumption.md) | a single-pass iterator or generator consumed a second time, which sees no items | heuristic, opt-in |
-| [`MUT107`](rules/hash-attr-mutation.md) | a method other than an initializer that changes an attribute the class's `__hash__` reads | heuristic, opt-in |
-| [`MUT120`](rules/readonly-view-mutation.md) | a change of a value held through a read-only view (a protocol of properties without setters) that a type checker does not see | heuristic, experimental, opt-in |
-| [`MUT112`](rules/conditional-ownership-mutation.md) | an in-place change of a value that is new on one path and borrowed state on another | heuristic, experimental, opt-in |
-| [`MUT113`](rules/iterated-container-mutation.md) | a dict, set, or deque of the instance changed while a method iterates it | heuristic, experimental, opt-in |
-| [`MUT101`](rules/cached-property-stale-mutation.md), [`MUT111`](rules/cached-property-stale-read.md) | an attribute that a `@cached_property` reads, changed without invalidating the cache, and a read of such a stale property | exact, experimental, opt-in |
-
-Experimental rules can change or go away between releases. [Experimental Features](experimental.md) says why each one is marked.
-
-## 📜 Contracts: your own ownership rules
+## 📜 Who may change, read, or call what
 
 Some rules belong to your project, not to Python: only `app.store` may append to `Order.items`, only `app.billing` reads a card token, nothing changes the settings object that `load_settings` returns. Write them down once and `heki check` enforces them across files, aliases, and helpers.
 
@@ -171,6 +88,193 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 `lru_cache` and `cache` results are protected without a contract. A `readonly-returns` entry adds the producers that are not cached, such as a function that returns a module-level dict.
 
+## 🤝 Not breaking a value you borrowed or share
+
+A function that receives a list did not make it, and a function that gets a cached result did not make that either. Changing such a value changes it for everyone who holds it. These rules report the change.
+
+```toml
+# heki.toml
+[lint]
+extend-select = ["MUT113", "MUT115"]
+```
+
+### A read-only parameter changed by a helper
+
+A parameter annotated `Sequence`, `Mapping`, or `AbstractSet` promises that the function only reads it. `MUT110` reports a call that hands such a parameter, as itself, to a function that changes it in place. Tier: exact, default ([`MUT110`](rules/readonly-param-mutation.md)).
+
+```python
+# app/stock.py
+from collections.abc import Sequence
+
+
+def sort_names(names) -> None:
+    if isinstance(names, list):
+        names.sort()
+
+
+def prepare(names: Sequence[str]) -> list[str]:
+    sort_names(names)
+    return list(names)
+```
+
+```console
+$ heki check
+app/stock.py:10:5: MUT110 (readonly-param-mutation) [warning] `prepare` passes its read-only parameter `names` to `app.stock.sort_names`; whenever line 6 of `sort_names` runs, it changes the caller's object in place
+   |
+10 |     sort_names(names)
+   |     ^
+  = related: app/stock.py:10:5: `prepare` calls `app.stock.sort_names`
+  = related: app/stock.py:6:9: `sort_names` changes the object in place here
+  = help: pass a copy (`list(names)` / `dict(names)` / `set(names)`), or annotate the helper's parameter with a mutable type
+...
+```
+
+`MUT110` is a warning, because the bug it reports is rarely harmful, so it does not fail the run. Pass a copy (`list(names)`), or annotate the helper's parameter with a mutable type.
+
+### A cached result changed in place
+
+A function under `lru_cache` or `cache` hands the same list, dict, or set to every caller with the same arguments. `MUT114` reports a change of that object. Tier: exact, default ([`MUT114`](rules/cached-result-mutation.md)).
+
+```python
+# app/stock.py
+from functools import lru_cache
+
+
+@lru_cache(maxsize=None)
+def default_tags(shop: str) -> list[str]:
+    return ["new", shop]
+
+
+def tag(shop: str, item: str) -> list[str]:
+    tags = default_tags(shop)
+    tags.append(item)
+    return tags
+```
+
+```console
+$ heki check
+app/stock.py:11:5: MUT114 (cached-result-mutation) [error] `tag` changes in place the list that `default_tags` returned; `default_tags` is cached by `functools.lru_cache`
+   |
+11 |     tags.append(item)
+   |     ^
+  = help: change a copy (`list(...)`) instead
+...
+```
+
+
+`MUT114` is an error, so it fails the run. A producer that is not cached, such as a function that returns a module-level dict, is covered by a `readonly-returns` contract.
+
+### A shared return value changed
+
+For a value that is shared without a cache, name its producers in a `readonly-returns` contract, with `deep = true` to cover what is below the result. `MUT202` reports a change of what a producer returned, directly or through the functions that return it. Tier: heuristic, contract ([`MUT202`](rules/readonly-return-mutation.md)).
+
+```toml
+# heki.toml
+[[readonly-returns]]
+name = "schemas"
+producers = ["registry.schema"]
+deep = true
+```
+
+```python
+# app/m.py
+from registry import schema
+
+
+def schema_of(name: str) -> dict[str, list[str]]:
+    return schema(name)
+
+
+def extend(name: str) -> None:
+    s = schema_of(name)
+    s["fields"].append("extra")
+```
+
+heki reports: `extend` mutates the shared object returned by read-only producer `registry.schema` through `app.m.schema_of`. Change a `copy.deepcopy` of the value instead.
+
+### A shallow copy shares its items
+
+`dict(x)`, `x.copy()`, and `copy.copy(x)` copy one level. The inner lists are the same objects, so a change below the copy changes the original too. `MUT115` reports it when the original is state that outlives the call. Tier: heuristic, opt-in ([`MUT115`](rules/shallow-copy-nested-mutation.md)).
+
+```python
+def with_base(options: dict[str, list[str]], base: str) -> dict[str, list[str]]:
+    result = options.copy()
+    result["bases"].append(base)  # changes the list `options["bases"]` holds
+    return result
+```
+
+heki reports: `with_base` changes in place an object that its shallow copy of `options` (`.copy()`, line 2) shares with `options`. Rebuild the inner value instead: `result["bases"] = [*result["bases"], base]`.
+
+### A container changed while it is iterated
+
+A dict, set, or deque that a loop is iterating raises `RuntimeError` at the next step once something changes it. `MUT113` reports a method that suspends at a `yield` inside such a loop while another method changes the container. Tier: heuristic, experimental, opt-in ([`MUT113`](rules/iterated-container-mutation.md)).
+
+```python
+class Subscriptions:
+    def __init__(self) -> None:
+        self.by_node: dict[str, object] = {}
+        self._cursor = self._cycle()
+
+    def _cycle(self):
+        while True:
+            yield from self.by_node.values()  # MUT113
+
+    def next_subscriber(self) -> object:
+        return next(self._cursor)
+
+    def drop(self, node: str) -> None:
+        self.by_node.pop(node, None)
+```
+
+heki reports: `Subscriptions._cycle` suspends at a `yield` while iterating `self.by_node`, which `Subscriptions.drop` changes in place, so resuming it after that change raises `RuntimeError`. Iterate over a snapshot: `yield from list(self.by_node.values())`.
+
+### Other rules about values that change under you
+
+| Rule | Reports | Tier |
+| --- | --- | --- |
+| [`MUT119`](rules/change-lost-on-new-object.md) | an in-place change of a new container that nothing keeps, such as `list(xs).sort()`: the change is lost | exact, default |
+| [`MUT118`](rules/sentinel-lost-in-deepcopy.md) | `copy.deepcopy` of an instance whose `object()` sentinel a function tests by identity | heuristic, runs with `--heuristic` |
+| [`MUT108`](rules/readonly-type-mutation.md) | an in-place change of a field that a standard type declares read-only: a frozen dataclass, a `NamedTuple`, `Final` and `ReadOnly` attributes, `ReadOnly` `TypedDict` keys | heuristic, opt-in |
+| [`MUT107`](rules/hash-attr-mutation.md) | a method other than an initializer that changes an attribute the class's `__hash__` reads | heuristic, opt-in |
+| [`MUT120`](rules/readonly-view-mutation.md) | a change of a value held through a read-only view (a protocol of properties without setters) that a type checker does not see | heuristic, experimental, opt-in |
+| [`MUT112`](rules/conditional-ownership-mutation.md) | an in-place change of a value that is new on one path and borrowed state on another | heuristic, experimental, opt-in |
+| [`MUT101`](rules/cached-property-stale-mutation.md), [`MUT111`](rules/cached-property-stale-read.md) | an attribute that a `@cached_property` reads, changed without invalidating the cache, and a read of such a stale property | exact, experimental, opt-in |
+
+## 🔂 Single-use values used twice or not at all
+
+An iterator or a generator gives each item once. Reading it a second time sees nothing, and a generator that nobody iterates never runs its body.
+
+### An iterator consumed twice
+
+`rows` below is a generator expression. `sum` uses it up, and the list comprehension after it sees no items. `MUT106` reports the second pass. Tier: heuristic, opt-in ([`MUT106`](rules/iterator-double-consumption.md)).
+
+```python
+def summarize(lines: list[str]) -> tuple[int, list[str]]:
+    rows = (line.strip() for line in lines)
+    count = sum(1 for _ in rows)
+    kept = [r for r in rows if r]  # MUT106: `rows` was consumed by `sum`
+    return count, kept
+```
+
+heki reports: `rows` is a single-pass iterator already consumed at line 3, so this pass sees no items. Build a list when the value is read more than once.
+
+### A generator that is never iterated
+
+Calling a generator function only creates the generator. Its body runs when something iterates it. `EFF116` reports a call whose generator is dropped: a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate. Tier: heuristic, experimental, opt-in ([`EFF116`](rules/generator-never-iterated.md)).
+
+```python
+def parse_extra(text: str):
+    for line in text.splitlines():
+        yield line.strip()
+
+
+def check(text: str) -> None:
+    if not parse_extra(text):  # EFF116
+        print("nothing to parse")
+```
+
+heki reports: only a truth test reads what `parse_extra` returns, and `parse_extra` is a generator function: a generator is always true, and the body does not run. Iterate it, as in `if not list(parse_extra(text))`.
+
 ## 👉 Next steps
 
 - [Configuration: contracts](configuration.md#contracts) lists every key of the five contracts.
@@ -178,3 +282,15 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 - [Adoption recipes](adoption.md#starter-recipes) have contracts to copy for a web service and a layered application.
 - [Coding agents](coding-agents.md) shows how the same contracts keep an agent out of the files it must not change.
 - `heki inspect app.cart.remove` (experimental) shows what one function changes, keeps, and returns.
+
+## 🦀 If you know Rust
+
+Nothing here is enforced when Python compiles the code. heki reports the places where the code breaks the expectation that a Rust compiler would hold it to.
+
+| Rust | Closest in heki | How Python differs |
+| --- | --- | --- |
+| Ownership: one owner decides who may change a value | `write-owners`, `read-owners`, `call-owners` (`MUT201`, `MUT203`, `MUT204`) | Any code can reach any object. A contract names the owners, and heki reports the code outside them. |
+| Shared borrow `&T` | `Sequence`, `Mapping`, `AbstractSet`, and `ReadOnly` parameters (`MUT110`); shared return values (`MUT114`, `MUT202`) | The annotation promises nothing at run time. heki reports the helper that changes the value anyway. |
+| Exclusive borrow `&mut T`, no change while borrowed | a container changed while it is iterated (`MUT113`); a shallow copy that shares its items (`MUT115`) | Nothing stops the change, and it shows up later as a `RuntimeError` or a surprising value. |
+| Move: a moved value cannot be used again | a single-use iterator or generator (`MUT106`, `EFF116`) | The name stays usable after the value is used up, and the second use sees nothing. |
+| Lifetime: a reference does not outlive what it points to | cleanup that cancellation cuts short ([`EFF118`](effects.md#resource-and-cancellation-lifetimes)) | A Python object stays alive while a name refers to it, so nothing dangles. What can end early is the work around a resource. |
