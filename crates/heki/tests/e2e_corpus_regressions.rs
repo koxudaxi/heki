@@ -175,6 +175,35 @@ const STR_PIECES: &str = r#"class Buffer:
         for row in rows:
             self.text += "{}:{}".format(row, 1)
 
+    def format_with_text(self, rows) -> None:
+        for row in rows:
+            self.text += "{}!".format(row)
+
+    def format_of_exact_operand(self, rows) -> None:
+        for row in rows:
+            self.text += "{:>3}".format(len(row))
+
+    def template_in_a_local(self, rows) -> None:
+        template = "{}!"
+        for row in rows:
+            self.text += template.format(row)
+
+    def lone_field_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "{}".format(row)
+
+    def lone_indexed_field_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "{0}".format(row)
+
+    def lone_field_with_spec_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "{:>3}".format(row)
+
+    def lone_field_with_nested_spec_of_unknown(self, rows, width) -> None:
+        for row in rows:
+            self.text += "{:{}}".format(row, width)
+
     def str_of_int(self, rows) -> None:
         for row in rows:
             self.text += str(len(row))
@@ -278,6 +307,13 @@ fn str_pieces_of_known_type_are_reported_and_a_piece_of_unknown_type_is_not() {
         &[
             ("Buffer.join_piece", "OPT103"),
             ("Buffer.format_method", "OPT103"),
+            ("Buffer.format_with_text", "OPT103"),
+            ("Buffer.format_of_exact_operand", "OPT103"),
+            ("Buffer.template_in_a_local", "OPT103"),
+            ("Buffer.lone_field_of_unknown", "OPT103"),
+            ("Buffer.lone_indexed_field_of_unknown", "OPT103"),
+            ("Buffer.lone_field_with_spec_of_unknown", "OPT103"),
+            ("Buffer.lone_field_with_nested_spec_of_unknown", "OPT103"),
             ("Buffer.str_of_int", "OPT103"),
             ("Buffer.repr_of_int", "OPT103"),
             ("Buffer.ascii_of_str", "OPT103"),

@@ -18,8 +18,8 @@ use crate::{
 use heki_ast::Span;
 use heki_ir::walk::{self, FnShape};
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, Inst, InstKind, IrFunction,
-    ModuleIr, Terminator, UnaryOpKind, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind,
+    IrFunction, ModuleIr, Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1345,6 +1345,40 @@ impl<'a> FnCtx<'a> {
         self.after_def(st, dst, span);
     }
 
+    /// `recv` is a string literal that `str.format` cannot return as one field's formatted
+    /// value: it has literal text (an escaped brace included) or other than one replacement
+    /// field. A template that is a single field (`'{}'`, `'{0}'`, `'{:>3}'`) returns what that
+    /// operand's `__format__` returned, which may be a `str` subclass instance. A template that
+    /// is not a literal here is not known to write text.
+    fn template_writes_text(&self, recv: VarId) -> bool {
+        let Some(InstKind::Const {
+            literal: ConstLiteral::Str(template),
+            ..
+        }) = self.shape.inst(recv).map(|i| &i.kind)
+        else {
+            return false;
+        };
+        let (mut depth, mut fields, mut text) = (0u32, 0u32, false);
+        let mut chars = template.chars().peekable();
+        while let Some(c) = chars.next() {
+            match (depth, c) {
+                (0, '{' | '}') if chars.peek() == Some(&c) => {
+                    chars.next();
+                    text = true;
+                }
+                (0, '{') => {
+                    depth = 1;
+                    fields += 1;
+                }
+                (0, _) => text = true,
+                (_, '{') => depth += 1,
+                (_, '}') => depth -= 1,
+                _ => {}
+            }
+        }
+        text || fields != 1
+    }
+
     /// `str(x)`, `repr(x)`, `ascii(x)`, and `format(x, spec)` of exact builtins: their own
     /// `__str__` / `__repr__` / `__format__` return an exact `str`. Another class's may return a
     /// `str` subclass instance, which `str(x)` hands back unchanged (see `builtins.str` in the
@@ -1395,7 +1429,25 @@ impl<'a> FnCtx<'a> {
             );
             // `str.join` and `str.format` on an exact `str` build a new exact `str` whatever
             // their operands are (items that are not `str` raise); the operands stay escaped.
-            if st.exact_type(recv) == Some(BuiltinKind::Str) && matches!(method, "join" | "format")
+            if st.exact_type(recv) == Some(BuiltinKind::Str)
+                && match method {
+                    "join" => true,
+                    "format" => {
+                        self.template_writes_text(recv)
+                            || args.iter().chain(kwargs.iter().map(|(_, v)| v)).all(|a| {
+                                matches!(
+                                    st.exact_type(*a),
+                                    Some(
+                                        BuiltinKind::Str
+                                            | BuiltinKind::Int
+                                            | BuiltinKind::Float
+                                            | BuiltinKind::Bool
+                                    )
+                                )
+                            })
+                    }
+                    _ => false,
+                }
             {
                 self.fresh(st, dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
             } else {

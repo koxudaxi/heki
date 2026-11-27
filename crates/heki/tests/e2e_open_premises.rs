@@ -592,6 +592,52 @@ fn a_str_piece_of_unknown_class_leaves_its_exact_type_open() {
 }
 
 #[test]
+fn a_lone_format_field_leaves_the_exact_type_open_and_other_templates_do_not() {
+    // A template that is one field returns its operand's `__format__` result unchanged, which
+    // may be a `str` subclass instance; text beside the field, or an exact builtin operand,
+    // makes the result an exact `str`.
+    let with = |piece: &str| {
+        format!(
+            "class Buffer:\n    def __init__(self):\n        self.text = \"\"\n\n    def add(self, rows, width):\n        for row in rows:\n            self.text += {piece}\n"
+        )
+    };
+    let exact_type_open = |name: &str, piece: &str| {
+        let found = reports(name, OPT, &with(piece));
+        assert_eq!(found.len(), 1, "{piece}: {found:#?}");
+        open_of(&found[0]).contains(&("Rewrite proven safe".to_owned(), "exact-type".to_owned()))
+    };
+    for (i, piece) in [
+        "\"{}\".format(row)",
+        "\"{0}\".format(row)",
+        "\"{:>3}\".format(row)",
+        "\"{:{}}\".format(row, width)",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            exact_type_open(&format!("op_fmt_lone_{i}"), piece),
+            "{piece}"
+        );
+    }
+    for (i, piece) in [
+        "\"{}!\".format(row)",
+        "\"{{}}{}\".format(row)",
+        "\"{}{}\".format(row, row)",
+        "\"{:>3}\".format(len(row))",
+        "\"\".join(row)",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            !exact_type_open(&format!("op_fmt_text_{i}"), piece),
+            "{piece}"
+        );
+    }
+}
+
+#[test]
 fn a_read_of_the_accumulator_inside_the_loop_leaves_the_rewrite_unproven() {
     let open = "def build(items):\n    x = ()\n    for i in items:\n        x = x + (i,)\n        print(len(x))\n    return x\n";
     heuristic(

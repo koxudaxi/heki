@@ -1839,7 +1839,7 @@ impl<'a, 'c> Rules<'a, 'c> {
     /// `__str__` / `__repr__` / `__format__` return, which is a `str` or a subclass instance
     /// or raises), an f-string field or conversion, a `BuildString`, or a concatenation of such
     /// pieces and exact strings.
-    fn str_valued(&self, v: VarId) -> bool {
+    fn str_valued(&self, st: &FrameState, v: VarId) -> bool {
         let cx = self.cx();
         // Nested concatenations are looked into to a fixed depth; a deeper one is not a piece.
         const DEPTH: usize = 5;
@@ -1875,6 +1875,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                             cx.builtin_callee(*callee_var, callee),
                             Some("str" | "repr" | "ascii" | "format")
                         ) => {}
+                    // `str.format` of an exact `str` template: a lone field returns its operand's
+                    // `__format__` result, a `str` or a subclass instance.
+                    InstKind::MethodCall { recv, method, .. }
+                        if method == "format" && st.exact_type(*recv) == Some(Str) => {}
                     _ => return None,
                 }
             }
@@ -1906,7 +1910,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let mut obs = self.base();
         // The attribute's own type is not tracked; the right operand shows what it holds. A piece
         // that is only known to be a `str` or a subclass of it leaves the exact type open.
-        let str_piece = st.exact_type(rhs).is_none() && self.str_valued(rhs);
+        let str_piece = st.exact_type(rhs).is_none() && self.str_valued(&st, rhs);
         obs.push(if str_piece {
             self.ck.ob(
                 K::ExactType,

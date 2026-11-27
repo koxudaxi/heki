@@ -10658,9 +10658,10 @@ Checks quadratic accumulation of immutable values in a loop:
   receiver, the function) only ever assign a string, bytes, or tuple literal of the pieces'
   kind (`self.text = ""`): `self.values += (i,)` extends a list in place.
   A piece of that kind is a literal, a concatenation of them, an f-string, `"".join(...)`,
-  `"...".format(...)`, `"..." % scalar`, or `str`, `repr`, `ascii`, or `format` of a value of a
+  `"...".format(...)` of a template with text beside its field (or of exact builtin operands), `"..." % scalar`, or `str`, `repr`, `ascii`, or `format` of a value of a
   builtin type (`str(len(items))`). `str(x)`, `repr(x)`, `ascii(x)`, and `format(x)` of a value
-  of unknown type, an f-string field, and a concatenation of such pieces are a `str` or a
+  of unknown type, `"{}".format(x)` (a template that is one field returns what `x.__format__`
+  returned), an f-string field, and a concatenation of such pieces are a `str` or a
   subclass of it, not an exact `str`: another class's `__str__` / `__format__` may return a
   `str` subclass instance that overrides `__radd__`. The report is heuristic, and its open
   premise (`Rewrite proven safe`, cause `exact-type`) says so. A piece of any other unknown
