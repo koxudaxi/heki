@@ -782,8 +782,8 @@ fn rules_worth_enabling_follow_the_policy() {
     let listed = quiet_lines(&["--all"]);
     assert!(
         listed[0].ends_with(
-            "; experimental and exact: MUT101, MUT111; heuristic: EFF102, EFF105, EFF106, EFF110, \
-             EFF112, EFF114, EFF115, EFF116, EFF117, EFF118, IMP101, IMP102, IMP104, IMP301, \
+            "; experimental and exact: MUT101, MUT111; heuristic: EFF102, EFF105, EFF106, \
+             EFF112, EFF114, EFF115, EFF117, EFF118, IMP101, IMP102, IMP104, IMP301, \
              IMP302, MUT108, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112"
         ),
         "{listed:?}"
