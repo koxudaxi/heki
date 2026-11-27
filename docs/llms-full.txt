@@ -75,7 +75,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` alwa
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
@@ -108,7 +108,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
 
 Found 1 diagnostic(s) in 1 file(s).
 heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports, which can be wrong about the code and count as warnings; `fail-on = "warning"` in the lint settings makes them fail it.
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
@@ -145,9 +145,14 @@ enforce.
     $ uvx heki==0.9.0 check
     All checks passed (4 file(s)).
     ...
-    hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
+    hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
     $ uvx heki==0.9.0 recommend
-    heki recommend (experimental) on .: 4 file(s), 10 function(s)
+    heki recommend (experimental) on .: 4 file(s), 11 function(s)
+    ...
+    Types the code already keeps
+      1 read-only parameter group(s), exact; 0 heuristic
+      No type checker configuration found: half of each guard is a type checker's.
+        app/report.py:8  total(prices)  list[float] -> Sequence[float]  public
     ...
     What heki cannot see (no report either way)
       calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
@@ -160,9 +165,10 @@ enforce.
     ...
     ```
 
-    heki's catalog doesn't say what `stripe.Charge.create` does, so heki reports nothing through
-    it. If the call waits on the network, `EFF101` would report it in `async def checkout`. Only
-    `app.store` writes `Order.items`, so the report ends with the keys that make that a contract.
+    `total` only reads `prices`, so its annotation can say so. heki's catalog doesn't say what
+    `stripe.Charge.create` does, so heki reports nothing through it. If the call waits on the
+    network, `EFF101` would report it in `async def checkout`. Only `app.store` writes
+    `Order.items`, so the report ends with the keys that make that a contract.
 
 3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and a CI step. If the project
    has findings today, record them in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only
@@ -375,7 +381,10 @@ and what it does when it cannot tell.
 heki differs from these tools in what it models: effects and aliases. It leaves syntax and types
 to the tools that model them, also as they grow. Where another tool covers part of a case, heki
 keeps the rest: Ruff's `RUF006` reports discarded tasks, so `EFF107` reports only the tasks bound
-to a variable.
+to a variable. An `await` written directly in a `finally` body or an `__aexit__` with no shielded
+scope around it is a single-file linter's check (flake8-async's `ASYNC102`); `EFF118` adds what
+needs the call graph: which awaits reach a cancellation checkpoint through helpers, and which
+helpers and callers shield them.
 
 ### Clean for Ruff, ty, and tach; broken all the same
 
@@ -451,7 +460,7 @@ $ heki check --output-format concise
 app/api.py:5:12: EFF101 `app.users.load_user` always runs the waiting call `requests.get` on the event loop (3 calls down, on every path)
 app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (through a helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 ## Where heki pays off
@@ -637,14 +646,18 @@ Missed findings close as heki learns more:
   class. A read is not.
 - Typed: builtin classes, the builtin exception and warning classes among them
   (`error: ValueError`; not `IOError` or `EnvironmentError`, and not a name the module or the
-  function binds itself), what a standard library call the catalog types gives, an annotation
-  of a local that names an import of its own function (not a name the function binds more than
-  once or otherwise), and, in a `finally` body, what the annotations say before the `try`.
+  function binds itself), what a standard library call the catalog types gives, by its declared
+  return type (`importlib.util.module_from_spec(spec)` is a `types.ModuleType`, though a custom
+  loader's `create_module` may return another object), an annotation of a local that names an
+  import of its own function (not a name the function binds more than once or otherwise), a
+  call of a value declared `type[C]` wherever the value is held (a parameter, a local, or an
+  attribute annotated in `__init__` or the class body, read in a subclass too), and, in a
+  `finally` body, what the annotations say before the `try`.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
   unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
   module binds to a type expression more than once or with type parameters (a type alias bound
   once names its value), calls of a subscripted class other than a builtin or `collections`
-  container (`Box[int]()`), and calls of `type[C]` attributes.
+  container (`Box[int]()`), and calls of a `type[A | B]`.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
@@ -882,7 +895,7 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT113`, `MUT208`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF118`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204`, `MUT208` |
@@ -895,7 +908,9 @@ Source: https://heki.koxudaxi.dev/installation/
 # Installation
 
 heki is a single executable: its Python package ships only that executable and installs no
-Python dependencies into your environment.
+Python dependencies into your environment. It is published as prebuilt wheels on PyPI for the
+platforms listed below, so `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
+toolchain and compile nothing.
 
 ## With uv, pipx, or pip
 
@@ -932,16 +947,6 @@ Wheels are published for these platforms:
 | macOS | Apple silicon, Intel |
 | Windows | x86-64 |
 
-## From source
-
-heki needs Rust 1.99 or newer:
-
-```console
-$ git clone https://github.com/koxudaxi/heki
-$ cd heki
-$ cargo install --path crates/heki
-```
-
 ## Check the installation
 
 ```console
@@ -956,6 +961,20 @@ $ heki rule --all
 - The version of the checked code comes from
   [`target-version`](https://heki.koxudaxi.dev/configuration/#top-level-settings), or from `requires-python`; see
   [Scope](https://heki.koxudaxi.dev/scope/#the-target-python-version) for what it changes.
+
+## From source
+
+??? note "Only for a platform without a wheel, or for development on heki"
+
+    heki needs Rust 1.99 or newer:
+
+    ```console
+    $ git clone https://github.com/koxudaxi/heki
+    $ cd heki
+    $ cargo install --path crates/heki
+    ```
+
+    `pip install` of the source distribution builds the same executable with maturin.
 
 
 ---
@@ -1014,9 +1033,9 @@ $ heki check app/api.py
 
 ## Ask what fits the project
 
-`heki recommend` (experimental) analyzes the project as `heki check` does and says which rules
-would report here, what heki could not see, and the contracts the code already keeps, with the
-keys to add to `[tool.heki]`. It writes no file. A run of `heki check` that shows nothing, on a
+`heki recommend` (experimental) analyzes the project as `heki check` does and says which
+parameter types and contracts the code already keeps, which rules would report here, and what
+heki could not see, with the keys to add to `[tool.heki]`. It writes no file. A run of `heki check` that shows nothing, on a
 project without contracts or a baseline, ends with a line that points to it:
 
 ```console
@@ -1343,6 +1362,7 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 - [Configuration: contracts](https://heki.koxudaxi.dev/configuration/#contracts) lists every key of the five contracts.
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adoption recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have contracts to copy for a web service and a layered application.
 - [Coding agents](https://heki.koxudaxi.dev/coding-agents/) shows how the same contracts keep an agent out of the files it must not change.
 - `heki inspect app.cart.remove` (experimental) shows what one function changes, keeps, and returns.
 
@@ -1370,12 +1390,13 @@ Four rules are exact and run by default. Their reports show the call chain, and 
 
 `EFF103`, `EFF109`, and `EFF116` also have heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration, a helper that takes the lock on some paths, a call that may run another implementation). They appear with `--heuristic`.
 
-Two more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
+Three more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
 | [`EFF117`](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | state that one writer changes holding a thread lock and another changes holding none, where both can run on threads heki resolves | heuristic, runs with `--heuristic` |
+| [`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/) | a `finally` body, an `except` taking the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way, so in a cancelled scope the cleanup stops there | heuristic, runs with `--heuristic` |
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
 
@@ -1495,7 +1516,7 @@ The run exits with code 1. When the new effect is intended, refresh the snapshot
 ## 👉 Next steps
 
 - [Configuration: effect-boundaries](https://heki.koxudaxi.dev/configuration/#effect-boundaries) lists every key and `forbid` token.
-- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](https://heki.koxudaxi.dev/adoption/#an-async-web-or-database-service) to copy.
 - `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental).
 - [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) covers the contracts about who may change, read, or call a thing.
 
@@ -1649,7 +1670,7 @@ The import is in `total`, so it runs when `total` runs, and loading `app.domain.
 
 - [Configuration: import-boundaries](https://heki.koxudaxi.dev/configuration/#import-boundaries) lists every key of the contract.
 - [Configuration: imports](https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports) lists `cycle-edges` and `module-distributions`.
-- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline, and has a [domain boundary with a read-only settings contract](https://heki.koxudaxi.dev/adoption/#a-layered-application) to copy.
 - [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) and [Async and Execution Effects](https://heki.koxudaxi.dev/effects/) cover the other contracts.
 
 
@@ -1850,8 +1871,10 @@ $ heki recommend app --output-format json
 It takes the options of `heki check` that decide what is analyzed: `--select`,
 `--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`, `--config`,
 `--target-version`, and `--baseline`. The advice is relative to that configuration. `--all`
-shows every block of contracts, where the report shows the first 3 of each kind, and lists up
-to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5.
+shows every block of contracts, where the report shows the first 3 of each kind, lists up
+to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5, lists every
+suggestion group, the heuristic ones too, where the text lists the first 3 exact ones, and names
+every rule without reports.
 
 ## What it prints
 
@@ -1860,23 +1883,32 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
-- **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
-  of exact rules), counted by the premise of the claim each leaves open and why ([Rule
-  Precision](https://heki.koxudaxi.dev/precision/)), or by the condition of the exact tier that is no premise
-  ("Trip count open": the claim holds, and the change pays off only over a loop the data
-  sizes). Each row says what the cause states, how many reports leave it open, how many leave
-  nothing else open, and what closes it: an annotation, which must be true; a change of the
-  code; heki's catalog, which no configuration sets (the row says where to report the case);
-  or nothing you can apply. None of it enters the block. A report whose rule records no cause
-  is counted as "not recorded", never given a guessed one.
-- **What heki cannot see**: where heki is silent, so no count of reports applies (see
-  [below](https://heki.koxudaxi.dev/recommend/#what-heki-cannot-see)).
+- **Start here**: up to three first steps, each repeating what a later part says: the reports
+  that fail `heki check` now (the baseline that records them is in the notes), a source root
+  the block adds (the contract candidates come from a run with it), the command that shows the
+  reports the rules count, the exact types, and the contract blocks in the keys. It is left out
+  when there is none.
+- **Types the code already keeps**: the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions), counted exact and
+  heuristic, and whether heki found a type checker's configuration (without one, half of each
+  guard is missing). The first 3 exact groups by rank are listed, each on one line with its
+  place, function and parameter, the annotation now and as proposed, and its labels; `--all`
+  lists every group, the heuristic ones last with the premises they leave open. The lines under
+  them say what each group states, what reports a later change of the type it writes, and what
+  each label shown means. The edits are in the JSON object; none of it enters the block.
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
   the published measurement of how often its reports are right about the code
-  ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". Rules without reports here are named on
-  one line.
+  ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". A rule that runs now and withholds its
+  heuristic reports says so. A line under the rows gives the `heki check --extend-select` command
+  that shows the reports they count (with the paths given; a rule the configuration ignores is
+  left out of it, since `ignore` wins). The rules without reports here are on one line: how
+  many, the exact ones by code, the experimental exact ones apart, and the number of heuristic
+  ones, which `--all` names. `--all`, or a saved summary snapshot, also shows how to run
+  `MUT103`.
+- **What heki cannot see**: where heki is silent, so no count of reports applies (see
+  [below](https://heki.koxudaxi.dev/recommend/#what-heki-cannot-see)). The source-root candidates, the one part that enters the
+  block, come first.
 - **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
   contracts the code already keeps, as blocks: the candidates whose entries differ only in their
   targets or scopes are one entry. Each block has its confidence, evidence, and the trial run of
@@ -1891,6 +1923,15 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)). They are listed
   whatever `lint.unmatched-contract-entries` says, and the section is left out when there is
   none.
+- **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
+  of exact rules), counted by the premise of the claim each leaves open and why ([Rule
+  Precision](https://heki.koxudaxi.dev/precision/)), or by the condition of the exact tier that is no premise
+  ("Trip count open": the claim holds, and the change pays off only over a loop the data
+  sizes). Each row says what the cause states, how many reports leave it open, how many leave
+  nothing else open, and what closes it: an annotation, which must be true; a change of the
+  code; heki's catalog, which no configuration sets (the row says where to report the case);
+  or nothing you can apply. None of it enters the block. A report whose rule records no cause
+  is counted as "not recorded", never given a guessed one.
 - **Notes**: what to know to weigh the advice. How many of the reports shown now (with a
   baseline, the regressions) make `heki check` fail, with the Ratchet baseline that records them
   so that only new ones fail; and at the default `fail-on`, how many do not (warnings, and
@@ -1925,7 +1966,9 @@ one.
   then print through it, exact and heuristic: "if it waits" (`EFF101`) and "if it sends a query"
   (`EFF103`). heki cannot know what a library call does, so no entry enters the block, and the
   trial's counts are kept out of every count of reports: add an entry if you know what the call
-  does.
+  does. The text lists the names whose trial changes a report, the most exact reports first,
+  then the most heuristic ones, then by reach, and counts the others on a line each: the names
+  whose trial changes no report, with the first few by reach, and the names not tried.
 - **Names heki's catalog lacks in packages it covers**: the same, for the names the trial shows
   heki would report through. If such a call waits or sends a query, report it at heki's issue
   tracker: the catalog should list it.
@@ -1934,7 +1977,8 @@ one.
   name nothing heki sees binds, a protocol whose implementations heki cannot list, a call's
   result or an attribute heki gives no class, a method named at run time, more implementations
   than heki follows, or a member heki does not find. An annotation would resolve most of them;
-  an annotation is an edit of the program, so none enters the block.
+  an annotation is an edit of the program, so none enters the block. The text lists the calls in
+  test code, as `relax-async-in-tests` finds it, after the others, and counts those it leaves out.
 - **Source roots**: a directory below the project root, neither a source root nor a regular
   package (a directory with `__init__.py` is imported by its own name, so heki never takes one
   for a source root), below which the dotted path of an import that names no project module is a
@@ -2162,7 +2206,40 @@ def test_load_user() -> None:
 $ heki recommend app
 heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
-Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 4 heuristic rule(s) off
+Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
+
+Start here
+  - heki check fails on 1 report(s) now: a Ratchet baseline records them, so that it fails only on new ones (Notes)
+  - heki check app --extend-select MUT106,OPT110 shows 2 report(s) not shown now: 0 exact, 2 heuristic (heuristic reports can be wrong)
+  - 2 exact read-only parameter type(s) to write (Types the code already keeps)
+
+Types the code already keeps
+  2 read-only parameter group(s), exact; 2 heuristic (heki recommend --all lists them)
+  No type checker configuration found: half of each guard is a type checker's.
+    app/report.py:2  total_and_count(rows)  list[int] -> Sequence[int]  public
+    app/report.py:9  average(rows)          list[int] -> Sequence[int]  public
+  Each group states that the parameter itself is never changed, in its function and in every function it is handed to, and that it does not leave them. The edits of a group go together; --output-format json has them.
+  After the edit, a type checker reports a change of the parameter in the function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports handing it to a function without annotations that changes it.
+  public: a name without a leading underscore along it; callers, overriders, and implementers outside the checked files are not known
+
+Rules worth enabling here
+  rule    reports  exact  consequence  right about the code (published)  real harm  block
+  MUT106        1      -  bug          not measured                      -          yes
+  OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
+  see the 2 report(s): heki check app --extend-select MUT106,OPT110
+  No reports here: 30 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 23 heuristic one(s)
+
+What heki cannot see (no report either way)
+  calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
+    name                  calls  async  loops  if it waits     if it sends a query
+    stripe.Charge.create      1      1      0  EFF101 1 exact  -
+  if it waits, if it sends a query: what heki check would print if the call waited on the network or sent a database query; a trial, not a fact (Notes)
+
+Contract candidates
+  effect-boundaries  app.report  medium
+    3 function(s) in 1 module(s) reach no blocking call heki sees
+    trial: EFF201 0
+  For every block, accesses inside code heki cannot follow (unresolved calls, libraries without a catalog) are not seen.
 
 What keeps reports heuristic
   1 heuristic report(s) of exact claims: OPT110 1
@@ -2174,24 +2251,6 @@ What keeps reports heuristic
     the value looked up may compare otherwise through `hash` than through `==`: a custom `__eq__` / `__hash__`, or an unhashable value
     e.g. app/users.py:14 OPT110
   Nothing here enters the block: an annotation or a change of the code is an edit of the program.
-
-What heki cannot see (no report either way)
-  calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
-    name                  calls  async  loops  if it waits     if it sends a query
-    stripe.Charge.create      1      1      0  EFF101 1 exact  -
-
-Rules worth enabling here
-  rule    reports  exact  consequence  right about the code (published)  real harm  block
-  MUT106        1      -  bug          not measured                      -          yes
-  OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF110, EFF112, EFF114, EFF115, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
-  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
-
-Contract candidates
-  effect-boundaries  app.report  medium
-    3 function(s) in 1 module(s) reach no blocking call heki sees
-    trial: EFF201 0
-  For every block, accesses inside code heki cannot follow (unresolved calls, libraries without a catalog) are not seen.
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
@@ -2215,7 +2274,8 @@ A suggestion is a claim about the code and the annotation edit that writes it in
 typing (ADR-023). It is no report: it has no rule code, severity, suppression, baseline entry,
 or exit code, and `heki check` never prints one. Edits valid only together are one group: a
 parameter and the parameters it is handed to, and the same parameter of every definition of an
-override family. The JSON object lists them under `suggestions`.
+override family. The text lists them under "Types the code already keeps", and the JSON object
+under `suggestions`, with the edits.
 
 The kind `readonly-parameter` suggests `Sequence`, `Mapping`, or `AbstractSet` for a parameter
 annotated `list`, `dict`, or `set` that the function, and every function it hands it to, only
@@ -2685,6 +2745,9 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 
 | Field | Content |
 | ----- | ------- |
+| `version`, `heki`, `root`, `query`, `resolved_from` | the version of the object, the heki release, the project root, the symbol as given, and how it named the function (`name`, `glob`, `suffix`, or `line`; `null` for an exact full name) |
+| `complete`, `errors` | `complete` is false when `errors` lists the files heki could not read or parse |
+| `function` | the function: full name, module, kind, definition lines, `async`, `generator`, `abstract`, `stub`, class, decorators, parameters, the call that offloads it to a thread or process pool, and whether a caller drives it without an event loop |
 | `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
@@ -3287,7 +3350,11 @@ A write into the entries of a target's container (`model.meta["kw"][name] = v`) 
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
 after an augmented assignment that changes the container in place and so keeps it
 (`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
-(`count += 1`) binds a new object.
+(`count += 1`) binds a new object. An attribute write on an entry of a project class
+(`model.fields[0].name = v` with `fields: list[Field]`) is a write of that class's attribute
+(`Field.name`), judged by its own contracts, also in a helper handed the container
+(`rename_all(model.fields)`); on an entry heki ties to no project class, a helper handed the
+container writes the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -3319,6 +3386,24 @@ may store what it reads out of it. A project function's result that holds itself
 objects it links (`made.part = part; part.parent = made`) is new at a call until a value read
 out of it is stored. A store into an object the function did not make, or into one of its own
 that was kept before, still ends the freshness of what it stores.
+
+A container a class's constructor makes for each instance is held by that instance, so storing a new
+object into it links the two the same way: `copied = Node(); copied.children.append(part)` leaves
+`part` new while `copied` is (`append`, `appendleft`, `insert`, `add`, `setdefault`, and item
+stores, on a list, set, or dict, when they run no project code on what they store). The constructor
+is the project `__init__` the class runs, its own or a base's (no class decorator,
+`__init_subclass__`, `dataclass_transform`, or metaclass other than `type` or `abc.ABCMeta` along
+the MRO, and no code that reading the attribute runs), and it binds the attribute once, on every
+path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
+`bytearray()`. It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
+call `super().__init__(...)`, whose `__init__` along the MRO does the same or is `object`'s, and
+no store in them runs code (a property's setter, a descriptor, `__setattr__`): a call handed
+`self` or a member of it, such as `self.setup()`, may hand the container anywhere. The object must
+be one the function made by calling the class on every path.
+Rebinding the attribute before an object is stored into the list (`copied.children = node.children`
+on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, or a helper handed
+`copied`), or keeping the list, ends the freshness of what is stored into it. A project function
+returning such an object does not carry the fact to its callers.
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
@@ -4275,7 +4360,7 @@ excluded = true               # never reported
 | Key | Meaning |
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
-| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
+| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`, `checkpoint` (an await where a cancelled AnyIO or Trio scope raises, `EFF118`). |
 | `async-safe` | Safe to call from `async def`: it never blocks the event loop, so the blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread (the receiver is not counted). |
 | `excluded` | Never reported (logging and similar). |
@@ -4465,6 +4550,57 @@ Their reports can be wrong about the code: they are printed, and fail the run on
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
+Two contracts keep the rest of the service in line: handlers that never block, and database
+writes that only the repository layer makes. `fail = true` makes their reports fail the run.
+
+```toml
+# heki.toml
+[[effect-boundaries]]
+name = "handlers-do-not-block"
+scopes = ["app.web.*"]
+forbid = ["blocking"]
+message = "await an async client, or move the call to app.repo and run it in a thread"
+fail = true
+
+[[call-owners]]
+name = "db-writes-in-repo"
+targets = ["app.db.Session.add", "app.db.Session.commit"]
+allowed-callers = ["app.repo.*"]
+message = "write through a function of app.repo"
+fail = true
+```
+
+The first reports a `time.sleep` two calls below an `async def` in `app.web` (`EFF201`). The
+second reports a handler that calls `session.add` or `session.commit` itself (`MUT204`). Use
+`write-owners` instead when the rule is about a field, not a call:
+[State Ownership](https://heki.koxudaxi.dev/ownership/#which-contract-do-i-need).
+
+### A layered application
+
+Keep the domain free of the web and infrastructure layers, and keep a shared settings object
+from being changed in place:
+
+```toml
+# heki.toml
+[[import-boundaries]]   # experimental
+name = "domain-is-a-leaf"
+importers = ["app.domain", "app.domain.*"]
+forbidden-imports = ["app.web", "app.web.*", "app.infra", "app.infra.*"]
+message = "pass what the domain needs in as an argument"
+fail = true
+
+[[readonly-returns]]
+name = "shared-settings"
+producers = ["app.settings.get_settings"]
+deep = true
+fail = true
+```
+
+A module of `app.domain` that imports `app.infra` is reported as `IMP201`, and a view that
+assigns to `get_settings().debug` or appends to `get_settings().hosts` as `MUT202`. See
+[Imports](https://heki.koxudaxi.dev/imports/#architecture-import-boundaries) and
+[State Ownership](https://heki.koxudaxi.dev/ownership/#which-contract-do-i-need).
+
 ### Walls for a team or a coding agent
 
 Declare the architecture as contracts, make their reports fail the run with `fail = true`, and give
@@ -4508,6 +4644,10 @@ fail = true
   that wants that can still set. Record today's findings in the baseline first
   (`uvx heki==0.9.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
+- A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
+  review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
+  its base and compare them ([Auditing inline suppressions](https://heki.koxudaxi.dev/adoption/#auditing-inline-suppressions)).
+  `CODEOWNERS` covers the contract and baseline files, and this comparison covers the comments.
 - For Claude Code, add the [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code): it runs
   `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
   and sends a failing report back to it.
@@ -4687,14 +4827,10 @@ repos:
       - id: heki
 ```
 
-[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
-there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
-moves `rev` to the latest release.
-
-To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
-`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
-(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
-first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its prebuilt PyPI
+wheel (the [platforms](https://heki.koxudaxi.dev/installation/) heki publishes wheels for), so it compiles nothing and needs
+no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate` moves `rev` to the
+latest release.
 
 A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
@@ -4748,6 +4884,14 @@ report of its key, so a run with `--touched` compares all of them and shows ever
 grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
 the commit added the report. It judges the stale entries of the touched files and of the reports
 that touch them only: a stale entry elsewhere is left to a run over the whole project.
+
+??? note "Building the hook from source"
+
+    Only a platform without a wheel, or a development version of heki, needs this. Point `repo` at
+    `https://github.com/koxudaxi/heki` with a release `rev`. pre-commit then installs the repository
+    as a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
+    `PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
+    pre-commit keeps the installed hook for later runs.
 
 ## Continuous integration
 
@@ -4875,6 +5019,17 @@ The configuration, the baseline, and the CI files that decide this (`pyproject.t
 `heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
 the audit file shows what suppressions hide, and a weakened configuration or baseline is the
 code owners' to review.
+
+## Stability on the way to 1.0
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that
+run by default, the format of the Ratchet baseline, the contract tables `write-owners`,
+`read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with
+`fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A
+change to one of them is listed under "Breaking changes" in the release notes. The experimental
+features can change in any release: `heki recommend`, `heki inspect`, `heki skill`,
+`--generate-prompt`, and the rules marked experimental
+([Experimental Features](https://heki.koxudaxi.dev/experimental/) has the list).
 
 ## Rolling out rules
 
@@ -5139,9 +5294,21 @@ Options:
           Write the reports that inline suppressions hid (`# heki: ignore[...]`, `# noqa`) to this JSON file, next to any `--output-format`, so CI can compare it with the file of the protected base branch and find the suppressions a change adds. It lists the reports of the files the run shows (`--touched`, PATHS that are files); a baseline changes nothing in it. Each entry names the report (`code`, `file`, `function`, `target` as its baseline key, `line`, `column`) and the `directive` that hid it (`kind`, `file`, `line`, `column`); the entries are sorted, and the same project gives the same bytes. Exits with 2 when the file cannot be written
 
       --output-format-json-schema <TARGET>
-          Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json`
-          
-          [possible values: generate-prompt]
+          Print the JSON Schema of a JSON format heki writes and exit: `generate-prompt` (the object of `--generate-prompt --output-format json`), or a published schema by its name and version, such as `check-1` or `baseline-3` (docs/output-formats.md lists them)
+
+          Possible values:
+          - generate-prompt:     The object of `heki check --generate-prompt --output-format json`
+          - check-1:             The array of `heki check --output-format json`
+          - report-suppressed-1: The file `heki check --report-suppressed` writes
+          - summary-snapshot-1:  The summary snapshot file `heki snapshot --write` writes
+          - baseline-1:          A Ratchet baseline file, version 1 (counts diagnostics)
+          - baseline-2:          A Ratchet baseline file, version 2 (counts violation sites)
+          - baseline-3:          A Ratchet baseline file, version 3 (counts sites and the heuristic ones)
+          - inspect-1:           The output of `heki inspect --output-format json`
+          - inspect-imports-1:   The output of `heki inspect --imports --output-format json`
+          - rule-1:              The output of `heki rule --output-format json`
+          - assumptions-1:       The output of `heki assumptions --json`
+          - error-1:             What a failed command writes to stdout with `--output-format json`
 
   -h, --help
           Print help (see a summary with '-h')
@@ -5484,7 +5651,7 @@ Options:
           Print the JSON Schema of the object of `--output-format json` and exit
 
       --all
-          Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add
+          Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones), and every rule without reports by name
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -5626,11 +5793,64 @@ Examples:
 
 ---
 
+Source: https://heki.koxudaxi.dev/output-formats/
+
+# Output Formats
+
+Every JSON format heki writes has a JSON Schema in the repository, so that CI, governance tools,
+and coding agents can check what they read. The schemas are in
+[`docs/schemas/`](https://github.com/koxudaxi/heki/tree/main/docs/schemas) and published at
+`https://heki.koxudaxi.dev/schemas/<name>.json`, the `$id` of each. They follow JSON Schema draft
+2020-12 and are derived from the types that write the output, so they cannot drift from it.
+`heki check --output-format-json-schema <name>` prints the same schema.
+
+| Format | Written by | Schema |
+| ------ | ---------- | ------ |
+| Diagnostics, an array | `heki check --output-format json` | [check-1](https://heki.koxudaxi.dev/schemas/check-1.json) |
+| Suppressed reports | `heki check --report-suppressed PATH` | [report-suppressed-1](https://heki.koxudaxi.dev/schemas/report-suppressed-1.json) |
+| Effect summary snapshot | `heki snapshot --write`, or `heki snapshot` on stdout | [summary-snapshot-1](https://heki.koxudaxi.dev/schemas/summary-snapshot-1.json) |
+| Ratchet baseline, version 1 | files written before baselines counted sites | [baseline-1](https://heki.koxudaxi.dev/schemas/baseline-1.json) |
+| Ratchet baseline, version 2 | files that count sites | [baseline-2](https://heki.koxudaxi.dev/schemas/baseline-2.json) |
+| Ratchet baseline, version 3 | `heki check --baseline FILE --update-baseline` | [baseline-3](https://heki.koxudaxi.dev/schemas/baseline-3.json) |
+| Function facts | `heki inspect SYMBOL --output-format json` | [inspect-1](https://heki.koxudaxi.dev/schemas/inspect-1.json) |
+| Import facts | `heki inspect --imports MODULE --output-format json` | [inspect-imports-1](https://heki.koxudaxi.dev/schemas/inspect-imports-1.json) |
+| Rule metadata | `heki rule [CODE] --output-format json` | [rule-1](https://heki.koxudaxi.dev/schemas/rule-1.json) |
+| Assumption A1 hazards | `heki assumptions --json` | [assumptions-1](https://heki.koxudaxi.dev/schemas/assumptions-1.json) |
+| Failure of a command | any command, with `--output-format json` | [error-1](https://heki.koxudaxi.dev/schemas/error-1.json) |
+| Configuration advice | `heki recommend --output-format json` | [recommend-3](https://heki.koxudaxi.dev/schemas/recommend-3.json), and [version 1](https://heki.koxudaxi.dev/schemas/recommend-1.json) and [2](https://heki.koxudaxi.dev/schemas/recommend-2.json) |
+| Prompt for a language model | `heki check --generate-prompt --output-format json` | `heki check --output-format-json-schema generate-prompt` |
+
+The baseline and the snapshot are files you commit. A baseline is TOML: its schema describes its
+values as JSON, which is what a TOML parser gives. Validate a baseline by parsing it first.
+SARIF output (`--output-format sarif`) follows the public
+[SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) schema, which
+heki does not copy.
+
+## Versions
+
+The version of a format is part of its schema name. A format with a `version` or
+`schema_version` field (the snapshot, the suppressed report, the baselines, `heki inspect`,
+`heki recommend`) writes the number its schema is named by; the others (the diagnostics, the rule
+metadata, the assumptions, the failure object) have no field and are known by the schema name.
+
+- A change that breaks a reader, such as a field that is removed, renamed, or changes meaning,
+  or a value a reader would not expect, makes the next version: a new schema file with the next
+  number, and a new `version` where the format has the field. It is listed under Breaking
+  changes in the release notes. The files of the earlier versions stay published.
+- A field that is added is not breaking. The schema of the version gains the property, and the
+  release notes list it. The schemas forbid properties they do not list, because they describe
+  what this release writes; a reader should ignore fields it does not know.
+- A baseline is read in every version. `heki check --update-baseline` writes version 3, and a
+  file of an earlier version keeps its meaning until then.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 54 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 55 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -5694,6 +5914,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF115 | [async-def-as-sync-callback](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run. | ≈ 🔌 🧪 |
 | EFF116 | [generator-never-iterated](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | A call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run. |  |
 | EFF117 | [unlocked-write-of-guarded-state](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | State that another writer changes holding a thread lock (`threading.Lock`, `RLock`, `Condition`, `Semaphore`), changed here holding none, where a thread heki resolves can run one of the writes: an update can be lost. | ≈ |
+| EFF118 | [unshielded-cleanup-checkpoint](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/) | A cleanup (a `finally` body, an `except` taking the cancellation, an `__aexit__`) that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way: in a cancelled scope the cleanup stops there. | ≈ |
 | EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)
@@ -5838,7 +6059,16 @@ cost estimate such as "(N+1)", and no advice (that goes into the help).
 Exact claims hold in every run consistent with seven assumptions
 ([ARCHITECTURE.md, section 3.4](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md)):
 
-- **R1**: the functions and classes on a call chain are not replaced at run time.
+- **R1**: the functions and classes on a call chain are not replaced at run time. A special
+  method bound on a class after its body (`__setattr__`, `__delattr__`, `__getattribute__`,
+  `__getattr__`, a copy hook) is bound under its own name: a store under a constant name (a
+  string literal, or a module or class name bound once to one), or under a name the storing
+  function builds with constant text that can still spell it, may bind it, and a store under a
+  name of unknown value (a parameter, a loop variable over `dir()`, `vars()`, or a mapping's keys,
+  a value read from data, a module name bound to a built string) is taken to bind none. This
+  gives up `setattr(cls, name, hook)` binding `__setattr__` through such a `name`. Code heki
+  does not read is taken to bind none either: a class decorator outside the project, and a call
+  or a closure the class is handed to, bind on it only what the stores heki reads bind.
 - **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
   goes through a method call holds only when every implementation in such a subclass has it.
   A value annotated with a nominal container ABC (`Sequence`, `Mapping`, `Set`, and their mutable
@@ -5887,6 +6117,8 @@ reports](https://heki.koxudaxi.dev/precision/#harm-of-the-exact-reports)):
   ([Fixes and Safety](https://heki.koxudaxi.dev/fixes/)), so a report is a fix, not only a line to read.
 - `OPT113` runs by default on its own share: 2 of its 8 census reports, and none of its 6
   holdout reports.
+- A rule with fewer than 10 exact reports in its certification runs by default on the real bugs
+  it found instead: [Rare failures](https://heki.koxudaxi.dev/precision/#rare-failures).
 
 ## How a rule becomes exact
 
@@ -5902,11 +6134,44 @@ A rule is certified exact when all four hold:
    rule was designed or fixed, finds no false claim outside a violation of R1-R7.
 4. **Run-time oracle**: the claimed events (the call that runs, the statement executed on each
    iteration) happen where the code ran, checked with `sys.monitoring` on the differential test
-   suite and on datamodel-code-generator.
+   suite and on datamodel-code-generator and, for a rule whose sites those do not have, on
+   programs its premise table generates: each base program fails as claimed, and no program with
+   a premise stripped does.
 
 Every release then runs the corpus with the release candidate and checks every report it adds
 or changes in an exact rule. A false claim found later is a bug: it is fixed before the next
 release, or the rule becomes heuristic in that release and needs a new certification.
+
+## Rare failures
+
+Some rules report a failure that mature code has already fixed: an import that raises, a lock
+that waits for itself, a function body that never runs. heki reports them where the code is
+written, in the editor and in hooks, so the corpus has few of them, and a share of real harm
+cannot be read from a handful of reports. Such a rule is certified as any other, and runs by
+default when all of these hold:
+
+1. Its consequence is `Bug`, and its claim is a failure a run shows: an exception, a wait that
+   never ends, a body that does not run, or a test that gives the opposite answer.
+2. Its census and its holdout run have fewer than 10 exact reports together, and no false claim.
+   A census or a holdout run without a report counts; packages added for the rule are not
+   required.
+3. The run-time oracle shows both sides on programs its premise table generates: every base
+   program reports and fails as claimed where it runs, and no program with one premise stripped
+   reports or fails.
+4. It found at least two real bugs, in two projects: exact reports that two reviewers class as
+   confirmed, at the parent commit of a merged pull request that fixes the failure (the report
+   is gone at the fix), or in the young repositories of the development corpus.
+
+A false claim found later demotes the rule as for any exact rule. A rule that reaches 10 exact
+reports is judged on its share of real harm. Below 10, one report moves the share by more than 10
+points, so the 10 % bar decides nothing.
+
+The certifications table records the real bugs of such a rule, and `build_docs.py` fails when a
+rule in the default set with fewer than 10 exact reports has none recorded. It exempts the rules
+of consequence `MinorBug` and the rules certified before this section existed (`OPT101`,
+`OPT102`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`, `OPT113`, `EFF101`,
+`EFF103`, `DATA101`, `MUT110`, `MUT114`, `MUT101`, `MUT111`, `MUT119`); a rule certified after it
+is not exempt.
 
 ## Certifications
 
@@ -5919,30 +6184,36 @@ census reports are those of its exact tier with the plain-key premise, all among
 the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
 before reports reaching one waiting call are folded together.
 
-| Rule | Certified | Census: reports / false | Holdout: reports / false |
-| ---- | --------- | ----------------------: | -----------------------: |
-| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 |
-| `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 |
-| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 |
-| `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 |
-| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 |
-| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
-| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
-| `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
-| `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 |
-| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
-| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
-| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
-| `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
-| `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
-| `MUT101` | 0.2.4 (experimental) | 26 / 0 | 1 / 0 |
-| `MUT111` | 0.2.4 (experimental) | 60 / 0 | 2 / 0 |
-| `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 |
+| Rule | Certified | Census: reports / false | Holdout: reports / false | Real bugs |
+| ---- | --------- | ----------------------: | -----------------------: | --------: |
+| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 | - |
+| `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 | - |
+| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 | - |
+| `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 | - |
+| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 | - |
+| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 | - |
+| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 | - |
+| `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 | - |
+| `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 | - |
+| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 | - |
+| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 | - |
+| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 | - |
+| `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 | - |
+| `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 | - |
+| `MUT101` | 0.2.4 (experimental) | 26 / 0 | 1 / 0 | - |
+| `MUT111` | 0.2.4 (experimental) | 60 / 0 | 2 / 0 | - |
+| `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 | - |
+| `EFF109` | 0.10.0 | 6 / 0 | 1 / 0 | 7 |
+| `EFF116` | 0.10.0 | 10 / 0 | 0 / 0 | - |
 
 The exact tier of the size-dependent rewrites has since asked that the data decide the loop's trip
 count, which keeps a subset of the reports their census and holdout run checked.
 
 ## Harm of the exact reports
+
+The table below is why the size-dependent `OPT` rewrites are opt-in: almost none of their exact
+reports were of real harm. The bug rules (`EFF`, `MUT`) are a different kind. A report of one names
+a defect, and [Measurements](https://heki.koxudaxi.dev/precision/#measurements) gives the real-harm share of each in its own row.
 
 The certification runs of the `OPT` rules classed the harm of their exact reports. The census
 reused the classes of an earlier pre-check, which classed a sample, so some census reports have
@@ -5959,6 +6230,8 @@ none.
 | `OPT121` | 0 / 0 / 10 / 2 | 0 / 0 / 5 / 0 |
 | `OPT130` | 0 / 0 / 1 / 0 | 0 / 0 / 0 / 0 |
 | `OPT113` | 0 / 2 / 6 / 0 | 0 / 0 / 6 / 0 |
+| `EFF109` | 3 / 3 / 0 / 0 | 1 / 0 / 0 / 0 |
+| `EFF116` | 1 / 4 / 5 / 0 | 0 / 0 / 0 / 0 |
 
 A run of the 0.3.0 build on the frozen holdout corpus (2026-11-24), with the eight rewrite rules
 and `OPT113` selected by code, has 134 exact reports. Each is a report the certification's holdout
@@ -6021,6 +6294,8 @@ Source: https://heki.koxudaxi.dev/experimental/
 Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. A feature leaves this page when it becomes stable.
 
 An experimental rule is never enabled by default: it runs only when `select` or `extend-select` names its code or name, and `heki check` then reports it like any other rule. `heki rule <CODE>` and the rule's page say that it is experimental.
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that run by default, the format of the Ratchet baseline, the contract tables `write-owners`, `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with `fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A change to one of them is listed under "Breaking changes" in the release notes. See [Adopting heki](https://heki.koxudaxi.dev/adoption/#stability-on-the-way-to-10).
 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
@@ -6343,6 +6618,7 @@ On a save, the edit reaches other files only through what it changes:
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
 | the writes that leave a `@cached_property` stale (`MUT111`, when selected) | the files reading such a property: whether a read is reported depends on every writer of the class family, wherever it is |
 | the states written holding a thread lock, the functions threads reach, those every call of which holds a lock, or those only construction and the after-fork handlers run (`EFF117`, when selected) | every file when the states, their locked writers, or whether a thread runs those writers change; otherwise the files of the functions that joined or left those sets |
+| the cancellation checkpoints a function's awaits reach, or whether a call runs under a shield (`EFF118`, when selected) | the callers of the function, as for any effect, and the files of the functions a changed call reaches: whether every call of a function shields it decides its report |
 | a function generators are handed to | those generators: whether it iterates them decides where their writes and reads are reported |
 | a function's own in-place changes, attribute rebindings, or calls, while its effects stay the same | the files with `MUT108` / `MUT110` / `MUT120` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
@@ -7641,9 +7917,13 @@ Its premises:
   run (R2, R5). Established.
 - **Plain write**: the write is one of two kinds. It may rebind or delete the attribute with a
   plain store: no property, descriptor, `__setattr__`, `__delattr__`, or metaclass heki does not
-  know in a class the instance may be, and every base a project class or a plain one. Or it may
-  change in place the builtin list, dict, or set the attribute holds by its type, through a
-  changing method or an item store that no project subclass of the container replaces.
+  know in a class the instance may be, no `__setattr__` or `__delattr__` bound on one after its
+  body by a store heki reads (through a value that may be a class object, under that name or a
+  name built at run time that may be it, also in a class decorator or an `__init_subclass__`,
+  as for `MUT115`; a name of unknown value and code heki does not read binding none under R1),
+  and every base a project class or a plain one. Or it may change in place the builtin list,
+  dict, or set the attribute holds by its type, through a changing method or an item store that
+  no project subclass of the container replaces.
   Established.
 - **Kept to the return**: no point from the write to the method's normal return may remove or
   replace the kept value, exception edges into handlers included. The write's own instruction
@@ -11892,7 +12172,11 @@ is the receiver's class, and a class method returning `Self`, such as pydantic's
 type parameter of its class (`obj: T` in `class Site(Generic[T])` or `class Site[T]:`) holds
 the argument the instance's annotation gives (`site: Site[Schema]`, also through a type alias);
 a name another module binds only under `if TYPE_CHECKING:` (serving it from a module
-`__getattr__`) is the class that import names, also as a base class; a copy (`copy.copy`,
+`__getattr__`) is the class that import names, also as a base class, and a name a module
+serves only from its `__getattr__` is what the hook returns for it where heki follows the hook
+(a branch testing the name against the literal, a factory read from a module-level dict by the
+name and called), as an import of it would be, and a class object a factory annotated `-> type[C]`
+returns is `C` as a `TYPE_CHECKING` import is; a copy (`copy.copy`,
 `copy.deepcopy`, `dataclasses.replace`, `model_copy`) has its original's class, calling a `functools.partial` object returns what the
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
 an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
@@ -13121,8 +13405,18 @@ Its premises:
   project subclass replaces; `copy.copy` of an instance of a project class no class of which
   (R2) defines `__copy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, or `__setstate__`, or
   has a metaclass or a base heki does not know; or `model_copy()` without `deep=True` of a
-  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. Open for the other
-  copies (`dataclasses.replace`, `copy.replace`, the catalog's other sanitizers).
+  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. A class defines a
+  name also when a store heki reads binds it on the class after its body: a store through a
+  value that may be a class object (any value heki does not establish as an instance: `self`,
+  what a class call makes, a parameter annotated with a class other than `type`) under the
+  name, or under a name built at run time whose constant text at its ends may be the name's
+  (`Node.__copy__ = f`, `setattr(cls, "__copy__", f)` in a class decorator, an
+  `__init_subclass__`, or another function handed the class; `f"_cached_{name}"` is never
+  `__copy__`). A store under a name of unknown value (a parameter, a key of `vars()` or of a
+  mapping, a value read from data) binds none, and so does code heki does not read: a class
+  decorator outside the project, and a call or a closure the class is handed to, bind only what
+  the stores heki reads bind (R1). Open for the other copies (`dataclasses.replace`,
+  `copy.replace`, the catalog's other sanitizers).
 - **Borrowed original**: on every path the copied value is state that outlives the call: a
   parameter, a global, a variable of an enclosing function, or what a plain attribute or item
   load reads from such state. Open: one path is enough. What a call returns is not followed.
@@ -13138,8 +13432,9 @@ Its premises:
   changing method, or an in-place operator on a builtin `list`, `dict`, or `set` (by
   annotation, R2) that no project subclass replaces, or a plain attribute store or delete on an
   instance of a project class (no property, descriptor, `__setattr__`, or metaclass in a class it
-  may be; pydantic's `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by
-  a helper the object is handed to.
+  may be, also none bound on the class after its body as for **Shallow copy**; pydantic's
+  `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by a helper the
+  object is handed to.
 
 ## Why is this bad?
 The copy suggests the original stays as it was, but the objects below the copy are the
@@ -13931,6 +14226,126 @@ No automatic fix.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/
+
+# unshielded-cleanup-checkpoint (EFF118)
+
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+
+A cleanup (a `finally` body, an `except` taking the cancellation, an `__aexit__`) that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way: in a cancelled scope the cleanup stops there.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+## What it does
+Checks for cleanup code that awaits a call reaching an AnyIO or Trio cancellation checkpoint with
+no shield on the way. The rule is heuristic: it runs when `select` or `extend-select` names it,
+and with `--heuristic` (`lint.heuristic = true`).
+
+A cleanup is:
+
+- a `finally` body;
+- an `except` clause that is the first of its `try` to take the cancellation: a bare `except`,
+  `BaseException`, `asyncio.CancelledError`, `trio.Cancelled`,
+  `anyio.get_cancelled_exc_class()`, or a tuple holding one; a clause after one whose classes
+  heki cannot tell is left out, and so is a clause after one taking the cancellation
+  (`except Cancelled: raise` first);
+- the body of an `__aexit__` method.
+
+A checkpoint is an await of a call the catalog lists as one: `anyio.sleep`, the `to_thread`,
+`to_process`, and `to_interpreter` calls, `run_process`, `open_process`, `open_file`, the
+connections, `Event.wait`, the acquisition of a `Lock`, `Semaphore`, `CapacityLimiter`, or
+`Condition` (also by `async with`), `Condition.wait`, a memory object stream's `send` and
+`receive`, `Process.wait`, their Trio counterparts, and `run_in_threadpool`. The call is found
+through awaited project calls, with the shortest chain of calls down to it. A lock or semaphore
+made with `fast_acquire=True` takes no checkpoint while nobody holds it and is not counted.
+`lowlevel.checkpoint()` and `checkpoint_if_cancelled()` count only where something runs after
+them: awaited last, they hand the cancellation on to the caller on purpose.
+
+It does not report:
+
+- a checkpoint inside a `with` over `CancelScope(shield=True)` or `move_on_after(...,
+  shield=True)` (and the other `move_on_*` and `fail_*` calls) on every path to it, in the
+  cleanup or in any function on the way; a project function whose checkpoints are all shielded
+  reaches none;
+- a checkpoint inside a cancel scope that may shield: one made with a `shield` argument that is
+  not a constant, one whose `shield` attribute the function sets, or one made elsewhere;
+- a checkpoint on a branch the call's constant arguments never take (`await self._stop()` where
+  the checkpoint is under `if force:` and `force` defaults to `False`);
+- a function every call of which runs it shielded: each awaits it inside a shield, or only
+  creates its coroutine (`await _shielded(self._close())`, a task) where heki does not follow
+  it; a function with no call heki finds is reported;
+- an await of a coroutine stored first (`pending = work(); await pending`), an `async for`,
+  and a project context manager entering a shielded scope (not followed);
+- native asyncio awaits (`asyncio.sleep`, `asyncio.Lock`): what cancels them is a task's
+  `cancel()`, which is delivered once;
+- test code.
+
+## What a report states
+
+A report states that when the scope around the cleanup is already cancelled, the await raises
+the cancellation at the checkpoint, so the statements after it in the cleanup, and the work of
+the call itself, do not run.
+
+Its premises:
+
+- **Cancelled scope**: the cleanup runs while an AnyIO or Trio scope around it is cancelled. An
+  AnyIO cancellation is level-triggered: every checkpoint inside the cancelled scope raises
+  again until the scope exits. Open: whether the cleanup runs after a cancellation at all (a
+  `finally` also runs on a normal exit) is not established.
+- **Checkpoint**: the call reaches the checkpoint on some path. Open: one path is enough, and a
+  branch decided by state the call does not show is not told apart.
+- **No shield**: no shield is on the path, in the functions on the way or in the calls of the
+  function holding the cleanup. Open: a caller further up and a caller heki does not see (a
+  framework calling an endpoint) may run it shielded.
+
+## Why is this bad?
+A cleanup releases what the code holds: it deletes a temporary resource, stops a process,
+closes a connection, or puts a worker back into its pool. Cancellation is the usual reason the
+cleanup runs, and an AnyIO or Trio scope cancelled once cancels every checkpoint inside it, so
+the first await that checks for cancellation raises again. A shutdown loop that stops each
+process inside `try: ... except Exception:` ends at the first process, because the cancellation
+is not an `Exception`; a pool that pops a stale worker into a call argument and then awaits
+neither destroys nor keeps it.
+
+## Example
+```python
+import anyio
+
+
+async def delete_group(name: str) -> None:
+    await anyio.to_thread.run_sync(delete_container_group, name)
+
+
+async def run(name: str) -> None:
+    try:
+        await watch(name)
+    finally:
+        await delete_group(name)  # EFF118
+        log_deleted(name)
+```
+
+Use instead:
+```python
+    finally:
+        with anyio.CancelScope(shield=True):
+            await delete_group(name)
+        log_deleted(name)
+```
+
+## Fix safety
+No automatic fix. A shield keeps the cleanup running while the scope is cancelled: give a
+cleanup that can wait for long a deadline too (`anyio.move_on_after(10, shield=True)`).
+
+## Options
+- `lint.heuristic = true` (or `--heuristic`) runs the rule by default; `--select EFF118` runs
+  it alone.
+- `[[tool.heki.ecosystem]]` entries with `effects = ["checkpoint"]` add checkpoints.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/write-owner-violation/
 
 # write-owner-violation (MUT201)
@@ -13997,7 +14412,15 @@ allowed writers:
   reported once at the outermost call site; a helper changing an entry of the container it is
   handed (`box["k"].add(v)`, also through a local alias of the entry) writes it too, an
   `indirect_item_mut` write, and so does a method of the container changing an entry of its
-  own `self`, called on the attribute's value (an `item_mut` write at the call). A helper that
+  own `self`, called on the attribute's value (an `item_mut` write at the call). An attribute
+  write on an entry is such a change only when heki ties the entry to no project class
+  (`for field in fields: field.name = v` with `fields: list`, also in a function the entry is
+  handed to that does not type it either): on an entry of a project class
+  (`fields: list[Field]`), it is that
+  class's write (`Field.name`), judged by the contracts of `Field.name` as the same write made
+  directly (`for field in model.fields: field.name = v`) is, also when the helper hands the
+  entry to a function typing it (`rename(field, v)`) or writes below one of its attributes
+  (`field.tags.append(v)`). A helper that
   sees the object's class (an annotated parameter, `self` of a method) reports its own write
   instead, so a write it routes through the allowed writers stays allowed for its callers; a helper handed the value of an attribute
   (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
@@ -14028,7 +14451,10 @@ The written object's class is the one heki infers for it, with annotations as hi
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
 `Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
 `Mapping[...]`, `tuple[...]`, and `set[...]`, and a type alias naming one (`Models: TypeAlias =
-list[Model]`); a constructor call; and what the object comes
+list[Model]`); a constructor call, also of a value declared `type[Model]` wherever it is held (a
+parameter, or an attribute annotated in `__init__` or the class body); a standard library call
+by its declared return type (`importlib.util.module_from_spec(spec)` gives a `types.ModuleType`,
+though a custom loader may return another object); and what the object comes
 from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
 `by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
 `zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
@@ -14040,7 +14466,11 @@ is the receiver's class, and a class method returning `Self`, such as pydantic's
 type parameter of its class (`obj: T` in `class Site(Generic[T])` or `class Site[T]:`) holds
 the argument the instance's annotation gives (`site: Site[Schema]`, also through a type alias);
 a name another module binds only under `if TYPE_CHECKING:` (serving it from a module
-`__getattr__`) is the class that import names, also as a base class; a copy (`copy.copy`,
+`__getattr__`) is the class that import names, also as a base class, and a name a module
+serves only from its `__getattr__` is what the hook returns for it where heki follows the hook
+(a branch testing the name against the literal, a factory read from a module-level dict by the
+name and called), as an import of it would be, and a class object a factory annotated `-> type[C]`
+returns is `C` as a `TYPE_CHECKING` import is; a copy (`copy.copy`,
 `copy.deepcopy`, `dataclasses.replace`, `model_copy`) has its original's class, calling a `functools.partial` object returns what the
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
 an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
@@ -14139,7 +14569,8 @@ an object the function did not make, a container, a global, or a closure, no `yi
 call that may keep it ran before the write. An attribute store into another new object of a
 class whose attribute write runs no code links the holder to it instead: the object stays new
 until it, an object holding it, or a value read out of one is kept (see
-[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). A project function keeps an object it
+[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). So does a store into a list, set, or dict
+the class's constructor made for a new instance (`copied.children.append(part)`). A project function keeps an object it
 stores, yields, or hands to code heki does not follow or to a function that keeps it; reading
 or writing it keeps nothing. A
 store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a

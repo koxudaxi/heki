@@ -1,0 +1,256 @@
+{
+  "$defs": {
+    "AllowedExample": {
+      "additionalProperties": false,
+      "description": "A public project function that does what a contract report shows from a place its contract\nallows, and the file defining it (the report's help names it).",
+      "properties": {
+        "fqn": {
+          "description": "Dotted fully qualified name (`pkg.store.Store.add`).",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file that defines it, as reports print paths.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fqn",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Certainty": {
+      "description": "Whether a report can be wrong about the code (ADR-018). A report's claim is a conjunction of\npremises (its rule page lists them under \"What a report states\").",
+      "oneOf": [
+        {
+          "const": "exact",
+          "description": "Every premise of the claim was established, under the assumptions R1-R5, and the rule's\nreports were checked on the measurement corpus with none wrong: a wrong one is a bug.",
+          "type": "string"
+        },
+        {
+          "const": "heuristic",
+          "description": "A premise of the claim may be unknown, which does not stop the report: it can be wrong\nabout the code.",
+          "type": "string"
+        }
+      ]
+    },
+    "Diagnostic": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_examples": {
+          "description": "The public project functions that do what a contract report shows from a place its\ncontract allows, at most three, by fully qualified name: its help names them. Empty for the other\nreports and when there is none; written to JSON only when not empty.",
+          "items": {
+            "$ref": "#/$defs/AllowedExample"
+          },
+          "type": "array"
+        },
+        "blocker": {
+          "description": "What keeps the rewrite of an `OPT` report from being safe; none otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "certainty": {
+          "$ref": "#/$defs/Certainty",
+          "description": "The certainty of the report, written by every output format: its rule's, or heuristic\nwhere the report did not establish a premise its rule's exact reports have (an `OPT`\nreport whose rewrite is not proven)."
+        },
+        "column": {
+          "description": "The 1-based byte column of the report.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidence": {
+          "description": "What shows the claim holds, when the rule keeps it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fix": {
+          "description": "The edits of the report's fix, as byte spans of `path`; none when the report has no fix.",
+          "items": {
+            "$ref": "#/$defs/TextEdit"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "help": {
+          "description": "What to do about it (`= help:` in the full output); `None` when the rule has no advice\nfor the report.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "The 1-based line of the report.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "One sentence saying what happens, without advice.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, as `heki check` prints paths: relative to the working directory, with forward\nslashes.",
+          "type": "string"
+        },
+        "qualname": {
+          "description": "The qualified name of the function the report is in; empty at module level.",
+          "type": "string"
+        },
+        "related": {
+          "description": "The other places the report is about: the hops of a call chain, a definition.",
+          "items": {
+            "$ref": "#/$defs/RelatedLocation"
+          },
+          "type": "array"
+        },
+        "rule_code": {
+          "description": "The code of the rule that reports (`EFF101`).",
+          "type": "string"
+        },
+        "rule_slug": {
+          "description": "The name of the rule (`async-blocking-call`).",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity",
+          "description": "The severity of the report, from its rule or the configuration."
+        },
+        "sites": {
+          "description": "Distinct violation sites the diagnostic stands for (at least 1): a contract report at the\ncaller of a private helper covers every write, read, or call inside it, and an effect\nboundary report every forbidden site its scope function reaches. Ratchet baselines count\nsites, so a second violation behind a recorded report is a regression. Written to JSON\nonly when above 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "span": {
+          "$ref": "#/$defs/Span",
+          "description": "The byte span of the reported code in `path`."
+        },
+        "target": {
+          "description": "What the report is about: the call, name, or module it names.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "span",
+        "qualname",
+        "rule_code",
+        "rule_slug",
+        "target",
+        "severity",
+        "certainty",
+        "message",
+        "help",
+        "evidence",
+        "blocker",
+        "related",
+        "fix"
+      ],
+      "type": "object"
+    },
+    "RelatedLocation": {
+      "additionalProperties": false,
+      "description": "Related jump location (e.g., each hop in an `EFF101` or `MUT201` call chain for LSP).",
+      "properties": {
+        "column": {
+          "description": "The 1-based byte column.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "The 1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "What the location is: the call of a hop, for instance.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, as reports print paths.",
+          "type": "string"
+        },
+        "span": {
+          "$ref": "#/$defs/Span",
+          "description": "Byte span in `path` (the LSP server converts it with the file's own text)."
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "span",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Severity": {
+      "description": "Diagnostic severity override (matches `t-linter` / `ty`).",
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "type": "string"
+    },
+    "Span": {
+      "additionalProperties": false,
+      "description": "Byte-offset span in the original Python source file.",
+      "properties": {
+        "end": {
+          "description": "The offset after the last byte.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "The offset of the first byte.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "TextEdit": {
+      "additionalProperties": false,
+      "description": "Minimal byte-span text edit (preserves formatting and comments).",
+      "properties": {
+        "replacement": {
+          "description": "The text that takes their place.",
+          "type": "string"
+        },
+        "span": {
+          "$ref": "#/$defs/Span",
+          "description": "The bytes to replace."
+        }
+      },
+      "required": [
+        "span",
+        "replacement"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/check-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "items": {
+    "$ref": "#/$defs/Diagnostic"
+  },
+  "title": "heki check --output-format json",
+  "type": "array"
+}

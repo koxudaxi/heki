@@ -54,9 +54,9 @@ $ heki check app/api.py
 
 ## Ask what fits the project
 
-`heki recommend` (experimental) analyzes the project as `heki check` does and says which rules
-would report here, what heki could not see, and the contracts the code already keeps, with the
-keys to add to `[tool.heki]`. It writes no file. A run of `heki check` that shows nothing, on a
+`heki recommend` (experimental) analyzes the project as `heki check` does and says which
+parameter types and contracts the code already keeps, which rules would report here, and what
+heki could not see, with the keys to add to `[tool.heki]`. It writes no file. A run of `heki check` that shows nothing, on a
 project without contracts or a baseline, ends with a line that points to it:
 
 ```console

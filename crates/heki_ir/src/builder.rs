@@ -242,6 +242,7 @@ fn release_spare_capacity(f: &mut IrFunction) {
     f.starred.shrink_to_fit();
     f.pattern_subjects.shrink_to_fit();
     f.str_heads.shrink_to_fit();
+    f.str_tails.shrink_to_fit();
     for bb in &mut f.blocks {
         bb.insts.shrink_to_fit();
         bb.phis.shrink_to_fit();
@@ -478,6 +479,8 @@ impl<'a> ModuleLowerer<'a> {
             starred: Vec::new(),
             pattern_subjects: Vec::new(),
             str_heads: Vec::new(),
+            str_tails: Vec::new(),
+            finally_bodies: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
             loop_carried: Vec::new(),
@@ -786,6 +789,10 @@ struct FnBuilder<'m, 'a> {
     class_bases: Vec<(VarId, u32)>,
     /// `IrFunction::str_heads`.
     str_heads: Vec<(VarId, String)>,
+    /// `IrFunction::str_tails`.
+    str_tails: Vec<(VarId, String)>,
+    /// `IrFunction::finally_bodies`.
+    finally_bodies: Vec<Span>,
     /// The statement uses of the function (`ModuleIr::statement_uses`).
     statement_uses: Vec<(VarId, Span)>,
     /// The annotations the function evaluates (`ModuleIr::annotations`).
@@ -886,6 +893,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             pattern_subjects: Vec::new(),
             class_bases: Vec::new(),
             str_heads: Vec::new(),
+            str_tails: Vec::new(),
+            finally_bodies: Vec::new(),
             statement_uses: Vec::new(),
             annotations: Vec::new(),
             type_values: Vec::new(),
@@ -2531,6 +2540,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let dispatch_bb = has_handlers.then(|| self.new_block(false));
         let after_bb = self.new_block(false);
         let normal_next = normal_finally_bb.unwrap_or(after_bb);
+        if let (Some(first), Some(last)) = (t.finalbody.first(), t.finalbody.last()) {
+            self.finally_bodies.push(Span {
+                start: Span::from(first.range()).start,
+                end: Span::from(last.range()).end,
+            });
+        }
         if has_finally {
             self.unwind.push(Unwind::Finally {
                 body: &t.finalbody,
@@ -3394,6 +3409,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 if let Some(head) = heki_ast::fstring_head(expr) {
                     self.str_heads.push((dst, head));
                 }
+                if let Some(tail) = heki_ast::fstring_tail(expr).filter(|t| !t.is_empty()) {
+                    self.str_tails.push((dst, tail));
+                }
                 dst
             }
             // A template keeps the values of its replacement fields (`Template.values`, a tuple)
@@ -4099,6 +4117,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.starred.clear();
         self.class_bases.clear();
         self.str_heads.clear();
+        self.str_tails.clear();
+        self.finally_bodies.clear();
         self.statement_uses.clear();
         self.annotations.clear();
         self.type_values.clear();
@@ -4202,6 +4222,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             starred: self.starred,
             pattern_subjects: self.pattern_subjects,
             str_heads: self.str_heads,
+            str_tails: self.str_tails,
+            finally_bodies: self.finally_bodies,
             blocks: self.blocks,
             loops: self.finished_loops,
             loop_carried,

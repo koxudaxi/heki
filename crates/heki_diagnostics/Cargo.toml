@@ -12,6 +12,7 @@ workspace = true
 anstyle.workspace = true
 heki_ast.workspace = true
 heki_env.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

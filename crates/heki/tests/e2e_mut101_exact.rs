@@ -300,6 +300,42 @@ fn kept_to_the_return_stripped_code_heki_does_not_follow_runs_after_the_write() 
     assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
 }
 
+/// `Holder.replace` rebinds what `features` reads, then runs `after` on `hook`, a test case.
+fn after_in_case(after: &str) -> String {
+    let extra = "\n\nclass Manager:\n    def __enter__(self) -> None:\n        self.__dict__.pop(\"features\", None)\n\n    def __exit__(self, *exc) -> None:\n        return None\n\n\ndef forget(obj: Holder) -> None:\n    obj.__dict__.pop(\"features\", None)\n";
+    holder(READ, WRITE, after, extra)
+        .replacen(
+            "raw: dict[str, str], hook)",
+            "raw: dict[str, str], hook: unittest.TestCase)",
+            1,
+        )
+        .replacen(
+            "import functools\n",
+            "import functools\nimport unittest\n",
+            1,
+        )
+}
+
+#[test]
+fn kept_to_the_return_stripped_code_a_test_case_method_runs_of_its_arguments() {
+    // The callable of `assertRaisesRegex` and `assertWarnsRegex` is argument 2 (argument 1 is the
+    // regex); the manager of the context-entry methods may be passed by keyword.
+    for after in [
+        r#"hook.assertRaisesRegex(ValueError, "x", forget, self)"#,
+        r#"hook.assertWarnsRegex(Warning, "x", forget, self)"#,
+        "hook.enterContext(Manager())",
+        "hook.enterContext(cm=Manager())",
+        "hook.enterClassContext(cm=Manager())",
+    ] {
+        let p = project("mut101_strip_case_args", &after_in_case(after));
+        assert_eq!(tiers(&p), vec![report("MUT101", 16, false)], "{after}");
+    }
+    // The same calls with arguments that run nothing of the project keep it.
+    let after = r#"hook.assertRaisesRegex(ValueError, "x", len, self.items)"#;
+    let p = project("mut101_kept_case_args", &after_in_case(after));
+    assert_eq!(tiers(&p), vec![report("MUT101", 16, true)]);
+}
+
 /// A class every special method and attribute hook of which is code of the project.
 const HOOKED: &str = r#"
 

@@ -1,0 +1,49 @@
+{
+  "$defs": {
+    "AssumptionRecord": {
+      "additionalProperties": false,
+      "description": "One hazard of Assumption A1, as `heki assumptions --json` lists it.",
+      "properties": {
+        "column": {
+          "description": "The byte column of the hazard.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "description": "What the hazard is (`eval`, `exec`, `locals()`, a frame introspection, or a function too\nlarge to model).",
+          "type": "string"
+        },
+        "line": {
+          "description": "The line of the hazard.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file, as `heki check` prints paths.",
+          "type": "string"
+        },
+        "qualname": {
+          "description": "The qualified name of the function it is in.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "qualname",
+        "kind"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/assumptions-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "items": {
+    "$ref": "#/$defs/AssumptionRecord"
+  },
+  "title": "heki assumptions --json",
+  "type": "array"
+}

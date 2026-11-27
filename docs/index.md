@@ -66,7 +66,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` alwa
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
@@ -99,7 +99,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
 
 Found 1 diagnostic(s) in 1 file(s).
 heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports, which can be wrong about the code and count as warnings; `fail-on = "warning"` in the lint settings makes them fail it.
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
@@ -136,9 +136,14 @@ enforce.
     $ uvx heki==0.9.0 check
     All checks passed (4 file(s)).
     ...
-    hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
+    hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
     $ uvx heki==0.9.0 recommend
-    heki recommend (experimental) on .: 4 file(s), 10 function(s)
+    heki recommend (experimental) on .: 4 file(s), 11 function(s)
+    ...
+    Types the code already keeps
+      1 read-only parameter group(s), exact; 0 heuristic
+      No type checker configuration found: half of each guard is a type checker's.
+        app/report.py:8  total(prices)  list[float] -> Sequence[float]  public
     ...
     What heki cannot see (no report either way)
       calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
@@ -151,9 +156,10 @@ enforce.
     ...
     ```
 
-    heki's catalog doesn't say what `stripe.Charge.create` does, so heki reports nothing through
-    it. If the call waits on the network, `EFF101` would report it in `async def checkout`. Only
-    `app.store` writes `Order.items`, so the report ends with the keys that make that a contract.
+    `total` only reads `prices`, so its annotation can say so. heki's catalog doesn't say what
+    `stripe.Charge.create` does, so heki reports nothing through it. If the call waits on the
+    network, `EFF101` would report it in `async def checkout`. Only `app.store` writes
+    `Order.items`, so the report ends with the keys that make that a contract.
 
 3. Keep it running with the [pre-commit hook](adoption.md#pre-commit) and a CI step. If the project
    has findings today, record them in a [Ratchet baseline](adoption.md#ratchet-baselines) so only

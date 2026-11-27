@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "Directive": {
+      "additionalProperties": false,
+      "description": "The suppression that hid a report.",
+      "properties": {
+        "column": {
+          "description": "The byte column of the comment.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file of the comment, relative to the project root, with forward slashes.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`heki-ignore` (names rules), `heki-ignore-bare`, `noqa-code` (names rules), or `noqa-bare`.",
+          "enum": [
+            "heki-ignore",
+            "heki-ignore-bare",
+            "noqa-code",
+            "noqa-bare"
+          ],
+          "type": "string"
+        },
+        "line": {
+          "description": "The line of the comment.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "file",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
+    "Entry": {
+      "additionalProperties": false,
+      "description": "One report an inline suppression hid.",
+      "properties": {
+        "code": {
+          "description": "The code of the rule whose report was hidden.",
+          "type": "string"
+        },
+        "column": {
+          "description": "The byte column of the hidden report.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "directive": {
+          "$ref": "#/$defs/Directive",
+          "description": "The suppression that hid it."
+        },
+        "file": {
+          "description": "Relative to the project root, with forward slashes.",
+          "type": "string"
+        },
+        "function": {
+          "description": "The qualified name of the function the report is in; none at module level.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "The line of the hidden report.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "description": "The target of the report's Ratchet baseline key, which the baseline counts it under.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "file",
+        "function",
+        "target",
+        "line",
+        "column",
+        "directive"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/report-suppressed-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The file `heki check --report-suppressed` writes.",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "The version of the file: 1.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "suppressed": {
+      "description": "The reports the inline suppressions hid, sorted by file, function, code, target, and\nposition.",
+      "items": {
+        "$ref": "#/$defs/Entry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "suppressed"
+  ],
+  "title": "heki check --report-suppressed",
+  "type": "object"
+}

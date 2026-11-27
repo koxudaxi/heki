@@ -175,5 +175,6 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 - [Configuration: contracts](configuration.md#contracts) lists every key of the five contracts.
 - [Adopting heki in a code base](adoption.md) shows how to start with a baseline.
+- [Adoption recipes](adoption.md#starter-recipes) have contracts to copy for a web service and a layered application.
 - [Coding agents](coding-agents.md) shows how the same contracts keep an agent out of the files it must not change.
 - `heki inspect app.cart.remove` (experimental) shows what one function changes, keeps, and returns.

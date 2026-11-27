@@ -85,6 +85,57 @@ Their reports can be wrong about the code: they are printed, and fail the run on
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
+Two contracts keep the rest of the service in line: handlers that never block, and database
+writes that only the repository layer makes. `fail = true` makes their reports fail the run.
+
+```toml
+# heki.toml
+[[effect-boundaries]]
+name = "handlers-do-not-block"
+scopes = ["app.web.*"]
+forbid = ["blocking"]
+message = "await an async client, or move the call to app.repo and run it in a thread"
+fail = true
+
+[[call-owners]]
+name = "db-writes-in-repo"
+targets = ["app.db.Session.add", "app.db.Session.commit"]
+allowed-callers = ["app.repo.*"]
+message = "write through a function of app.repo"
+fail = true
+```
+
+The first reports a `time.sleep` two calls below an `async def` in `app.web` (`EFF201`). The
+second reports a handler that calls `session.add` or `session.commit` itself (`MUT204`). Use
+`write-owners` instead when the rule is about a field, not a call:
+[State Ownership](ownership.md#which-contract-do-i-need).
+
+### A layered application
+
+Keep the domain free of the web and infrastructure layers, and keep a shared settings object
+from being changed in place:
+
+```toml
+# heki.toml
+[[import-boundaries]]   # experimental
+name = "domain-is-a-leaf"
+importers = ["app.domain", "app.domain.*"]
+forbidden-imports = ["app.web", "app.web.*", "app.infra", "app.infra.*"]
+message = "pass what the domain needs in as an argument"
+fail = true
+
+[[readonly-returns]]
+name = "shared-settings"
+producers = ["app.settings.get_settings"]
+deep = true
+fail = true
+```
+
+A module of `app.domain` that imports `app.infra` is reported as `IMP201`, and a view that
+assigns to `get_settings().debug` or appends to `get_settings().hosts` as `MUT202`. See
+[Imports](imports.md#architecture-import-boundaries) and
+[State Ownership](ownership.md#which-contract-do-i-need).
+
 ### Walls for a team or a coding agent
 
 Declare the architecture as contracts, make their reports fail the run with `fail = true`, and give
@@ -128,6 +179,10 @@ fail = true
   that wants that can still set. Record today's findings in the baseline first
   (`uvx heki==0.9.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
+- A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
+  review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
+  its base and compare them ([Auditing inline suppressions](#auditing-inline-suppressions)).
+  `CODEOWNERS` covers the contract and baseline files, and this comparison covers the comments.
 - For Claude Code, add the [Stop hook](coding-agents.md#a-stop-hook-for-claude-code): it runs
   `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
   and sends a failing report back to it.
@@ -307,14 +362,10 @@ repos:
       - id: heki
 ```
 
-[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
-there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
-moves `rev` to the latest release.
-
-To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
-`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
-(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
-first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its prebuilt PyPI
+wheel (the [platforms](installation.md) heki publishes wheels for), so it compiles nothing and needs
+no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate` moves `rev` to the
+latest release.
 
 A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
@@ -368,6 +419,14 @@ report of its key, so a run with `--touched` compares all of them and shows ever
 grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
 the commit added the report. It judges the stale entries of the touched files and of the reports
 that touch them only: a stale entry elsewhere is left to a run over the whole project.
+
+??? note "Building the hook from source"
+
+    Only a platform without a wheel, or a development version of heki, needs this. Point `repo` at
+    `https://github.com/koxudaxi/heki` with a release `rev`. pre-commit then installs the repository
+    as a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
+    `PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
+    pre-commit keeps the installed hook for later runs.
 
 ## Continuous integration
 
@@ -495,6 +554,17 @@ The configuration, the baseline, and the CI files that decide this (`pyproject.t
 `heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
 the audit file shows what suppressions hide, and a weakened configuration or baseline is the
 code owners' to review.
+
+## Stability on the way to 1.0
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that
+run by default, the format of the Ratchet baseline, the contract tables `write-owners`,
+`read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with
+`fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A
+change to one of them is listed under "Breaking changes" in the release notes. The experimental
+features can change in any release: `heki recommend`, `heki inspect`, `heki skill`,
+`--generate-prompt`, and the rules marked experimental
+([Experimental Features](experimental.md) has the list).
 
 ## Rolling out rules
 

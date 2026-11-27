@@ -6,6 +6,7 @@
 use crate::UnboundCall;
 use crate::blind_spots::{self, Blind, BlindCall, UnresolvedReason};
 use crate::cache_flow::{self, KeptRemovalKind};
+use crate::cancellation;
 use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
@@ -28,7 +29,8 @@ use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::partial::Partial;
 use crate::readonly::{
-    self, ContractSharing, Derivation, ProtectedReturn, ReturnStep, container_mutator,
+    self, ContainerKind, ContractSharing, Derivation, ProtectedReturn, ReturnStep,
+    container_mutator,
 };
 use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
@@ -47,7 +49,7 @@ use crate::{
     UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Join, KeySet, Or, Use};
 use heki_ir::{
     BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
     FunctionId, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode,
@@ -581,6 +583,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
     into.iterates_params |= other.iterates_params;
     // A must-fact: propagate only through parameters both definitions forward unconditionally.
     into.unconditional_forwards &= other.unconditional_forwards;
+    into.entry_change_params |= other.entry_change_params;
     for (i, paths) in other.mutated_param_paths {
         let memos = other.memo_param_paths.as_deref().and_then(|m| m.get(&i));
         for path in paths {
@@ -944,6 +947,11 @@ struct Extractor<'a> {
     lock_held: OnceCell<FxHashSet<Position>>,
     /// Where the function certainly holds thread locks (`EFF117`, [`Self::thread_lock_points`]).
     thread_locks: OnceCell<guarded::LockPoints>,
+    /// Where the function runs shielded from cancellation (`EFF118`, [`Self::shield_here`]).
+    shields: OnceCell<cancellation::ShieldPoints>,
+    /// The budget of the walks after the function's re-delivery checkpoints (`EFF118`, its own:
+    /// they never spend the budget of the walks other rules read).
+    redelivery_budget: OnceCell<Budget>,
     /// The blocks acquiring each lock (`locks::BlockTests::common`).
     lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
     /// The points that may take a lock (a `with`, an `acquire()`) every normal return has
@@ -988,8 +996,8 @@ struct Extractor<'a> {
     /// ([`Self::mapping`]).
     mappings: RefCell<FxHashMap<VarId, keywords::Ways>>,
     /// The budget of the walks over the function's values ([`Self::global_roots`],
-    /// [`Self::mapping`], [`Self::element_paths`]) and of the mapping entries calls bind
-    /// ([`Self::keyword_ways`]).
+    /// [`Self::mapping`], [`Self::element_paths`], [`Self::entry_params`]) and of the mapping
+    /// entries calls bind ([`Self::keyword_ways`]).
     walk_budget: Budget,
     /// What the function may rebind (set by `build_aliases`).
     rebound: OnceCell<Rebound<'a>>,
@@ -998,7 +1006,10 @@ struct Extractor<'a> {
     items_changed: OnceCell<FxHashSet<(u8, Option<String>)>>,
     /// The parameters whose items or elements each value may be, or be below
     /// ([`Self::element_paths`]), on the function's tables and budget.
-    elements: Closure<(VarId, ItemStep), KeySet<(u8, String)>>,
+    elements: ElementWalks<KeySet<(u8, String)>>,
+    /// The parameters whose entries each value may be as part of the container
+    /// ([`Self::entry_params`]), on the function's tables and budget.
+    entries: ElementWalks<Or>,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -1025,6 +1036,10 @@ struct Extractor<'a> {
     /// is the elements, the display is never seen ([`Self::build_unpacked_displays`]).
     unpacked: FxHashMap<VarId, VarId>,
     unpacked_displays: FxHashSet<VarId>,
+    /// The stores into containers that may be ones a constructor made ([`Escape::Added`]), by
+    /// position, for the check after the visit of whether they hand the value to code of the
+    /// project.
+    added: FxHashMap<crate::construction::Pos, AddedBy>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
     /// The opt-in facts the enabled rules read.
@@ -1355,6 +1370,7 @@ impl<'a> Extractor<'a> {
             ..EffectSummary::default()
         };
         let live = ownership::Live::of(f, &defs);
+        let scopes = narrowed.scopes();
         let mut ex = Self {
             f,
             shape,
@@ -1394,6 +1410,8 @@ impl<'a> Extractor<'a> {
             takes_on_every_return: FxHashSet::default(),
             lock_held: OnceCell::new(),
             thread_locks: OnceCell::new(),
+            shields: OnceCell::new(),
+            redelivery_budget: OnceCell::new(),
             state_tests: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
@@ -1416,7 +1434,8 @@ impl<'a> Extractor<'a> {
             walk_budget: Budget::of_function("summary::walks", f),
             rebound: OnceCell::new(),
             items_changed: OnceCell::new(),
-            elements: Closure::new(),
+            elements: ElementWalks::new(scopes),
+            entries: ElementWalks::new(scopes),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -1426,6 +1445,7 @@ impl<'a> Extractor<'a> {
             maybe_new: FxHashSet::default(),
             unpacked: FxHashMap::default(),
             unpacked_displays: FxHashSet::default(),
+            added: FxHashMap::default(),
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
@@ -2065,19 +2085,8 @@ impl<'a> Extractor<'a> {
         if self.param_alias.is_empty() {
             return Vec::new();
         }
-        let (f, shape) = (self.f, self.shape);
-        let container = |v: &VarId| {
-            self.param_alias
-                .get(v)
-                .or_else(|| self.param_copy_alias.get(v))
-        };
         let own = |(v, step): (VarId, ItemStep)| {
-            let ItemStep::Items(index) = step else {
-                return KeySet::new();
-            };
-            let key = index.and_then(|i| shape.str_const(i));
-            container(&v)
-                .filter(|alias| self.keeps_items(alias, key))
+            self.items_of_container(v, step)
                 .map(|(i, path)| {
                     let path = path.clone();
                     (*i, path.unwrap_or_else(|| crate::ELEMENTS_PATH.to_owned()))
@@ -2085,49 +2094,120 @@ impl<'a> Extractor<'a> {
                 .into_iter()
                 .collect()
         };
-        let next = |(v, step): (VarId, ItemStep), out: &mut Vec<(VarId, ItemStep)>| {
-            let below = (v, ItemStep::Below);
-            match shape.def(v) {
-                Def::Phi(b, i) => out
-                    .extend((f.block(b).phis[i as usize].incoming.iter()).map(|(_, w)| (*w, step))),
-                Def::Inst(b, i) => match (&f.block(b).insts[i as usize].kind, step) {
-                    (InstKind::Copy { src, .. }, _) => out.push((*src, step)),
-                    // The items of a parameter or of its copy are its own (`own`); those of any
-                    // other value are below it.
-                    (_, ItemStep::Items(_)) if container(&v).is_none() => out.push(below),
-                    (_, ItemStep::Items(_)) => {}
-                    (
-                        InstKind::SubscriptLoad {
-                            obj,
-                            index,
-                            is_slice: false,
-                            ..
-                        },
-                        ItemStep::Below,
-                    ) => out.push((*obj, ItemStep::Items(Some(*index)))),
-                    (InstKind::IterNext { iter, .. }, ItemStep::Below) => {
-                        if let Some(InstKind::MakeIter { iterable, .. }) =
-                            shape.inst(*iter).map(|i| &i.kind)
-                        {
-                            out.push((*iterable, ItemStep::Items(None)));
-                        }
-                    }
-                    (kind, ItemStep::Below) => match self.attr_load(kind) {
-                        // An attribute of a parameter or of its copy is `param_alias`'s.
-                        Some((_, obj, _)) if container(&obj).is_none() => out.push((obj, step)),
-                        Some(_) => {}
-                        None => out.extend(self.element_view(kind)),
-                    },
-                },
-                Def::Param | Def::None => {}
-            }
-        };
-        match self
-            .elements
-            .ask(&self.walk_budget, (var, ItemStep::Below), own, next)
-        {
+        let next = |at, out: &mut Vec<_>| self.element_steps(at, out, |_| true);
+        match self.elements.of(self.narrowing_scope()).ask(
+            &self.walk_budget,
+            (var, ItemStep::Below),
+            own,
+            next,
+        ) {
             Answer::Known(paths) => paths.iter().cloned().collect(),
             Answer::Open => Vec::new(),
+        }
+    }
+
+    /// The parameters (bit `i`) whose entries the object `var` holds may be as part of the
+    /// container ([`crate::EffectSummary::entry_change_params`]): the [`Self::element_paths`] at
+    /// [`crate::ELEMENTS_PATH`] that no attribute of an object of a project class leads to (the
+    /// object `field.tags` holds is the field's, not an entry of the container holding the
+    /// field), asked only when `elements`, the element paths of `var`, hold one. Only with an
+    /// ownership contract; none past the function's budget.
+    fn entry_params(&self, var: VarId, elements: &[(u8, String)]) -> u64 {
+        if !self.ownership
+            || elements
+                .iter()
+                .all(|(_, path)| path != crate::ELEMENTS_PATH)
+        {
+            return 0;
+        }
+        let own = |(v, step): (VarId, ItemStep)| {
+            Or(match self.items_of_container(v, step) {
+                Some((i, None)) => 1u64.checked_shl(u32::from(*i)).unwrap_or(0),
+                _ => 0,
+            })
+        };
+        let next = |at, out: &mut Vec<_>| {
+            self.element_steps(at, out, |obj| self.project_classes(obj).is_empty());
+        };
+        self.entries
+            .of(self.narrowing_scope())
+            .ask(&self.walk_budget, (var, ItemStep::Below), own, next)
+            .map(|mask| mask.0)
+            .open_means(0)
+    }
+
+    /// The narrowing scope of the block being read ([`crate::infer::NarrowedVals::scope`]).
+    fn narrowing_scope(&self) -> usize {
+        self.narrowed.scope(self.pos.0)
+    }
+
+    /// The parameter or the shallow copy of one (`param_alias`, `param_copy_alias`) whose items
+    /// the step `(v, step)` of [`Self::element_steps`] takes, while the function leaves them as
+    /// the original's ([`Rebound::keeps_items`]).
+    fn items_of_container(&self, v: VarId, step: ItemStep) -> Option<&(u8, Option<String>)> {
+        let ItemStep::Items(index) = step else {
+            return None;
+        };
+        let key = index.and_then(|i| self.shape.str_const(i));
+        self.param_alias
+            .get(&v)
+            .or_else(|| self.param_copy_alias.get(&v))
+            .filter(|alias| self.keeps_items(alias, key))
+    }
+
+    /// The values one step on from `(v, step)` in [`Self::element_paths`]: those whose items
+    /// `v`'s object may be, or whose objects it may be below, through copies, phis, items,
+    /// iteration, the elements and views methods outside the project hand out, and the
+    /// attributes of the objects `through_attr_of` accepts.
+    fn element_steps(
+        &self,
+        (v, step): (VarId, ItemStep),
+        out: &mut Vec<(VarId, ItemStep)>,
+        through_attr_of: impl Fn(VarId) -> bool,
+    ) {
+        let (f, shape) = (self.f, self.shape);
+        let container = |v: &VarId| {
+            self.param_alias
+                .get(v)
+                .or_else(|| self.param_copy_alias.get(v))
+        };
+        let below = (v, ItemStep::Below);
+        match shape.def(v) {
+            Def::Phi(b, i) => {
+                out.extend((f.block(b).phis[i as usize].incoming.iter()).map(|(_, w)| (*w, step)))
+            }
+            Def::Inst(b, i) => match (&f.block(b).insts[i as usize].kind, step) {
+                (InstKind::Copy { src, .. }, _) => out.push((*src, step)),
+                // The items of a parameter or of its copy are its own (`items_of_container`);
+                // those of any other value are below it.
+                (_, ItemStep::Items(_)) if container(&v).is_none() => out.push(below),
+                (_, ItemStep::Items(_)) => {}
+                (
+                    InstKind::SubscriptLoad {
+                        obj,
+                        index,
+                        is_slice: false,
+                        ..
+                    },
+                    ItemStep::Below,
+                ) => out.push((*obj, ItemStep::Items(Some(*index)))),
+                (InstKind::IterNext { iter, .. }, ItemStep::Below) => {
+                    if let Some(InstKind::MakeIter { iterable, .. }) =
+                        shape.inst(*iter).map(|i| &i.kind)
+                    {
+                        out.push((*iterable, ItemStep::Items(None)));
+                    }
+                }
+                (kind, ItemStep::Below) => match self.attr_load(kind) {
+                    // An attribute of a parameter or of its copy is `param_alias`'s.
+                    Some((_, obj, _)) if container(&obj).is_none() && through_attr_of(obj) => {
+                        out.push((obj, step));
+                    }
+                    Some(_) => {}
+                    None => out.extend(self.element_view(kind)),
+                },
+            },
+            Def::Param | Def::None => {}
         }
     }
 
@@ -2689,9 +2769,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// The project class a call constructs: a call of a class object (`Model(...)`,
-    /// `cls(...)`, a property's value `self.model_type(...)`), or of a class reached through a
-    /// module or class (`models.Model(...)`), or an allocation by `object.__new__`
-    /// ([`Self::bare_allocation`]).
+    /// `cls(...)`, a property's or an attribute's value `self.model_type(...)`), or of a class
+    /// reached through a module or class (`models.Model(...)`), or an allocation by
+    /// `object.__new__` ([`Self::bare_allocation`]).
     fn construction(&self, kind: &InstKind) -> Option<String> {
         let project = self.cx.project;
         match kind {
@@ -2750,7 +2830,7 @@ impl<'a> Extractor<'a> {
                 }
                 recv => self
                     .cx
-                    .property_value(recv.recv()?, method)??
+                    .called_member(recv.recv()?, method)??
                     .class_object(project)
                     .map(str::to_owned),
             },
@@ -2860,10 +2940,13 @@ impl<'a> Extractor<'a> {
                 Some(classes) => Implementers::Listed(classes.to_vec()),
                 None => Implementers::Unlisted,
             });
+        let param_elements = self.element_paths(var);
+        let param_entries = self.entry_params(var, &param_elements);
         let mut origin = ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
-            param_elements: self.element_paths(var),
+            param_elements,
+            param_entries,
             param_copy: self.param_copy_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
             targets: None,
@@ -2938,7 +3021,9 @@ impl<'a> Extractor<'a> {
             AttrName::KeyOf(sources) => {
                 return self.computed_name(&owner, Adds::UnlessKeysOf(sources), kind, span);
             }
-            AttrName::Unknown => return self.computed_name(&owner, Adds::Any, kind, span),
+            AttrName::Built { .. } | AttrName::Unknown => {
+                return self.computed_name(&owner, Adds::Any, kind, span);
+            }
         };
         for attr in attrs {
             if removes && owner.is_self {
@@ -4108,6 +4193,7 @@ impl<'a> Extractor<'a> {
             queues: None,
             state_tests: None,
             locks: crate::LockHeld::None,
+            shield: crate::ShieldAt::Unshielded,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
@@ -4915,12 +5001,67 @@ impl<'a> Extractor<'a> {
                 }
             }
         };
+        // A store into a container hands the value to code of the project when the call does,
+        // on the receiver's class, the items', or the values handed; an item store, only when
+        // the container's `__setitem__` does, and for the key also when hashing it or comparing
+        // it with the keys held does.
+        rec.adds_running_code(|pos, var| match &self.added[&pos] {
+            AddedBy::Call {
+                symbol,
+                recv,
+                args,
+                kwargs,
+                star,
+            } => self.library_call_runs_project_code(
+                symbol,
+                None,
+                Some(*recv),
+                args,
+                kwargs,
+                *star,
+                false,
+            ),
+            AddedBy::Item { obj, value } => {
+                let kind = &self.f.block(BlockId(pos.0)).insts[pos.1 as usize].kind;
+                let mut specials = self.f.special_methods(kind);
+                if var == *value {
+                    specials.retain(|s| s.value == *obj);
+                    for s in &mut specials {
+                        s.keyed = false;
+                    }
+                }
+                self.specials_run_project_code(&specials)
+            }
+        });
+        let kb = self.cx.kb;
+        let catalog_stores = |base: &str| {
+            kb.lookup(&format!("{base}.__setattr__"))
+                .is_some_and(|e| e.stores_on_instance)
+        };
+        let project = self.cx.project;
+        // What a construction of each class makes is decided once, for every read of it.
+        let constructions: RefCell<FxHashMap<Box<str>, &[_]>> = RefCell::default();
+        let made = |class: &str, attr: &str| {
+            let known = constructions.borrow().get(class).copied();
+            let containers = known.unwrap_or_else(|| {
+                let made = project.constructor_containers(class, catalog_stores);
+                constructions.borrow_mut().insert(class.into(), made);
+                made
+            });
+            let kind = containers
+                .iter()
+                .find_map(|(a, k)| (&**a == attr).then_some(*k))?;
+            project
+                .attr_read_finds_stored(class, attr, catalog_stores)
+                .then_some(kind)
+        };
         let (answers, returned) = rec.resolve(
             self.shape,
             &self.may_params,
             &param_of,
             (&element_of, &reads_of),
             &handed_to,
+            &made,
             returns,
         );
         for p in std::mem::take(&mut self.pending_sites) {
@@ -4983,7 +5124,7 @@ impl<'a> Extractor<'a> {
     fn escape(&mut self, var: VarId, how: Escape) {
         let params = self.may_params.get(&var).copied().unwrap_or(0);
         let recorded = self.track && (params != 0 || self.may_hold_or_read_new(var));
-        let keeps_params = matches!(how, Escape::Definite | Escape::Into(_)) && params != 0;
+        let keeps_params = !matches!(how, Escape::Handed(..)) && params != 0;
         if !recorded && !keeps_params {
             return;
         }
@@ -5233,8 +5374,35 @@ impl<'a> Extractor<'a> {
             && self
                 .cx
                 .project
-                .attr_write_stores_value(class, attr, catalog_stores))
+                .attr_write_stores_value(class, &[attr], catalog_stores))
         .then_some(obj)
+    }
+
+    /// Record, when `var` may hold a container the constructor of a new object made for it (what
+    /// a read of an attribute of an object that may be new gives, which `Recorder::resolve`
+    /// decides), the read for the store `how` ([`Escape::Added`]) into it at the current
+    /// instruction names; `how` otherwise.
+    fn added_to(&mut self, var: VarId, how: (ContainerKind, AddedBy)) -> Option<Escape> {
+        let shape = self.shape;
+        let read = shape.copy_root(var);
+        let Some(InstKind::AttrLoad { obj, attr, .. }) = shape.inst(read).map(|i| &i.kind) else {
+            return None;
+        };
+        if NAMESPACE_ATTRS.contains(&attr.as_str()) || !self.may_be_new(*obj) {
+            return None;
+        }
+        self.rec.container_read(read, *obj, attr);
+        self.added.insert(self.at(), how.1);
+        Some(Escape::Added(var, how.0))
+    }
+
+    /// Record a write of the attribute `attr` (`None`: of any, also its namespace or class) of
+    /// the object `obj` holds, which may rebind a container its constructor made.
+    fn attr_written(&mut self, obj: VarId, attr: Option<&str>) {
+        if self.track && self.may_hold_or_read_new(obj) {
+            let attr = attr.filter(|a| !NAMESPACE_ATTRS.contains(a));
+            self.rec.write(self.at(), obj, attr);
+        }
     }
 
     /// Whether a query about `var` can be answered with anything but "no".
@@ -5253,6 +5421,11 @@ impl<'a> Extractor<'a> {
                     .link_holder(*obj, attr)
                     .map_or(Escape::Definite, Escape::Into);
                 self.escape(*value, how);
+                self.attr_written(*obj, Some(attr));
+            }
+            InstKind::AttrDelete { obj, attr } => self.attr_written(*obj, Some(attr)),
+            InstKind::AttrLoad { obj, attr, .. } if NAMESPACE_ATTRS.contains(&attr.as_str()) => {
+                self.attr_written(*obj, None);
             }
             InstKind::StoreGlobal { value, .. }
             | InstKind::StoreDeref { value, .. }
@@ -5262,9 +5435,21 @@ impl<'a> Extractor<'a> {
             | InstKind::Yield {
                 value: Some(value), ..
             } => self.escape(*value, Escape::Definite),
-            InstKind::SubscriptStore { index, value, .. } => {
-                self.escape(*index, Escape::Definite);
-                self.escape(*value, Escape::Definite);
+            InstKind::SubscriptStore {
+                obj, index, value, ..
+            } => {
+                let kind = (self.types.get(obj).map(Val::instance_classes))
+                    .and_then(|classes| classes.first().filter(|_| classes.len() == 1))
+                    .and_then(|class| ContainerKind::of_class(class))
+                    .filter(|k| matches!(k, ContainerKind::List | ContainerKind::Dict));
+                let item = AddedBy::Item {
+                    obj: *obj,
+                    value: *value,
+                };
+                let how = kind.and_then(|kind| self.added_to(*obj, (kind, item)));
+                let how = how.unwrap_or(Escape::Definite);
+                self.escape(*index, how.clone());
+                self.escape(*value, how);
             }
             // The targets an unpacking binds hold the elements; the display is never seen.
             InstKind::AllocBuiltin { dst, .. } if self.unpacked_displays.contains(dst) => {}
@@ -5682,13 +5867,21 @@ impl<'a> Extractor<'a> {
             InstKind::MakeIter {
                 iterable, is_async, ..
             } if self.f.var_name(*iterable) != Some(".0") => {
-                self.protocol_call(bb, *iterable, iteration_protocol(*is_async), span)
+                self.protocol_call(bb, *iterable, iteration_protocol(*is_async), false, span)
             }
             InstKind::EnterWith {
                 mgr,
                 is_async: false,
                 ..
-            } => self.protocol_call(bb, *mgr, "__enter__", span),
+            } => self.protocol_call(bb, *mgr, "__enter__", false, span),
+            // Entering an async context manager awaits its `__aenter__` (a lock's acquisition).
+            InstKind::EnterWith {
+                mgr,
+                is_async: true,
+                ..
+            } if self.opt_in.checkpoints => {
+                self.protocol_call(bb, *mgr, "__aenter__", true, span);
+            }
             _ => {}
         }
     }
@@ -5849,7 +6042,7 @@ impl<'a> Extractor<'a> {
                 _ => None,
             });
         if let Some(is_async) = first_is_async {
-            self.protocol_call(bb, iterable, iteration_protocol(is_async), span);
+            self.protocol_call(bb, iterable, iteration_protocol(is_async), false, span);
         }
     }
 
@@ -5857,9 +6050,16 @@ impl<'a> Extractor<'a> {
     /// (`__iter__`, `__aiter__` when a `for` loop, a comprehension, or a consuming call such as
     /// `list(...)` iterates it; `__enter__` when a `with` enters it): the catalog's entry for
     /// it is a call at `span` (`for row in session.query(User):` runs the query,
-    /// `with fsspec.open(path):` opens the file). Project classes' special methods are not
-    /// followed.
-    fn protocol_call(&mut self, bb: BlockId, value: VarId, protocol: &str, span: Span) {
+    /// `with fsspec.open(path):` opens the file; `__aenter__`, awaited, when an `async with`
+    /// enters it). Project classes' special methods are not followed.
+    fn protocol_call(
+        &mut self,
+        bb: BlockId,
+        value: VarId,
+        protocol: &str,
+        is_awaited: bool,
+        span: Span,
+    ) {
         let Some(Val::Inst(class)) = self.val(value) else {
             return;
         };
@@ -5868,7 +6068,7 @@ impl<'a> Extractor<'a> {
         }
         let symbol = format!("{class}.{protocol}");
         if self.cx.catalog(&symbol).is_some() {
-            self.external_call(bb, symbol, Passed::NOTHING, false, span);
+            self.external_call(bb, symbol, Passed::NOTHING, is_awaited, span);
         }
     }
 
@@ -6072,9 +6272,15 @@ impl<'a> Extractor<'a> {
     }
 
     /// A change of the object `var` holds, when it may be one a parameter holds as an item or
-    /// an element, or one below it ([`Self::element_paths`]).
-    fn change_param_element(&mut self, var: Option<VarId>, span: Span) {
-        for (i, path) in var.map(|v| self.element_paths(v)).unwrap_or_default() {
+    /// an element, or one below it ([`Self::element_paths`]); `of_entry`: a change of an entry
+    /// as part of the container too, when it is one ([`Self::entry_params`]).
+    fn change_param_element(&mut self, var: Option<VarId>, of_entry: bool, span: Span) {
+        let Some(var) = var else { return };
+        let paths = self.element_paths(var);
+        if of_entry {
+            self.summary.entry_change_params |= self.entry_params(var, &paths);
+        }
+        for (i, path) in paths {
             self.change_below_param_attr(i, path, span);
         }
     }
@@ -6215,7 +6421,12 @@ impl<'a> Extractor<'a> {
         match owner.param {
             Some((i, None)) => self.mutate_param(i, attr.to_owned(), span),
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
-            None => self.change_param_element(owner.var, span),
+            // An attribute of an entry of a project class is that class's write
+            // (`typed_site`), not one of the container holding the entry.
+            None => {
+                let untied = owner.typed_classes.is_empty();
+                self.change_param_element(owner.var, untied, span);
+            }
         }
         for class in owner.typed_classes {
             self.typed_site(class, attr, (None, EntryKey::Written), kind, span, written);
@@ -6775,7 +6986,7 @@ impl<'a> Extractor<'a> {
                 self.mutate_param(i, String::new(), span);
             }
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
-            None => self.change_param_element(Some(var), span),
+            None => self.change_param_element(Some(var), true, span),
         }
         if let Some((i, slot)) = self.param_slot_alias.get(&var).cloned() {
             self.summary
@@ -7242,7 +7453,7 @@ impl<'a> Extractor<'a> {
                 );
                 // `list(query)` iterates the query as a `for` loop does.
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
-                    self.protocol_call(bb, iterable, iteration_protocol(false), call.span);
+                    self.protocol_call(bb, iterable, iteration_protocol(false), false, call.span);
                 }
                 self.note_returned_realloc(symbol, call);
                 // A project class without a project `__init__` (a dataclass, a pydantic model),
@@ -7284,6 +7495,7 @@ impl<'a> Extractor<'a> {
                         arguments,
                         state_tests: None,
                         locks: crate::LockHeld::None,
+                        shield: crate::ShieldAt::Unshielded,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
@@ -8128,11 +8340,42 @@ impl<'a> Extractor<'a> {
                         .held_at(self.pos.0, self.pos.1)
                         .is_empty(),
             ),
+            shield: self.shield_here(),
             complete,
             on_every_return,
             made_by: None,
             module_member: None,
         }
+    }
+
+    /// Whether the instruction at [`Self::pos`] runs shielded from cancellation (`EFF118`;
+    /// unshielded while the rule does not run).
+    fn shield_here(&self) -> crate::ShieldAt {
+        if !self.opt_in.checkpoints {
+            return crate::ShieldAt::Unshielded;
+        }
+        self.shields
+            .get_or_init(|| {
+                cancellation::ShieldPoints::of(self.cx, self.shape, &self.types, &self.live)
+            })
+            .at(self.pos.0, self.pos.1)
+    }
+
+    /// Whether an awaited catalog checkpoint `symbol` at [`Self::pos`] lets a cancellation in
+    /// here: only while `EFF118` runs, outside a shield, and, for one doing no work of its own,
+    /// where something runs after it ([`cancellation::REDELIVERIES`]).
+    fn checkpoint_counts(&self, symbol: &str, is_awaited: bool) -> bool {
+        is_awaited
+            && self.opt_in.checkpoints
+            && self.shield_here().is_unshielded()
+            && !(cancellation::REDELIVERIES.contains(&symbol)
+                && cancellation::runs_nothing_after(
+                    self.shape,
+                    self.redelivery_budget
+                        .get_or_init(|| Budget::of_function("cancellation::redelivery", self.f)),
+                    self.pos.0,
+                    self.pos.1,
+                ))
     }
 
     /// Whether the call at [`Self::pos`] has as its targets every implementation it can run
@@ -8359,6 +8602,7 @@ impl<'a> Extractor<'a> {
             return;
         }
         match callee {
+            Callee::External(symbol) if self.adds_to_container(symbol, call) => {}
             Callee::External(symbol) => {
                 let new_instance = call
                     .constructs
@@ -8387,6 +8631,35 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// Whether the call of the library method `symbol` stores what it is handed in a builtin
+    /// container that may be one a constructor made (`kids.append(part)`,
+    /// [`stored_into_container`]), recording its escapes: the receiver's and each argument's
+    /// [`Escape::Added`].
+    fn adds_to_container(&mut self, symbol: &str, call: &Call<'_>) -> bool {
+        let (Some(recv), Some(kind)) = (call.recv_var, stored_into_container(symbol)) else {
+            return false;
+        };
+        let site = AddedBy::Call {
+            symbol: symbol.to_owned(),
+            recv,
+            args: call.args.to_vec(),
+            kwargs: call.kwargs.to_vec(),
+            star: call.star_from.is_some(),
+        };
+        let Some(how) = (call.per_item.is_none() && call.args_at.is_some())
+            .then(|| self.added_to(recv, (kind, site)))
+            .flatten()
+        else {
+            return false;
+        };
+        // A keyword argument makes these methods raise before they store anything.
+        let keywords = call.kwargs.iter().map(|(_, v)| v);
+        for v in std::iter::once(&recv).chain(call.args).chain(keywords) {
+            self.escape(*v, how.clone());
+        }
+        true
+    }
+
     /// The allocation of a project call, its callees bound (`returns`: each with the parameters
     /// the call binds to values without elements): a constructor call allocates its object, a
     /// call handing back an argument as itself ([`Self::same_objects`]) gives that argument's
@@ -8401,12 +8674,14 @@ impl<'a> Extractor<'a> {
         };
         if let Some(class) = &call.constructs {
             if !self.cx.project.may_reuse_instances(class) {
-                self.rec.alloc(self.at(), dst, NewKind::Own, Vec::new());
+                let made = (NewKind::Own, Some(class.as_str()));
+                self.rec.alloc(self.at(), dst, made, Vec::new());
             }
         } else if let Some(&arg) = self.same_objects.get(&dst) {
             self.rec.handed_back(dst, arg);
         } else if self.may_be_new(dst) {
-            self.rec.alloc(self.at(), dst, NewKind::Own, returns);
+            self.rec
+                .alloc(self.at(), dst, (NewKind::Own, None), returns);
         }
     }
 
@@ -8461,6 +8736,26 @@ impl<'a> Extractor<'a> {
         kwargs: &[(Option<String>, VarId)],
         constructs: bool,
     ) {
+        // The object an attribute write by name writes (the receiver of a bound
+        // `obj.__setattr__`), and the name.
+        let written = match recv {
+            Some(obj) => Some((obj, args.first())),
+            None => args.first().map(|obj| (*obj, args.get(1))),
+        };
+        if let Some((obj, name)) = written
+            && let Some(named) = match symbol {
+                "builtins.setattr"
+                | "builtins.object.__setattr__"
+                | "builtins.delattr"
+                | "builtins.object.__delattr__" => Some(true),
+                "builtins.vars" => Some(false),
+                _ => None,
+            }
+        {
+            let attr = name.filter(|_| named);
+            let attr = attr.and_then(|a| self.shape.str_const(*a));
+            self.attr_written(obj, attr);
+        }
         let method = symbol.rsplit('.').next().unwrap_or(symbol);
         let deep_kwarg = || {
             kwargs.iter().any(|(k, v)| {
@@ -8493,7 +8788,7 @@ impl<'a> Extractor<'a> {
             _ => (None, false, 0),
         };
         if let (Some(kind), Some(dst)) = (alloc.filter(|_| self.track), dst) {
-            self.rec.alloc(self.at(), dst, kind, Vec::new());
+            self.rec.alloc(self.at(), dst, (kind, None), Vec::new());
         }
         if let Some(v) = recv.filter(|_| !recv_read) {
             self.escape(v, Escape::Definite);
@@ -8571,6 +8866,9 @@ impl<'a> Extractor<'a> {
             .iter()
             .copied()
             .filter(|e| !((is_awaited || finished) && BLOCKING_EFFECTS.contains(e)))
+            .filter(|e| {
+                *e != ExecEffectKind::Checkpoint || self.checkpoint_counts(&symbol, is_awaited)
+            })
             .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
             .filter(|e| !(setting && *e == ExecEffectKind::BlockingDb))
             .collect();
@@ -9360,6 +9658,7 @@ fn role_site(
         arguments: None,
         state_tests: site.state_tests.clone(),
         locks: site.locks,
+        shield: site.shield,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
@@ -9447,6 +9746,23 @@ fn construction_of(answer: &NewArg, rebinds: bool) -> Construction {
 enum ItemStep {
     Below,
     Items(Option<VarId>),
+}
+
+/// The walks of [`Extractor::element_paths`] or [`Extractor::entry_params`], one per narrowing
+/// scope ([`crate::infer::NarrowedVals::scope`]): their steps read the values of the block being
+/// read (the classes of an attribute's object, the views of a receiver's methods), so an answer
+/// holds only in the blocks where the checks give every value the same types.
+struct ElementWalks<S>(Vec<Closure<(VarId, ItemStep), S>>);
+
+impl<S: Join + Default> ElementWalks<S> {
+    fn new(scopes: usize) -> Self {
+        Self((0..scopes).map(|_| Closure::new()).collect())
+    }
+
+    /// The walk of the narrowing scope `scope`.
+    fn of(&self, scope: usize) -> &Closure<(VarId, ItemStep), S> {
+        &self.0[scope]
+    }
 }
 
 /// What a function may rebind on some object: the attribute names it stores or deletes (also
@@ -9725,7 +10041,31 @@ impl BuiltRule {
 }
 
 /// The attributes whose store or deletion replaces an object's whole namespace or its class.
-const NAMESPACE_ATTRS: &[&str] = &["__dict__", "__class__"];
+pub(crate) const NAMESPACE_ATTRS: &[&str] = &["__dict__", "__class__"];
+
+/// A store into a container that may be one a constructor made ([`Escape::Added`]).
+enum AddedBy {
+    /// A call of the library method `symbol` storing what it is handed in its receiver.
+    Call {
+        symbol: String,
+        recv: VarId,
+        args: Vec<VarId>,
+        kwargs: Vec<(Option<String>, VarId)>,
+        star: bool,
+    },
+    /// An item store, `obj[key] = value`.
+    Item { obj: VarId, value: VarId },
+}
+
+/// The kind of the builtin container whose method `symbol` stores what it is handed in it
+/// (`ownership::STORING_METHODS`: `list.append`, `set.add`, `dict.setdefault`, ...).
+fn stored_into_container(symbol: &str) -> Option<ContainerKind> {
+    let (class, method) = symbol.rsplit_once('.')?;
+    ownership::STORING_METHODS
+        .contains(&method)
+        .then(|| ContainerKind::of_class(class))
+        .flatten()
+}
 
 /// The operands of a call or method call instruction ([`call_operands`]).
 struct CallOperands<'i> {

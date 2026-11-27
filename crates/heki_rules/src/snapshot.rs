@@ -20,24 +20,38 @@ use thiserror::Error;
 pub const SNAPSHOT_FILE: &str = ".heki-summary-snapshot.json";
 pub const SNAPSHOT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The normalized summary of one public function.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 pub struct SnapshotEntry {
+    /// The parameters the function changes in place, directly or through the functions it
+    /// calls. Left out when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mutates_params: Vec<String>,
+    /// The parameters that escape: the function stores, captures, yields, or returns them. Left
+    /// out when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escapes_params: Vec<String>,
+    /// The attributes of `self` the function changes, as `attr` or `attr["key"]`. Left out when
+    /// there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mutates_self_attrs: Vec<String>,
+    /// The names of the effects the function has, directly or through the functions it calls.
+    /// Left out when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transitive_exec_effects: Vec<String>,
 }
 
 /// Normalized summaries keyed by `module:qualname`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 pub struct SummarySnapshot {
+    /// The version of the file: 1.
+    #[schemars(extend("const" = 1))]
     pub version: u32,
+    /// The summary of every public function, by `module:qualname`.
     pub functions: BTreeMap<String, SnapshotEntry>,
 }
 

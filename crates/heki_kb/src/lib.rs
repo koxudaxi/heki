@@ -202,6 +202,9 @@ pub enum ExecEffectKind {
     UnpooledClientAlloc,
     DbQuery,
     QuadraticRealloc,
+    /// An await where a cancelled AnyIO or Trio scope raises its cancellation (`EFF118`): kept
+    /// only on an awaited call, and only while a rule reading it runs.
+    Checkpoint,
 }
 
 impl ExecEffectKind {
@@ -226,6 +229,7 @@ impl ExecEffectKind {
         Self::UnpooledClientAlloc,
         Self::DbQuery,
         Self::QuadraticRealloc,
+        Self::Checkpoint,
     ];
 
     /// The effect's name in the catalogs and in `[[tool.heki.ecosystem]]` (`blocking_net`).
@@ -240,6 +244,7 @@ impl ExecEffectKind {
             Self::UnpooledClientAlloc => "unpooled_client_alloc",
             Self::DbQuery => "db_query",
             Self::QuadraticRealloc => "quadratic_realloc",
+            Self::Checkpoint => "checkpoint",
         }
     }
 
@@ -257,7 +262,10 @@ impl ExecEffectKind {
             | Self::Sleep
             | Self::BlockingFs => Some(WaitKind::Io),
             Self::BlockingSync => Some(WaitKind::Thread),
-            Self::UnpooledClientAlloc | Self::DbQuery | Self::QuadraticRealloc => None,
+            Self::UnpooledClientAlloc
+            | Self::DbQuery
+            | Self::QuadraticRealloc
+            | Self::Checkpoint => None,
         }
     }
 
@@ -436,6 +444,10 @@ pub struct EcosystemEntry {
     /// The call gives at most as many of its [`Self::items`] as the integer passed here
     /// (`fetchmany(size)`): a count the code passes fixes how many there are.
     pub items_up_to: Option<ArgSlot>,
+    /// `EFF118`: the call makes a cancel scope, or the class is one (`anyio.CancelScope`,
+    /// `trio.move_on_after`): a `with` over it shields what runs inside from the cancellation
+    /// of the scopes around it when the argument at this slot is true (`shield=True`).
+    pub cancel_scope: Option<ArgSlot>,
     /// The library API a method of a catalog class is, as reports name it: the class of what a
     /// call returns in one case (`sqlite3.connect(":memory:")`) has the methods of a library
     /// class (`sqlite3.Connection.execute`).
@@ -474,6 +486,103 @@ pub struct EcosystemEntry {
     /// type argument names (`ContextVar[T].get()`), or the result a future was given
     /// (`concurrent.futures.Future.result`).
     pub returns_held: Option<HeldValue>,
+    /// The call opens a file as `io.open` does: the class of the file object it returns
+    /// follows the `mode` and `buffering` it passes ([`FileArgs::class`]). Boxed: three
+    /// entries have one, and every entry holds the field.
+    pub file_object: Option<Box<FileArgs>>,
+}
+
+/// Where a call opening a file as `io.open` does (`EcosystemEntry::file_object`) takes its
+/// `mode` and its `buffering`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileArgs {
+    /// The file argument. Unset: the file is the receiver (`pathlib.Path.open`), a path.
+    pub file: ArgSlot,
+    pub mode: ArgSlot,
+    pub buffering: ArgSlot,
+}
+
+/// The file classes `io.open` returns: text, binary read, binary write (also append and
+/// exclusive creation), binary read and write (`+`), and unbuffered binary.
+pub const FILE_CLASSES: &[&str] = &[
+    "io.TextIOWrapper",
+    "io.BufferedReader",
+    "io.BufferedWriter",
+    "io.BufferedRandom",
+    "io.FileIO",
+];
+
+/// The class of a file object `io.open` returns with a mode or a buffering heki does not
+/// know: its members are those every class of [`FILE_CLASSES`] has.
+pub const ANY_FILE_CLASS: &str = "io.open()";
+
+impl FileArgs {
+    /// The class of the file object the call returns, `arg` telling what it passes as for
+    /// [`EcosystemEntry::case_for`]. An argument it leaves out takes `io.open`'s default
+    /// (`mode="r"`, `buffering=-1`).
+    pub fn class(
+        &self,
+        mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> &'static str {
+        let mut at = |slot: &ArgSlot| arg(slot.arg, slot.param.as_deref());
+        let names_path = (self.file == ArgSlot::default())
+            || at(&self.file).is_some_and(|fact| fact.is_path_like());
+        let mode = match at(&self.mode) {
+            None => Some("r".to_owned()),
+            Some(fact) => match fact.literal {
+                Some(LiteralValue::Str(mode)) => Some(mode),
+                _ => None,
+            },
+        };
+        let buffering = match at(&self.buffering) {
+            None => Some(-1),
+            Some(fact) => match fact.literal {
+                Some(LiteralValue::Int(n)) => Some(n),
+                Some(LiteralValue::Bool(b)) => Some(i64::from(b)),
+                _ => None,
+            },
+        };
+        match file_class(mode.as_deref(), buffering) {
+            // `open` never sets `O_NONBLOCK` on a path it opens, so only an integer file
+            // descriptor can give a binary read that returns `None` instead of bytes.
+            "io.BufferedReader" | "io.BufferedRandom" if !names_path => ANY_FILE_CLASS,
+            class => class,
+        }
+    }
+}
+
+/// The class of the file object `io.open(file, mode, buffering)` returns, as CPython decides
+/// it (`None`: an argument heki does not know). Unbuffered I/O is binary only, so a call with
+/// `buffering=0` that returns gives a raw file whatever its mode; a mode CPython rejects
+/// raises, and one only an older version accepts (`"U"`) gives [`ANY_FILE_CLASS`].
+fn file_class(mode: Option<&str>, buffering: Option<i64>) -> &'static str {
+    if buffering == Some(0) {
+        return "io.FileIO";
+    }
+    let Some(mode) = mode.filter(|m| is_open_mode(m)) else {
+        return ANY_FILE_CLASS;
+    };
+    if !mode.contains('b') {
+        return "io.TextIOWrapper";
+    }
+    match buffering {
+        None => ANY_FILE_CLASS,
+        Some(_) if mode.contains('+') => "io.BufferedRandom",
+        Some(_) if mode.contains('r') => "io.BufferedReader",
+        Some(_) => "io.BufferedWriter",
+    }
+}
+
+/// Whether `io.open` accepts `mode`: each of `rwxab+t` at most once, exactly one of `rwxa`,
+/// and not both `t` and `b`.
+fn is_open_mode(mode: &str) -> bool {
+    let mut seen = BTreeSet::new();
+    let known = mode
+        .chars()
+        .all(|c| "rwxab+t".contains(c) && seen.insert(c));
+    let kinds = mode.chars().filter(|c| "rwxa".contains(*c)).count();
+    known && kinds == 1 && !(seen.contains(&'t') && seen.contains(&'b'))
 }
 
 /// What a method returning the value its receiver holds returns
@@ -688,6 +797,27 @@ pub struct ArgFact {
     pub truthy: Option<bool>,
 }
 
+impl ArgFact {
+    /// The value is known to be a path (a string, bytes, or a path object) and so no integer
+    /// file descriptor.
+    pub fn is_path_like(&self) -> bool {
+        self.names_file
+            || matches!(self.literal, Some(LiteralValue::Str(_)))
+            || self.class.as_deref().is_some_and(|c| {
+                matches!(
+                    c,
+                    "builtins.str"
+                        | "builtins.bytes"
+                        | "os.PathLike"
+                        | "pathlib.Path"
+                        | "pathlib.PurePath"
+                        | "pathlib.PosixPath"
+                        | "pathlib.WindowsPath"
+                )
+            })
+    }
+}
+
 /// A constant argument.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LiteralValue {
@@ -763,7 +893,8 @@ impl EcosystemEntry {
     }
 
     /// The first case the call's arguments select: `arg(position, keyword)` tells what the
-    /// call passes there (`None`: nothing known, or not passed).
+    /// call passes there (`None`: nothing; an argument `*` / `**` unpacking may pass is one
+    /// nothing is known of).
     pub fn case_for(
         &self,
         mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
@@ -801,6 +932,16 @@ impl EcosystemEntry {
         self.declared_return_in(case)
             .filter(|t| *t != SELF_RETURN_TYPE)
             .map(|t| split_receiver_items(t).0)
+    }
+
+    /// The class of what a call passing `arg` (as for [`Self::case_for`]) returns: its
+    /// case's or its own, or that of the file object a call opening a file returns.
+    pub fn result_class(
+        &self,
+        mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<&str> {
+        self.return_type_in(self.case_for(&mut arg))
+            .or_else(|| Some(self.file_object.as_ref()?.class(arg)))
     }
 
     /// Whether the items of what the call returns are instances of its receiver's class
@@ -2162,10 +2303,84 @@ mod tests {
 
     /// Every Layer 2 entry (docs/ANALYSIS_AND_KB_SPEC.md section 4.2), as `(symbols, expected
     /// entry without symbol)`.
+    /// The calls opening a file as `io.open` does, and the members of the classes of the file
+    /// objects they return.
+    fn file_objects() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let opening = |file: Option<u8>, mode: u8| EcosystemEntry {
+            file_object: Some(Box::new(FileArgs {
+                file: ArgSlot {
+                    arg: file,
+                    param: file.map(|_| "file".into()),
+                },
+                mode: ArgSlot {
+                    arg: Some(mode),
+                    param: Some("mode".into()),
+                },
+                buffering: ArgSlot {
+                    arg: Some(mode + 1),
+                    param: Some("buffering".into()),
+                },
+            })),
+            ..entry(&[BlockingFs])
+        };
+        let mut out = vec![
+            (s(&["builtins.open", "io.open"]), opening(Some(0), 1)),
+            (s(&["pathlib.Path.open"]), opening(None, 0)),
+        ];
+        for class in FILE_CLASSES.iter().copied().chain([ANY_FILE_CLASS]) {
+            let reads = class != "io.BufferedWriter";
+            let writes = class != "io.BufferedReader";
+            let flushes = !matches!(class, "io.BufferedReader" | "io.FileIO");
+            let tell_flushes = matches!(class, "io.TextIOWrapper" | ANY_FILE_CLASS);
+            let line = match class {
+                "io.TextIOWrapper" => Some("builtins.str"),
+                "io.BufferedWriter" | ANY_FILE_CLASS => None,
+                _ => Some("builtins.bytes"),
+            };
+            let int = Some("builtins.int");
+            let bool = Some("builtins.bool");
+            let members = [
+                ("read", reads, line.filter(|_| class != "io.FileIO")),
+                ("readline", reads, line),
+                ("readlines", reads, reads.then_some("builtins.list")),
+                (
+                    "write",
+                    writes,
+                    int.filter(|_| writes && !matches!(class, "io.FileIO" | ANY_FILE_CLASS)),
+                ),
+                ("writelines", writes, None),
+                ("seek", true, int),
+                ("tell", tell_flushes, int),
+                ("truncate", writes, int.filter(|_| writes)),
+                ("flush", flushes, None),
+                ("close", true, None),
+                ("fileno", false, int),
+                ("readable", false, bool),
+                ("writable", false, bool),
+                ("seekable", false, bool),
+                ("isatty", false, bool),
+                ("__iter__", reads, Some(SELF_RETURN_TYPE)),
+                ("__next__", reads, line),
+                ("__enter__", false, Some(SELF_RETURN_TYPE)),
+                ("__exit__", true, None),
+            ];
+            for (member, waits, returns) in members {
+                let effects: &[ExecEffectKind] = if waits { &[BlockingFs] } else { &[] };
+                let e = EcosystemEntry {
+                    return_type: returns.map(Into::into),
+                    ..entry(effects)
+                };
+                out.push((vec![format!("{class}.{member}")], e));
+            }
+        }
+        out
+    }
+
     fn layer2_required() -> Vec<(Vec<String>, EcosystemEntry)> {
         [
             one_at_a_time_apis(),
             standard_library(),
+            file_objects(),
             http_clients(),
             boto3_clients(),
             sync_databases(),
@@ -2181,10 +2396,175 @@ mod tests {
             pydantic_models(),
             llm_requests(),
             file_process_and_network_rows(),
+            cancellation_rows(),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The AnyIO and Trio awaits that check for cancellation (`checkpoint`), and the cancel
+    /// scopes that shield from it (`EFF118`). An entry of a class with `fast_acquire=True` is a
+    /// method of the library class (`api`) that takes no checkpoint while uncontended.
+    fn cancellation_rows() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let checkpoint = || async_safe(entry(&[Checkpoint]));
+        let fast_acquire = |class: &str| ArgCase {
+            param: Some("fast_acquire".into()),
+            equals: Some(ArgLiteral::Bool(true)),
+            return_type: Some(format!("{class}(fast_acquire=True)")),
+            ..ArgCase::default()
+        };
+        let scope = |arg: Option<u8>| EcosystemEntry {
+            cancel_scope: Some(ArgSlot {
+                arg,
+                param: Some("shield".into()),
+            }),
+            ..entry(&[])
+        };
+        vec![
+            (s(ANYIO_CHECKPOINTS), checkpoint()),
+            (s(TRIO_CHECKPOINTS), checkpoint()),
+            (
+                s(&["anyio.Lock"]),
+                EcosystemEntry {
+                    cases: vec![fast_acquire("anyio.Lock")],
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["anyio.Semaphore"]),
+                EcosystemEntry {
+                    cases: vec![fast_acquire("anyio.Semaphore")],
+                    ..entry(&[])
+                },
+            ),
+            (
+                [FAST_ACQUIRE_LOCK, FAST_ACQUIRE_SEMAPHORE]
+                    .iter()
+                    .flat_map(|class| with_prefix(class, &["acquire", "__aenter__"]))
+                    .collect(),
+                async_safe(entry(&[])),
+            ),
+            (s(&["anyio.CancelScope", "trio.CancelScope"]), scope(None)),
+            (
+                with_prefix(
+                    "anyio",
+                    &["move_on_after", "fail_after", "move_on_at", "fail_at"],
+                ),
+                scope(Some(1)),
+            ),
+            (
+                with_prefix(
+                    "trio",
+                    &["move_on_after", "fail_after", "move_on_at", "fail_at"],
+                ),
+                scope(None),
+            ),
+        ]
+    }
+
+    const FAST_ACQUIRE_LOCK: &str = "anyio.Lock(fast_acquire=True)";
+    const FAST_ACQUIRE_SEMAPHORE: &str = "anyio.Semaphore(fast_acquire=True)";
+
+    /// The AnyIO awaits that check for cancellation; `to_thread.run_sync` and its siblings carry
+    /// the effect beside offloading.
+    const ANYIO_CHECKPOINTS: &[&str] = &[
+        "anyio.sleep",
+        "anyio.sleep_forever",
+        "anyio.sleep_until",
+        "anyio.lowlevel.checkpoint",
+        "anyio.lowlevel.checkpoint_if_cancelled",
+        "anyio.run_process",
+        "anyio.open_process",
+        "anyio.open_file",
+        "anyio.connect_tcp",
+        "anyio.connect_unix",
+        "anyio.getaddrinfo",
+        "anyio.wait_readable",
+        "anyio.wait_writable",
+        "anyio.Event.wait",
+        "anyio.Lock.acquire",
+        "anyio.Lock.__aenter__",
+        "anyio.Semaphore.acquire",
+        "anyio.Semaphore.__aenter__",
+        "anyio.CapacityLimiter.acquire",
+        "anyio.CapacityLimiter.acquire_on_behalf_of",
+        "anyio.CapacityLimiter.__aenter__",
+        "anyio.Condition.acquire",
+        "anyio.Condition.__aenter__",
+        "anyio.Condition.wait",
+        "anyio.streams.memory.MemoryObjectSendStream.send",
+        "anyio.streams.memory.MemoryObjectReceiveStream.receive",
+        "anyio.abc.Process.wait",
+    ];
+
+    /// The Trio awaits that check for cancellation.
+    const TRIO_CHECKPOINTS: &[&str] = &[
+        "trio.sleep",
+        "trio.sleep_forever",
+        "trio.sleep_until",
+        "trio.lowlevel.checkpoint",
+        "trio.lowlevel.checkpoint_if_cancelled",
+        "trio.open_file",
+        "trio.open_tcp_stream",
+        "trio.open_unix_socket",
+        "trio.run_process",
+        "trio.Event.wait",
+        "trio.Lock.acquire",
+        "trio.Lock.__aenter__",
+        "trio.Semaphore.acquire",
+        "trio.Semaphore.__aenter__",
+        "trio.CapacityLimiter.acquire",
+        "trio.CapacityLimiter.acquire_on_behalf_of",
+        "trio.CapacityLimiter.__aenter__",
+        "trio.Condition.acquire",
+        "trio.Condition.__aenter__",
+        "trio.Condition.wait",
+        "trio.MemorySendChannel.send",
+        "trio.MemoryReceiveChannel.receive",
+    ];
+
+    /// The awaits an earlier catalog had as checkpoints, and the remedies: none is one. A
+    /// subprocess of `asyncio` is no AnyIO object, `aclose_forcefully` and
+    /// `cancel_shielded_checkpoint` close or yield under a shield, and AnyIO's `AsyncFile`
+    /// closes under its own.
+    #[test]
+    fn layer2_checkpoints_leave_out_the_remedies_and_native_asyncio() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for symbol in [
+            "asyncio.subprocess.Process.wait",
+            "anyio.aclose_forcefully",
+            "anyio.lowlevel.cancel_shielded_checkpoint",
+            "anyio.AsyncFile.aclose",
+            "trio.lowlevel.cancel_shielded_checkpoint",
+            "asyncio.sleep",
+            "asyncio.Lock.acquire",
+        ] {
+            assert!(
+                kb.lookup(symbol)
+                    .is_none_or(|e| !e.effects.contains(&Checkpoint)),
+                "{symbol}"
+            );
+        }
+        let checkpoints: BTreeSet<&str> = (kb.entries.values())
+            .filter(|e| e.effects.contains(&Checkpoint))
+            .map(|e| e.symbol.as_str())
+            .collect();
+        // Every checkpoint is an AnyIO or Trio await, or Starlette's offloading call.
+        for symbol in &checkpoints {
+            let e = kb.lookup(symbol).unwrap();
+            assert!(e.async_safe, "{symbol}");
+            assert!(
+                ["anyio.", "trio.", "starlette.", "fastapi."]
+                    .iter()
+                    .any(|p| symbol.starts_with(p)),
+                "{symbol}"
+            );
+        }
+        assert_eq!(
+            checkpoints.len(),
+            ANYIO_CHECKPOINTS.len() + TRIO_CHECKPOINTS.len() + 6
+        );
     }
 
     /// The file system, process, and network calls the catalog lists by module (#434, #445,
@@ -2962,15 +3342,36 @@ mod tests {
                     ..entry(&[])
                 },
             ),
+            (unittest_symbols(UNITTEST_PLAIN), entry(&[])),
+            (
+                unittest_symbols(UNITTEST_RAISES),
+                EcosystemEntry {
+                    exit_suppresses: Some(true),
+                    ..entry(&[])
+                },
+            ),
+            (
+                unittest_symbols(UNITTEST_WATCHES),
+                EcosystemEntry {
+                    exit_suppresses: Some(false),
+                    ..entry(&[])
+                },
+            ),
             (
                 s(&[
-                    "builtins.open",
-                    "io.open",
+                    "unittest.IsolatedAsyncioTestCase.asyncSetUp",
+                    "unittest.IsolatedAsyncioTestCase.asyncTearDown",
+                    "unittest.IsolatedAsyncioTestCase.addAsyncCleanup",
+                    "unittest.IsolatedAsyncioTestCase.enterAsyncContext",
+                ]),
+                entry(&[]),
+            ),
+            (
+                s(&[
                     "pathlib.Path.read_text",
                     "pathlib.Path.read_bytes",
                     "pathlib.Path.write_text",
                     "pathlib.Path.write_bytes",
-                    "pathlib.Path.open",
                     "os.listdir",
                     "os.scandir",
                     "os.walk().__iter__",
@@ -3032,17 +3433,26 @@ mod tests {
             (
                 s(&[
                     "asyncio.to_thread",
+                    "asgiref.sync.sync_to_async",
+                    "asyncer.asyncify",
+                    "channels.db.database_sync_to_async",
+                ]),
+                offload(0),
+            ),
+            // They check for cancellation before the callable starts (`EFF118`).
+            (
+                s(&[
                     "anyio.to_thread.run_sync",
                     "anyio.to_process.run_sync",
                     "anyio.to_interpreter.run_sync",
                     "trio.to_thread.run_sync",
                     "starlette.concurrency.run_in_threadpool",
                     "fastapi.concurrency.run_in_threadpool",
-                    "asgiref.sync.sync_to_async",
-                    "asyncer.asyncify",
-                    "channels.db.database_sync_to_async",
                 ]),
-                offload(0),
+                EcosystemEntry {
+                    effects: vec![Checkpoint],
+                    ..offload(0)
+                },
             ),
             (
                 with_prefix(
@@ -3140,6 +3550,11 @@ mod tests {
                     &["get_running_loop", "get_event_loop", "new_event_loop"],
                 ),
                 returning("asyncio.AbstractEventLoop", entry(&[])),
+            ),
+            // A module made from a spec: `types.ModuleType` says nothing of the names it binds.
+            (
+                s(&["importlib.util.module_from_spec"]),
+                returning("types.ModuleType", entry(&[])),
             ),
             (
                 with_prefix(
@@ -4572,6 +4987,9 @@ mod tests {
                 "atexit.register",
                 "contextlib.ExitStack.callback",
                 "contextlib.AsyncExitStack.callback",
+                "unittest.TestCase.addCleanup",
+                "unittest.TestCase.addClassCleanup",
+                "unittest.IsolatedAsyncioTestCase.addClassCleanup",
             ],
         ),
         (
@@ -4730,9 +5148,21 @@ mod tests {
         ),
         (
             ResultItems::Lines,
-            &["builtins.open", "io.open", "pathlib.Path.open"],
+            &[
+                "builtins.open",
+                "io.open",
+                "pathlib.Path.open",
+                "io.TextIOWrapper.readlines",
+                "io.BufferedReader.readlines",
+                "io.BufferedRandom.readlines",
+                "io.FileIO.readlines",
+                "io.open().readlines",
+            ],
         ),
-        (ResultItems::Text, &["pathlib.Path.read_text"]),
+        (
+            ResultItems::Text,
+            &["pathlib.Path.read_text", "io.TextIOWrapper.read"],
+        ),
         (
             ResultItems::Entries,
             &[
@@ -4810,6 +5240,68 @@ mod tests {
 
     /// The classes and factories whose context manager's exit returns a false value on every
     /// path.
+    /// The members of `unittest.TestCase` the catalog lists, which no effect belongs to.
+    const UNITTEST_PLAIN: &[&str] = &[
+        "assertEqual",
+        "assertNotEqual",
+        "assertTrue",
+        "assertFalse",
+        "assertIs",
+        "assertIsNot",
+        "assertIsNone",
+        "assertIsNotNone",
+        "assertIn",
+        "assertNotIn",
+        "assertIsInstance",
+        "assertNotIsInstance",
+        "assertAlmostEqual",
+        "assertNotAlmostEqual",
+        "assertGreater",
+        "assertGreaterEqual",
+        "assertLess",
+        "assertLessEqual",
+        "assertRegex",
+        "assertNotRegex",
+        "assertCountEqual",
+        "assertMultiLineEqual",
+        "assertSequenceEqual",
+        "assertListEqual",
+        "assertTupleEqual",
+        "assertSetEqual",
+        "assertDictEqual",
+        "fail",
+        "skipTest",
+        "id",
+        "shortDescription",
+        "setUp",
+        "tearDown",
+        "setUpClass",
+        "tearDownClass",
+        "subTest",
+        "addCleanup",
+        "addClassCleanup",
+        "enterContext",
+        "enterClassContext",
+    ];
+    /// The context managers of the class whose exit swallows the exception it expects.
+    const UNITTEST_RAISES: &[&str] = &["assertRaises", "assertRaisesRegex"];
+    /// The context managers of the class whose exit lets every exception through.
+    const UNITTEST_WATCHES: &[&str] = &[
+        "assertWarns",
+        "assertWarnsRegex",
+        "assertLogs",
+        "assertNoLogs",
+    ];
+
+    /// `members` of both `unittest.TestCase` and `unittest.IsolatedAsyncioTestCase`, which the
+    /// catalog lists one by one for each.
+    fn unittest_symbols(members: &[&str]) -> Vec<String> {
+        ["TestCase", "IsolatedAsyncioTestCase"]
+            .iter()
+            .flat_map(|class| members.iter().map(move |m| format!("unittest.{class}.{m}")))
+            .collect()
+    }
+
     const EXITS_NEVER_SUPPRESS: &[&str] = &[
         "tempfile.TemporaryFile",
         "tempfile.NamedTemporaryFile",
@@ -4889,14 +5381,26 @@ mod tests {
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
                     .map(|(default, _)| HeldValue { default: *default });
-                // The methods of the classes of what `sqlite3.connect` returns are the library's.
-                let api = [SQLITE3_MEMORY, SQLITE3_FILE].iter().find_map(|class| {
-                    let method = symbol.strip_prefix(&format!("{class}."))?;
-                    Some(match method.strip_prefix("cursor().") {
-                        Some(m) => format!("sqlite3.Cursor.{m}"),
-                        None => format!("sqlite3.Connection.{method}"),
+                // The methods of the classes of what `sqlite3.connect` returns are the library's,
+                // and so are those of a lock made with `fast_acquire=True`.
+                let api = [SQLITE3_MEMORY, SQLITE3_FILE]
+                    .iter()
+                    .find_map(|class| {
+                        let method = symbol.strip_prefix(&format!("{class}."))?;
+                        Some(match method.strip_prefix("cursor().") {
+                            Some(m) => format!("sqlite3.Cursor.{m}"),
+                            None => format!("sqlite3.Connection.{method}"),
+                        })
                     })
-                });
+                    .or_else(|| {
+                        [FAST_ACQUIRE_LOCK, FAST_ACQUIRE_SEMAPHORE]
+                            .iter()
+                            .find_map(|class| {
+                                let method = symbol.strip_prefix(&format!("{class}."))?;
+                                let library = class.strip_suffix("(fast_acquire=True)")?;
+                                Some(format!("{library}.{method}"))
+                            })
+                    });
                 let writes_in_order = ORDERED_OUTPUTS
                     .iter()
                     .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
@@ -4952,6 +5456,115 @@ mod tests {
         assert_eq!(kb.api_class(&file_cursor), Some("sqlite3.Cursor"));
         assert_eq!(kb.api_class(SQLITE3_MEMORY), Some("sqlite3.Connection"));
         assert_eq!(kb.api_class("sqlite3.Connection"), None);
+    }
+
+    /// The class of the file object `io.open` returns, by its mode and its buffering as CPython
+    /// decides them; an argument left out takes its default, one heki does not know gives the
+    /// class of the members every file class has.
+    #[test]
+    fn a_file_class_follows_the_mode_and_the_buffering() {
+        const RAW: &str = "io.FileIO";
+        const TEXT: &str = "io.TextIOWrapper";
+        const READER: &str = "io.BufferedReader";
+        const WRITER: &str = "io.BufferedWriter";
+        const RANDOM: &str = "io.BufferedRandom";
+        for (mode, buffering, class) in [
+            (Some("r"), Some(-1), TEXT),
+            (Some("rt"), None, TEXT),
+            (Some("tr"), Some(1), TEXT),
+            (Some("w+"), Some(4096), TEXT),
+            (Some("a"), Some(-1), TEXT),
+            (Some("x"), Some(-1), TEXT),
+            (Some("rb"), Some(-1), READER),
+            (Some("br"), Some(8192), READER),
+            (Some("wb"), Some(-1), WRITER),
+            (Some("ab"), Some(1), WRITER),
+            (Some("xb"), Some(-1), WRITER),
+            (Some("r+b"), Some(-1), RANDOM),
+            (Some("wb+"), Some(-1), RANDOM),
+            (Some("+ab"), Some(-1), RANDOM),
+            (Some("rb"), Some(0), RAW),
+            (Some("w+b"), Some(0), RAW),
+            (None, Some(0), RAW),
+            (Some("rb"), None, ANY_FILE_CLASS),
+            (None, Some(-1), ANY_FILE_CLASS),
+            (Some("rU"), Some(-1), ANY_FILE_CLASS),
+            (Some("rw"), Some(-1), ANY_FILE_CLASS),
+            (Some("rbt"), Some(-1), ANY_FILE_CLASS),
+            (Some("rr"), Some(-1), ANY_FILE_CLASS),
+            (Some(""), Some(-1), ANY_FILE_CLASS),
+        ] {
+            assert_eq!(file_class(mode, buffering), class, "{mode:?} {buffering:?}");
+        }
+        let args = FileArgs {
+            file: ArgSlot {
+                arg: Some(0),
+                param: Some("file".into()),
+            },
+            mode: ArgSlot {
+                arg: Some(1),
+                param: Some("mode".into()),
+            },
+            buffering: ArgSlot {
+                arg: Some(2),
+                param: Some("buffering".into()),
+            },
+        };
+        let lit = |v| ArgFact {
+            literal: Some(v),
+            ..ArgFact::default()
+        };
+        let path = lit(LiteralValue::Str("x.bin".into()));
+        let call_on = |file: ArgFact, mode: Option<ArgFact>, buffering: Option<ArgFact>| {
+            args.class(|i, _| match i {
+                Some(0) => Some(file.clone()),
+                Some(1) => mode.clone(),
+                _ => buffering.clone(),
+            })
+        };
+        let call = |mode: Option<ArgFact>, buffering: Option<ArgFact>| {
+            call_on(path.clone(), mode, buffering)
+        };
+        let rb = || Some(lit(LiteralValue::Str("rb".into())));
+        assert_eq!(call_on(ArgFact::default(), rb(), None), ANY_FILE_CLASS);
+        assert_eq!(
+            call_on(lit(LiteralValue::Int(3)), rb(), None),
+            ANY_FILE_CLASS
+        );
+        assert_eq!(call_on(lit(LiteralValue::Int(3)), None, None), TEXT);
+        assert_eq!(
+            call_on(
+                lit(LiteralValue::Int(3)),
+                rb(),
+                Some(lit(LiteralValue::Int(0)))
+            ),
+            RAW
+        );
+        assert_eq!(call(None, None), TEXT);
+        assert_eq!(
+            call(Some(lit(LiteralValue::Str("rb".into()))), None),
+            READER
+        );
+        assert_eq!(
+            call(
+                Some(lit(LiteralValue::Str("rb".into()))),
+                Some(lit(LiteralValue::Bool(false)))
+            ),
+            RAW
+        );
+        assert_eq!(call(Some(ArgFact::default()), None), ANY_FILE_CLASS);
+        assert_eq!(
+            call(
+                Some(lit(LiteralValue::Str("wb".into()))),
+                Some(ArgFact::default())
+            ),
+            ANY_FILE_CLASS
+        );
+        assert_eq!(
+            call(None, Some(lit(LiteralValue::Float(0.0)))),
+            TEXT,
+            "a float buffering raises"
+        );
     }
 
     /// No async API can fire `EFF101`: async APIs are often called without a direct `await`
@@ -5012,6 +5625,9 @@ mod tests {
                         || FUTURE_CLASSES.contains(&class)
                         || THREAD_LOCAL_CLASSES.contains(&class)
                         || class.starts_with("builtins.")
+                        // Any module: the class says nothing of the names a value binds, and a
+                        // call on one is unresolved by design (`resolver::is_any_module`).
+                        || class == "types.ModuleType"
                         || (e.returns_receiver_items_in(None) && class.starts_with("typing.")),
                     "{symbol} -> {class}"
                 );
@@ -5100,7 +5716,7 @@ mod tests {
         ] {
             assert_eq!(e.wait_kind(), Some(WaitKind::Io), "{e:?}");
         }
-        for e in [UnpooledClientAlloc, DbQuery, QuadraticRealloc] {
+        for e in [UnpooledClientAlloc, DbQuery, QuadraticRealloc, Checkpoint] {
             assert_eq!(e.wait_kind(), None, "{e:?}");
         }
         assert!(

@@ -12,7 +12,9 @@ pub const EXPERIMENTAL_POLICY: &str = "Experimental features can still change in
     opt-in rule that is not experimental is stable and only off by default.";
 
 /// How an entry names its target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExperimentalKind {
     /// A rule code (`MUT101`).
@@ -29,11 +31,13 @@ pub enum ExperimentalKind {
     Behavior,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct ExperimentalFeature {
     /// `<kind>.<name>`, stable while the feature is experimental (`rule.MUT101`).
     pub id: &'static str,
     pub kind: ExperimentalKind,
+    /// What the feature is: a rule code, a command, an option, a key, or a behavior.
     pub target: &'static str,
     /// The release the feature is experimental in first.
     pub since: &'static str,

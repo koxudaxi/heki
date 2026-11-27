@@ -17,12 +17,13 @@ Four rules are exact and run by default. Their reports show the call chain, and 
 
 `EFF103`, `EFF109`, and `EFF116` also have heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration, a helper that takes the lock on some paths, a call that may run another implementation). They appear with `--heuristic`.
 
-Two more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
+Three more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF102`](rules/loop-unpooled-client.md) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
 | [`EFF117`](rules/unlocked-write-of-guarded-state.md) | state that one writer changes holding a thread lock and another changes holding none, where both can run on threads heki resolves | heuristic, runs with `--heuristic` |
+| [`EFF118`](rules/unshielded-cleanup-checkpoint.md) | a `finally` body, an `except` taking the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way, so in a cancelled scope the cleanup stops there | heuristic, runs with `--heuristic` |
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
 
@@ -142,6 +143,6 @@ The run exits with code 1. When the new effect is intended, refresh the snapshot
 ## 👉 Next steps
 
 - [Configuration: effect-boundaries](configuration.md#effect-boundaries) lists every key and `forbid` token.
-- [Adopting heki in a code base](adoption.md) shows how to start with a baseline.
+- [Adopting heki in a code base](adoption.md) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](adoption.md#an-async-web-or-database-service) to copy.
 - `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](coding-agents.md#what-a-function-does-heki-inspect-experimental).
 - [State Ownership and Mutation](ownership.md) covers the contracts about who may change, read, or call a thing.

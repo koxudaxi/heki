@@ -4,7 +4,9 @@
 //! base class another module binds only under `if TYPE_CHECKING:`. A write of a `__dict__` key
 //! no target names is `MUT205` only on an object of unknown class: each shape either names the
 //! class (no report) or leaves it open (reported). A name bound only under `if TYPE_CHECKING:`
-//! types what it names but never decides what a call runs: the tier of `EFF101` tells it.
+//! types what it names but never decides what a call runs: the tier of `EFF101` tells it. A
+//! name a module serves from its `__getattr__` is what the hook returns for it where heki
+//! follows the hook, which decides what a call runs.
 
 mod common;
 
@@ -394,23 +396,19 @@ fn a_type_checking_binding_of_another_module_names_its_class() {
     assert_eq!(unknown_receivers(&p), names(&["otherwise"]));
 }
 
-const LAZY_HTTP: &str = r#"from typing import TYPE_CHECKING, Any
+const LAZY_HTTP: &str = r#"import importlib
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from requests import Session as Session
     from time import sleep as pause
 
+_SOURCES = {"pause": ("asyncio", "sleep"), "Session": ("httpx", "AsyncClient")}
+
 
 def __getattr__(name: str) -> Any:
-    if name == "pause":
-        from asyncio import sleep  # noqa: PLC0415
-
-        return sleep
-    if name == "Session":
-        from httpx import AsyncClient  # noqa: PLC0415
-
-        return AsyncClient
-    raise AttributeError(name)
+    module, attr = _SOURCES[name]
+    return getattr(importlib.import_module(module), attr)
 "#;
 
 const LAZY_HTTP_USE: &str = r#"import time
@@ -458,10 +456,10 @@ fn eff101_reports(p: &Project) -> BTreeSet<(u64, String)> {
 }
 
 /// A name a module binds only under `if TYPE_CHECKING:` types what it names, but does not say
-/// which object runs: a module `__getattr__` may serve another one. Calling it is no call of
-/// the function the import names, and a method a class finds only through a base named so is
-/// at most a heuristic target, on an instance, on the class, and through `super()`. A method of
-/// the class itself comes before that base and stays exact.
+/// which object runs: a module `__getattr__` heki cannot follow may serve another one. Calling
+/// it is no call of the function the import names, and a method a class finds only through a
+/// base named so is at most a heuristic target, on an instance, on the class, and through
+/// `super()`. A method of the class itself comes before that base and stays exact.
 #[test]
 fn a_type_checking_binding_never_decides_what_a_call_runs() {
     let p = project(
@@ -478,6 +476,710 @@ fn a_type_checking_binding_never_decides_what_a_call_runs() {
             heuristic(19),
             heuristic(23),
             (27, "EFF101".to_owned()),
+        ])
+    );
+}
+
+const BASE: &str = r#"from typing import Self
+
+
+class Base:
+    def copy(self) -> Self:
+        return type(self)()
+"#;
+
+/// The shape of the report: an `lru_cache` factory returning a class it defines, read from a
+/// table by the name the hook is given.
+const LAZY: &str = r#"from functools import lru_cache
+from typing import Any
+
+
+@lru_cache(maxsize=1)
+def _get_base_class() -> type:
+    from pkg.base import Base  # noqa: PLC0415
+
+    class _StrictBase(Base):
+        pass
+
+    return _StrictBase
+
+
+_LAZY_EXPORTS = {"Base": _get_base_class}
+
+
+def __getattr__(name: str) -> Any:
+    if (factory := _LAZY_EXPORTS.get(name)) is None:
+        raise AttributeError(name)
+    return factory()
+"#;
+
+const LAZY_BRANCH: &str = r#"import sys
+from typing import Any
+
+from pkg.base import Base as _Base
+
+
+def _other():
+    class _Other(_Base):
+        pass
+
+    return _Other
+
+
+_LOADERS = {"Loaded": _other, "Built": _Base}
+
+
+def __getattr__(name: str) -> Any:
+    if name == "Base":
+        if sys.version_info >= (3, 11):
+            from pkg.base import Base  # noqa: PLC0415
+
+            return Base
+        from pkg.base import Base  # noqa: PLC0415
+
+        return Base
+    if name in ("Other", "Again"):
+        return _other()
+    return _LOADERS[name]()
+"#;
+
+const LAZY_FALLBACK: &str = r#"import importlib
+from typing import Any
+
+
+def __getattr__(name: str) -> Any:
+    if name == "Base":
+        from pkg.base import Base  # noqa: PLC0415
+
+        return Base
+    return importlib.import_module(f"pkg.{name.lower()}")
+"#;
+
+const LAZY_DECLARED: &str = r#"from pkg.base import Base
+
+
+def _model() -> type[Base]:
+    return Base
+
+
+_EXPORTS = {"Model": _model}
+
+
+def __getattr__(name: str) -> type[Base]:
+    return _EXPORTS[name]()
+"#;
+
+const LAZY_OPEN: &str = r#"import importlib
+from typing import Any
+
+
+def __getattr__(name: str) -> Any:
+    return getattr(importlib.import_module("pkg.base"), name)
+"#;
+
+const LAZY_MAYBE_NONE: &str = r#"from typing import Any
+
+
+def _base() -> type:
+    from pkg.base import Base  # noqa: PLC0415
+
+    return Base
+
+
+_EXPORTS = {"Base": _base}
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        return _EXPORTS[name]()
+    except ImportError:
+        return None
+"#;
+
+const LAZY_PATCHED: &str = r#"from typing import Any
+
+
+def _base() -> type:
+    from pkg.base import Base  # noqa: PLC0415
+
+    class _Patched(Base):
+        pass
+
+    return _Patched
+
+
+_EXPORTS = {"Base": _base}
+
+
+def __getattr__(name: str) -> Any:
+    return _EXPORTS[name]()
+"#;
+
+const PATCH: &str = r#"import pkg.lazy_patched
+
+
+def patch() -> None:
+    pkg.lazy_patched._EXPORTS = {}
+"#;
+
+const LAZY_CACHED: &str = r#"from typing import Any
+
+
+def _base() -> type:
+    from pkg.base import Base  # noqa: PLC0415
+
+    return Base
+
+
+_EXPORTS = {"Base": _base}
+
+
+def __getattr__(name: str) -> Any:
+    value = _EXPORTS[name]()
+    globals()[name] = value
+    return value
+"#;
+
+const LAZY_BOUND: &str = r#"from typing import Any
+
+Base: Any = object
+
+
+def __getattr__(name: str) -> Any:
+    if name == "Base":
+        from pkg.base import Base  # noqa: PLC0415
+
+        return Base
+    raise AttributeError(name)
+"#;
+
+const GETATTR_USE: &str = r#"import pkg.lazy as lazy_module
+from pkg.base import Base as DirectBase
+from pkg.lazy import Base as LazyBase
+from pkg.lazy_bound import Base as BoundBase
+from pkg.lazy_branch import Again, Built, Loaded, Missing
+from pkg.lazy_branch import Base as BranchBase
+from pkg.lazy_cached import Base as CachedBase
+from pkg.lazy_declared import Model
+from pkg.lazy_fallback import Base as FallbackBase
+from pkg.lazy_fallback import Other as FallbackOther
+from pkg.lazy_maybe_none import Base as MaybeNoneBase
+from pkg.lazy_open import Base as OpenBase
+from pkg.lazy_patched import Base as PatchedBase
+
+
+class Direct(DirectBase):
+    pass
+
+
+class Lazy(LazyBase):
+    pass
+
+
+class ThroughModule(lazy_module.Base):
+    pass
+
+
+class Branch(BranchBase):
+    pass
+
+
+class Listed(Again):
+    pass
+
+
+class Unlisted(Missing):
+    pass
+
+
+class OnLoaded(Loaded):
+    pass
+
+
+class OnBuilt(Built):
+    pass
+
+
+class Declared(Model):
+    pass
+
+
+class Fallback(FallbackBase):
+    pass
+
+
+class FallbackOnOther(FallbackOther):
+    pass
+
+
+class Opened(OpenBase):
+    pass
+
+
+class MaybeNone(MaybeNoneBase):
+    pass
+
+
+class Patched(PatchedBase):
+    pass
+
+
+class Cached(CachedBase):
+    pass
+
+
+class Bound(BoundBase):
+    pass
+
+
+def direct(obj: Direct) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def lazy(obj: Lazy) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def constructed() -> None:
+    LazyBase().copy().__dict__["_mark"] = True
+
+
+def through_module(obj: ThroughModule) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def branch(obj: Branch) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def listed(obj: Listed) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def unlisted(obj: Unlisted) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def loaded(obj: OnLoaded) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def built(obj: OnBuilt) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def declared(obj: Declared) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def fallback(obj: Fallback) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def fallback_other(obj: FallbackOnOther) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def opened(obj: Opened) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def maybe_none(obj: MaybeNone) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def patched(obj: Patched) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def cached(obj: Cached) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def bound(obj: Bound) -> None:
+    obj.copy().__dict__["_mark"] = True
+"#;
+
+/// A name a module binds no other way but serves from its `__getattr__` is what the hook
+/// returns for that literal name: the class an `lru_cache` factory read from a table by the
+/// name defines (the report's shape, also read as `module.Base` and called), what a branch
+/// testing the name against the literal returns (also on two ways, the same class; a later
+/// `return` of a table's value the name is no key of raises, and the name takes no `return`
+/// past the test's other way), and the class object a factory annotated `-> type[Base]`
+/// returns. A class based on it has its methods. A name no test or table of the hook names, a
+/// table value heki cannot call (a class another module defines), a hook heki cannot follow, one
+/// that may also return `None`, one whose table another module rebinds, one caching what it
+/// serves in `globals()`, and a module binding the name itself leave the class unknown.
+#[test]
+fn a_name_a_module_getattr_serves_is_what_the_hook_returns() {
+    let p = project(
+        "getattr_served",
+        &[
+            ("base.py", BASE),
+            ("lazy.py", LAZY),
+            ("lazy_branch.py", LAZY_BRANCH),
+            ("lazy_declared.py", LAZY_DECLARED),
+            ("lazy_fallback.py", LAZY_FALLBACK),
+            ("lazy_open.py", LAZY_OPEN),
+            ("lazy_maybe_none.py", LAZY_MAYBE_NONE),
+            ("lazy_patched.py", LAZY_PATCHED),
+            ("patch.py", PATCH),
+            ("lazy_cached.py", LAZY_CACHED),
+            ("lazy_bound.py", LAZY_BOUND),
+            ("use.py", GETATTR_USE),
+        ],
+    );
+    assert_eq!(
+        unknown_receivers(&p),
+        names(&[
+            "unlisted",
+            "built",
+            "fallback_other",
+            "opened",
+            "maybe_none",
+            "patched",
+            "cached",
+            "bound"
+        ])
+    );
+}
+
+const LAZY_SERVED: &str = r#"from typing import TYPE_CHECKING, Any
+
+import requests
+
+if TYPE_CHECKING:
+    from asyncio import sleep as pause
+    from httpx import AsyncClient as Session
+
+
+def _declared() -> type[requests.Session]:
+    return requests.Session
+
+
+def __getattr__(name: str) -> Any:
+    if name == "pause":
+        from time import sleep  # noqa: PLC0415
+
+        return sleep
+    if name == "Session":
+        return requests.Session
+    if name == "Declared":
+        return _declared()
+    raise AttributeError(name)
+"#;
+
+const LAZY_SERVED_USE: &str = r#"from pkg.lazy_served import Declared, Session, pause
+
+
+class Client(Session):
+    async def through_super(self) -> None:
+        super().get("https://example.com")
+
+
+class Typed(Declared):
+    pass
+
+
+async def paused() -> None:
+    pause(1)
+
+
+async def on_instance(client: Client) -> None:
+    client.get("https://example.com")
+
+
+async def on_class(client: Client) -> None:
+    Client.get(client, "https://example.com")
+
+
+async def on_declared(typed: Typed) -> None:
+    typed.get("https://example.com")
+
+
+async def annotated(session: Session) -> None:
+    session.get("https://example.com")
+"#;
+
+/// What a module `__getattr__` heki follows serves decides what a call runs, also where the
+/// module's `if TYPE_CHECKING:` import names another object: calling the function it serves,
+/// and a method a class based on the class it serves finds there, are exact targets. A class
+/// object of a class or a subclass (`-> type[requests.Session]`) gives heuristic targets only,
+/// and an annotation naming the name reads it as a type checker does, as the `TYPE_CHECKING`
+/// import names it.
+#[test]
+fn a_followed_module_getattr_decides_what_a_call_runs() {
+    let p = project(
+        "getattr_calls",
+        &[("lazy_served.py", LAZY_SERVED), ("use.py", LAZY_SERVED_USE)],
+    );
+    assert_eq!(
+        eff101_reports(&p),
+        BTreeSet::from([
+            (6, "EFF101".to_owned()),
+            (14, "EFF101".to_owned()),
+            (18, "EFF101".to_owned()),
+            (22, "EFF101".to_owned()),
+            (26, "EFF101 [heuristic]".to_owned()),
+        ])
+    );
+}
+
+const REPLACE_HOOK_CODE: &str = r#"import pkg.lazy_served
+from asyncio import sleep
+
+
+def replacement(name):
+    return sleep
+
+
+pkg.lazy_served.__getattr__.__code__ = replacement.__code__
+"#;
+
+const REPLACE_FACTORY_CODE: &str = r#"import pkg.lazy_served
+
+
+def replacement():
+    return None
+
+
+pkg.lazy_served._declared.__code__ = replacement.__code__
+"#;
+
+/// Another module replacing the code of the hook, or of a factory the hook calls, leaves what
+/// the module serves open: no exact report through the served name.
+#[test]
+fn replacing_the_code_of_a_getattr_hook_or_its_factory_leaves_its_names_open() {
+    let hook = project(
+        "getattr_code_hook",
+        &[
+            ("lazy_served.py", LAZY_SERVED),
+            ("use.py", LAZY_SERVED_USE),
+            ("replace.py", REPLACE_HOOK_CODE),
+        ],
+    );
+    assert!(
+        eff101_reports(&hook)
+            .iter()
+            .all(|(_, kind)| kind.contains("[heuristic]"))
+    );
+    let factory = project(
+        "getattr_code_factory",
+        &[
+            ("lazy_served.py", LAZY_SERVED),
+            ("use.py", LAZY_SERVED_USE),
+            ("replace.py", REPLACE_FACTORY_CODE),
+        ],
+    );
+    assert!(!eff101_reports(&factory).contains(&(22, "EFF101".to_owned())));
+}
+
+const LAZY_TESTS: &str = r#"import os
+import sys
+from typing import Any
+
+from pkg.base import Base
+
+_ALIASES = {"Alias": Base}
+_seen = []
+
+
+def _made() -> type:
+    class _Made(Base):
+        pass
+
+    return _Made
+
+
+_FACTORIES = {"Made": _made, "Again": _made}
+
+
+def __getattr__(name: str) -> Any:
+    if sys.version_info < (3, 8):
+        raise AttributeError(name)
+    if sys.platform == "emscripten":
+        raise AttributeError(name)
+    if os.environ.get("NO_LAZY") is not None:
+        raise AttributeError(name)
+    if os.environ.get("LAZY_DEBUG"):
+        _seen.append(name)
+    if name.startswith("__"):
+        raise AttributeError(name)
+    if name == "Old":
+        _seen.append(name)
+    if name != "Alias":
+        _seen.append(name)
+    if "Old" == name:
+        return Base
+    if name not in ("Alias", "Made", "Again", "Missing", "Quiet", "Namespace", "Fallback"):
+        raise AttributeError(name)
+    if name == "Made":
+        _seen.append(name)
+    if name == "Fallback":
+        return _FACTORIES.get(name, _made)()
+    if name == "Quiet":
+        return
+    if name == "Namespace":
+        return globals()[name]
+    if not name in _FACTORIES:  # noqa: E713
+        return _ALIASES[name]
+    if (factory := _FACTORIES.get(name)) is not None:
+        return factory()
+    return _FACTORIES.get(name, _made)()
+"#;
+
+const LAZY_TWICE: &str = r#"import sys
+from typing import Any
+
+if sys.version_info >= (3, 7):
+
+    def __getattr__(name: str) -> Any:
+        if name == "Twice":
+            from pkg.base import Base  # noqa: PLC0415
+
+            return Base
+        raise AttributeError(name)
+
+else:
+
+    def __getattr__(name: str) -> Any:
+        raise AttributeError(name)
+"#;
+
+const LAZY_REBOUND: &str = r#"from typing import Any
+
+
+def __getattr__(name: str) -> Any:
+    if name == "Rebound":
+        from pkg.base import Base  # noqa: PLC0415
+
+        return Base
+    raise AttributeError(name)
+
+
+def _quiet(name: str) -> Any:
+    raise AttributeError(name)
+
+
+__getattr__ = _quiet
+"#;
+
+const TESTS_USE: &str = r#"from pkg.lazy_rebound import Rebound
+from pkg.lazy_tests import Again, Alias, Fallback, Made, Missing, Namespace, Old, Quiet
+from pkg.lazy_twice import Twice
+
+
+class OnOld(Old):
+    pass
+
+
+class OnAlias(Alias):
+    pass
+
+
+class OnMade(Made):
+    pass
+
+
+class OnAgain(Again):
+    pass
+
+
+class OnMissing(Missing):
+    pass
+
+
+class OnQuiet(Quiet):
+    pass
+
+
+class OnNamespace(Namespace):
+    pass
+
+
+class OnFallback(Fallback):
+    pass
+
+
+class OnTwice(Twice):
+    pass
+
+
+class OnRebound(Rebound):
+    pass
+
+
+def old(obj: OnOld) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def alias(obj: OnAlias) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def made(obj: OnMade) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def again(obj: OnAgain) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def missing(obj: OnMissing) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def quiet(obj: OnQuiet) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def namespace(obj: OnNamespace) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def fallback(obj: OnFallback) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def twice(obj: OnTwice) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def rebound(obj: OnRebound) -> None:
+    obj.copy().__dict__["_mark"] = True
+"#;
+
+/// The tests a hook makes of its name decide which `return` each literal name reaches: a test of
+/// something else (the platform, the environment, a method of the name) lets every name take
+/// both ways, `==` written either way round and `in` a display or a table let the names they
+/// list take the way they hold and every other name the other, also negated (`!=`, `not in`,
+/// `not`), and `get(name) is not None` only the table's keys; ways that join again keep the
+/// names of both. A key a subscript
+/// lacks raises, and `get` with a default calls what it gives for a key. A bare `return` serves
+/// `None`, and the default of a key `get` lacks and a value of the namespace are what heki does
+/// not follow. A module defining two hooks, or binding the hook's name again, serves no name
+/// heki follows.
+#[test]
+fn the_tests_a_module_getattr_makes_decide_what_each_name_gets() {
+    let p = project(
+        "getattr_tests",
+        &[
+            ("base.py", BASE),
+            ("lazy_tests.py", LAZY_TESTS),
+            ("lazy_twice.py", LAZY_TWICE),
+            ("lazy_rebound.py", LAZY_REBOUND),
+            ("use.py", TESTS_USE),
+        ],
+    );
+    assert_eq!(
+        unknown_receivers(&p),
+        names(&[
+            "missing",
+            "quiet",
+            "namespace",
+            "fallback",
+            "twice",
+            "rebound"
         ])
     );
 }

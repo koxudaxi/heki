@@ -147,23 +147,33 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         rest,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
-         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 4 heuristic rule(s) \
+         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
          off\n\
+         \n\
+         Start here\n\
+         \x20 - heki check fails on 1 report(s) now: a Ratchet baseline records them, so that it \
+         fails only on new ones (Notes)\n\
+         \x20 - heki check --extend-select EFF101,OPT101,OPT110 shows 3 report(s) not shown now: \
+         0 exact, 3 heuristic (heuristic reports can be wrong)\n\
+         \x20 - 1 contract block(s) in the keys at the end: the code keeps them today; adopt only \
+         the boundaries you intend to keep (Notes)\n\
+         \n\
+         Types the code already keeps\n\
+         \x20 No read-only parameter to suggest a type for here.\n\
          \n\
          Rules worth enabling here\n\
          \x20 rule    reports  exact  consequence  right about the code (published)  real harm  \
          block\n\
          \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        \
-         yes\n\
+         yes (on now: naming it adds its heuristic reports)\n\
          \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         \
-         no: slower code, not a bug\n\
+         no: slower code, not a bug (on now: naming it adds its heuristic reports)\n\
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
          no: slower code, not a bug\n\
-         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF110, EFF112, EFF114, EFF115, \
-         EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, \
-         OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
-         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
-         select it.\n\
+         \x20 see the 3 report(s): heki check --extend-select EFF101,OPT101,OPT110\n\
+         \x20 No reports here: 31 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
+         experimental and exact: MUT101, MUT111; heki recommend --all names the 24 heuristic \
+         one(s)\n\
          \n\
          Contract candidates\n\
          \x20 effect-boundaries  app.lists  medium\n\
@@ -198,7 +208,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     );
     let (_, _, note) = p.heki(&["check"]);
     assert!(
-        note.contains("4 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
+        note.contains("5 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
         "{note}"
     );
     // The same counts as `heki check` for every selection, also with `lint.heuristic`.
@@ -739,17 +749,17 @@ fn rules_worth_enabling_follow_the_policy() {
     assert_eq!(
         section,
         "  rule    reports  exact  consequence  right about the code (published)  real harm  block\n\
-        \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        yes\n\
+        \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        yes (on now: naming it adds its heuristic reports)\n\
         \x20 EFF107        1      -  bug          not measured                      -          yes\n\
         \x20 MUT106        1      -  bug          not measured                      -          yes\n\
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
-        \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug\n\
+        \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug (on now: naming it adds its heuristic reports)\n\
         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF110        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF112, EFF114, EFF115, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
-        MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
-        \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
+        \x20 see the 7 report(s): heki check --extend-select EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF110\n\
+        \x20 No reports here: 27 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
+        experimental and exact: MUT101, MUT111; heki recommend --all names the 20 heuristic one(s)"
     );
     assert!(
         out.contains(
@@ -758,6 +768,33 @@ fn rules_worth_enabling_follow_the_policy() {
         ),
         "{out}"
     );
+    // `--all` names the heuristic ones, and `MUT103`, as a saved snapshot does.
+    let quiet_lines = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["recommend"];
+        all.extend_from_slice(args);
+        let (_, out, _) = p.heki(&all);
+        (out.lines())
+            .skip_while(|l| !l.starts_with("  No reports here: "))
+            .take_while(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let listed = quiet_lines(&["--all"]);
+    assert!(
+        listed[0].ends_with(
+            "; experimental and exact: MUT101, MUT111; heuristic: EFF102, EFF105, EFF106, EFF110, \
+             EFF112, EFF114, EFF115, EFF116, EFF117, EFF118, IMP101, IMP102, IMP104, IMP301, \
+             IMP302, MUT108, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112"
+        ),
+        "{listed:?}"
+    );
+    let snapshot = "  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, \
+                    then select it.";
+    assert_eq!(listed[1], snapshot);
+    let (code, _, err) = p.heki(&["snapshot", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(quiet_lines(&[])[1], snapshot);
+    std::fs::remove_file(p.dir.join(".heki-summary-snapshot.json")).unwrap();
     let (_, report, _) = recommend_json(&p, &[]);
     assert_eq!(
         rule(&report, "EFF107"),
@@ -896,6 +933,207 @@ fn the_block_enables_exactly_the_reports_it_promises() {
     }
 }
 
+/// The command the text of `heki recommend <args>` names under "Rules worth enabling here".
+fn command_shown(p: &Project, args: &[&str]) -> Vec<String> {
+    let mut all = vec!["recommend"];
+    all.extend_from_slice(args);
+    let (_, out, _) = p.heki(&all);
+    let line = (out.lines())
+        .find(|l| l.starts_with("  see the "))
+        .unwrap_or_else(|| panic!("{out}"));
+    let command = line.split_once(": heki ").unwrap().1;
+    command.split_whitespace().map(str::to_owned).collect()
+}
+
+#[test]
+fn the_command_under_the_rules_shows_every_report_they_count() {
+    let p = shop_with_opt_in("recommend_rules_command");
+    for (args, codes) in [
+        (vec![], "EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF110"),
+        // The paths given are the command's; a rule the configuration ignores stays out of it,
+        // since `ignore` wins over `extend-select`.
+        (
+            vec!["app", "--ignore", "MUT106"],
+            "EFF101,EFF107,MUT107,OPT101,OPT110,EFF110",
+        ),
+    ] {
+        let (_, report, _) = recommend_json(&p, &args);
+        let command = command_shown(&p, &args);
+        assert_eq!(command.last().unwrap(), codes, "{command:?}");
+        if args.is_empty() {
+            assert_eq!(command, ["check", "--extend-select", codes]);
+        } else {
+            assert_eq!(command[..2], ["check", "app"]);
+        }
+        let named: Vec<&str> = codes.split(',').collect();
+        let counted: u64 = (report["rules"].as_array().unwrap().iter())
+            .filter(|r| named.contains(&r["code"].as_str().unwrap()))
+            .map(|r| r["reports"].as_u64().unwrap())
+            .sum();
+        assert_eq!(counted, 7 - u64::from(!args.is_empty()));
+        // The command carries the options given to `heki recommend`.
+        let run: Vec<&str> = command[1..].iter().map(String::as_str).collect();
+        let shown = checked(&p, &run);
+        assert_eq!(
+            shown.len() as u64,
+            report["reports_now"]["shown"].as_u64().unwrap() + counted,
+            "{run:?}"
+        );
+    }
+    // Analysis options and a file argument: the command shows the reports the whole analysis
+    // counted, with the configuration it used.
+    let c = shop_with_opt_in("recommend_rules_command_options");
+    c.write("custom.toml", "extend-exclude = [\"app/users.py\"]\n")
+        .write("pyproject.toml", "[project]\nname = \"t\"\n");
+    for args in [
+        vec!["--config", "custom.toml"],
+        vec!["app/opt_in.py"],
+        vec!["app/opt_in.py", "--config", "custom.toml"],
+        vec!["--heuristic"],
+        vec!["--no-heuristic"],
+        vec!["--target-version", "py312"],
+    ] {
+        let (_, report, _) = recommend_json(&c, &args);
+        let command = command_shown(&c, &args);
+        // `analyzed.paths` keeps the paths given, as in version 3; the command names the
+        // directory analyzed.
+        let mut given: Vec<&str> = (args.iter().copied())
+            .filter(|a| a.ends_with(".py"))
+            .collect();
+        if given.is_empty() {
+            given.push(".");
+        }
+        assert_eq!(report["analyzed"]["paths"], json!(given), "{args:?}");
+        assert_eq!(command[0], "check");
+        assert_eq!(
+            command.iter().any(|w| w == "--config"),
+            args.contains(&"--config"),
+            "{command:?}"
+        );
+        assert!(!command.iter().any(|w| w.ends_with(".py")), "{command:?}");
+        let named: Vec<&str> = command.last().unwrap().split(',').collect();
+        let counted: u64 = (report["rules"].as_array().unwrap().iter())
+            .filter(|r| named.contains(&r["code"].as_str().unwrap()))
+            .map(|r| r["reports"].as_u64().unwrap())
+            .sum();
+        let run: Vec<&str> = command[1..].iter().map(String::as_str).collect();
+        assert_eq!(
+            checked(&c, &run).len() as u64,
+            report["reports_now"]["shown"].as_u64().unwrap() + counted,
+            "{args:?} {run:?}"
+        );
+    }
+    // A path a shell would split is quoted.
+    let q = Project::new("recommend_rules_command_quoted");
+    q.write("my app/opt_in.py", OPT_IN);
+    let (_, out, _) = q.heki(&["recommend", "my app"]);
+    assert!(
+        out.contains(": heki check 'my app' --extend-select "),
+        "{out}"
+    );
+}
+
+/// The sections of the text, in the order it prints them.
+const SECTIONS: &[&str] = &[
+    "\nReports now  ",
+    "\nStart here\n",
+    "\nTypes the code already keeps\n",
+    "\nRules worth enabling here\n",
+    "\nWhat heki cannot see (no report either way)\n",
+    "\nContract candidates\n",
+    "\nWhat keeps reports heuristic\n",
+    "\nNotes\n",
+    "\npyproject.toml: keys to add or change\n",
+];
+
+#[test]
+fn the_sections_come_in_their_order() {
+    let p = shop_with_opt_in("recommend_section_order");
+    let (_, out, _) = p.heki(&["recommend"]);
+    let at: Vec<usize> = SECTIONS
+        .iter()
+        .map(|s| out.find(s).unwrap_or_else(|| panic!("{s:?}: {out}")))
+        .collect();
+    assert!(at.is_sorted(), "{at:?}: {out}");
+}
+
+/// The steps of "Start here" in `heki recommend <args>`, without their dash.
+fn steps(p: &Project, args: &[&str]) -> Vec<String> {
+    let mut all = vec!["recommend"];
+    all.extend_from_slice(args);
+    let (_, out, _) = p.heki(&all);
+    (out.lines())
+        .skip_while(|l| *l != "Start here")
+        .skip(1)
+        .map_while(|l| l.strip_prefix("  - "))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn start_here_repeats_the_first_steps_the_report_has() {
+    let p = shop_with_opt_in("recommend_start_here");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let (_, out, _) = p.heki(&["recommend"]);
+    let command = (out.lines())
+        .find_map(|l| l.strip_prefix("  see the 7 report(s): "))
+        .unwrap_or_else(|| panic!("{out}"));
+    let failing = report["reports_now"]["failing"].as_u64().unwrap();
+    assert!(failing > 0);
+    // The failing reports first, then the command of "Rules worth enabling here"; three at most.
+    assert_eq!(
+        steps(&p, &[]),
+        [
+            format!(
+                "heki check fails on {failing} report(s) now: a Ratchet baseline records them, so \
+                 that it fails only on new ones (Notes)"
+            ),
+            format!("{command} shows 7 report(s) not shown now: 0 exact, 7 heuristic (heuristic reports can be wrong)"),
+            "1 contract block(s) in the keys at the end: the code keeps them today; adopt only the \
+             boundaries you intend to keep (Notes)"
+                .to_owned(),
+        ]
+    );
+    // With a baseline holding every report, nothing fails; the exact types come before the
+    // contract blocks.
+    p.write(
+        "app/core.py",
+        "def total(rows: list[int]) -> int:\n    return sum(rows)\n",
+    );
+    let (code, _, err) = p.heki(&[
+        "check",
+        "--select",
+        &every_rule(),
+        "--baseline",
+        "b.toml",
+        "--update-baseline",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let with_baseline = steps(&p, &["--baseline", "b.toml"]);
+    assert!(with_baseline[0].ends_with(
+        " shows 0 regression(s) among 7 report(s) not shown now: 0 exact, 7 heuristic \
+             (heuristic reports can be wrong)"
+    ));
+    assert_eq!(
+        with_baseline[1],
+        "1 exact read-only parameter type(s) to write (Types the code already keeps)"
+    );
+    // A source root the block adds: the contract candidates wait for a run with it.
+    let q = subdirectory_app("recommend_start_here_src");
+    assert_eq!(
+        steps(&q, &[]),
+        [
+            "add src = [\"backend\"] (keys at the end), then run heki recommend again: it renames \
+         modules, and the contract candidates come from that run"
+        ]
+    );
+    // Nothing to start with: no section.
+    let r = Project::new("recommend_start_here_none");
+    r.write("app.py", "def f():\n    return 1\n");
+    let (_, out, _) = r.heki(&["recommend"]);
+    assert!(!out.contains("Start here"), "{out}");
+}
+
 #[test]
 fn a_rules_reports_do_not_depend_on_the_other_rules_selected() {
     let p = shop_with_opt_in("recommend_independence");
@@ -958,6 +1196,16 @@ fn a_baseline_splits_each_rules_reports() {
     assert!(
         out.contains("  rule    reports  exact  regressions  consequence  ")
             && out.contains("\n  MUT106        1      -            1  bug  "),
+        "{out}"
+    );
+    // A run with the baseline prints the regressions of the reports the command adds.
+    let regressions: u64 = (report["rules"].as_array().unwrap().iter())
+        .filter_map(|r| r["baseline"]["regressions"].as_u64())
+        .sum();
+    assert!(
+        out.contains(&format!(
+            ", {regressions} regression(s) among them: heki check --baseline b.toml --extend-select "
+        )),
         "{out}"
     );
     assert_follows_the_schema(&report);
@@ -1415,11 +1663,13 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
     for line in [
         "  calls of packages heki's catalog does not cover: 3 call(s) of 3 name(s) in 1 \
          package(s)",
-        "    name                        calls  async  loops  if it waits     if it sends a query",
-        "    stripe.Charge.create            1      1      0  EFF101 1 exact  -",
-        "    stripe.Charge.capture           1      0      1  -               EFF103 1 exact",
-        "    stripe.Refund.create_async      1      0      0  -               -",
+        "    name                   calls  async  loops  if it waits     if it sends a query",
+        "    stripe.Charge.create       1      1      0  EFF101 1 exact  -",
+        "    stripe.Charge.capture      1      0      1  -               EFF103 1 exact",
+        "    and 1 more name(s) whose trial changes no report (stripe.Refund.create_async)",
         "    requests.utils.quote      1      1      0  EFF101 1 exact  -",
+        "  if it waits, if it sends a query: what heki check would print if the call waited on \
+         the network or sent a database query; a trial, not a fact (Notes)",
         "  1 function(s) with an A1 hazard, 0 of them too large to model: the Soundness lane \
          proves nothing in them (`heki assumptions` lists them)",
     ] {
@@ -1429,6 +1679,29 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
         out.contains("(if they do, report them at https://github.com/koxudaxi/heki/issues)"),
         "{out}"
     );
+    // A name whose trial changes no report comes after those whose trial changes one, however
+    // busy it is (on the event loop in test code, where `EFF101` reports nothing); the JSON keeps
+    // its order by reach.
+    p.write(
+        "tests/test_refunds.py",
+        "import stripe\n\n\nasync def test_refunds():\n    stripe.Refund.create_async(amount=1)\n    \
+         stripe.Refund.create_async(amount=2)\n",
+    );
+    let (_, busy, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        busy["blind_spots"]["uncatalogued"][0]["symbols"][0]["symbol"],
+        "stripe.Refund.create_async"
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n    stripe.Charge.create       1      1      0  EFF101 1 exact  -\n    \
+             stripe.Charge.capture      1      0      1  -               EFF103 1 exact\n    \
+             and 1 more name(s) whose trial changes no report (stripe.Refund.create_async)\n"
+        ),
+        "{out}"
+    );
+    std::fs::remove_file(p.dir.join("tests/test_refunds.py")).unwrap();
     // What the trial counts is what `heki check` prints with such an entry.
     p.write(
         "pyproject.toml",
@@ -2054,6 +2327,105 @@ fn the_text_lists_the_unresolved_calls_with_the_most_reach_first() {
         out.contains("\n    app.job_08      1      0      0  parameter `client` has no annotation (run)\n    and 2 more\n"),
         "{out}"
     );
+    // Test code comes after the rest whatever its reach, as `relax-async-in-tests` judges it: a
+    // package directory named `test_*` is no test location.
+    p.write(
+        "tests/test_jobs.py",
+        "async def test_poll(client):\n    client.run()\n    client.stop()\n",
+    )
+    .write(
+        "test_utils/helpers.py",
+        "async def help_poll(client):\n    client.run()\n    client.stop()\n    client.wait()\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let listed: Vec<&str> = (report["blind_spots"]["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .take(3)
+    .map(|u| u["function"].as_str().unwrap())
+    .collect();
+    assert_eq!(
+        listed,
+        [
+            "test_utils.helpers.help_poll",
+            "tests.test_jobs.test_poll",
+            "app.job_11"
+        ]
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    let rows: Vec<&str> = (out.lines())
+        .skip_while(|l| !l.starts_with("  calls heki does not resolve: "))
+        .skip(2)
+        .take_while(|l| l.starts_with("    "))
+        .map(|l| l.split_whitespace().next().unwrap())
+        .collect();
+    let mut jobs: Vec<String> = vec!["test_utils.helpers.help_poll".into(), "app.job_11".into()];
+    jobs.extend((0..8).map(|i| format!("app.job_{i:02}")));
+    jobs.push("and".into());
+    assert_eq!(rows, jobs, "{out}");
+    assert!(
+        out.contains("\n    and 4 more, 1 of them in test code\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn long_lists_fold_into_counts_in_the_text() {
+    // A project below the working directory: paths are written below its root.
+    let p = Project::new("recommend_long_lists");
+    let calls = |package: &str, names: &[String]| -> String {
+        let body: String = names
+            .iter()
+            .map(|n| format!("    {package}.{n}()\n"))
+            .collect();
+        format!("def use_{package}():\n{body}\n\n")
+    };
+    let alpha: Vec<String> = (0..60).map(|i| format!("f{i:02}")).collect();
+    let beta: Vec<String> = (0..10).map(|i| format!("g{i}")).collect();
+    let jobs: String = (0..52)
+        .map(|i| format!("def j{i:02}(client):\n    client.run()\n\n\n"))
+        .collect();
+    p.write("proj/pyproject.toml", "[project]\nname = \"proj\"\n")
+        .write("proj/app/__init__.py", "")
+        .write(
+            "proj/app/calls.py",
+            &format!(
+                "import alpha\nimport beta\n\n\n{}{}",
+                calls("alpha", &alpha),
+                calls("beta", &beta)
+            ),
+        )
+        .write("proj/app/jobs.py", &jobs)
+        .write(
+            "proj/tests/test_jobs.py",
+            "async def test_job(client):\n    client.run()\n",
+        );
+    let (_, report, _) = recommend_json(&p, &["proj"]);
+    assert_eq!(report["root"], "proj");
+    let totals = &report["blind_spots"]["totals"];
+    assert_eq!(
+        (
+            &totals["tried"],
+            &totals["not_tried"],
+            &totals["unresolved_groups"]
+        ),
+        (&json!(64), &json!(6), &json!(53))
+    );
+    let (_, out, _) = p.heki(&["recommend", "proj"]);
+    // 50 names of `alpha` are listed, and 10 of `beta`, 6 of which are past the 64 tried; no
+    // trial changes a report, so there is no table.
+    for line in [
+        "    54 name(s) whose trial changes no report (alpha.f00, alpha.f01, alpha.f02, ...)",
+        "    6 name(s) not tried, past the first 64 by reach",
+        "    and 10 more name(s), not listed",
+        // The test function is listed first by reach and printed after the rest; the groups
+        // past the list are not known.
+        "    and 43 more, at least 1 of them in test code",
+    ] {
+        assert!(out.lines().any(|l| l == line), "{line}\n{out}");
+    }
+    assert!(!out.contains("a trial, not a fact"), "{out}");
 }
 
 #[test]

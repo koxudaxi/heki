@@ -30,6 +30,7 @@
 //! a value with no elements, where those paths raise or never reach their `return`
 //! (`elements_of` of [`ReturnsNew::New`]).
 
+use crate::readonly::ContainerKind;
 use crate::{
     CallTests, FuncKey, InputGuard, Keep, KeptBy, MayGiven, NewArg, NewCond, NewFrom, NewKind,
     ReturnsNew,
@@ -52,6 +53,12 @@ pub(crate) enum Escape {
     /// Stored as an attribute of the object this variable holds, by a write that runs no code: a
     /// link when that object is one the function made on every path, kept by what keeps it.
     Into(VarId),
+    /// Stored in the builtin container of this kind the variable holds, by a call or an item
+    /// store that keeps nothing else (`kids.append(part)`, `kids[k] = part`): a link when that
+    /// container is one the constructor of the function's objects made ([`Recorder::resolve`]),
+    /// and the store runs no code of the project; otherwise a definite escape. The receiver's
+    /// own escape (the variable is the container's) is then nothing.
+    Added(VarId, ContainerKind),
 }
 
 /// One allocation: a variable defined by a constructor call, a copy, or a project call
@@ -61,6 +68,11 @@ struct Alloc {
     dst: VarId,
     kind: NewKind,
     returns: Vec<NewFrom>,
+    /// The project class a constructor call made the object of.
+    class: Option<Box<str>>,
+    /// For a container the constructor of a root's object made, that root, made and so killed
+    /// where that object is, and the attribute.
+    of: Option<(usize, Box<str>)>,
 }
 
 /// What the extractor records for one function.
@@ -75,6 +87,15 @@ pub(crate) struct Recorder {
     escapes: Vec<(Pos, VarId, Escape, Vec<InputGuard>)>,
     /// The points asked about, by query id.
     queries: Vec<(Pos, VarId)>,
+    /// The writes of an attribute (`None`: of any) of the object a variable holds: a store, a
+    /// delete, `setattr`, a write through its `__dict__`.
+    writes: Vec<(Pos, VarId, Option<Box<str>>)>,
+    /// The attribute reads a store into a container names ([`Escape::Added`]): the read, the
+    /// object read, and the attribute.
+    reads: Vec<(VarId, VarId, Box<str>)>,
+    /// The reads [`Recorder::resolve`] decides give a container the constructor of the object
+    /// read made: the container roots each gives, and their kind.
+    owned: FxHashMap<VarId, (u64, ContainerKind)>,
 }
 
 /// The escape state before a point: allocation roots and parameters that may be kept, and the
@@ -94,6 +115,10 @@ pub(crate) type ReadsOf<'a> = dyn Fn(VarId, &mut Vec<VarId>) + 'a;
 /// What the call of a hand-over (site, callee index, tests known) tells: the callee and the
 /// call's tests.
 pub(crate) type HandedTo<'a> = dyn Fn(u32, u16, &[InputGuard]) -> (FuncKey, CallTests) + 'a;
+
+/// The kind of the builtin container an attribute of a new instance of a project class holds,
+/// one its constructor made and nothing else holds (`ProjectDecls::constructor_container`).
+pub(crate) type MadeContainer<'a> = dyn Fn(&str, &str) -> Option<ContainerKind> + 'a;
 
 /// What may be kept on some path: the union of the states joined.
 impl Join for State {
@@ -234,13 +259,23 @@ impl Keeps {
 }
 
 impl Recorder {
-    pub(crate) fn alloc(&mut self, pos: Pos, dst: VarId, kind: NewKind, returns: Vec<NewFrom>) {
+    /// An allocation at `pos`; `class`: the project class a constructor call makes an instance
+    /// of.
+    pub(crate) fn alloc(
+        &mut self,
+        pos: Pos,
+        dst: VarId,
+        (kind, class): (NewKind, Option<&str>),
+        returns: Vec<NewFrom>,
+    ) {
         if self.allocs.len() < 64 {
             self.allocs.push(Alloc {
                 pos,
                 dst,
                 kind,
                 returns,
+                class: class.map(Into::into),
+                of: None,
             });
         }
     }
@@ -256,6 +291,27 @@ impl Recorder {
         self.escapes.push((pos, var, how, known));
     }
 
+    /// The read `read` of the attribute `attr` of the object `obj` holds gives a container that
+    /// a store names ([`Escape::Added`]).
+    pub(crate) fn container_read(&mut self, read: VarId, obj: VarId, attr: &str) {
+        self.reads.push((read, obj, attr.into()));
+    }
+
+    /// A write of the attribute `attr` (`None`: of any) of the object `obj` holds at `pos`.
+    pub(crate) fn write(&mut self, pos: Pos, obj: VarId, attr: Option<&str>) {
+        self.writes.push((pos, obj, attr.map(Into::into)));
+    }
+
+    /// Make every store into a container ([`Escape::Added`]) that `runs_code` says may hand the
+    /// value (at a position) to code of the project a definite escape.
+    pub(crate) fn adds_running_code(&mut self, runs_code: impl Fn(Pos, VarId) -> bool) {
+        for (pos, var, how, _) in &mut self.escapes {
+            if matches!(how, Escape::Added(..)) && runs_code(*pos, *var) {
+                *how = Escape::Definite;
+            }
+        }
+    }
+
     /// Ask about `var` just before the instruction at `pos`; returns the query id.
     pub(crate) fn query(&mut self, pos: Pos, var: VarId) -> usize {
         self.queries.push((pos, var));
@@ -267,14 +323,25 @@ impl Recorder {
     /// parameters a value is an element of by its definition (`0`: none); `reads_of` the
     /// operands of a value's definition it may hold a part of (the object of an attribute read,
     /// what a call is handed); `handed_to` the callee of a hand-over and what its call tells,
-    /// where the tests given hold.
+    /// where the tests given hold; `made` the containers the constructor of a project class
+    /// makes for its instance.
+    ///
+    /// A read of an attribute of an object the function made by calling its class, on every
+    /// path, is the container that class's constructor made for it (`Owned`, [`Self::owned`]),
+    /// when a store into a container names the read: a root of its own, which the object holds
+    /// and which is made and killed where the object is. Rebinding the attribute, or any
+    /// attribute, of an object that may be it keeps that root, so that what is stored into what
+    /// a later read gives is kept; keeping or handing on the object keeps it with what the
+    /// object holds.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve(
-        self,
+        mut self,
         shape: &FnShape<'_>,
         may_params: &FxHashMap<VarId, u64>,
         param_of: &dyn Fn(VarId) -> Option<u8>,
         (element_of, reads_of): (&dyn Fn(VarId) -> u64, &ReadsOf<'_>),
         handed_to: &HandedTo<'_>,
+        made: &MadeContainer<'_>,
         returns: bool,
     ) -> (Vec<NewArg>, ReturnsNew) {
         // Without an allocation, only parameters can be asked about, and nothing is returned
@@ -297,23 +364,38 @@ impl Recorder {
             Vec::new()
         };
         let holders = self.escapes.iter().filter_map(|(_, _, how, _)| match how {
-            Escape::Into(holder) => Some(*holder),
+            Escape::Into(holder) | Escape::Added(holder, _) => Some(*holder),
             _ => None,
         });
-        let asked = (self.queries.iter().map(|(_, v)| *v))
+        // The objects whose attributes the containers stored into are read out of.
+        let read_objects = self.reads.iter().map(|(_, obj, _)| *obj);
+        let asked: Vec<VarId> = (self.queries.iter().map(|(_, v)| *v))
             .chain(returned.iter().map(|(_, v)| *v))
             .chain(self.escapes.iter().map(|(_, v, _, _)| *v))
-            .chain(holders);
+            .chain(holders)
+            .chain(read_objects)
+            .collect();
         let budget = Budget::of_function("construction::Recorder", f);
         let returned_vars: Vec<VarId> = returned.iter().map(|(_, v)| *v).collect();
-        let found = self.roots(
-            shape,
-            &budget,
-            asked,
-            (&returned_vars, element_of),
-            may_params,
-            param_of,
-        );
+        let roots_of = |rec: &Self, written: &[(Pos, VarId, Option<Box<str>>)]| {
+            rec.roots(
+                shape,
+                &budget,
+                (asked.iter().copied()).chain(written.iter().map(|(_, obj, _)| *obj)),
+                (&returned_vars, element_of),
+                may_params,
+                param_of,
+            )
+        };
+        // The writes matter only to the containers decided `Owned`.
+        let found = roots_of(&self, &[]).and_then(|roots| {
+            if self.decide_owned(&roots, made) {
+                roots_of(&self, &self.writes)
+            } else {
+                self.writes.clear();
+                Answer::Known(roots)
+            }
+        });
         // Past the budget, no object is known to be new, as past the allocations recorded.
         let Answer::Known(roots) = found else {
             return (vec![NewArg::Old; self.queries.len()], ReturnsNew::No);
@@ -329,8 +411,21 @@ impl Recorder {
             let (a, p) = roots.masks(h);
             a != 0 && p == 0 && roots.all.get(&h).copied().unwrap_or(false)
         };
+        let containers = self.container_roots();
+        // A container stored into: one of `kind` the constructor of the function's objects made
+        // for them, on every path.
+        let owned = |c: VarId, kind: ContainerKind| {
+            holds(c)
+                && roots.masks(c).0 & !containers == 0
+                && self.owned.get(&shape.copy_root(c)).map(|o| o.1) == Some(kind)
+        };
+        let linking = |var: VarId, how: &Escape| match how {
+            Escape::Into(h) => holds(*h),
+            Escape::Added(c, kind) => *c != var && owned(*c, *kind),
+            _ => false,
+        };
         // Past the budget, every value may hold or have been read out of every root.
-        let links = (self.links(shape, &budget, &roots, &holds, reads_of))
+        let links = (self.links(shape, &budget, &roots, &linking, reads_of))
             .open_means(Links::everything(self.allocs.len()));
         // The ids of the stores that may keep what they are handed: a hand-over, one per callee,
         // parameter, and what its call tells; a definite store under tests of the function's
@@ -364,7 +459,9 @@ impl Recorder {
         for (pos, var, how, known) in &self.escapes {
             let mut out = Vec::new();
             match how {
-                Escape::Into(holder) if holds(*holder) => {
+                // The receiver of a store into a container its objects own keeps nothing.
+                Escape::Added(c, kind) if c == var && owned(*c, *kind) => {}
+                Escape::Into(holder) | Escape::Added(holder, _) if linking(*var, how) => {
                     // A parameter stored in a new object stays kept (`keep_params`).
                     let params = roots.masks(*var).1;
                     if params != 0 {
@@ -399,7 +496,9 @@ impl Recorder {
                     }
                     actions.push((*pos, 1, Action::Link { holder, value }));
                 }
-                Escape::Definite | Escape::Into(_) => stored(&mut keeps, *var, known, &mut out),
+                Escape::Definite | Escape::Into(_) | Escape::Added(..) => {
+                    stored(&mut keeps, *var, known, &mut out);
+                }
                 Escape::Handed(s, c, p) => {
                     let (allocs, params) = roots.masks(*var);
                     if allocs | params != 0 {
@@ -432,6 +531,27 @@ impl Recorder {
                 }
             }
             actions.extend(out.into_iter().map(|k| (*pos, 1, Action::Escape(k))));
+        }
+        // A write of an attribute of an object that may be one holding a container keeps the
+        // container: a later read of the attribute may give another value.
+        for (pos, obj, attr) in &self.writes {
+            let objects = roots.masks(*obj).0;
+            let objects = objects | links.held_by(links.read(*obj, objects));
+            let rebound = (self.allocs.iter().enumerate())
+                .filter(|(_, a)| {
+                    a.of.as_ref().is_some_and(|(r, of)| {
+                        objects & (1u64 << r) != 0 && attr.as_ref().is_none_or(|attr| attr == of)
+                    })
+                })
+                .fold(0u64, |mask, (r, _)| mask | (1u64 << r));
+            if rebound != 0 {
+                let kept = Kept {
+                    allocs: rebound,
+                    params: 0,
+                    by: None,
+                };
+                actions.push((*pos, 1, Action::Escape(kept)));
+            }
         }
         let handed_keys = keeps.keys;
         // Every action in position order (queries, escapes, kills at one position), and the
@@ -565,7 +685,8 @@ impl Recorder {
                         Some((_, v)) => (*v, false),
                         None => (returned[*i - self.queries.len()].1, true),
                     };
-                    answers[*i] = self.answer(&roots, &state, &handed_keys, var, of_return);
+                    answers[*i] =
+                        self.answer(&roots, &state, &handed_keys, var, of_return, containers);
                 } else {
                     apply(&mut state, action);
                 }
@@ -607,26 +728,98 @@ impl Recorder {
         (answers, returns_new())
     }
 
-    /// The allocation roots each allocating variable defines.
+    /// The allocation roots each allocating variable defines, and the container roots each read
+    /// decided `Owned` gives.
     fn own_roots(&self) -> FxHashMap<VarId, u64> {
         let mut own: FxHashMap<VarId, u64> = FxHashMap::default();
-        for (r, a) in self.allocs.iter().enumerate() {
+        for (r, a) in self
+            .allocs
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.of.is_none())
+        {
             *own.entry(a.dst).or_default() |= 1u64 << r;
+        }
+        for (read, (bits, _)) in &self.owned {
+            *own.entry(*read).or_default() |= bits;
         }
         own
     }
 
-    /// The links between the allocation roots ([`Links`]): each [`Escape::Into`] whose holder
-    /// `holds` links into the holder's roots the roots its value may hold or have been read out
-    /// of (a value read out of an object may be one it holds), closed under links. Without a
-    /// link or a root from a project call, nothing is read out of a root that the escapes do not
-    /// keep already. Open past the budget.
+    /// The roots of the containers the constructors of the function's objects made.
+    fn container_roots(&self) -> u64 {
+        (self.allocs.iter().enumerate())
+            .filter(|(_, a)| a.of.is_some())
+            .fold(0, |mask, (r, _)| mask | (1u64 << r))
+    }
+
+    /// Decide which attribute reads a store into a container names ([`Self::reads`]) give the
+    /// container the constructor of the object read made for it ([`Self::owned`]): every root
+    /// the object may hold, on every path, is an object the function made by calling a project
+    /// class whose constructor makes the attribute such a container (`made`), of one kind. Each
+    /// object root and attribute gets one container root, among the 64 roots. Whether any does.
+    fn decide_owned(&mut self, roots: &Roots<'_>, made: &MadeContainer<'_>) -> bool {
+        let reads = std::mem::take(&mut self.reads);
+        let mut made_for: FxHashMap<(usize, &str), usize> = FxHashMap::default();
+        for (t, obj, attr) in &reads {
+            let (a, p) = roots.masks(*obj);
+            if self.owned.contains_key(t)
+                || a == 0
+                || p != 0
+                || !roots.all.get(obj).copied().unwrap_or(false)
+            {
+                continue;
+            }
+            let kinds: Option<Vec<ContainerKind>> = roots_in(a)
+                .map(|r| {
+                    let alloc = &self.allocs[r];
+                    (alloc.kind == NewKind::Own)
+                        .then_some(())
+                        .and_then(|()| made(alloc.class.as_deref()?, attr))
+                })
+                .collect();
+            let kind = (kinds.as_deref())
+                .and_then(|ks| ks.first().filter(|k| ks.iter().all(|x| x == *k)))
+                .copied();
+            let missing = roots_in(a)
+                .filter(|r| !made_for.contains_key(&(*r, &**attr)))
+                .count();
+            let (Some(kind), true) = (kind, self.allocs.len() + missing <= 64) else {
+                continue;
+            };
+            let mut bits = 0u64;
+            for r in roots_in(a) {
+                let id = *made_for.entry((r, attr)).or_insert_with(|| {
+                    let pos = self.allocs[r].pos;
+                    self.allocs.push(Alloc {
+                        pos,
+                        dst: *t,
+                        kind: NewKind::Own,
+                        returns: Vec::new(),
+                        class: None,
+                        of: Some((r, attr.clone())),
+                    });
+                    self.allocs.len() - 1
+                });
+                bits |= 1u64 << id;
+            }
+            self.owned.insert(*t, (bits, kind));
+        }
+        !self.owned.is_empty()
+    }
+
+    /// The links between the allocation roots ([`Links`]): each escape `linking` says is a
+    /// link ([`Escape::Into`], [`Escape::Added`]) links into the holder's roots the roots its
+    /// value may hold or have been read out of (a value read out of an object may be one it
+    /// holds), and an object holds the containers its constructor made, closed under links.
+    /// Without a link or a root from a project call, nothing is read out of a root that the
+    /// escapes do not keep already. Open past the budget.
     fn links(
         &self,
         shape: &FnShape<'_>,
         budget: &Budget,
         roots: &Roots<'_>,
-        holds: &dyn Fn(VarId) -> bool,
+        linking: &dyn Fn(VarId, &Escape) -> bool,
         reads_of: &ReadsOf<'_>,
     ) -> Answer<Links> {
         let mut links = Links {
@@ -634,16 +827,22 @@ impl Recorder {
             read: FxHashMap::default(),
             everything: 0,
         };
-        let linking = |how: &Escape| matches!(how, Escape::Into(h) if holds(*h));
-        let any_link = self.escapes.iter().any(|(_, _, how, _)| linking(how));
+        for (r, a) in self.allocs.iter().enumerate() {
+            if let Some((holder, _)) = a.of {
+                links.held[holder] |= 1u64 << r;
+            }
+        }
+        let any_link = (self.escapes.iter()).any(|(_, var, how, _)| linking(*var, how));
         if !any_link && self.allocs.iter().all(|a| a.returns.is_empty()) {
             return Answer::Known(links);
         }
         let own = self.own_roots();
         let f = shape.f;
-        // What `may` walks, and the operands of a definition the value may hold a part of.
+        // What `may` walks, and the operands of a definition the value may hold a part of; a
+        // read decided `Owned` is its container itself.
         let from = |v: VarId, out: &mut Vec<VarId>| {
             match shape.def(v) {
+                Def::Inst(..) if self.owned.contains_key(&v) => {}
                 Def::Inst(..) => reads_of(v, out),
                 Def::Phi(b, i) => out.extend(
                     (f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x))
@@ -658,12 +857,18 @@ impl Recorder {
         let found: Answer<Vec<u64>> = (self.escapes.iter())
             .map(|(_, var, _, _)| read.ask(budget, *var, own, from).map(|b| b.0))
             .collect();
-        found.map(|found| {
+        let written: Answer<Vec<u64>> = (self.writes.iter())
+            .map(|(_, obj, _)| read.ask(budget, *obj, own, from).map(|b| b.0))
+            .collect();
+        found.zip(written).map(|(found, written)| {
+            for ((_, obj, _), found) in self.writes.iter().zip(written) {
+                links.read.insert(*obj, found | roots.masks(*obj).0);
+            }
             for ((_, var, how, _), found) in self.escapes.iter().zip(found) {
                 let read = found | roots.masks(*var).0;
                 links.read.insert(*var, read);
-                if let Escape::Into(holder) = how
-                    && holds(*holder)
+                if let Escape::Into(holder) | Escape::Added(holder, _) = how
+                    && linking(*var, how)
                 {
                     for r in roots_in(roots.masks(*holder).0) {
                         links.held[r] |= read;
@@ -819,7 +1024,8 @@ impl Recorder {
     /// Whether `var` holds, at a point with escape state `state`, a new object or a parameter
     /// that nothing kept, and under which conditions. A returned value (`of_return`) may also
     /// be an element of a parameter on the paths without an allocation
-    /// ([`Roots::elements_of`]).
+    /// ([`Roots::elements_of`]). A container root (`containers`) is no new object the answer
+    /// names: it is part of the object holding it.
     fn answer(
         &self,
         roots: &Roots<'_>,
@@ -827,9 +1033,11 @@ impl Recorder {
         handed_keys: &[Keep],
         var: VarId,
         of_return: bool,
+        containers: u64,
     ) -> NewArg {
         let (a, p) = roots.masks(var);
         let new = a != 0
+            && a & containers == 0
             && p == 0
             && (roots.all.get(&var).copied().unwrap_or(false)
                 || of_return && roots.elements_of.contains_key(&var));

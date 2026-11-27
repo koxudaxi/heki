@@ -36,7 +36,10 @@ and what it does when it cannot tell.
 heki differs from these tools in what it models: effects and aliases. It leaves syntax and types
 to the tools that model them, also as they grow. Where another tool covers part of a case, heki
 keeps the rest: Ruff's `RUF006` reports discarded tasks, so `EFF107` reports only the tasks bound
-to a variable.
+to a variable. An `await` written directly in a `finally` body or an `__aexit__` with no shielded
+scope around it is a single-file linter's check (flake8-async's `ASYNC102`); `EFF118` adds what
+needs the call graph: which awaits reach a cancellation checkpoint through helpers, and which
+helpers and callers shield them.
 
 ### Clean for Ruff, ty, and tach; broken all the same
 
@@ -112,7 +115,7 @@ $ heki check --output-format concise
 app/api.py:5:12: EFF101 `app.users.load_user` always runs the waiting call `requests.get` on the event loop (3 calls down, on every path)
 app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (through a helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
-note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 ## Where heki pays off
@@ -298,14 +301,18 @@ Missed findings close as heki learns more:
   class. A read is not.
 - Typed: builtin classes, the builtin exception and warning classes among them
   (`error: ValueError`; not `IOError` or `EnvironmentError`, and not a name the module or the
-  function binds itself), what a standard library call the catalog types gives, an annotation
-  of a local that names an import of its own function (not a name the function binds more than
-  once or otherwise), and, in a `finally` body, what the annotations say before the `try`.
+  function binds itself), what a standard library call the catalog types gives, by its declared
+  return type (`importlib.util.module_from_spec(spec)` is a `types.ModuleType`, though a custom
+  loader's `create_module` may return another object), an annotation of a local that names an
+  import of its own function (not a name the function binds more than once or otherwise), a
+  call of a value declared `type[C]` wherever the value is held (a parameter, a local, or an
+  attribute annotated in `__init__` or the class body, read in a subclass too), and, in a
+  `finally` body, what the annotations say before the `try`.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
   unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
   module binds to a type expression more than once or with type parameters (a type alias bound
   once names its value), calls of a subscripted class other than a builtin or `collections`
-  container (`Box[int]()`), and calls of `type[C]` attributes.
+  container (`Box[int]()`), and calls of a `type[A | B]`.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
@@ -543,7 +550,7 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT113`, `MUT208`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF118`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204`, `MUT208` |

@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "Docs": {
+      "description": "The page of the documentation, or the section of one, that explains it.",
+      "enum": [
+        "https://heki.koxudaxi.dev/",
+        "https://heki.koxudaxi.dev/getting-started/",
+        "https://heki.koxudaxi.dev/configuration/",
+        "https://heki.koxudaxi.dev/coding-agents/",
+        "https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental",
+        "https://heki.koxudaxi.dev/coding-agents/#install-the-skill",
+        "https://heki.koxudaxi.dev/llms.txt",
+        "https://heki.koxudaxi.dev/configuration/#where-heki-finds-the-configuration",
+        "https://heki.koxudaxi.dev/configuration/#which-tables-hold-the-settings",
+        "https://heki.koxudaxi.dev/configuration/#module-names-follow-the-source-roots",
+        "https://heki.koxudaxi.dev/configuration/#top-level-settings",
+        "https://heki.koxudaxi.dev/configuration/#the-default-target-version",
+        "https://heki.koxudaxi.dev/configuration/#requiring-a-heki-version",
+        "https://heki.koxudaxi.dev/configuration/#which-files-are-checked",
+        "https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint",
+        "https://heki.koxudaxi.dev/configuration/#contracts",
+        "https://heki.koxudaxi.dev/configuration/#write-owners",
+        "https://heki.koxudaxi.dev/configuration/#read-owners",
+        "https://heki.koxudaxi.dev/configuration/#call-owners",
+        "https://heki.koxudaxi.dev/configuration/#effect-boundaries",
+        "https://heki.koxudaxi.dev/configuration/#readonly-returns",
+        "https://heki.koxudaxi.dev/configuration/#invalidation",
+        "https://heki.koxudaxi.dev/configuration/#import-boundaries",
+        "https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports",
+        "https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem",
+        "https://heki.koxudaxi.dev/rules/",
+        "https://heki.koxudaxi.dev/adoption/#ratchet-baselines",
+        "https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103",
+        "https://heki.koxudaxi.dev/fixes/#how-fix-applies-fixes",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-check",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-server",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-rule",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-snapshot",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-assumptions",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-inspect",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-recommend",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-skill-install",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-version",
+        "https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental"
+      ],
+      "type": "string"
+    },
+    "Problem": {
+      "additionalProperties": false,
+      "description": "What a command could not do, and how to fix it.",
+      "properties": {
+        "candidates": {
+          "description": "The names it might have meant, the closest first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "column": {
+          "description": "The 1-based byte column; written with `line`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "docs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Docs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The page of the documentation that explains it."
+        },
+        "help": {
+          "description": "What to do about it, one step per line.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "line": {
+          "description": "The 1-based line, when the cause is at a position.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "What went wrong.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, as `heki check` prints paths.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "help",
+        "docs",
+        "candidates"
+      ],
+      "title": "Location",
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/error-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What a command writes to stdout, next to the report on stderr, when it fails with\n`--output-format json`.",
+  "properties": {
+    "error": {
+      "$ref": "#/$defs/Problem",
+      "description": "What the command could not do, and how to fix it."
+    }
+  },
+  "required": [
+    "error"
+  ],
+  "title": "What a failed command writes with --output-format json",
+  "type": "object"
+}

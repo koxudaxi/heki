@@ -1,0 +1,533 @@
+{
+  "$defs": {
+    "Activation": {
+      "description": "When a rule runs without being named by its code or name (ADR-018).",
+      "oneOf": [
+        {
+          "const": "default",
+          "description": "In the default selection, and matched by a prefix or `ALL`, while the rule is exact;\nwhatever its certainty with `lint.heuristic`.",
+          "type": "string"
+        },
+        {
+          "const": "opt-in",
+          "description": "Only by its exact code or name.",
+          "type": "string"
+        },
+        {
+          "const": "contract",
+          "description": "Selected as an exact `Default` rule is, whatever its certainty: it reports only what a\ndeclared contract asks for, so declaring the contract is what selects it.",
+          "type": "string"
+        }
+      ]
+    },
+    "Certainty": {
+      "description": "Whether a report can be wrong about the code (ADR-018). A report's claim is a conjunction of\npremises (its rule page lists them under \"What a report states\").",
+      "oneOf": [
+        {
+          "const": "exact",
+          "description": "Every premise of the claim was established, under the assumptions R1-R5, and the rule's\nreports were checked on the measurement corpus with none wrong: a wrong one is a bug.",
+          "type": "string"
+        },
+        {
+          "const": "heuristic",
+          "description": "A premise of the claim may be unknown, which does not stop the report: it can be wrong\nabout the code.",
+          "type": "string"
+        }
+      ]
+    },
+    "Certification": {
+      "additionalProperties": false,
+      "description": "The certification of an exact rule (docs/precision.md, \"How a rule becomes exact\").",
+      "properties": {
+        "census": {
+          "$ref": "#/$defs/Checked",
+          "description": "Every report on the development corpus, checked by hand."
+        },
+        "holdout": {
+          "$ref": "#/$defs/Checked",
+          "description": "Every report of one run on the frozen holdout corpus."
+        },
+        "real_bugs": {
+          "description": "The real bugs it found (docs/precision.md, \"Rare failures\"), for a rule with fewer than 10\nexact reports in its census and holdout run.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "release": {
+          "description": "The release that certified it.",
+          "type": "string"
+        },
+        "rule": {
+          "description": "The code of the certified rule.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "release",
+        "census",
+        "holdout"
+      ],
+      "type": "object"
+    },
+    "Checked": {
+      "additionalProperties": false,
+      "description": "Reports checked by hand, the false claims found among them, and the harm of the right ones\nwhere the run classed it.",
+      "properties": {
+        "false_claims": {
+          "description": "The reports found wrong about the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "harm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Harm"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The right reports by class; left out when the run did not class them."
+        },
+        "reports": {
+          "description": "The reports checked.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reports",
+        "false_claims"
+      ],
+      "type": "object"
+    },
+    "Consequence": {
+      "description": "What happens in the code a rule reports, which sets its default severity.",
+      "oneOf": [
+        {
+          "const": "bug",
+          "description": "A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, an\nevent loop held up for every other task, or a broken contract.",
+          "type": "string"
+        },
+        {
+          "const": "minor-bug",
+          "description": "A bug that is rarely harmful: a promise the code makes is broken, such as a read-only\nannotation, where the callers seldom notice; or a bug the first test that runs the code\nshows, such as a generator whose body never runs.",
+          "type": "string"
+        },
+        {
+          "const": "slowdown",
+          "description": "Slower code that computes the right result.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExperimentalFeature": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "`<kind>.<name>`, stable while the feature is experimental (`rule.MUT101`).",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExperimentalKind"
+        },
+        "reason": {
+          "description": "Why the feature is experimental, as whole sentences.",
+          "type": "string"
+        },
+        "since": {
+          "description": "The release the feature is experimental in first.",
+          "type": "string"
+        },
+        "target": {
+          "description": "What the feature is: a rule code, a command, an option, a key, or a behavior.",
+          "type": "string"
+        },
+        "tracking": {
+          "description": "An issue or discussion that tracks what keeps the feature experimental.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "target",
+        "since",
+        "reason",
+        "tracking"
+      ],
+      "type": "object"
+    },
+    "ExperimentalKind": {
+      "description": "How an entry names its target.",
+      "oneOf": [
+        {
+          "const": "rule",
+          "description": "A rule code (`MUT101`).",
+          "type": "string"
+        },
+        {
+          "const": "command",
+          "description": "A command (`heki inspect`), its options and output included.",
+          "type": "string"
+        },
+        {
+          "const": "cli-option",
+          "description": "A command and one of its options (`heki check --generate-prompt`).",
+          "type": "string"
+        },
+        {
+          "const": "config-key",
+          "description": "A key below `[tool.heki]`, with its tables (`lint.relax-async-in-tests`).",
+          "type": "string"
+        },
+        {
+          "const": "output-field",
+          "description": "An output format and one of its fields (`json fix`).",
+          "type": "string"
+        },
+        {
+          "const": "behavior",
+          "description": "A behavior no single name selects, described in words.",
+          "type": "string"
+        }
+      ]
+    },
+    "Harm": {
+      "additionalProperties": false,
+      "description": "The right reports of a run by class (docs/precision.md): confirmed, plausible, and benign, and\nthose the run left without a class.",
+      "properties": {
+        "benign": {
+          "description": "Reports that are right, of code that is deliberate or harmless at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed": {
+          "description": "Reports whose problem is real and observable from the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plausible": {
+          "description": "Reports that are right, of code that does harm at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unclassified": {
+          "description": "Right reports the run left without a class.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "confirmed",
+        "plausible",
+        "benign",
+        "unclassified"
+      ],
+      "type": "object"
+    },
+    "Premise": {
+      "additionalProperties": false,
+      "description": "One premise of an exact claim.",
+      "properties": {
+        "decided_in": {
+          "description": "Where heki decides it (`crate::module::item`): the one home every rule reading the\npremise goes through. Several entries are steps of one decision, in order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "The name the rule pages give it, unique in the table.",
+          "type": "string"
+        },
+        "states": {
+          "description": "What it states, as the rule pages state it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "states",
+        "decided_in"
+      ],
+      "type": "object"
+    },
+    "PublishedMeasurement": {
+      "additionalProperties": false,
+      "description": "A measurement as published: the classes of the sampled reports, and the shares derived\nfrom them.",
+      "properties": {
+        "benign": {
+          "description": "Reports that are right, of code that is deliberate or harmless at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed": {
+          "description": "Reports whose problem is real and observable from the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "date": {
+          "description": "The date of the build the round measured.",
+          "type": "string"
+        },
+        "false_claims": {
+          "description": "Reports that are wrong about the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "interval_percent": {
+          "description": "The 95% Wilson score interval of `right_percent`.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "plausible": {
+          "description": "Reports that are right, of code that does harm at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "real_harm_percent": {
+          "description": "The share of real harm (confirmed and plausible), in percent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "right_percent": {
+          "description": "The share right about the code (confirmed, plausible, and benign), in percent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "description": "The round of the measurement protocol.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "description": "The code of the measured rule.",
+          "type": "string"
+        },
+        "sample": {
+          "description": "The reports sampled.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rule",
+        "round",
+        "date",
+        "sample",
+        "confirmed",
+        "plausible",
+        "benign",
+        "false_claims",
+        "right_percent",
+        "interval_percent",
+        "real_harm_percent"
+      ],
+      "type": "object"
+    },
+    "RuleFamily": {
+      "description": "The family a rule belongs to, which its code starts with.",
+      "oneOf": [
+        {
+          "const": "Mut",
+          "description": "Changes of objects other code holds.",
+          "type": "string"
+        },
+        {
+          "const": "Eff",
+          "description": "Effects: blocking calls and what a function runs.",
+          "type": "string"
+        },
+        {
+          "const": "Data",
+          "description": "Data and its types.",
+          "type": "string"
+        },
+        {
+          "const": "Opt",
+          "description": "Slower code that computes the right result.",
+          "type": "string"
+        },
+        {
+          "const": "Imp",
+          "description": "Imports.",
+          "type": "string"
+        }
+      ]
+    },
+    "RuleRecord": {
+      "additionalProperties": false,
+      "description": "A rule as `heki rule --output-format json` prints it.",
+      "properties": {
+        "activation": {
+          "$ref": "#/$defs/Activation"
+        },
+        "auto_fix_default": {
+          "description": "Whether `--fix` applies the rule's fix by default.",
+          "type": "boolean"
+        },
+        "certainty": {
+          "$ref": "#/$defs/Certainty",
+          "description": "The certainty of the rule's reports at most: heuristic until the rule is certified."
+        },
+        "certification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Certification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the rule became exact; none for a rule that is not certified."
+        },
+        "code": {
+          "description": "The code of the rule (`EFF101`).",
+          "type": "string"
+        },
+        "consequence": {
+          "$ref": "#/$defs/Consequence"
+        },
+        "default_enabled": {
+          "description": "Whether the rule runs with no configuration.",
+          "type": "boolean"
+        },
+        "default_severity": {
+          "$ref": "#/$defs/Severity",
+          "description": "The severity the rule's reports have unless the configuration overrides it."
+        },
+        "doc": {
+          "description": "Ruff-style documentation (`crates/heki_rules/rule-docs/<CODE>.md`): printed by\n`heki rule <CODE>` and published as the rule's page.",
+          "type": "string"
+        },
+        "experimental": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExperimentalFeature"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why the rule is experimental; none for a stable rule."
+        },
+        "family": {
+          "$ref": "#/$defs/RuleFamily"
+        },
+        "heuristic_note": {
+          "description": "What a heuristic rule's reports mean and how the rule is selected; none for an exact\nrule.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measurement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublishedMeasurement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The latest measurement of how often its reports are right about the code."
+        },
+        "premises": {
+          "description": "The premises of the rule's exact claim (`heki_rules::premises`), empty for a rule\nwithout one.",
+          "items": {
+            "$ref": "#/$defs/Premise"
+          },
+          "type": "array"
+        },
+        "size_dependent_fix": {
+          "description": "A proven-safe rewrite that `--fix` applies only with `--include-size-dependent`.",
+          "type": "boolean"
+        },
+        "slug": {
+          "description": "The name of the rule (`async-blocking-call`), which also names its page.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "One line saying what the rule reports.",
+          "type": "string"
+        },
+        "unsafe_fix": {
+          "description": "A fix that may change what the program does: `--fix` and `--diff` apply it only with\n`--unsafe-fixes`, and the language server offers it as a quick fix that is not preferred.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "slug",
+        "family",
+        "certainty",
+        "activation",
+        "consequence",
+        "auto_fix_default",
+        "size_dependent_fix",
+        "unsafe_fix",
+        "summary",
+        "doc",
+        "default_enabled",
+        "heuristic_note",
+        "experimental",
+        "default_severity",
+        "premises",
+        "certification",
+        "measurement"
+      ],
+      "type": "object"
+    },
+    "Severity": {
+      "description": "Diagnostic severity override (matches `t-linter` / `ty`).",
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/rule-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/RuleRecord"
+    },
+    {
+      "items": {
+        "$ref": "#/$defs/RuleRecord"
+      },
+      "type": "array"
+    }
+  ],
+  "description": "`heki rule` prints one rule, or an array of every rule.",
+  "title": "heki rule --output-format json"
+}

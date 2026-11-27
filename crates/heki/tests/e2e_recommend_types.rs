@@ -424,6 +424,106 @@ fn a_group_says_what_it_needs_and_what_guards_it() {
     assert!(established, "{outer:#}");
 }
 
+/// The section "Types the code already keeps" of `heki recommend <args>`.
+fn types_text(p: &Project, args: &[&str]) -> String {
+    let mut all = vec!["recommend"];
+    all.extend_from_slice(args);
+    let (code, out, err) = p.heki(&all);
+    assert_eq!(code, 0, "{err}");
+    let section = out
+        .split("\nTypes the code already keeps\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_else(|| panic!("{out}"));
+    format!("{section}\n")
+}
+
+#[test]
+fn the_text_lists_the_exact_groups_first_and_the_heuristic_ones_with_all() {
+    let p = project("recommend_types_text");
+    let claim = "  Each group states that the parameter itself is never changed, in its function \
+                 and in every function it is handed to, and that it does not leave them. The \
+                 edits of a group go together; --output-format json has them.\n\
+                 \x20 After the edit, a type checker reports a change of the parameter in the \
+                 function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, \
+                 on) reports handing it to a function without annotations that changes it.\n\
+                 \x20 public: a name without a leading underscore along it; callers, overriders, \
+                 and implementers outside the checked files are not known\n";
+    // The first 3 exact groups by rank, the others counted.
+    assert_eq!(
+        types_text(&p, &[]),
+        format!(
+            "  7 read-only parameter group(s), exact; 7 heuristic (heki recommend --all lists them)\n\
+             \x20 type checker: mypy (pyproject.toml)\n\
+             \x20   app/core.py:39   outer(rows) and 1 more in the group  list[int] -> Sequence[int]           public\n\
+             \x20   app/core.py:6    total(rows)                          list[int] -> Sequence[int]           public\n\
+             \x20   app/core.py:107  lookup(table)                        dict[str, int] -> Mapping[str, int]  public\n\
+             \x20   and 4 more exact group(s) (heki recommend --all lists them)\n{claim}"
+        )
+    );
+    // Every group with `--all`, the heuristic ones last with what they leave open.
+    let all = types_text(&p, &["--all"]);
+    assert!(
+        all.contains(
+            "    app/core.py:56   Base.has(rows) and 1 more in the group  list[int] -> Sequence[int]           public, family\n\
+             \x20 heuristic: a premise of the edit is open, or a label holds it back\n\
+             \x20   app/core.py:34   rebound(rows)        list[int] -> Sequence[int]  public\n\
+             \x20     open: Name bound once: the name is bound again (app/core.py:34)\n"
+        ) && all.contains(
+            "    app/core.py:96   named(rows)          list[str] -> Sequence[str]  public, list[str]\n"
+        ) && all.contains(
+            "\n  family: the same parameter in every definition of an override family\n\
+             \x20 list[str]: a `Sequence[str]` also admits a plain `str`\n"
+        ),
+        "{all}"
+    );
+    // Without a type checker, the note says that half of each guard is missing; a private name
+    // is not `public`.
+    let q = Project::new("recommend_types_text_unchecked");
+    q.write("pyproject.toml", "[project]\nname = \"t\"\n")
+        .write("app/__init__.py", "")
+        .write(
+            "app/core.py",
+            "def _total(rows: list[int]) -> int:\n    return sorted(rows)[0]\n\n\n\
+             def run() -> int:\n    return _total([1])\n",
+        );
+    assert_eq!(
+        types_text(&q, &[]),
+        "  1 read-only parameter group(s), exact; 0 heuristic\n\
+         \x20 No type checker configuration found: half of each guard is a type checker's.\n\
+         \x20   app/core.py:1  _total(rows)  list[int] -> Sequence[int]\n\
+         \x20 Each group states that the parameter itself is never changed, in its function and \
+         in every function it is handed to, and that it does not leave them. The edits of a group \
+         go together; --output-format json has them.\n\
+         \x20 After the edit, a type checker reports a change of the parameter in the function \
+         and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports \
+         handing it to a function without annotations that changes it.\n"
+    );
+    // A guard the configuration does not run says so.
+    assert!(
+        types_text(&q, &["--ignore", "MUT110"])
+            .contains("; MUT110 (exact, off) reports handing it"),
+        "{}",
+        types_text(&q, &["--ignore", "MUT110"])
+    );
+    // Only heuristic groups: counted, none listed without `--all`.
+    q.write(
+        "app/core.py",
+        "def _named(rows: list[str]) -> bool:\n    return \"a\" in rows\n\n\n\
+         def run() -> bool:\n    return _named([\"a\"])\n",
+    );
+    assert_eq!(
+        types_text(&q, &[]),
+        "  0 read-only parameter group(s), exact; 1 heuristic (heki recommend --all lists them)\n\
+         \x20 No type checker configuration found: half of each guard is a type checker's.\n"
+    );
+    q.write("app/core.py", "def run() -> int:\n    return 1\n");
+    assert_eq!(
+        types_text(&q, &[]),
+        "  No read-only parameter to suggest a type for here.\n"
+    );
+}
+
 #[test]
 fn two_runs_print_the_same_object_and_it_follows_the_schema() {
     let p = project("recommend_types_schema");

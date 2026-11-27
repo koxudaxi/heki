@@ -86,12 +86,12 @@ enum Takes {
 /// (with the `CatchException`), the source text of its classes (none for a bare `except`), the
 /// variable it binds the exception to, and its span.
 #[derive(Debug, Clone, Copy)]
-struct Clause<'f> {
-    test: BlockId,
+pub(super) struct Clause<'f> {
+    pub(super) test: BlockId,
     body: BlockId,
-    types: &'f [String],
+    pub(super) types: &'f [String],
     caught: Option<VarId>,
-    span: Span,
+    pub(super) span: Span,
 }
 
 impl<'f> Clause<'f> {
@@ -314,7 +314,10 @@ impl<'f> Handlers<'f> {
 
 /// The clauses a dispatch block tests in turn, and the block that raises the exception again
 /// when none takes it (`None` when the chain ends otherwise: an `except*` group's rest).
-fn clause_chain(f: &IrFunction, dispatch: BlockId) -> (Vec<Clause<'_>>, Option<BlockId>) {
+pub(super) fn clause_chain(
+    f: &IrFunction,
+    dispatch: BlockId,
+) -> (Vec<Clause<'_>>, Option<BlockId>) {
     let mut clauses = Vec::new();
     let mut test = dispatch;
     // Each clause's test block comes after the previous one's, so the chain has fewer links
@@ -338,7 +341,7 @@ fn clause_chain(f: &IrFunction, dispatch: BlockId) -> (Vec<Clause<'_>>, Option<B
 }
 
 /// Whether the clause of span `span` is an `except*` clause, by its source text.
-fn is_star_clause(source: &str, span: Span) -> bool {
+pub(super) fn is_star_clause(source: &str, span: Span) -> bool {
     source
         .get(span.start as usize..span.end as usize)
         .and_then(|text| text.strip_prefix("except"))
@@ -402,7 +405,7 @@ fn class_takes(decls: &ProjectDecls, fqn: &str) -> Takes {
 /// `test`) names, through re-exports and module aliases: a module-level name, or an attribute of
 /// one naming a module (`builtins.RuntimeError`, `errors.Base` for `Base = Exception`); `None`
 /// for anything else (a local variable, a call).
-fn class_named(
+pub(super) fn class_named(
     shape: &FnShape<'_>,
     tcx: &TypeCtx<'_>,
     decls: &ProjectDecls,
@@ -432,14 +435,14 @@ fn class_named(
 
 /// The instruction computing a clause's classes: the last one before the constant the clause's
 /// test branches on (the test itself is not modeled).
-fn type_expression_inst(f: &IrFunction, test: BlockId) -> Option<&InstKind> {
+pub(super) fn type_expression_inst(f: &IrFunction, test: BlockId) -> Option<&InstKind> {
     let insts = &f.block(test).insts;
     let (_, before) = insts.split_last()?;
     before.last().map(|i| &i.kind)
 }
 
 /// The value of a clause's classes ([`type_expression_inst`]).
-fn type_expression(f: &IrFunction, test: BlockId) -> Option<VarId> {
+pub(super) fn type_expression(f: &IrFunction, test: BlockId) -> Option<VarId> {
     type_expression_inst(f, test)?.dst()
 }
 

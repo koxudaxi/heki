@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "EFF118", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -152,7 +152,7 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass"]
 write-universe = ["Ticket.flag", "Part.flag"]
 "#;
 
@@ -354,6 +354,13 @@ const LINK_NEG_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\n\n\ndef run(
 const LINK_MODEL: &str = "from typing import Any\n\nfrom pydantic import BaseModel\n\n\nclass Part(BaseModel):\n    flag: bool = False\n    parent: Any = None\n";
 const LINK_MODEL_SUB: &str = "from pydantic import ConfigDict\n\nfrom pkg.link_model import Part\n\n\nclass Validated(Part):\n    model_config = ConfigDict(validate_assignment=True)\n";
 const LINK_MODEL_PASS: &str = "from pkg.link_model import Part\n\n\ndef run() -> Part:\n    copied, part = Part(), Part()\n    part.parent = copied\n    copied.flag = True\n    return copied\n";
+// A class of another module whose constructor makes a list for each instance after calling the
+// constructor of a base in a third module, and a pass storing a new ticket into the list of a new
+// instance (`ClassDecl::plain_init`).
+const OWNED_BASE: &str =
+    "SHARED_STATE = {}\n\n\nclass Base:\n    def __init__(self):\n        self.ready = True\n";
+const OWNED_MODEL: &str = "from pkg.owned_base import Base\n\nSHARED = []\n\n\nclass Holder(Base):\n    def __init__(self):\n        super().__init__()\n        self.parts: list = []\n";
+const OWNED_PASS: &str = "from pkg.copy_ops import Ticket\nfrom pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    part = Ticket()\n    copied.parts.append(part)\n    part.flag = True\n    return copied\n";
 const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
@@ -797,6 +804,15 @@ const LAZY_MODELS: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHEC
 const LAZY_MODELS_RUNTIME: &str = "from pkg.made_models import Waiter as Waiter\n";
 const LAZY_MODELS_ELSE: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\nelse:\n    Waiter: Any = object\n";
 const LAZY_USE: &str = "from pkg.lazy_models import Waiter\n\n\nclass LazyWaiter(Waiter):\n    pass\n\n\nasync def serve_lazy(w: LazyWaiter) -> None:\n    w.wait()\n";
+// A base another module serves from its `__getattr__` (`ModuleDecls::getattr_exports`): the
+// class a factory read from a table by the name defines, while no other file rebinds the table,
+// and the class object a factory annotated `-> type[Waiter]` gives, whose targets are heuristic.
+const SERVED_MODELS: &str = "from typing import Any\n\n\ndef _waiter() -> type:\n    from pkg.made_models import Waiter\n\n    class _Served(Waiter):\n        pass\n\n    return _Served\n\n\n_EXPORTS = {\"Waiter\": _waiter}\n\n\ndef __getattr__(name: str) -> Any:\n    return _EXPORTS[name]()\n";
+const SERVED_MODELS_DECLARED: &str = "from typing import Any\n\nfrom pkg.made_models import Waiter as _Waiter\n\n\ndef _waiter() -> type[_Waiter]:\n    return _Waiter\n\n\n_EXPORTS = {\"Waiter\": _waiter}\n\n\ndef __getattr__(name: str) -> Any:\n    return _EXPORTS[name]()\n";
+const SERVED_USE: &str = "from pkg.served_models import Waiter\n\n\nclass ServedWaiter(Waiter):\n    pass\n\n\nasync def serve_served(w: ServedWaiter) -> None:\n    w.wait()\n";
+const SERVED_PATCH: &str =
+    "import pkg.served_models\n\n\ndef patch() -> None:\n    pkg.served_models._EXPORTS = {}\n";
+const SERVED_PATCH_NONE: &str = "def patch() -> None:\n    return None\n";
 // A factory function and a class attribute annotated with the callable they hold
 // (`Callable[..., Waiter]`, `FunctionDecl::return_type`, `ClassDecl` attribute types): calling
 // what they hold in other files gives a `Waiter` while the annotation names that one class.
@@ -1031,6 +1047,13 @@ const LOCKED_LIST_CLEAR: &str =
 const LOCKED_LIST_RUN: &str =
     "from pkg.locked_list import add\n\n\ndef run(line: str) -> None:\n    add(line)\n";
 
+// A `finally` body awaiting a helper in another module that sleeps (`EFF118`), and a third module
+// calling the function holding the cleanup.
+const CLEANUP_HELPERS: &str =
+    "import anyio\n\n\nasync def stop() -> None:\n    await anyio.sleep(1)\n";
+const CLEANUP_USE: &str = "from pkg.cleanup_helpers import stop\n\n\nasync def close() -> None:\n    try:\n        pass\n    finally:\n        await stop()\n        print(\"stopped\")\n";
+const CLEANUP_CALLER: &str = "import anyio\n\nfrom pkg.cleanup_use import close\n\n\nasync def shutdown() -> None:\n    with anyio.CancelScope(shield=True):\n        await close()\n";
+
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
 // the exact claim.
@@ -1041,6 +1064,19 @@ const COPY_USER: &str = "import copy\n\nfrom pkg.copied_node import Node\n\n\nde
 const COPY_HELPER: &str = "def grow(rows):\n    return len(rows)\n";
 const COPY_HELPER_GROWING: &str = "def grow(rows):\n    rows.append(1)\n";
 const COPY_HANDED: &str = "from pkg.copy_helper import grow\n\n\ndef handed(options: dict[str, list[int]]) -> None:\n    result = dict(options)\n    grow(result[\"rows\"])\n";
+// A copy hook bound on the copied class after its body, from another module, and a decorator of
+// another module that reads the class or binds a copy hook on it.
+const COPY_PATCH: &str = "from pkg.copied_node import Node\n\n\ndef _copy(self):\n    return self\n\n\nNode.__copy__ = _copy\n";
+const COPIED_NODE_DECORATED: &str = "from pkg.copy_deco import register\n\n\n@register\nclass Node:\n    def __init__(self) -> None:\n        self.children: list[int] = []\n";
+const COPY_DECO: &str = "def register(cls):\n    print(cls.__name__)\n    return cls\n";
+const COPY_DECO_HOOK: &str = "def _copy(self):\n    return self\n\n\ndef register(cls):\n    cls.__copy__ = _copy\n    return cls\n";
+// A store under a name built at run time through a value that may be a class object: a name
+// that is never a copy hook's, one that may be, and the same one through an instance.
+const COPY_FILL_NO_HOOK: &str =
+    "def fill(target, name, value):\n    setattr(target, f\"_cached_{name}\", value)\n";
+const COPY_FILL_HOOK: &str =
+    "def fill(target, name, value):\n    setattr(target, f\"__{name}__\", value)\n";
+const COPY_FILL_INSTANCE: &str = "import types\n\n\ndef fill(name, value):\n    target = types.SimpleNamespace()\n    setattr(target, f\"__{name}__\", value)\n";
 
 // `MUT202` through summaries of changes below a parameter's items: a helper two modules below
 // changes an item of its own copy of what it is handed, then gives that item a new list first; a
@@ -1305,6 +1341,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/link_neg_pass.py", LINK_NEG_PASS),
         ("pkg/link_model.py", LINK_MODEL),
         ("pkg/link_model_pass.py", LINK_MODEL_PASS),
+        ("pkg/owned_base.py", OWNED_BASE),
+        ("pkg/owned_model.py", OWNED_MODEL),
+        ("pkg/owned_pass.py", OWNED_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -1903,14 +1942,17 @@ fn steps_returned_types() -> Vec<Step> {
 }
 
 /// A read in another file of an attribute annotated with a type parameter of its class, on an
-/// instance annotated with an argument, while the class's annotation names the parameter; and a
+/// instance annotated with an argument, while the class's annotation names the parameter; a
 /// class based on a name another module binds only under `if TYPE_CHECKING:`, while that module
 /// binds it no other way: the wait its method makes is heuristic until the module imports the
-/// name at run time.
+/// name at run time; and a class based on a name another module's `__getattr__` serves, exact
+/// while no file rebinds what the hook reads and heuristic while it serves a class object.
 fn steps_declared_types() -> Vec<Step> {
     const SITE: &[(&str, &str)] = &[("pkg/generic_site_use.py", "EFF101")];
     const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101 [heuristic]")];
     const LAZY_EXACT: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
+    const SERVED: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101")];
+    const SERVED_HEURISTIC: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101 [heuristic]")];
     vec![
         Step::new(
             "an attribute typed by the class's type parameter holds the waiting class",
@@ -1960,6 +2002,40 @@ fn steps_declared_types() -> Vec<Step> {
         )
         .present(LAZY)
         .absent(LAZY_EXACT),
+        Step::new(
+            "a base another module serves from its __getattr__",
+            vec![
+                Action::Create("pkg/served_models.py", SERVED_MODELS.to_owned()),
+                Action::Create("pkg/served_use.py", SERVED_USE.to_owned()),
+            ],
+        )
+        .present(SERVED),
+        Step::new(
+            "another file rebinds the table the hook reads",
+            vec![Action::Create(
+                "pkg/served_patch.py",
+                SERVED_PATCH.to_owned(),
+            )],
+        )
+        .absent(SERVED)
+        .absent(SERVED_HEURISTIC),
+        Step::new(
+            "that file no longer rebinds it",
+            vec![save("pkg/served_patch.py", SERVED_PATCH_NONE)],
+        )
+        .present(SERVED),
+        Step::new(
+            "the factory is annotated with the class object instead",
+            vec![save("pkg/served_models.py", SERVED_MODELS_DECLARED)],
+        )
+        .present(SERVED_HEURISTIC)
+        .absent(SERVED),
+        Step::new(
+            "the factory defines the class again",
+            vec![save("pkg/served_models.py", SERVED_MODELS)],
+        )
+        .present(SERVED)
+        .absent(SERVED_HEURISTIC),
     ]
 }
 
@@ -3963,6 +4039,32 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .present(&[("pkg/reseal_helper.py", "MUT207")]),
         Step::new(
+            "the constructor of another module's class binds the list to a shared one",
+            vec![Action::Save(
+                "pkg/owned_model.py",
+                OWNED_MODEL.replace("list = []", "list = SHARED"),
+            )],
+        )
+        .present(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the constructor makes a new list again",
+            vec![save("pkg/owned_model.py", OWNED_MODEL)],
+        )
+        .absent(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the base constructor of a third module replaces the instance's namespace",
+            vec![Action::Save(
+                "pkg/owned_base.py",
+                OWNED_BASE.replace("self.ready = True", "self.__dict__ = SHARED_STATE"),
+            )],
+        )
+        .present(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the base constructor only stores an attribute again",
+            vec![save("pkg/owned_base.py", OWNED_BASE)],
+        )
+        .absent(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
             "the copy helper of another module defaults its table to a shared dict",
             vec![Action::Save(
                 "pkg/copy_ops.py",
@@ -4454,6 +4556,62 @@ fn steps_mut115() -> Vec<Step> {
             vec![save("pkg/copy_helper.py", COPY_HELPER)],
         )
         .absent(&[("pkg/copy_handed.py", "MUT115")]),
+        Step::new(
+            "a new module binds a `__copy__` on the copied class after its body: the claim is open",
+            vec![Action::Create("pkg/copy_patch.py", COPY_PATCH.to_owned())],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the module is deleted",
+            vec![Action::Delete("pkg/copy_patch.py")],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "a decorator of a new module that hands the class back decorates the copied class",
+            vec![
+                Action::Create("pkg/copy_deco.py", COPY_DECO.to_owned()),
+                save("pkg/copied_node.py", COPIED_NODE_DECORATED),
+            ],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the decorator binds a copy hook on the class: the claim is open",
+            vec![save("pkg/copy_deco.py", COPY_DECO_HOOK)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the decorator only reads the class again",
+            vec![save("pkg/copy_deco.py", COPY_DECO)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the copied class is no longer decorated, and the decorator's module is deleted",
+            vec![
+                save("pkg/copied_node.py", COPIED_NODE),
+                Action::Delete("pkg/copy_deco.py"),
+            ],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "a new module stores under a built name that is never a copy hook's",
+            vec![Action::Create(
+                "pkg/copy_fill.py",
+                COPY_FILL_NO_HOOK.to_owned(),
+            )],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the built name may be a copy hook's: the claim is open",
+            vec![save("pkg/copy_fill.py", COPY_FILL_HOOK)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the store goes through an instance",
+            vec![save("pkg/copy_fill.py", COPY_FILL_INSTANCE)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new("the module is deleted", vec![Action::Delete("pkg/copy_fill.py")])
+            .present(&[("pkg/copy_user.py", "MUT115")]),
     ]
 }
 
@@ -4723,11 +4881,18 @@ fn steps_captured_parameters() -> Vec<Step> {
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`). A change of
 /// an entry of the field's value is one of the field too, unless only the allowed callee makes
-/// it.
+/// it; an attribute write on an entry is one only while the helper does not know the entry's
+/// class, which an annotation alone changes (the helper changes the same paths of its
+/// parameter either way).
 fn steps_indirect_helpers() -> Vec<Step> {
     let changing = RACK_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
     let entry = RACK_OPS.replace("    empty(xs)\n", "    xs[0].append(1)\n    empty(xs)\n");
     let allowed_entry = RACK_OPS.replace("    xs.clear()\n", "    xs[0].clear()\n");
+    let untyped_attr = RACK_OPS.replace("    empty(xs)\n", "    xs[0].label = 1\n    empty(xs)\n");
+    let typed_attr = format!(
+        "from pkg.rack import Rack\n\n\n{}",
+        untyped_attr.replace("def refill(xs):", "def refill(xs: list[Rack]):")
+    );
     let writes = &[
         ("pkg/rack_view.py", "EFF201"),
         ("pkg/rack_view.py", "MUT201"),
@@ -4759,6 +4924,21 @@ fn steps_indirect_helpers() -> Vec<Step> {
             ("pkg/rack_view.py", "EFF201"),
             ("pkg/rack_view.py", "MUT201"),
         ]),
+        Step::new(
+            "the helper sets an attribute of an entry whose class it does not know",
+            vec![Action::Save("pkg/rack_ops.py", untyped_attr)],
+        )
+        .present(writes),
+        Step::new(
+            "the helper types the entries: the attribute is their class's",
+            vec![Action::Save("pkg/rack_ops.py", typed_attr)],
+        )
+        .absent(writes),
+        Step::new(
+            "the helper is back to its first form",
+            vec![save("pkg/rack_ops.py", RACK_OPS)],
+        )
+        .absent(writes),
     ]
 }
 
@@ -5739,6 +5919,58 @@ fn steps_eff117() -> Vec<Step> {
 /// `EFF116`: whether a call's callees are generator functions comes from their declarations in
 /// other modules, a function's and a method's and its override's, which change between a
 /// generator function and a plain one; a call that may run a plain override is no report.
+/// `EFF118`: whether the `finally` body's await is reported comes from the helper's module, whose
+/// sleep stops or starts being shielded, and from the module calling the function holding the
+/// cleanup, which runs it shielded or not.
+fn steps_eff118() -> Vec<Step> {
+    let shielded_helper = CLEANUP_HELPERS.replace(
+        "    await anyio.sleep(1)\n",
+        "    with anyio.CancelScope(shield=True):\n        await anyio.sleep(1)\n",
+    );
+    let unshielded_caller = CLEANUP_CALLER.replace(
+        "    with anyio.CancelScope(shield=True):\n        await close()\n",
+        "    await close()\n",
+    );
+    vec![
+        Step::new(
+            "a `finally` body awaits a helper in another module that sleeps",
+            vec![
+                Action::Create("pkg/cleanup_helpers.py", CLEANUP_HELPERS.to_owned()),
+                Action::Create("pkg/cleanup_use.py", CLEANUP_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the helper's module shields the sleep",
+            vec![save("pkg/cleanup_helpers.py", &shielded_helper)],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the sleep is unshielded again",
+            vec![save("pkg/cleanup_helpers.py", CLEANUP_HELPERS)],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the only call of the function holding the cleanup runs it shielded",
+            vec![Action::Create(
+                "pkg/cleanup_caller.py",
+                CLEANUP_CALLER.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the call stops shielding it",
+            vec![save("pkg/cleanup_caller.py", &unshielded_caller)],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "it shields it again",
+            vec![save("pkg/cleanup_caller.py", CLEANUP_CALLER)],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+    ]
+}
+
 fn steps_eff116() -> Vec<Step> {
     vec![
         Step::new(
@@ -7681,6 +7913,7 @@ sessions!(editing, Session::start, {
     eff115: steps_eff115,
     eff116: steps_eff116,
     eff117: steps_eff117,
+    eff118: steps_eff118,
     attribute_types: steps_attribute_types,
     builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,
@@ -9905,6 +10138,55 @@ fn lsp_diagnostics_equal_a_full_check_for_class_objects_across_modules() {
             vec![save("pkg/types.py", CLASS_OBJECTS_TYPES)],
         )
         .present(both),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// The attribute is annotated in a base class of another module than the subclass calling it.
+const CLASS_OBJECT_ATTRIBUTE_BASE: &str = "from pkg.types import DataType\n\n\nclass Parser:\n    def __init__(self) -> None:\n        self.field_type: type[DataType] = DataType\n";
+const CLASS_OBJECT_ATTRIBUTE_USE: &str = "from pkg.base import Parser\nfrom pkg.types import DataType\n\n\nclass OpenAPIParser(Parser):\n    def build(self) -> DataType:\n        return self.field_type(is_dict=True)\n";
+
+/// A call of a class object an attribute declares constructs its class from the declarations of
+/// another module: the subclass calling it sees the base class's annotation change to one of no
+/// known class and back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_class_object_attributes_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/types.py", CLASS_OBJECTS_TYPES.to_owned()),
+        ("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE.to_owned()),
+        ("pkg/use.py", CLASS_OBJECT_ATTRIBUTE_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_class_object_attributes",
+        CLASS_OBJECTS_CONFIG,
+        files,
+        false,
+    );
+    let constructs: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(constructs),
+        Step::new(
+            "the attribute is declared `Any`",
+            vec![save(
+                "pkg/base.py",
+                &format!(
+                    "from typing import Any\n\n{}",
+                    CLASS_OBJECT_ATTRIBUTE_BASE.replace(": type[DataType] =", ": Any =")
+                ),
+            )],
+        )
+        .absent(constructs),
+        Step::new(
+            "it is declared a class object again",
+            vec![save("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE)],
+        )
+        .present(constructs),
     ];
     let mut failures = Vec::new();
     for step in &steps {

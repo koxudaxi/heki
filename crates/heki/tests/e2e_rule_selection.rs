@@ -205,8 +205,14 @@ fn a_text_run_says_how_many_heuristic_rules_and_reports_it_left_off() {
     }
     // Only the rules a selection would run with `lint.heuristic` count, not the ignored ones.
     let (_, _, stderr) = p.heki(&["check", "--select", "EFF"]);
-    assert!(stderr.ends_with(&note(&rules_and_report(2))), "{stderr}");
-    let (_, _, stderr) = p.heki(&["check", "--select", "EFF", "--ignore", "EFF102,EFF117"]);
+    assert!(stderr.ends_with(&note(&rules_and_report(3))), "{stderr}");
+    let (_, _, stderr) = p.heki(&[
+        "check",
+        "--select",
+        "EFF",
+        "--ignore",
+        "EFF102,EFF117,EFF118",
+    ]);
     assert!(
         stderr.ends_with(&note("1 heuristic report(s) are not shown")),
         "{stderr}"
@@ -489,8 +495,9 @@ fn the_size_dependent_rewrites_are_opt_in_and_the_option_applying_them_selects_t
 
 #[test]
 fn a_clean_text_run_of_a_project_without_contracts_points_to_recommend() {
-    let hint = "hint: `heki recommend` (experimental) lists the rules and contracts that fit \
-                this project, and what heki could not see\n";
+    let hint = "hint: `heki recommend` (experimental) lists the parameter types and contracts \
+                the code already keeps, the rules that fit this project, and what heki could not \
+                see\n";
     let p = Project::new("recommend_hint");
     p.write("pyproject.toml", "[project]\nname = \"t\"\n")
         .write("app/__init__.py", "")
