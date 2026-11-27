@@ -6913,6 +6913,73 @@ fn steps_allowed_examples() -> Vec<Step> {
     ]
 }
 
+// `include-overrides`: a write owner and an invalidation contract whose method entries name
+// the overrides in the subclasses of their classes. The classes are in one module, a middle
+// class in a second, the subclasses in a third, and a private helper in a fourth.
+const OVERRIDE_CONTRACTS: &str = "\n[[tool.heki.write-owners]]\nname = \"shelf\"\ntargets = [\"Shelf.items\"]\nallowed-writers = [\"pkg.ov_base:Keeper.store\"]\ninclude-overrides = true\n\n[[tool.heki.invalidation]]\nname = \"catalog\"\ntargets = [\"Leaf.kids\"]\ninvalidators = [\"Catalog.refresh\"]\ninclude-overrides = true\n";
+const OV_BASE: &str = "class Shelf:\n    def __init__(self) -> None:\n        self.items: list[int] = []\n\n\nclass Keeper:\n    def store(self, shelf: Shelf) -> None:\n        shelf.items.append(1)\n\n\nclass Leaf:\n    def __init__(self) -> None:\n        self.kids: list[int] = []\n\n\nclass Catalog:\n    def refresh(self) -> None:\n        pass\n";
+const OV_MID: &str = "from pkg.ov_base import Catalog, Keeper\n\n\nclass Mid(Keeper):\n    pass\n\n\nclass MidCatalog(Catalog):\n    pass\n";
+const OV_MID_BASELESS: &str = "from pkg.ov_base import Catalog, Keeper\n\n\nclass Mid:\n    pass\n\n\nclass MidCatalog:\n    pass\n";
+const OV_HELP: &str = "from pkg.ov_base import Shelf\n\n\ndef _fill(shelf: Shelf) -> None:\n    shelf.items.append(2)\n";
+const OV_SUB_WRITING: &str = "from pkg.ov_base import Shelf\nfrom pkg.ov_mid import Mid\n\n\nclass Sub(Mid):\n    def store(self, shelf: Shelf) -> None:\n        shelf.items.append(3)\n";
+const OV_SUB_HELPED: &str = "from pkg.ov_base import Shelf\nfrom pkg.ov_help import _fill\nfrom pkg.ov_mid import Mid\n\n\nclass Sub(Mid):\n    def store(self, shelf: Shelf) -> None:\n        _fill(shelf)\n";
+const OV_GROW: &str = "from pkg.ov_base import Leaf\nfrom pkg.ov_mid import MidCatalog\n\n\nclass FastCatalog(MidCatalog):\n    def refresh(self) -> None:\n        pass\n\n\ndef grow(leaf: Leaf, catalog: FastCatalog) -> None:\n    leaf.kids.append(1)\n    catalog.refresh()\n";
+
+/// `include-overrides`: an override added in a new subclass, a helper that runs only inside an
+/// override, a base removed from a class above the override in another module, and an
+/// invalidation contract whose invalidator's override announces a write.
+fn steps_include_overrides() -> Vec<Step> {
+    vec![
+        Step::new(
+            "contracts with the key, and a private helper no function calls",
+            vec![
+                Action::Configure(format!("{CONFIG}{OVERRIDE_CONTRACTS}")),
+                Action::Create("pkg/ov_base.py", OV_BASE.to_owned()),
+                Action::Create("pkg/ov_mid.py", OV_MID.to_owned()),
+                Action::Create("pkg/ov_help.py", OV_HELP.to_owned()),
+            ],
+        )
+        .present(&[("pkg/ov_help.py", "MUT201")]),
+        Step::new(
+            "a new subclass in another module overrides the allowed writer",
+            vec![Action::Create("pkg/ov_sub.py", OV_SUB_WRITING.to_owned())],
+        )
+        .absent(&[("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the override hands its write to the private helper",
+            vec![save("pkg/ov_sub.py", OV_SUB_HELPED)],
+        )
+        .absent(&[("pkg/ov_help.py", "MUT201"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the class between the override and the allowed writer drops its base",
+            vec![save("pkg/ov_mid.py", OV_MID_BASELESS)],
+        )
+        .present(&[("pkg/ov_sub.py", "MUT201")]),
+        Step::new("the base is back", vec![save("pkg/ov_mid.py", OV_MID)])
+            .absent(&[("pkg/ov_help.py", "MUT201"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "a write announced by an override of the invalidator",
+            vec![Action::Create("pkg/ov_grow.py", OV_GROW.to_owned())],
+        )
+        .absent(&[("pkg/ov_grow.py", "MUT208")]),
+        Step::new(
+            "the class between the override and the invalidator drops its base",
+            vec![save("pkg/ov_mid.py", OV_MID_BASELESS)],
+        )
+        .present(&[("pkg/ov_grow.py", "MUT208"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the base is back again",
+            vec![save("pkg/ov_mid.py", OV_MID)],
+        )
+        .absent(&[("pkg/ov_grow.py", "MUT208"), ("pkg/ov_sub.py", "MUT201")]),
+        Step::new(
+            "the override is removed",
+            vec![Action::Delete("pkg/ov_sub.py")],
+        )
+        .present(&[("pkg/ov_help.py", "MUT201")]),
+    ]
+}
+
 /// Files: a module created and deleted, a stub next to a module, and a package over the
 /// module of the same name.
 fn steps_files() -> Vec<Step> {
@@ -8018,6 +8085,7 @@ sessions!(editing, Session::start, {
     contracts: steps_contracts,
     allowed_examples: steps_allowed_examples,
     contract_extensions: steps_contract_extensions,
+    include_overrides: steps_include_overrides,
     references: steps_references,
     class_bodies: steps_class_bodies,
     bases_and_attribution: steps_bases_and_attribution,
