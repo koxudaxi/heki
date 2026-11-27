@@ -965,7 +965,15 @@ outside the project but builtin types may, allocate an instance of `C` without r
 `__init__`: a construction of `C`.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
-`sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`); `"Self"` types
+`sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`, `subprocess.run()`
+→ `subprocess.CompletedProcess`, `os.stat()` → `os.stat_result`, `re.compile()` → `re.Pattern`,
+`logging.getLogger()` → `logging.Logger`, or the subclass of it that `setLoggerClass`
+installs). An argument case names the class where the argument decides it: a function of
+`os.path` gives a path of the kind it is given (`str` for a `str` or a `pathlib` path, `bytes`
+for `bytes`), `shutil.copy` one of the kind of its destination, `shutil.copytree` its
+destination itself, and `urllib.parse.urlparse` a `ParseResult` or a `ParseResultBytes`; an
+argument heki knows nothing of gives no class, and so does a function that may return `None`
+(`shutil.which`, `shutil.move`). `"Self"` types
 a builder's result as its receiver (`client.with_options(...)`, an instance of a project subclass
 included), and `"C[Self]"` types a result `C` whose items are instances of the receiver's class
 (`Path.iterdir()`, `Path.glob()`). The operators run the special methods the same rows type:
@@ -3222,7 +3230,8 @@ receiver's class (`pathlib.Path.parents`). A row of the standard library
 (`typing.NamedTuple._fields`, `contextvars.Token.var`, `pathlib.Path.parent`) holds on every interpreter heki supports,
 which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
 the standard library that type a value (a method's `return_type`, a copy of its receiver,
-`returns_held`) on instances of each class it builds. The synchronous and asynchronous
+`returns_held`) on instances of each class it builds, and an argument case's `return_type` on
+arguments of each class the case names. The synchronous and asynchronous
 clients of a library have rows of their own at every step, and a row whose meaning changes
 across the verified releases under one name is left out. `[[distributions]]`
 (`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows
