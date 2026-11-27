@@ -9397,12 +9397,13 @@ const MAX_RECEIVER_CALLS: usize = 8;
 
 /// Whether a catalog call that does its effects as `emits` says has effect `e` on every call:
 /// a database effect only where it is done on every call, except that a SQLite connection that
-/// may be in memory sends its statements without waiting; nothing a configuration can switch
-/// off.
+/// may be in memory sends its statements without waiting; file system I/O only where the call
+/// cannot do its work without it; nothing a configuration can switch off.
 fn on_every_call(emits: heki_kb::Emits, e: ExecEffectKind) -> bool {
     match emits {
         heki_kb::Emits::Always => true,
         heki_kb::Emits::IfOnDisk => e != ExecEffectKind::BlockingDb,
+        heki_kb::Emits::MayAvoidTheFileSystem => e != ExecEffectKind::BlockingFs,
         heki_kb::Emits::UnlessConfiguredOtherwise => false,
         _ => !matches!(e, ExecEffectKind::BlockingDb | ExecEffectKind::DbQuery),
     }

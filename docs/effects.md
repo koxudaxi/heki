@@ -17,13 +17,7 @@ Two rules are exact and run by default, and two more are exact by default and ar
 
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](ownership.md#a-generator-that-is-never-iterated). Both are exact and run by default.
 
-One more rule runs by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because it can be wrong about the code:
-
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`EFF102`](rules/loop-unpooled-client.md) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
-
-Two more rules that run the same way are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](#resource-and-cancellation-lifetimes).
+Two rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code. They are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](#resource-and-cancellation-lifetimes).
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
 
@@ -34,12 +28,13 @@ These rules are off by default. Name one in `extend-select` or with `--extend-se
 ```toml
 # heki.toml
 [lint]
-extend-select = ["EFF105", "EFF107"]
+extend-select = ["EFF102", "EFF105", "EFF107"]
 ```
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
-| [`EFF105`](rules/async-blocking-fs.md) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
+| [`EFF102`](rules/loop-unpooled-client.md) | a loop over data whose every iteration makes an HTTP, database, or RPC client, or a sessionless request | exact, opt-in |
+| [`EFF105`](rules/async-blocking-fs.md) | a call in an `async def` that always runs blocking local file I/O on the event loop | exact, opt-in |
 | [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result bound to a local variable that is never awaited, returned, or stored; a call whose result is discarded is not reported | heuristic, opt-in |
 | [`EFF112`](rules/set-order-output.md) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
 | [`EFF114`](rules/recursion-error-as-value.md) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |

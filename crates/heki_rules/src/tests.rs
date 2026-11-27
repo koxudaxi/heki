@@ -174,7 +174,10 @@ fn semantic_fixtures_all_tp_detected_and_no_tn() {
     let mut config = owners(&["Model.fields"], &["Store.*"]);
     // The fixtures live under `tests/`: turn the test-code relaxation off for them.
     config.lint.relax_async_in_tests = Some(false);
-    config.lint.extend_select.push("MUT101".to_owned());
+    config
+        .lint
+        .extend_select
+        .extend(["MUT101".to_owned(), "EFF102".to_owned()]);
     let diags = check_with(&[("tests/semantic/fixtures.py", FIXTURES)], &config, &[]);
     let (tp, tn) = expectations(FIXTURES);
     assert_eq!(tp.len(), 7, "{tp:?}");
@@ -814,7 +817,9 @@ async def tp_async_query(db, ids):
 
 #[test]
 fn eff102_eff103_loop_rules() {
-    let diags = check(LOOP_SRC, &HekiConfig::default());
+    let mut config = HekiConfig::default();
+    config.lint.extend_select.push("EFF102".to_owned());
+    let diags = check(LOOP_SRC, &config);
     let got: BTreeSet<(&str, &str)> = diags
         .iter()
         .map(|d| (d.rule_code.as_str(), d.qualname.as_str()))

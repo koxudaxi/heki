@@ -307,6 +307,53 @@ class Eff101(unittest.TestCase):
         self.assertEqual(len(result["refutations"]), 1)
 
 
+class Eff105(unittest.TestCase):
+    claim = {"id": "k0", "rule": "EFF105", "site": "c0", "witnesses": ["os.path.isfile"]}
+
+    def test_a_file_system_call_inside_every_returning_call_confirms(self):
+        trace = run(fake(2, "os.path.isfile", "fs", True), call("c0", 1, 3))
+        result = checkers.check(self.claim, [trace])
+        self.assertEqual((result["checked"], result["refutations"]), (1, []))
+
+    def test_a_return_without_a_file_system_call_refutes_every_return(self):
+        trace = run(fake(5, "os.path.isfile", "fs", True), call("c0", 1, 3))
+        refutation = checkers.check(self.claim, [trace])["refutations"][0]
+        self.assertEqual(refutation["kind"], "no-file-system")
+        self.assertTrue(refutation["premise"].startswith("Every return"))
+
+    def test_a_call_that_answered_without_the_file_system_refutes_touches(self):
+        trace = run(fake(2, "os.path.isjunction", "fs", False), call("c0", 1, 3))
+        refutation = checkers.check(self.claim, [trace])["refutations"][0]
+        self.assertTrue(refutation["premise"].startswith("Touches the file system"))
+
+    def test_another_file_system_call_than_the_named_one_refutes_the_witness(self):
+        trace = run(fake(2, "os.path.getsize", "fs", True), call("c0", 1, 3))
+        self.assertEqual(checkers.check(self.claim, [trace])["refutations"][0]["kind"], "witness")
+
+
+class Eff102(unittest.TestCase):
+    claim = {"id": "k0", "rule": "EFF102", "site": "c0", "loop": "L0", "witnesses": ["requests.get"]}
+
+    def test_a_client_on_every_completed_iteration_confirms(self):
+        trace = run(
+            fake(3, "requests.get", "client", False),
+            iteration("L0", 1, 5),
+            iteration("L0", 6, 9, completed=False),
+        )
+        result = checkers.check(self.claim, [trace])
+        self.assertEqual((result["checked"], result["refutations"]), (1, []))
+
+    def test_a_returned_call_without_a_client_refutes_allocates(self):
+        trace = run(call("c0", 2, 4), iteration("L0", 1, 5))
+        refutation = checkers.check(self.claim, [trace])["refutations"][0]
+        self.assertEqual(refutation["kind"], "no-client")
+        self.assertIn("Allocates", refutation["premise"])
+
+    def test_another_client_than_the_named_one_refutes_the_witness(self):
+        trace = run(fake(3, "requests.Session", "client", False), iteration("L0", 1, 5))
+        self.assertEqual(checkers.check(self.claim, [trace])["refutations"][0]["kind"], "witness")
+
+
 class Eff103(unittest.TestCase):
     claim = {
         "id": "k0",

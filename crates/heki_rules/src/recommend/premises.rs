@@ -572,6 +572,6 @@ mod tests {
         assert_eq!(claim_of(&exact_tier), Some("OPT110"));
         exact_tier.certainty = Certainty::Exact;
         assert_eq!(claim_of(&exact_tier), None, "heuristic reports only");
-        assert_eq!(claim_of(&report("EFF102", 1, &[])), None, "no exact claim");
+        assert_eq!(claim_of(&report("EFF106", 1, &[])), None, "no exact claim");
     }
 }

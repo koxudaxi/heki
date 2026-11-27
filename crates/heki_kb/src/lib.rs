@@ -317,8 +317,9 @@ pub enum WaitKind {
 }
 
 /// When a call does its effects ([`EcosystemEntry::emits`]): for a database call, when it sends a
-/// statement or otherwise waits on the database; for any call, whether the library's
-/// configuration can make it skip them.
+/// statement or otherwise waits on the database; for a file system call, whether it can do its
+/// work without the file system; for any call, whether the library's configuration can make it
+/// skip them.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -349,6 +350,14 @@ pub enum Emits {
     /// kombu's in-memory transport publishes without the network). The configuration is not
     /// visible at the call, so no effect is certain and the call only supports heuristic reports.
     UnlessConfiguredOtherwise,
+    /// Its file system I/O (`blocking_fs`) only in a state, on a platform, or through a backend
+    /// the call does not show: a file object's member that its buffer, the memory it wraps, or
+    /// its closed state can answer; a result that does its work only once it is iterated
+    /// (`Path.iterdir` before Python 3.13); a test with no file system on POSIX
+    /// (`os.path.isjunction`); a library that reads the file system on some platforms only, or
+    /// through a backend that may be memory or the network; a reader whose source may be a URL.
+    /// Its other effects keep their own condition.
+    MayAvoidTheFileSystem,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -435,8 +444,9 @@ pub struct EcosystemEntry {
     /// Awaiting the object the call returns completes only once the future passed at this
     /// position is done (`asyncio.wrap_future(f)`).
     pub done_when_awaited: Option<u8>,
-    /// When the call's database effects (`blocking_db`, `db_query`) happen: on every call, or
-    /// only in a state of the session, connection, or receiver the call does not show.
+    /// When the call's database effects (`blocking_db`, `db_query`) and its file system I/O
+    /// (`blocking_fs`) happen: on every call, or only in a state of the session, connection, or
+    /// receiver the call does not show.
     pub emits: Emits,
     /// What the items of the call's result are, when the environment decides how many there
     /// are (the origin of a loop's items: `EFF103`).
@@ -4926,6 +4936,33 @@ mod tests {
     const SQLITE3_MEMORY: &str = "sqlite3.connect(\":memory:\")";
     const SQLITE3_FILE: &str = "sqlite3.connect(file)";
 
+    /// Whether the file system call `symbol` (`expected`) may do its work without the file
+    /// system: a file object's member, `Path.iterdir` (a generator before Python 3.13), the
+    /// junction tests (no I/O on POSIX), psutil (`/proc` on Linux only, values kept in a
+    /// `Process`), fsspec (a backend that may be memory or the network), and a reader whose
+    /// source may be a URL.
+    fn may_avoid_the_file_system(symbol: &str, expected: &EcosystemEntry) -> bool {
+        let file_member = FILE_CLASSES
+            .iter()
+            .chain(&[ANY_FILE_CLASS])
+            .any(|class| symbol.starts_with(&format!("{class}.")));
+        let reads_urls = expected
+            .cases
+            .iter()
+            .any(|c| c.effects.as_ref().is_some_and(|e| e.contains(&BlockingNet)));
+        expected.effects.contains(&BlockingFs)
+            && (file_member
+                || [
+                    "pathlib.Path.iterdir",
+                    "os.path.isjunction",
+                    "pathlib.Path.is_junction",
+                ]
+                .contains(&symbol)
+                || symbol.starts_with("psutil.")
+                || symbol.starts_with("fsspec.")
+                || reads_urls)
+    }
+
     /// The database calls that wait only in a state the call does not show.
     const CONDITIONAL_EMITTERS: &[(Emits, &[&str])] = &[
         (
@@ -5479,7 +5516,16 @@ mod tests {
                 let emits = CONDITIONAL_EMITTERS
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
-                    .map_or(Emits::Always, |(emits, _)| *emits);
+                    .map_or_else(
+                        || {
+                            if may_avoid_the_file_system(&symbol, &expected) {
+                                Emits::MayAvoidTheFileSystem
+                            } else {
+                                Emits::Always
+                            }
+                        },
+                        |(emits, _)| *emits,
+                    );
                 let exit_suppresses = if EXITS_NEVER_SUPPRESS.contains(&symbol.as_str()) {
                     Some(false)
                 } else {
@@ -5874,9 +5920,16 @@ mod tests {
             Emits::UnlessConnected
         );
         assert_eq!(emits("celery.Task.delay"), Emits::UnlessConfiguredOtherwise);
-        // Only database calls carry a condition on their database effects, and a call whose
-        // configuration can switch its effects off carries any.
+        // Only database calls carry a condition on their database effects, only file system
+        // calls one on their file system I/O, and a call whose configuration can switch its
+        // effects off carries any.
+        assert_eq!(emits("io.TextIOWrapper.read"), Emits::MayAvoidTheFileSystem);
+        assert_eq!(emits("builtins.open"), Emits::Always);
         for (symbol, e) in &kb.entries {
+            if e.emits == Emits::MayAvoidTheFileSystem {
+                assert!(e.effects.contains(&BlockingFs), "{symbol}");
+                continue;
+            }
             if !matches!(e.emits, Emits::Always | Emits::UnlessConfiguredOtherwise) {
                 assert!(
                     e.effects.iter().any(|k| matches!(k, BlockingDb | DbQuery)),

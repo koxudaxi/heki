@@ -6356,161 +6356,194 @@ writes_in_order = { arg = 0, param = "data", sorted_by = "sort_keys", sorted_by_
 opaque_to_layer3 = true
 
 # --- Processes and system state: psutil ---
-# Every query reads the operating system (`/proc`, system calls).
+# Every query reads the operating system (`/proc`, system calls). Only Linux reads `/proc`, and a
+# `Process` keeps some values after the first call, so no call touches the file system on every
+# call (`emits = "may-avoid-the-file-system"`).
 
 [[entries]]
 symbol = "psutil.Process"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.children"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.parent"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.parents"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.memory_info"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.memory_full_info"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.memory_percent"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.cpu_times"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.num_threads"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.num_fds"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.open_files"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.connections"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.net_connections"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.name"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.exe"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.cmdline"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.status"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.username"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.create_time"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.cwd"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.environ"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.threads"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.io_counters"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.nice"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.terminate"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.kill"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.suspend"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.resume"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.is_running"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.as_dict"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.Process.ppid"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -6524,91 +6557,109 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psutil.pids"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.pid_exists"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.virtual_memory"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.swap_memory"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.disk_usage"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.disk_partitions"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.disk_io_counters"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.net_io_counters"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.net_connections"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.net_if_addrs"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.net_if_stats"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.boot_time"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.users"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.cpu_times"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.cpu_count"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.cpu_stats"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.sensors_temperatures"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psutil.sensors_battery"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -6620,6 +6671,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psutil.process_iter().__iter__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -6631,7 +6683,9 @@ opaque_to_layer3 = true
 # A file system reads local disks or object stores; either waits on the call. `fsspec.open`
 # returns an `OpenFile` that opens the file when it is entered (`with`) or `open()` is called.
 # `walk` is a generator: it lists while its result is iterated. A file system for `ftp`, `sftp`
-# or `ssh` connects in its constructor.
+# or `ssh` connects in its constructor. The file system may be memory, the network, or a cache of
+# listings, so no call touches the local file system on every call
+# (`emits = "may-avoid-the-file-system"`).
 
 [[entries]]
 symbol = "fsspec.open"
@@ -6641,21 +6695,25 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "fsspec.core.OpenFile.__enter__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.core.OpenFile.open"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.open_files"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.open_local"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -6669,56 +6727,67 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.cat"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.cat_file"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.cat_ranges"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.open"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.ls"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.info"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.exists"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.isfile"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.isdir"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.find"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.glob"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -6730,146 +6799,175 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.walk().__iter__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.du"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.size"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.get"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.get_file"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.put"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.put_file"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.download"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.upload"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.rm"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.rm_file"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.rmdir"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.mkdir"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.makedirs"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.mv"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.move"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.cp"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.copy"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.cp_file"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.touch"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.read_text"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.write_text"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.pipe"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.pipe_file"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.head"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.tail"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.created"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.modified"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.checksum"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 # --- Data: pandas I/O ---
@@ -6877,11 +6975,13 @@ opaque_to_layer3 = true
 # source decides its I/O: a URL literal is downloaded (`urlopen` for `http(s)://` / `ftp://`,
 # fsspec for the object stores), an in-memory buffer (`io.StringIO` / `io.BytesIO`) is parsed
 # without I/O. `read_hdf` / `read_spss` take local paths only; `read_sas` is not listed as
-# reading URLs.
+# reading URLs. A reader of URLs is not established to touch the file system for a source heki
+# cannot evaluate, which may be a URL (`emits = "may-avoid-the-file-system"`).
 
 [[entries]]
 symbol = "pandas.read_csv"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6891,6 +6991,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_table"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6900,6 +7001,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_fwf"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6909,6 +7011,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_excel"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "io", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "io", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6918,6 +7021,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_json"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "path_or_buf", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "path_or_buf", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6927,6 +7031,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_parquet"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6936,6 +7041,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_feather"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6945,6 +7051,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_orc"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6954,6 +7061,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_pickle"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6968,6 +7076,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_xml"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "path_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "path_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -6977,6 +7086,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_stata"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
     { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
@@ -7018,7 +7128,8 @@ opaque_to_layer3 = true
 
 # --- Data: polars I/O ---
 # Readers of files are `blocking_fs` (EFF105, opt-in): an `http(s)://` URL is downloaded, an
-# in-memory buffer or raw `bytes` is parsed without I/O. The `scan_*` functions return a lazy
+# in-memory buffer or raw `bytes` is parsed without I/O; a source heki cannot evaluate may be a
+# URL (`emits = "may-avoid-the-file-system"`). The `scan_*` functions return a lazy
 # frame that reads when it is collected. `read_database` runs its query on the connection it is handed,
 # `read_database_uri` on a connection it opens; `DataFrame.write_database` inserts the rows.
 # `concat` is not listed: by default (`rechunk=False`) it appends the frames' chunks without
@@ -7027,6 +7138,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_csv"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
@@ -7036,6 +7148,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_parquet"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
@@ -7045,6 +7158,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_json"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
@@ -7054,6 +7168,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_ndjson"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
@@ -7063,6 +7178,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_ipc"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
@@ -7072,6 +7188,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_avro"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
@@ -7081,6 +7198,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_excel"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
@@ -7090,6 +7208,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "polars.read_ods"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
     { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },

@@ -38,7 +38,7 @@
 ## Rules
 
 - [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity error (a bug) · No automatic fix
-- [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity warning (slower code) · No automatic fix
+- [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Exact · Opt-in · Severity warning (slower code) · No automatic fix
 - [async-def-as-sync-callback (EFF115)](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity error (a bug) · No automatic fix
@@ -69,7 +69,7 @@
 - [loop-linear-dedup (OPT111)](https://heki.koxudaxi.dev/rules/loop-linear-dedup/): Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
 - [loop-linear-list-lookup (OPT112)](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [loop-linear-membership (OPT110)](https://heki.koxudaxi.dev/rules/loop-linear-membership/): Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
-- [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
+- [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Exact · Opt-in · Severity warning (slower code) · No automatic fix
 - [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [optional-dependency-at-import-time (IMP302)](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/): Family: Imports (IMP) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [read-owner-violation (MUT203)](https://heki.koxudaxi.dev/rules/read-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix

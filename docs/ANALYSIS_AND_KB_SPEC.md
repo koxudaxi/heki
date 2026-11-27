@@ -3291,8 +3291,11 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   cache; an exhausted pymongo or motor cursor returns nothing without a query), `unless-connected` (a pool checkout, Django's `connection.cursor()`),
   `unless-configured-otherwise` (any effect, on any entry: the library can be configured so the
   call does not do it, as Celery's `task_always_eager` or an in-memory transport; no effect of
-  the call is certain). Only `always`
-  establishes that the call sends or waits on every call.
+  the call is certain), and on file system entries `may-avoid-the-file-system` (its
+  `blocking_fs` only: a file object's member a buffer or the memory it wraps can answer,
+  `Path.iterdir` before Python 3.13, `os.path.isjunction` on POSIX, psutil, fsspec, a reader
+  whose source may be a URL; `EFF105`'s exact tier). Only `always`
+  establishes that the call sends, waits, or touches the file system on every call.
 - **`items`** on a call whose result's items the environment decides the number of: `rows`
   (`Cursor.fetchall`, a DB-API `execute` whose cursor is iterated, `Session.execute`, pymongo's
   `find`), `lines` (`open`), `entries` (`os.listdir`, `os.scandir`, `os.walk`), `text`

@@ -69,6 +69,9 @@ opaque_to_layer3 = true
 # --- Blocking filesystem (EFF105, opt-in) ---
 # `os.walk` is a generator function: it lists directories while its result is iterated. The
 # class of such a result is named after the call (`os.walk()`), its iteration is `__iter__`.
+# An entry touches the file system on every call for any argument it waits on (R6), unless it
+# says `emits = "may-avoid-the-file-system"`: `os.path.isjunction` and `Path.is_junction` do no
+# I/O on POSIX, and `Path.iterdir` is a generator before Python 3.13.
 
 [[entries]]
 symbol = "builtins.open"
@@ -127,11 +130,14 @@ opaque_to_layer3 = true
 # not. `FileIO.read` and `FileIO.write` return `None` in non-blocking mode, and so do the
 # binary reads of a file opened from an integer file descriptor (`open` sets `O_NONBLOCK` on no
 # path): `file_object` gives `io.open()` for a binary read of a file that is not known to be a
-# path.
+# path. No member touches the file system on every call (`emits = "may-avoid-the-file-system"`):
+# the buffer can answer a read, a write, a seek, a tell, or a flush, the object may wrap memory
+# (`io.TextIOWrapper(io.BytesIO())`), and closing a closed file does nothing.
 
 [[entries]]
 symbol = "io.TextIOWrapper.read"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.str"
 items = "text"
 opaque_to_layer3 = true
@@ -139,12 +145,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.TextIOWrapper.readline"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.str"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.readlines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.list"
 items = "lines"
 opaque_to_layer3 = true
@@ -152,40 +160,47 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.TextIOWrapper.write"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.writelines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.seek"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.tell"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.truncate"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.flush"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.close"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -216,12 +231,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.TextIOWrapper.__iter__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "Self"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.TextIOWrapper.__next__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.str"
 opaque_to_layer3 = true
 
@@ -233,23 +250,27 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.TextIOWrapper.__exit__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedReader.read"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedReader.readline"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedReader.readlines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.list"
 items = "lines"
 opaque_to_layer3 = true
@@ -265,6 +286,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedReader.seek"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
@@ -284,6 +306,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedReader.close"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -314,12 +337,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedReader.__iter__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "Self"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedReader.__next__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
@@ -331,6 +356,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedReader.__exit__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -348,17 +374,20 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedWriter.write"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedWriter.writelines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedWriter.seek"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
@@ -370,17 +399,20 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedWriter.truncate"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedWriter.flush"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedWriter.close"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -425,23 +457,27 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedWriter.__exit__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.read"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.readline"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.readlines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.list"
 items = "lines"
 opaque_to_layer3 = true
@@ -449,17 +485,20 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedRandom.write"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.writelines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.seek"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
@@ -471,17 +510,20 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedRandom.truncate"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.flush"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.close"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -512,12 +554,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedRandom.__iter__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "Self"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.BufferedRandom.__next__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
@@ -529,22 +573,26 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.BufferedRandom.__exit__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.FileIO.read"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.FileIO.readline"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.FileIO.readlines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.list"
 items = "lines"
 opaque_to_layer3 = true
@@ -552,16 +600,19 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.FileIO.write"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.FileIO.writelines"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.FileIO.seek"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
@@ -573,6 +624,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.FileIO.truncate"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
@@ -583,6 +635,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.FileIO.close"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -613,12 +666,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.FileIO.__iter__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "Self"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.FileIO.__next__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.bytes"
 opaque_to_layer3 = true
 
@@ -630,21 +685,25 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "io.FileIO.__exit__"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().read'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().readline'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().readlines'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.list"
 items = "lines"
 opaque_to_layer3 = true
@@ -652,39 +711,46 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = 'io.open().write'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().writelines'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().seek'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().tell'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().truncate'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "builtins.int"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().flush'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().close'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -715,12 +781,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = 'io.open().__iter__'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 return_type = "Self"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'io.open().__next__'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -731,6 +799,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = 'io.open().__exit__'
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1088,6 +1157,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "os.path.isjunction"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1199,6 +1269,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pathlib.Path.is_junction"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1230,6 +1301,7 @@ opaque_to_layer3 = true
 symbol = "pathlib.Path.iterdir"
 return_type = "typing.Iterator[Self]"
 effects = ["blocking_fs"]
+emits = "may-avoid-the-file-system"
 items = "entries"
 opaque_to_layer3 = true
 
