@@ -894,6 +894,10 @@ One more rule runs by default only when you pass `--heuristic` (or set `lint.heu
 
 Two more rules that run the same way are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](https://heki.koxudaxi.dev/effects/#resource-and-cancellation-lifetimes).
 
+The knowledge base names the calls that wait. Besides `requests` and `httpx.Client`, it lists the synchronous clients of Xinference (`xinference_client.RESTfulClient` and the handles of its models) and of Supabase and PostgREST (`supabase.Client`, `postgrest.SyncPostgrestClient`): building a table query, including through `.not_`, sends nothing, and `execute()` waits for the server, so `EFF101` and `EFF103` report it there. Tier: exact, default ([`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/), [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/)).
+
+`DATA101` (exact, default, [`loop-carried-concat`](https://heki.koxudaxi.dev/rules/loop-carried-concat/)) also reports an array grown through `numpy.r_[...]` or `numpy.c_[...]` on every iteration (`arr = np.r_[arr, chunk]`), also when a helper returns that concatenation (`arr = grow(arr, chunk)`), as it does for `numpy.hstack`.
+
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
 
 ## 🔧 Rules to switch on
@@ -1038,7 +1042,7 @@ Work around a resource can end early. A cancelled task stops at its next checkpo
 
 ### Cleanup that stops at a cancellation checkpoint
 
-A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. Tier: heuristic, runs with `--heuristic` ([`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/)).
+A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. A shield is a `CancelScope` with `shield=True` by the public name (`anyio.CancelScope`) or by the path that defines it (`anyio._core._tasks.CancelScope`). Tier: heuristic, runs with `--heuristic` ([`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/)).
 
 ```python
 # app/m.py

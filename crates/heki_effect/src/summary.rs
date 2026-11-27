@@ -5556,6 +5556,7 @@ impl<'a> Extractor<'a> {
                 self.sentinel_test(*rhs, *lhs, span);
             }
             InstKind::SubscriptLoad {
+                dst,
                 obj,
                 index,
                 key_const,
@@ -5582,7 +5583,8 @@ impl<'a> Extractor<'a> {
                         args: std::slice::from_ref(index),
                         ..Passed::NOTHING
                     };
-                    self.external_call(bb, symbol, passed, false, span);
+                    self.external_call(bb, symbol.clone(), passed, false, span);
+                    self.note_returned_realloc(&symbol, Some(*dst), std::slice::from_ref(index));
                 }
             }
             // `obj.__dict__ |= other` updates the namespace in place, whatever the result is
@@ -6299,16 +6301,16 @@ impl<'a> Extractor<'a> {
 
     /// A returned result of the quadratic reallocation `symbol` taking a parameter, as itself or
     /// in a display (`np.append(acc, x)`, `pd.concat([df, part])`): `reallocates_params`.
-    fn note_returned_realloc(&mut self, symbol: &str, call: &Call<'_>) {
+    fn note_returned_realloc(&mut self, symbol: &str, dst: Option<VarId>, args: &[VarId]) {
         let reallocates = self
             .cx
             .kb
             .lookup(symbol)
             .is_some_and(|e| e.effects.contains(&ExecEffectKind::QuadraticRealloc));
-        if !reallocates || !call.dst.is_some_and(|d| self.returned.contains_key(&d)) {
+        if !reallocates || !dst.is_some_and(|d| self.returned.contains_key(&d)) {
             return;
         }
-        for &arg in call.args {
+        for &arg in args {
             let held: Vec<VarId> = match self.defs.get(&arg).map(|i| &i.kind) {
                 Some(InstKind::AllocBuiltin { elems, .. }) => elems.clone(),
                 _ => vec![arg],
@@ -7517,7 +7519,7 @@ impl<'a> Extractor<'a> {
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
                     self.protocol_call(bb, iterable, iteration_protocol(false), false, call.span);
                 }
-                self.note_returned_realloc(symbol, call);
+                self.note_returned_realloc(symbol, call.dst, call.args);
                 // A project class without a project `__init__` (a dataclass, a pydantic model),
                 // and a library API building an instance of its receiver's class
                 // (`Model.model_construct(...)`): the construction is still a call site, with no

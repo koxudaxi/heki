@@ -7653,6 +7653,11 @@ name = "google-genai"
 packages = ["google.genai"]
 verified = ">=1.0,<4"
 
+[[distributions]]
+name = "postgrest"
+packages = ["postgrest"]
+verified = ">=2.34,<3"
+
 [[attributes]]
 symbol = "openai.OpenAI.chat"
 type = "openai.resources.chat.Chat"
@@ -7728,6 +7733,18 @@ type = "google.genai.client.AsyncClient"
 [[attributes]]
 symbol = "google.genai.client.AsyncClient.models"
 type = "google.genai.models.AsyncModels"
+
+[[attributes]]
+symbol = "postgrest._sync.request_builder.SyncSelectRequestBuilder.not_"
+type = "Self"
+
+[[attributes]]
+symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.not_"
+type = "Self"
+
+[[attributes]]
+symbol = "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder.not_"
+type = "Self"
 
 [[entries]]
 symbol = "openai.OpenAI.with_options"

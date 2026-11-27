@@ -4798,6 +4798,14 @@ def tn_one_statement(client: Client, ids: list[int]) -> None:
     client.table("users").select("*").in_("id", ids).execute()
 
 
+async def tp_negated_filter(client: Client) -> None:
+    client.table("users").select("*").not_.is_("name", "null").execute()
+
+
+async def tn_negated_filter_not_sent(client: Client) -> None:
+    client.table("users").select("*").not_.is_("name", "null")
+
+
 async def tn_built_not_sent(client: Client) -> None:
     client.table("users").select("*").limit(10)
 
@@ -4823,6 +4831,7 @@ fn supabase_queries_wait_when_executed() {
             d(7, "EFF101", "tp_query", execute),
             d(11, "EFF101", "tp_created", execute),
             d(16, "EFF103", "tp_per_row", execute),
+            d(24, "EFF101", "tp_negated_filter", execute),
         ]
     );
 }
@@ -4842,6 +4851,17 @@ def tp_c(columns: list[np.ndarray]) -> np.ndarray:
     for column in columns:
         grid = np.c_[grid, column]
     return grid
+
+
+def grow(acc: np.ndarray, x: np.ndarray) -> np.ndarray:
+    return np.r_[acc, x]
+
+
+def tp_through_helper(chunks: list[np.ndarray]) -> np.ndarray:
+    arr = np.array([])
+    for chunk in chunks:
+        arr = grow(arr, chunk)
+    return arr
 
 
 def tn_once(chunks: list[np.ndarray]) -> np.ndarray:
@@ -4868,7 +4888,8 @@ fn numpy_r_and_c_concatenations_accumulate() {
         ),
         vec![
             d(7, "DATA101", "tp_r", "arr"),
-            d(14, "DATA101", "tp_c", "grid")
+            d(14, "DATA101", "tp_c", "grid"),
+            d(25, "DATA101", "tp_through_helper", "arr"),
         ]
     );
 }
