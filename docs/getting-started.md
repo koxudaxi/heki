@@ -23,6 +23,8 @@ false ([Rule Precision](precision.md#certifications)). Without configuration, it
 - [`MUT119` (change-lost-on-new-object)](rules/change-lost-on-new-object.md)
 - [`EFF101` (async-blocking-call)](rules/async-blocking-call.md)
 - [`EFF103` (loop-db-query)](rules/loop-db-query.md)
+- [`EFF109` (lock-reacquired-while-held)](rules/lock-reacquired-while-held.md)
+- [`EFF116` (generator-never-iterated)](rules/generator-never-iterated.md)
 - [`DATA101` (loop-carried-concat)](rules/loop-carried-concat.md)
 - [`OPT101` (list-quadratic-concat)](rules/list-quadratic-concat.md)
 - [`OPT102` (set-dict-quadratic-merge)](rules/set-dict-quadratic-merge.md)

@@ -12,6 +12,13 @@ The claims, as the rule pages state them:
   names (a call that raised still ran).
 - `EFF103`: every iteration of the loop that completes sends a database statement, one the report
   names.
+- `EFF109`: whenever the reported call runs, the function holds a lock, and the call attempts
+  to take that lock again without returning first (the fakes record the blocking attempt on a
+  lock the run holds, then end it); a call that returned normally without such an attempt
+  refutes the claim.
+- `EFF116`: whenever the reported call returns, it ran no function body (it only created a
+  generator), and no generator of the reported function starts later in the run (the programs
+  make the function's generators at the reported call only).
 - `DATA101`: on every iteration that completes, the variable's new value was built by the
   reallocating calls from its value at the start of the iteration.
 - `MUT101`: whenever the reported write runs on an instance that holds a value of the cached
@@ -245,6 +252,98 @@ def check_eff103(claim, runs, sources=None):
                 run,
                 {"ran": [_brief(f) for f in inside], "named": sorted(named), "calls": [c[5] for c in ran]},
             )
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
+# EFF109
+# ---------------------------------------------------------------------------------------------
+def _held_before(locks, seq):
+    """The identities of the locks the run holds at `seq`, from the lock fakes' events."""
+    held = set()
+    for event in locks:
+        if event[1] >= seq:
+            break
+        lock, what = event[5]
+        if what == "taken":
+            held.add(lock)
+        elif what == "released":
+            held.discard(lock)
+    return held
+
+
+def check_eff109(claim, runs, sources=None):
+    result = Result(claim)
+    for run in valid_runs(runs):
+        events = run["events"]
+        locks = [f for f in _of(events, "fake") if f[3] == "lock"]
+        for call in _of(events, "call", claim["site"]):
+            held = _held_before(locks, call[3])
+            inside = _inside(locks, call[3], call[4])
+            waited = [f for f in inside if f[5][1] == "self"]
+            detail = {"held": len(held), "inside": [f[5][1] for f in inside]}
+            if not held:
+                result.checked += 1
+                result.refute("not-held", "Held: the call ran while the run held no lock", run, detail)
+                continue
+            if waited:
+                result.checked += 1
+                if not any(f[5][0] in held for f in waited):
+                    result.refute(
+                        "other-lock",
+                        "Same lock: the call waited for a lock it took itself, not the one held",
+                        run,
+                        detail,
+                    )
+                continue
+            if call[5] != "ok":
+                continue
+            result.checked += 1
+            if any(f[5] == [lock, "released"] for f in inside for lock in held):
+                result.refute("given-back", "Held: the call gave the held lock back", run, detail)
+            elif any(f[5][1] == "taken" for f in inside):
+                result.refute("other-lock", "Same lock: the call took another lock", run, detail)
+            else:
+                result.refute(
+                    "returned",
+                    "Non-reentrant / Every return / Every implementation: the call returned without"
+                    " waiting for the held lock",
+                    run,
+                    detail,
+                )
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
+# EFF116
+# ---------------------------------------------------------------------------------------------
+def check_eff116(claim, runs, sources=None):
+    result = Result(claim)
+    generator = claim["generator"]
+    for run in valid_runs(runs):
+        events = run["events"]
+        starts = _of(events, "start")
+        for call in _of(events, "call", claim["site"]):
+            if call[5] != "ok":
+                continue
+            result.checked += 1
+            ran = [s[3] for s in starts if call[3] < s[1] < call[4]]
+            if ran:
+                result.refute(
+                    "body-ran",
+                    "Generator function / Every implementation: the call ran a function's body",
+                    run,
+                    {"ran": ran[:5]},
+                )
+                continue
+            later = [s for s in starts if s[1] > call[4] and s[3] == generator]
+            if later:
+                result.refute(
+                    "iterated",
+                    "Never iterated: a generator of the function started after the call",
+                    run,
+                    {"started": generator, "at": [later[0][4], later[0][6]]},
+                )
     return result
 
 
@@ -832,6 +931,8 @@ def _check_same_collection(result, run, traversals, exhausted):
 CHECKERS = {
     "EFF101": check_eff101,
     "EFF103": check_eff103,
+    "EFF109": check_eff109,
+    "EFF116": check_eff116,
     "DATA101": check_data101,
     "MUT101": check_mut101,
     "MUT110": check_mut110,

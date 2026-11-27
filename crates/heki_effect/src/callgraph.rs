@@ -397,6 +397,13 @@ fn recompute(
             &mut s,
         );
     }
+    if index.opt_in.locks {
+        must_takes_through_calls(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
     if index.opt_in.kept_values {
         must_reads_through_self_calls(
             index,
@@ -565,6 +572,58 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
     if let Some(must) = &mut s.must_exec {
         let crate::MustExec { effects, given, .. } = &mut **must;
         given.retain(|c| effects.get(&c.effect).is_none());
+    }
+}
+
+/// The locks the function attempts to take whenever it returns normally through the project
+/// calls it has made whenever it returns ([`CallSite::made_on_every_return`]): each lock that
+/// every implementation of such a call attempts whenever it returns
+/// ([`ProjectIndex::site_must_take`]), unless the function may give it back
+/// (`LockFacts::gives_back`). A name bound to two definitions gains nothing, as for
+/// [`must_through_calls`].
+fn must_takes_through_calls(
+    index: &ProjectIndex,
+    sites: &[(PathBuf, usize)],
+    s: &mut EffectSummary,
+) {
+    if s.must_exec.as_ref().is_some_and(|m| m.bound_twice) {
+        return;
+    }
+    let facts = s.lock_facts();
+    let open: Vec<crate::locks::ObjRef> = (facts.acquires.iter())
+        .filter(|(lock, acq)| !acq.on_every_return && !facts.gives_back.contains(*lock))
+        .map(|(lock, _)| lock.clone())
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    // Per lock, the shortest chain of the calls that take it on every return.
+    let mut found: Vec<Option<crate::locks::LockAcquire>> = vec![None; open.len()];
+    for (path, i) in sites {
+        let site = &index.files[path].call_sites[*i];
+        if site.project_callees().is_empty() || !site.made_on_every_return() {
+            continue;
+        }
+        for (lock, best) in open.iter().zip(&mut found) {
+            if let Some(taken) = index.site_must_take(path, site, lock)
+                && best
+                    .as_ref()
+                    .is_none_or(|b| taken.chain.len() < b.chain.len())
+            {
+                *best = Some(taken);
+            }
+        }
+    }
+    for (lock, taken) in open.iter().zip(found) {
+        // The call's own transfer added the acquisition, in the same names.
+        let (Some(taken), Some(acq)) = (taken, s.lock_facts_mut().acquires.get_mut(lock)) else {
+            continue;
+        };
+        *acq = crate::locks::LockAcquire {
+            guards: std::mem::take(&mut acq.guards),
+            tests: std::mem::replace(&mut acq.tests, heki_ir::walk::Answer::Open),
+            ..taken
+        };
     }
 }
 
@@ -1761,6 +1820,18 @@ fn transfer(
             .collect();
         if !rebinds.is_empty() {
             t.lock_facts_mut().rebinds.extend(rebinds);
+        }
+        let given: Vec<_> = (callee.gives_back.iter())
+            .filter_map(|name| name.through(bc))
+            .collect();
+        if !given.is_empty() {
+            let facts = t.lock_facts_mut();
+            for name in &given {
+                if let Some(acq) = facts.acquires.get_mut(name) {
+                    acq.on_every_return = false;
+                }
+            }
+            facts.gives_back.extend(given);
         }
     }
 

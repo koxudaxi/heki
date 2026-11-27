@@ -469,8 +469,18 @@ fn a_report_names_the_function_and_what_reads_its_generator() {
     let handed = report_at(&diags, "pkg/handoffs.py", 23);
     assert_eq!(handed["qualname"], "runners");
     assert_eq!(handed["target"], "threading.Thread->scan");
-    // An experimental opt-in rule: heuristic until it is certified.
-    assert!(eff116(&diags).iter().all(|d| d["certainty"] == "heuristic"));
+    // Exact where every premise is established; heuristic where a name the call may run is
+    // bound to more than one definition (Generator function open).
+    let heuristic: Vec<(&str, u64)> = eff116(&diags)
+        .iter()
+        .filter(|d| d["certainty"] != "exact")
+        .map(|d| (d["path"].as_str().unwrap(), d["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        heuristic,
+        vec![("pkg/possible.py", 54), ("pkg/possible.py", 55)],
+        "{diags:#?}"
+    );
 }
 
 #[test]
@@ -506,14 +516,22 @@ fn a_suppression_comment_silences_a_report() {
 }
 
 #[test]
-fn the_rule_is_opt_in() {
-    let p = project("eff116_opt_in");
-    assert!(found(&diagnostics(&p, &[])).is_empty());
-    assert!(found(&diagnostics(&p, &["--select", "EFF"])).is_empty());
-    assert_eq!(
-        found(&diagnostics(&p, &["--select", "generator-never-iterated"])),
-        marked()
-    );
+fn the_rule_runs_by_default() {
+    let p = project("eff116_default");
+    let named = diagnostics(&p, &["--select", "generator-never-iterated"]);
+    assert_eq!(found(&named), marked());
+    // With `--heuristic` and the `EFF` prefix every report, without it the exact ones, as
+    // warnings.
+    assert_eq!(found(&diagnostics(&p, &[])), marked());
+    assert_eq!(found(&diagnostics(&p, &["--select", "EFF"])), marked());
+    let exact: Vec<Value> = (eff116(&named).into_iter())
+        .filter(|d| d["certainty"] == "exact")
+        .cloned()
+        .collect();
+    assert!(exact.iter().all(|d| d["severity"] == "warning"));
+    let (_, plain, _) = p.heki(&["check", "--output-format", "json"]);
+    let plain: Vec<Value> = serde_json::from_str(&plain).unwrap();
+    assert_eq!(found(&plain), found(&exact));
 }
 
 #[test]
@@ -523,5 +541,78 @@ fn heki_rule_explains_it() {
     assert_eq!(code, 0);
     assert!(stdout.contains("generator-never-iterated"));
     assert!(stdout.contains("Never iterated"));
-    assert!(stdout.contains("experimental"));
+    assert!(!stdout.contains("experimental"), "{stdout}");
+}
+
+/// A receiver typed by a protocol leaves Every implementation open: its implementers are never
+/// a complete set, so the report is heuristic; the same call on a class is exact.
+#[test]
+fn a_call_through_a_protocol_is_heuristic() {
+    let p = Project::new("eff116_protocol");
+    p.write("pkg/__init__.py", "").write(
+        "pkg/main.py",
+        r#"from typing import Protocol
+
+
+class Rows(Protocol):
+    def rows(self): ...
+
+
+class Table:
+    def rows(self):
+        yield 1
+
+
+def load(source: Rows, table: Table) -> None:
+    source.rows()
+    table.rows()
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "EFF116"]);
+    let tiers: Vec<(u64, &str)> = eff116(&diags)
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(tiers, vec![(14, "heuristic"), (15, "exact")], "{diags:#?}");
+}
+
+/// The counterexamples `tests/difftest/never_iterated_counterexamples.py` runs on CPython, one
+/// or more per premise, each running the body on the input the script runs: those of Generator
+/// function (a name bound to two definitions) and Every implementation through a protocol are
+/// heuristic; a subclass's plain method, a subclass's generator function a decorator may replace,
+/// and a generator that is iterated or kept are not reported. The base shapes, which never run
+/// the body, are exact.
+#[test]
+fn counterexamples_of_each_premise_are_not_exact() {
+    let p = Project::new("eff116_counterexamples");
+    let source = std::fs::read_to_string(
+        common::repo_root().join("tests/difftest/never_iterated_counterexamples.py"),
+    )
+    .unwrap();
+    p.write("cases.py", &source);
+    let diags = diagnostics(&p, &["--select", "EFF116"]);
+    let tiers: Vec<(&str, &str)> = eff116(&diags)
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        tiers,
+        vec![
+            ("refresh", "exact"),
+            ("refresh_tested", "exact"),
+            ("refresh_bound_twice", "heuristic"),
+            ("refresh_protocol", "heuristic"),
+        ],
+        "{diags:#?}"
+    );
 }

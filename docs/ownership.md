@@ -260,7 +260,7 @@ heki reports: `rows` is a single-pass iterator already consumed at line 3, so th
 
 ### A generator that is never iterated
 
-Calling a generator function only creates the generator. Its body runs when something iterates it. `EFF116` reports a call whose generator is dropped: a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate. Tier: heuristic, experimental, opt-in ([`EFF116`](rules/generator-never-iterated.md)).
+Calling a generator function only creates the generator. Its body runs when something iterates it. `EFF116` reports a call whose generator is dropped: a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate. Tier: exact, default, a warning; its heuristic reports, where a call may run another implementation, appear with `--heuristic` ([`EFF116`](rules/generator-never-iterated.md)).
 
 ```python
 def parse_extra(text: str):

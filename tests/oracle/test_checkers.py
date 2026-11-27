@@ -99,6 +99,73 @@ def line(
     ]
 
 
+def lock(seq, lock_id, what):
+    return fake(seq, "threading.Lock.acquire", "lock", False, [lock_id, what])
+
+
+def start(seq, qualname, act=1, caller_act=0):
+    return ["start", seq, act, qualname, "app/m.py", caller_act, 3]
+
+
+class Eff109(unittest.TestCase):
+    claim = {"id": "k0", "rule": "EFF109", "site": "c0"}
+
+    def check(self, *events, outcome="ok"):
+        result = checkers.check(self.claim, [run(*events, call("c0", 2, 6, outcome))])
+        return result["checked"], [r["kind"] for r in result["refutations"]]
+
+    def test_a_wait_for_the_held_lock_confirms(self):
+        self.assertEqual(self.check(lock(1, 7, "taken"), lock(3, 7, "self"), outcome="exc"), (1, []))
+
+    def test_a_call_returning_without_the_wait_refutes(self):
+        self.assertEqual(self.check(lock(1, 7, "taken")), (1, ["returned"]))
+
+    def test_a_call_that_raised_before_the_wait_is_not_checked(self):
+        self.assertEqual(self.check(lock(1, 7, "taken"), outcome="exc"), (0, []))
+
+    def test_no_lock_held_at_the_call_refutes(self):
+        self.assertEqual(self.check(lock(1, 7, "taken"), fake(1.5, "x", "lock", False, [7, "released"])), (1, ["not-held"]))
+
+    def test_another_lock_taken_or_the_held_one_given_back_refutes(self):
+        self.assertEqual(self.check(lock(1, 7, "taken"), lock(3, 8, "taken")), (1, ["other-lock"]))
+        given = fake(3, "x", "lock", False, [7, "released"])
+        self.assertEqual(self.check(lock(1, 7, "taken"), given, lock(4, 7, "taken")), (1, ["given-back"]))
+
+
+class Eff116(unittest.TestCase):
+    claim = {"id": "k0", "rule": "EFF116", "site": "c0", "generator": "rows"}
+
+    def check(self, *events):
+        result = checkers.check(self.claim, [run(call("c0", 2, 4), *events)])
+        return result["checked"], [r["kind"] for r in result["refutations"]]
+
+    def test_a_generator_that_never_starts_confirms(self):
+        self.assertEqual(self.check(start(6, "other")), (1, []))
+
+    def test_a_body_run_by_the_call_refutes(self):
+        self.assertEqual(self.check(start(3, "inner")), (1, ["body-ran"]))
+
+    def test_the_generator_starting_later_refutes(self):
+        self.assertEqual(self.check(start(6, "rows")), (1, ["iterated"]))
+
+
+class AwaitedCalls(unittest.TestCase):
+    def test_an_awaited_call_ends_after_its_await(self):
+        import dis
+
+        async def outer(f):
+            v = await f()
+            return v
+
+        instructions = list(dis.get_instructions(outer))
+        [(call_off, (inside, after))] = monitor.awaited_calls(instructions).items()
+        by_off = {i.offset: i for i in instructions}
+        self.assertTrue(by_off[call_off].opname.startswith("CALL"))
+        self.assertIn("GET_AWAITABLE", {by_off[o].opname for o in inside})
+        self.assertEqual(max(inside) < after, True)
+        self.assertEqual(by_off[max(inside)].opname, "END_SEND")
+
+
 class Mut115(unittest.TestCase):
     claim = {
         "id": "k0",

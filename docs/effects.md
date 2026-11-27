@@ -6,14 +6,16 @@ An effect is what a call does besides returning a value: it waits on the network
 
 ## 🔍 What runs without configuration
 
-Two rules are exact and run by default. Their reports show the call chain, and an error fails `heki check`.
+Two rules are exact and run by default, and two more are exact by default and are described with the problems they belong to. Their reports show the call chain, and an error fails `heki check`.
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF101`](rules/async-blocking-call.md) | a call in an `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop, however many helpers below | exact, default |
 | [`EFF103`](rules/loop-db-query.md) | a loop over data whose every iteration sends a database statement | exact, default |
 
-`EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
+`EFF103` also has heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration). They appear with `--heuristic`.
+
+`EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](ownership.md#a-generator-that-is-never-iterated). Both are exact and run by default.
 
 One more rule runs by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because it can be wrong about the code:
 
@@ -45,16 +47,14 @@ extend-select = ["EFF105", "EFF107"]
 
 Experimental rules can change or go away between releases. [Experimental Features](experimental.md) says why each one is marked.
 
-`EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](ownership.md#a-generator-that-is-never-iterated), with the other single-use values.
-
 ## 🔒 Exclusive use and lock safety
 
-Some objects allow one user at a time: a lock, a stream reader, a database connection. These rules report code that breaks that. The opt-in ones are off until you name them in `extend-select`, for example `--extend-select EFF106`. A prefix such as `EFF` or `ALL` never enables them.
+Some objects allow one user at a time: a lock, a stream reader, a database connection. These rules report code that breaks that. The opt-in ones (`EFF106` and `EFF110`) are off until you name them in `extend-select`, for example `--extend-select EFF106`. A prefix such as `EFF` or `ALL` never enables them.
 
 ```toml
 # heki.toml
 [lint]
-extend-select = ["EFF106", "EFF109", "EFF110"]
+extend-select = ["EFF106", "EFF110"]
 ```
 
 ### An exclusive object used by tasks started together
@@ -80,7 +80,7 @@ heki reports: `FrameClient.read_frames` starts a task for every item, each using
 
 ### A lock taken again while it is held
 
-`threading.Lock` and `asyncio.Lock` are not reentrant. A method that holds the lock and calls another method that takes it waits for itself. `EFF109` reports the second take, directly or through a call. Tier: heuristic, experimental, opt-in ([`EFF109`](rules/lock-reacquired-while-held.md)).
+`threading.Lock` and `asyncio.Lock` are not reentrant. A method that holds the lock and calls another method that takes it waits for itself. `EFF109` reports the second take, directly or through a call. Tier: exact, default; its heuristic reports, where a helper takes the lock on some paths only, appear with `--heuristic` ([`EFF109`](rules/lock-reacquired-while-held.md)).
 
 ```python
 # app/m.py

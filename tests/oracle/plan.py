@@ -14,6 +14,8 @@ import re
 EXACT_RULES = (
     "EFF101",
     "EFF103",
+    "EFF109",
+    "EFF116",
     "DATA101",
     "MUT101",
     "MUT110",
@@ -478,6 +480,20 @@ class Planner:
     def _eff101(self, claim, source, pos, report):
         self._site(claim, pos)
         claim["witnesses"] = witnesses(report)
+        return True
+
+    def _eff109(self, claim, source, pos, report):
+        self._site(claim, pos)
+        return True
+
+    def _eff116(self, claim, source, pos, report):
+        # A generator handed to a library call (`threading.Thread->scan`) runs where the library
+        # calls it, which the runs do not follow.
+        target = report.get("target") or ""
+        if not target or "->" in target:
+            return False
+        self._site(claim, pos)
+        claim["generator"] = target
         return True
 
     def _eff103(self, claim, source, pos, report):

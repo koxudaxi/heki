@@ -4,7 +4,8 @@ The recorder watches the places a plan names (built by `plan.py` from heki's rep
 
 - a call site: each execution of the call is an instance, from the call instruction until control
   is back in the calling frame, either at the next instruction (it returned) or through an
-  exception;
+  exception; for a call whose value is awaited at once (`await f()`), the next instruction is
+  the one after the `await`, so the instance holds the run of the coroutine;
 - a loop: each iteration starts after the loop's `FOR_ITER` has produced an item, and completes
   when control reaches that `FOR_ITER` again; an iteration left by `break`, `return`, or an
   exception does not complete;
@@ -145,6 +146,7 @@ class CodeInfo:
         "path",
         "line_of",
         "next_off",
+        "awaits",
         "pos_of",
         "sites",
         "for_iters",
@@ -181,6 +183,7 @@ class CodeInfo:
                 self.pos_of[ins.offset] = (pos.lineno, pos.col_offset, pos.end_lineno, pos.end_col_offset)
             if i + 1 < len(instructions):
                 self.next_off[ins.offset] = instructions[i + 1].offset
+        self.awaits = awaited_calls(instructions)
         self.offsets = [ins.offset for ins in instructions]
         self.watched = False
         self._instructions = instructions
@@ -369,16 +372,33 @@ class FrameState:
         self.entries = collections.Counter()
 
 
-class CallInstance:
-    __slots__ = ("site", "act", "start", "next_off", "captures", "objects")
+def awaited_calls(instructions):
+    """For each call whose value the next instructions await (`GET_AWAITABLE` up to its
+    `END_SEND`), the offsets of the `await` and the offset after it."""
+    out = {}
+    for i, ins in enumerate(instructions[:-1]):
+        if not ins.opname.startswith("CALL") or instructions[i + 1].opname != "GET_AWAITABLE":
+            continue
+        for j in range(i + 1, len(instructions) - 1):
+            if instructions[j].opname == "END_SEND":
+                inside = frozenset(x.offset for x in instructions[i + 1 : j + 1])
+                out[ins.offset] = (inside, instructions[j + 1].offset)
+                break
+    return out
 
-    def __init__(self, site, act, start, next_off, captures, objects):
+
+class CallInstance:
+    __slots__ = ("site", "act", "start", "next_off", "captures", "objects", "awaiting")
+
+    def __init__(self, site, act, start, next_off, captures, objects, awaiting=frozenset()):
         self.site = site
         self.act = act
         self.start = start
         self.next_off = next_off
         self.captures = captures
         self.objects = objects
+        # The offsets of the `await` of the call's value: the call has not returned there.
+        self.awaiting = awaiting
 
 
 class Iteration:
@@ -947,6 +967,9 @@ class Recorder:
         if fs.open_call:
             calls, fs.open_call = fs.open_call, []
             for call in calls:
+                if offset in call.awaiting:
+                    fs.open_call.append(call)
+                    continue
                 self._end_call(call, seq, "ok" if offset == call.next_off else "exc")
         if fs.pending_for:
             pending, fs.pending_for = fs.pending_for, []
@@ -1001,8 +1024,9 @@ class Recorder:
                     value = local.get(name, MISSING)
                     if value is not MISSING:
                         objects.append(value)
+            awaiting, next_off = info.awaits.get(offset, (frozenset(), info.next_off.get(offset)))
             call = CallInstance(
-                site, fs.act, seq, info.next_off.get(offset), self._capture(frame, names), objects
+                site, fs.act, seq, next_off, self._capture(frame, names), objects, awaiting
             )
             fs.open_call.append(call)
             self.open_calls.append(call)
