@@ -75,6 +75,7 @@ fn tables() -> &'static [Table] {
                 "import-boundaries-defaults",
                 keys_of::<ImportBoundaryRule>(),
             ),
+            table("groups", None),
             table("imports", keys_of::<ImportsConfig>()),
             table("imports.module-distributions", None),
             table("ecosystem", keys_of::<EcosystemOverride>()),
@@ -108,6 +109,8 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("extend-exclude", r#"["generated"]"#),
     ("src", r#"["src"]"#),
     ("baseline", r#""heki-baseline.toml""#),
+    ("include", r#"["contracts/store.toml"]"#),
+    ("groups.*", r#"["pkg.parser.*", "pkg.cli:parse"]"#),
     ("lint.select", r#"["EFF", "MUT101"]"#),
     ("lint.extend-select", r#"["EFF105"]"#),
     ("lint.ignore", r#"["OPT110"]"#),
@@ -516,8 +519,9 @@ mod tests {
                     }
                     contract => format!("[[{contract}]]\n{line}\n"),
                 };
+                // Read, not folded: the example of `include` names a file that is not there.
                 let parsed =
-                    ConfigLayout::TopLevel.parse(Path::new("heki.toml"), &text, Path::new(""));
+                    ConfigLayout::TopLevel.read(Path::new("heki.toml"), &text, Path::new(""));
                 assert!(parsed.is_ok(), "{text}: {parsed:?}");
             }
         }

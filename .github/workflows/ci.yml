@@ -647,7 +647,7 @@ jobs:
   pre-commit-hook:
     # `.pre-commit-hooks.yaml` as a project's configuration uses it: pre-commit builds heki from
     # this checkout and runs the hook on a project with one report, then on its configuration
-    # file alone.
+    # file alone, and on a file the configuration includes alone.
     name: pre-commit hook
     needs: changes
     if: *full-run
@@ -699,6 +699,16 @@ jobs:
           # is shown.
           if hook --files pyproject.toml; then
             echo "the hook passed on pyproject.toml with an exact EFF101 error in the project" >&2
+            exit 1
+          fi
+          grep -qF "app/handler.py:5:5: EFF101 (async-blocking-call) [error]" output.txt
+          # So does a file the configuration includes, whatever its name.
+          printf '\n[tool.heki]\ninclude = ["contracts/handlers.toml"]\n' >> pyproject.toml
+          mkdir -p contracts
+          printf '[[effect-boundaries]]\nname = "handlers"\nscopes = ["app.handler"]\nforbid = ["sleep"]\n' > contracts/handlers.toml
+          git add .
+          if hook --files contracts/handlers.toml; then
+            echo "the hook passed on an included configuration file with an exact EFF101 error in the project" >&2
             exit 1
           fi
           grep -qF "app/handler.py:5:5: EFF101 (async-blocking-call) [error]" output.txt
