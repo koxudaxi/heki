@@ -17,8 +17,9 @@
 //! the facts `EFF115` reads (`OptInTables::unawaited_handoffs`).
 //!
 //! A report is exact when its premises (`crate::premises::of_rule`) are established: every
-//! function the call runs is a generator function bound once, and they are every implementation
-//! it can run ([`Generators::exact`]). Never iterated holds for every report.
+//! function the call runs is a generator function that no decorator replaces, bound once, and
+//! they are every implementation it can run ([`Generators::exact`]). Never iterated holds for
+//! every report.
 
 use crate::mut_rules::CallInst;
 use crate::{CheckContext, ModuleUnit};
@@ -298,12 +299,15 @@ impl<'k> Generators<'k> {
             .iter()
             .flatten()
             .any(|s| s.must_exec.as_deref().is_some_and(|m| m.bound_twice));
+        let as_written = summaries
+            .iter()
+            .all(|s| s.is_some_and(|s| !s.decorator_may_replace));
         Some(Self {
             name: &first.qualname,
             others: keys.len() - 1,
             is_async: decls.iter().all(|d| d.is_async),
             bound_twice,
-            exact: complete && !bound_twice && summaries.iter().all(Option::is_some),
+            exact: complete && !bound_twice && as_written,
         })
     }
 

@@ -1817,9 +1817,10 @@ fn qualname_tiers(diags: &[Value]) -> Vec<(String, String)> {
 /// The counterexamples `tests/difftest/lock_retaken_counterexamples.py` runs on CPython, one or
 /// more per premise, each returning without waiting on the input the script runs: those of
 /// Non-reentrant (a project class derived from `asyncio.Lock`), Every implementation (a
-/// decorator that may skip the body, a subclass's method), and Every return are heuristic;
-/// those of Held and Same lock are not reported. The base shape, which waits for itself, is
-/// exact.
+/// decorator that may skip the body, a subclass's method), Every return (also a class body
+/// defined on one path), and Held through a generator that suspends holding the lock are
+/// heuristic; the other counterexamples of Held and Same lock are not reported. The base shape,
+/// which waits for itself, is exact.
 #[test]
 fn eff109_counterexamples_of_each_premise_are_not_exact() {
     let p = Project::new("eff109_counterexamples");
@@ -1833,6 +1834,8 @@ fn eff109_counterexamples_of_each_premise_are_not_exact() {
         ("Store.add", "exact"),
         ("Store.add_maybe", "heuristic"),
         ("Store.add_skipped", "heuristic"),
+        ("Store.rows", "heuristic"),
+        ("add_defined", "heuristic"),
         ("Base.run", "heuristic"),
         ("Board.beat", "heuristic"),
     ];
@@ -1876,6 +1879,181 @@ class Counter(Base):
     assert_eq!(
         tiers(&diags, "counter.py"),
         vec![tier(14, "exact")],
+        "{diags:#?}"
+    );
+}
+
+/// A lock taken in the body of a class a helper defines is taken on every return of the helper
+/// only when the `class` statement runs on every return, also for a class nested in another:
+/// the helpers defining the class on one path only are heuristic, the one defining it always is
+/// exact. A class body giving back the lock its function holds leaves no report.
+#[test]
+fn eff109_takes_a_class_body_lock_on_every_return_where_the_class_statement_runs() {
+    let p = Project::new("eff109_class_body");
+    p.write(
+        "defs.py",
+        r#"import threading
+
+LOCK = threading.Lock()
+
+
+def helper(flag: bool) -> None:
+    if flag:
+        class Local:
+            with LOCK:
+                x = 1
+
+
+def nested(flag: bool) -> None:
+    class Outer:
+        if flag:
+            class Inner:
+                with LOCK:
+                    x = 1
+
+
+def always() -> None:
+    class Local:
+        with LOCK:
+            x = 1
+
+
+def run() -> None:
+    with LOCK:
+        helper(False)
+
+
+def run_nested() -> None:
+    with LOCK:
+        nested(False)
+
+
+def run_always() -> None:
+    with LOCK:
+        always()
+
+
+def gives_back() -> None:
+    with LOCK:
+        class Local:
+            LOCK.release()
+            LOCK.acquire()
+
+
+def run_given_back() -> None:
+    with LOCK:
+        gives_back()
+"#,
+    );
+    let diags = diagnostics(&p, SELECT);
+    assert_eq!(
+        tiers(&diags, "defs.py"),
+        vec![
+            tier(29, "heuristic"),
+            tier(34, "heuristic"),
+            tier(39, "exact")
+        ],
+        "{diags:#?}"
+    );
+}
+
+/// A generator holding the lock hands control to the code iterating it at a `yield` or a
+/// `yield from`, which may give the lock back before the generator resumes, and an async
+/// generator at every `await` too: a retake after one is heuristic. Before the first suspension,
+/// and in a coroutine, whose awaits run other tasks, the retake stays exact; the `await` of the
+/// holding `acquire()` itself is no suspension on the way.
+#[test]
+fn eff109_is_heuristic_after_a_generator_holding_the_lock_suspends() {
+    let p = Project::new("eff109_generators");
+    p.write(
+        "gen.py",
+        r#"import asyncio
+import threading
+
+
+class Store:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def size(self) -> int:
+        with self._lock:
+            return 1
+
+    def rows(self):
+        self._lock.acquire()
+        yield 1
+        self._lock.acquire()
+        self._lock.release()
+        yield 2
+
+    def rows_call(self):
+        with self._lock:
+            yield 1
+            self.size()
+
+    def rows_from(self):
+        with self._lock:
+            yield from range(2)
+            self.size()
+
+    def rows_first(self):
+        with self._lock:
+            self.size()
+            yield 1
+
+
+class Board:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._other = asyncio.Lock()
+
+    async def update(self) -> None:
+        async with self._lock:
+            pass
+
+    async def ticks(self):
+        async with self._lock:
+            await asyncio.sleep(0)
+            await self.update()
+        yield 1
+
+    async def ticks_yield(self):
+        async with self._lock:
+            yield 1
+            await self.update()
+
+    async def ticks_other(self):
+        async with self._lock:
+            async with self._other:
+                pass
+            await self.update()
+        yield 1
+
+    async def ticks_first(self):
+        await self._lock.acquire()
+        await self.update()
+        yield 1
+
+    async def beat(self) -> None:
+        async with self._lock:
+            await asyncio.sleep(0)
+            await self.update()
+"#,
+    );
+    let diags = diagnostics(&p, SELECT);
+    assert_eq!(
+        tiers(&diags, "gen.py"),
+        vec![
+            tier(16, "heuristic"),
+            tier(23, "heuristic"),
+            tier(28, "heuristic"),
+            tier(32, "exact"),
+            tier(48, "heuristic"),
+            tier(54, "heuristic"),
+            tier(60, "heuristic"),
+            tier(65, "exact"),
+            tier(71, "exact"),
+        ],
         "{diags:#?}"
     );
 }

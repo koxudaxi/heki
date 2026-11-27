@@ -584,8 +584,9 @@ def load(source: Rows, table: Table) -> None:
 /// The counterexamples `tests/difftest/never_iterated_counterexamples.py` runs on CPython, one
 /// or more per premise, each running the body on the input the script runs: those of Generator
 /// function (a name bound to two definitions) and Every implementation through a protocol are
-/// heuristic; a subclass's plain method and a generator that is iterated or kept are not
-/// reported. The base shapes, which never run the body, are exact.
+/// heuristic; a subclass's plain method, a subclass's generator function a decorator may replace,
+/// and a generator that is iterated or kept are not reported. The base shapes, which never run
+/// the body, are exact.
 #[test]
 fn counterexamples_of_each_premise_are_not_exact() {
     let p = Project::new("eff116_counterexamples");

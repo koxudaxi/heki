@@ -19,21 +19,22 @@
 //! A report is exact when its premises (`crate::premises::of_rule`) are established: the
 //! lock's class is one no project class changes the acquisition of ([`non_reentrant`]), and the
 //! reported call attempts the acquisition whenever it returns, through every implementation
-//! of each call on the way ([`heki_effect::ProjectIndex::site_must_take`]). Held and Same lock
-//! hold for every report: an acquisition is reported only where the lock is held on every path
-//! and both sides name it the same way.
+//! of each call on the way ([`heki_effect::ProjectIndex::site_must_take`]), and no suspension of
+//! a generator holding the lock comes between ([`Suspensions`]). Same lock holds for every
+//! report, and so does Held but for those suspensions: an acquisition is reported only where the
+//! lock is held on every path and both sides name it the same way.
 
 use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::ProjectDecls;
-use heki_effect::held;
+use heki_effect::held::{self, Change, HeldSet};
 use heki_effect::locks::{self, LockSteps, ObjRef, SiteLock, Taken};
 use heki_effect::ownership;
 use heki_effect::{EffectSummary, FuncKey, TypeCtx, anchors_call_site};
 
 use heki_ir::walk::{Answer, FnShape};
-use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
+use heki_ir::{BlockId, FunctionKind, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 
@@ -166,6 +167,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         let entry = held::at_entry(&steps.shape, steps.locks.taken.len(), |b, i| {
             steps.locks.changes.get(&(b, i))
         });
+        let suspensions = Suspensions::of(f, &steps);
         let mut reported: FxHashSet<(Span, ObjRef)> = FxHashSet::default();
         for (b, state) in entry.into_iter().enumerate() {
             let Some(mut state) = state else {
@@ -175,6 +177,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             if !steps.live.block(bb) {
                 continue;
             }
+            let mut calm = suspensions.as_ref().map(|s| s.calm[b].clone());
             for (i, inst) in f.block(bb).insts.iter().enumerate() {
                 if !state.is_empty() {
                     let own = steps.locks.takes.get(&(bb, i)).map(|lock| {
@@ -196,7 +199,13 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
                         };
                         if reported.insert((inst.span, lock.clone())) {
                             let held = (steps.locks.taken.span(k), steps.locks.taken.item(k));
+                            let calm_holds = calm.as_ref().is_none_or(|c| {
+                                c.as_ref().is_some_and(|c| {
+                                    c.ones().any(|k| steps.locks.taken.item(k).lock == lock)
+                                })
+                            });
                             let exact = retake.on_every_return
+                                && calm_holds
                                 && non_reentrant(cx.decls, &held.1.class)
                                 && non_reentrant(cx.decls, &retake.class);
                             let d = report(cx, unit, f, &key, inst.span, held, retake.chain, out);
@@ -206,9 +215,77 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
                     }
                 }
                 state.apply(steps.locks.changes.get(&(bb, i)));
+                if let (Some(s), Some(Some(c))) = (&suspensions, &mut calm) {
+                    c.apply(s.change(&steps, (bb, i)));
+                }
             }
         }
     }
+}
+
+/// Where a generator holding a lock hands control to the code iterating it, which may give the
+/// lock back before the generator resumes (the Held premise is then open): every `yield` and
+/// `yield from`, and in an async generator every `await` as well.
+struct Suspensions {
+    /// The suspension points, each giving back what is held, then taking the lock it waits for
+    /// itself, if any ([`Change::Suspend`]).
+    points: FxHashMap<(BlockId, usize), Change>,
+    /// The acquisitions held on entry to each block with no suspension since they were taken
+    /// (`None`: unreachable).
+    calm: Vec<Option<HeldSet>>,
+}
+
+impl Suspensions {
+    /// `None` for a function that does not suspend to its consumer.
+    fn of(f: &IrFunction, steps: &Steps<'_>) -> Option<Self> {
+        let awaits_count = f.kind == FunctionKind::AsyncGenerator;
+        // An awaited `acquire()` takes its lock at the call, before the `await` waiting for it.
+        let awaited_take: FxHashMap<VarId, usize> = (steps.locks.changes.iter())
+            .filter_map(|((bb, i), change)| match change {
+                Change::Take(k) => Some((f.block(*bb).insts[*i].kind.dst()?, *k)),
+                _ => None,
+            })
+            .collect();
+        let mut points = FxHashMap::default();
+        for bb in &f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                let to_consumer = matches!(
+                    inst.kind,
+                    InstKind::Yield { .. } | InstKind::YieldFrom { .. }
+                );
+                if !to_consumer && !(awaits_count && inst.kind.suspends()) {
+                    continue;
+                }
+                let take = match (&inst.kind, steps.locks.changes.get(&(bb.id, i))) {
+                    (_, Some(Change::Take(k))) => Some(*k),
+                    (InstKind::Await { value, .. }, _) => awaited_take.get(value).copied(),
+                    _ => None,
+                };
+                points.insert((bb.id, i), Change::Suspend(take));
+            }
+        }
+        if points.is_empty() {
+            return None;
+        }
+        let calm = held::at_entry(&steps.shape, steps.locks.taken.len(), |b, i| {
+            calm_change(&points, steps, (b, i))
+        });
+        Some(Self { points, calm })
+    }
+
+    /// What instruction `at` does to the acquisitions held with no suspension since.
+    fn change<'s>(&'s self, steps: &'s Steps<'_>, at: (BlockId, usize)) -> Option<&'s Change> {
+        calm_change(&self.points, steps, at)
+    }
+}
+
+/// [`Suspensions::change`], from its suspension points.
+fn calm_change<'s>(
+    points: &'s FxHashMap<(BlockId, usize), Change>,
+    steps: &'s Steps<'_>,
+    at: (BlockId, usize),
+) -> Option<&'s Change> {
+    points.get(&at).or_else(|| steps.locks.changes.get(&at))
 }
 
 /// The lock acquisitions of `f` and what each instruction does to them, the names its calls

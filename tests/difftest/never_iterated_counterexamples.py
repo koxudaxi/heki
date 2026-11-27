@@ -5,8 +5,8 @@ function whose body appends to a log; in each counterexample one premise is fals
 empty and each counterexample fills it. `crates/heki/tests/e2e_eff116.rs` asserts that heki
 reports the base shapes exact, the counterexamples of Generator function and Every
 implementation heuristic (a name bound to two definitions, a receiver typed by a protocol), and
-the others not at all (a subclass overriding the method with a plain function, a generator that
-is iterated or kept).
+the others not at all (a subclass overriding the method with a plain function, or with a
+generator function a decorator replaces, a generator that is iterated or kept).
 
 Usage: python3.15 tests/difftest/never_iterated_counterexamples.py   (exit status 0 = all hold)
 """
@@ -86,6 +86,35 @@ def refresh_subclass(source: Source) -> None:
     source.load()
 
 
+# Generator function: a subclass's generator function, which a decorator replaces with a plain
+# function iterating it.
+def eager(fn):
+    def inner(*args, **kwargs):
+        return list(fn(*args, **kwargs))
+
+    return inner
+
+
+class Feed:
+    def __init__(self) -> None:
+        self.log: list[str] = []
+
+    def load(self):
+        self.log.append("loaded")
+        yield 1
+
+
+class DrainedFeed(Feed):
+    @eager
+    def load(self):
+        self.log.append("loaded")
+        yield 1
+
+
+def refresh_decorated(feed: Feed) -> None:
+    feed.load()
+
+
 # Never iterated: the generator is iterated, or kept and stepped.
 def refresh_iterated(loader: Loader) -> None:
     for _ in loader.load():
@@ -110,6 +139,8 @@ def main() -> int:
     refresh_protocol(types.SimpleNamespace(rows=lambda: eager.append("loaded")))
     subclass = EagerSource()
     refresh_subclass(subclass)
+    drained = DrainedFeed()
+    refresh_decorated(drained)
     iterated, stepped = Loader(), Loader()
     refresh_iterated(iterated)
     refresh_stepped(stepped)
@@ -117,6 +148,7 @@ def main() -> int:
         "Generator function: the plain definition": log,
         "Every implementation: an implementer outside the project": eager,
         "Every implementation: the subclass's plain method": subclass.log,
+        "Generator function: the subclass's method a decorator replaces": drained.log,
         "Never iterated: a for loop": iterated.log,
         "Never iterated: a name and next()": stepped.log,
     }

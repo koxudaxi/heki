@@ -49,10 +49,16 @@ def _raising_guard(sc):
 # ---------------------------------------------------------------------------------------------
 # EFF101 and EFF103: helpers down to a library call
 # ---------------------------------------------------------------------------------------------
-def _every_return_strip(sc, call_lines):
+EVERY_RETURN_WAYS = ["early", "handler", "suppressed", "loop", "branch"]
+
+
+def _every_return_strip(sc, call_lines, ways=EVERY_RETURN_WAYS):
     """The call on some paths only: an early return, a handler that returns, a suppressing
-    `with`, a loop that may run no time, or a branch."""
-    way = sc.pick(["early", "handler", "suppressed", "loop", "branch"])
+    `with`, a loop that may run no time, a branch, or (where `ways` has it) the body of a class
+    defined in a branch."""
+    way = sc.pick(ways)
+    if way == "class-body":
+        return block("if flag:", block(f"class {sc.name('Defined')}:", call_lines))
     if way == "early":
         return block("if flag:", ["return None"]) + call_lines
     if way == "handler":
@@ -64,9 +70,10 @@ def _every_return_strip(sc, call_lines):
     return block("if flag:", call_lines)
 
 
-def _chain(sc, leaf, strip, params, args, prefix=""):
+def _chain(sc, leaf, strip, params, args, prefix="", every_return_ways=EVERY_RETURN_WAYS):
     """Helpers one or two deep down to `leaf` (statements), one of them stripped of "Every
-    return" or "Every implementation"; returns the call of the first, from the entry module."""
+    return" (in one of `every_return_ways`) or "Every implementation"; returns the call of the
+    first, from the entry module."""
     depth = sc.rng.randint(1, 2)
     # The entry passes the receiver of a dispatched hop: it is the first hop.
     stripped_level = 0 if strip == "Every implementation" else sc.rng.randrange(depth)
@@ -75,7 +82,7 @@ def _chain(sc, leaf, strip, params, args, prefix=""):
         name = sc.name(prefix + "step")
         inner = list(leaf) if call is None else [f"v = {call}"]
         if strip == "Every return" and level == stripped_level:
-            inner = _every_return_strip(sc, inner)
+            inner = _every_return_strip(sc, inner, every_return_ways)
         if strip == "Every implementation" and level == stripped_level:
             name, call = _dispatched_hop(sc, name, inner, params, args)
             continue
@@ -1056,10 +1063,22 @@ def _holding(lock, body, way, awaits=False):
     return [acquire] + block("try:", body) + block("finally:", [f"{lock}.release()"])
 
 
-def _held_strip(sc, lock, body):
+def _held_strip(sc, lock, body, signature, args):
     """The entry's statements, with `lock` not held at the call on some input: taken on one
-    path, given back before the call, or given back by a helper (a handoff)."""
-    way = sc.pick(["one-path", "released", "helper"])
+    path, given back before the call, given back by a helper (a handoff), or held by a generator
+    making the call, which the entry has a helper of another module give back while the
+    generator is suspended."""
+    way = sc.pick(["one-path", "released", "helper", "suspended"])
+    if way == "suspended":
+        rows = sc.name("rows")
+        call = body[0].removeprefix("return ")
+        given_back = block("finally:", block(f"if {lock}.locked():", [f"{lock}.release()"]))
+        holding = [f"{lock}.acquire()"] + block("try:", ["yield None", f"yield {call}"]) + given_back
+        sc.define(block(f"def {rows}({signature}):", holding))
+        give = sc.name("give_back")
+        sc.define(block(f"def {give}(lock):", ["lock.release()"]), helper=True)
+        resume = block("if flag:", [f"{sc.ref(give, False, True)}({lock})"])
+        return [f"rows = {rows}({args})", "next(rows)", *resume, "return next(rows)"]
     if way == "one-path":
         release = block("if flag:", [f"{lock}.release()"])
         return block("if flag:", [f"{lock}.acquire()"]) + block("try:", body) + block("finally:", release)
@@ -1133,7 +1152,8 @@ def eff109(sc, strip):
     leaf = _holding(taken, ["v = 1"], sc.pick(["with", "acquire"]))
     if same_lock_way == "rebound":
         leaf = [f"global {lock}", f"{lock} = threading.Lock()", *leaf]
-    call = _chain(sc, leaf, strip, params, args, prefix="lock")
+    ways = [*EVERY_RETURN_WAYS, "class-body"]
+    call = _chain(sc, leaf, strip, params, args, prefix="lock", every_return_ways=ways)
     if by_argument:
         passed = "obj"
         if same_lock_way == "argument":
@@ -1143,10 +1163,13 @@ def eff109(sc, strip):
         sc.dispatch = (klass, [klass])
     body = [f"return {call}"]
     entry = sc.name("handle")
-    signature = sc.params
+    signature, entry_args = sc.params, CONTROLS
     if sc.dispatch:
-        signature = f"obj: {sc.dispatch[0]}, {sc.params}"
-    lines = _held_strip(sc, lock, body) if strip == "Held" else _holding(lock, body, way)
+        signature, entry_args = f"obj: {sc.dispatch[0]}, {sc.params}", f"obj, {CONTROLS}"
+    if strip == "Held":
+        lines = _held_strip(sc, lock, body, signature, entry_args)
+    else:
+        lines = _holding(lock, body, way)
     sc.define(block(f"def {entry}({signature}):", lines))
     _add_inputs(sc, entry, lambda k: [])
 
@@ -1361,6 +1384,8 @@ def generate(seed, table):
         "app/s0.py": _module_text(sc.main_imports, sc.main_defs),
         "data_s0.txt": "1\n2\nskip\n",
     }
+    if sc.helper_defs:
+        files["app/h0.py"] = _module_text(sc.helper_imports, sc.helper_defs)
     files["heki.toml"] = HEKI_TOML.format(rules=f'"{code}"')
     project = Project(seed, files, sc.entries, [f"table:{code}"])
     project.premise = {"rule": code, "stripped": strip, "premises": premises}

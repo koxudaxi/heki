@@ -243,7 +243,7 @@ fn extract_module(
                 &cell_aliases,
             )
             .run();
-            absorb_class_body(&mut summary, facts.summary, &key);
+            absorb_class_body(&mut summary, facts.summary, &key, ran);
             external.extend(facts.external);
             blind.extend(facts.blind);
             unbound.extend(facts.unbound);
@@ -422,8 +422,16 @@ where
 }
 
 /// Add the facts of a class body the function runs (`body`) to the function's own: its
-/// execution effects and the project attributes it writes and reads.
-fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncKey) {
+/// execution effects, the project attributes it writes and reads, and the locks it takes. `ran`
+/// are the function's flags of the `class` statement ([`Extractor::class_runs`]): a lock the
+/// body attempts to take whenever it returns is one the function attempts whenever it returns
+/// only when the body has returned then too, as for its calls ([`run_through`]).
+fn absorb_class_body(
+    into: &mut EffectSummary,
+    body: EffectSummary,
+    func: &FuncKey,
+    ran: OnEveryReturn,
+) {
     into.only_read_params &= body.only_read_params;
     into.join_read_kinds(&body);
     for e in &body.direct_exec_effects {
@@ -447,7 +455,11 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncK
     into.unknown_calls |= body.unknown_calls;
     add_state_changes(into, body.shared_state.as_deref());
     into.capacity_waits.extend(body.capacity_waits);
-    into.absorb_lock_facts(body.locks);
+    let mut locks = body.locks;
+    for acq in locks.iter_mut().flat_map(|l| l.acquires.values_mut()) {
+        acq.on_every_return &= ran.returned;
+    }
+    into.absorb_lock_facts(locks);
     into.absorb_exclusive_uses(body.exclusive.into_iter().flat_map(|uses| *uses));
     into.refresh_typed_field_writes(func);
 }

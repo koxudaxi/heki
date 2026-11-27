@@ -829,11 +829,12 @@ pub const NON_REENTRANT: Premise = Premise {
 
 pub const HELD: Premise = Premise {
     name: "Held",
-    states: "a `with` over the lock, or an awaited or blocking `acquire()`, holds it on every path to the reported call or inner acquisition, and nothing the holder runs on the way gives it back or binds its name",
+    states: "a `with` over the lock, or an awaited or blocking `acquire()`, holds it on every path to the reported call or inner acquisition, and nothing the holder runs on the way gives it back or binds its name, nor suspends a generator holding it",
     decided_in: &[
         "heki_effect::held::at_entry",
         "heki_effect::locks::lock_steps",
         "heki_effect::ProjectIndex::site_rebinds",
+        "heki_rules::eff_rules::lock_retaken::Suspensions",
     ],
 };
 
@@ -852,6 +853,7 @@ pub const GENERATOR_FUNCTION: Premise = Premise {
     states: "every function the call runs is a generator function (a `def` or an `async def` with `yield` in its body) whose every decorator keeps the call, and the name of each is bound to one definition",
     decided_in: &[
         "heki_effect::FunctionDecl::is_generator",
+        "heki_effect::EffectSummary::decorator_may_replace",
         "heki_effect::MustExec::bound_twice",
     ],
 };

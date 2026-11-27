@@ -190,13 +190,18 @@ impl LockFacts {
     }
 
     /// Add the facts of `other`: its acquisitions ([`add_acquisition`]), what it binds, and
-    /// what it gives back.
+    /// what it gives back, under whose names no lock is taken on every return any more.
     pub(crate) fn absorb(&mut self, other: LockFacts) {
         for (lock, acq) in other.acquires {
             add_acquisition(&mut self.acquires, lock, acq);
         }
         self.rebinds.extend(other.rebinds);
         self.gives_back.extend(other.gives_back);
+        for lock in &self.gives_back {
+            if let Some(acq) = self.acquires.get_mut(lock) {
+                acq.on_every_return = false;
+            }
+        }
     }
 }
 
