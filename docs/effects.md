@@ -25,6 +25,10 @@ One more rule runs by default only when you pass `--heuristic` (or set `lint.heu
 
 Two more rules that run the same way are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](#resource-and-cancellation-lifetimes).
 
+The knowledge base names the calls that wait. Besides `requests` and `httpx.Client`, it lists the synchronous clients of Xinference (`xinference_client.RESTfulClient` and the handles of its models) and of Supabase and PostgREST (`supabase.Client`, `postgrest.SyncPostgrestClient`): building a table query, including through `.not_`, sends nothing, and `execute()` waits for the server, so `EFF101` and `EFF103` report it there. Tier: exact, default ([`EFF101`](rules/async-blocking-call.md), [`EFF103`](rules/loop-db-query.md)).
+
+`DATA101` (exact, default, [`loop-carried-concat`](rules/loop-carried-concat.md)) also reports an array grown through `numpy.r_[...]` or `numpy.c_[...]` on every iteration (`arr = np.r_[arr, chunk]`), also when a helper returns that concatenation (`arr = grow(arr, chunk)`), as it does for `numpy.hstack`.
+
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
 
 ## 🔧 Rules to switch on
@@ -169,7 +173,7 @@ Work around a resource can end early. A cancelled task stops at its next checkpo
 
 ### Cleanup that stops at a cancellation checkpoint
 
-A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. Tier: heuristic, runs with `--heuristic` ([`EFF118`](rules/unshielded-cleanup-checkpoint.md)).
+A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. A shield is a `CancelScope` with `shield=True` by the public name (`anyio.CancelScope`) or by the path that defines it (`anyio._core._tasks.CancelScope`). Tier: heuristic, runs with `--heuristic` ([`EFF118`](rules/unshielded-cleanup-checkpoint.md)).
 
 ```python
 # app/m.py
