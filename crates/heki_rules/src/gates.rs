@@ -88,7 +88,8 @@ pub(crate) fn add_contract_facts(
 }
 
 /// Where the configuration defines the contracts of `d`, of `kind`: each contract, then the
-/// entry of its lists whose text is the report's target, when one is.
+/// entry of its lists the access matched ([`Diagnostic::contract_entries`]), or else the one
+/// whose text is the report's target, when one is.
 fn contract_locations(config: &HekiConfig, kind: &str, d: &Diagnostic) -> Vec<ContractLocation> {
     let sources = &config.sources;
     let mut out = Vec::new();
@@ -103,10 +104,20 @@ fn contract_locations(config: &HekiConfig, kind: &str, d: &Diagnostic) -> Vec<Co
             unnamed => unnamed,
         };
         out.push(location(table, label));
-        if let Some((key, at)) = sources.entry_named(kind, c, &d.target) {
+        let matched = (d.contract_entries.iter())
+            .find(|e| e.contract as usize == c)
+            .map(|e| {
+                let at = sources.entry_at(kind, c, e.key, e.position as usize);
+                at.map(|(text, at)| (e.key, text, at))
+            });
+        let entry = matched.unwrap_or_else(|| {
+            let (key, at) = sources.entry_named(kind, c, &d.target)?;
+            Some((key, d.target.as_str(), at))
+        });
+        if let Some((key, text, at)) = entry {
             let group = (at.place.group.as_ref())
                 .map_or_else(String::new, |g| format!(" from group `{g}`"));
-            let message = format!("`{key}` entry `{}`{group}", d.target);
+            let message = format!("`{key}` entry `{text}`{group}");
             out.push(location(at, message));
         }
     }

@@ -495,7 +495,7 @@ allowed-writers = ["@store"]
 
 ### Where a contract is defined
 
-Every contract report points at the contract it is of and at the entry its target names (JSON
+Every contract report points at the contract it is of and at the entry its access matched (JSON
 `contract_locations`, SARIF related locations, and the language server's related information:
 [Output formats](output-formats.md#where-a-contract-report-points)), and every
 [entry that matches nothing](#entries-that-match-nothing) is warned about with its place and its

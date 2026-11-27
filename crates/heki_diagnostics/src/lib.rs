@@ -61,6 +61,29 @@ pub struct ContractLocation {
     pub message: String,
 }
 
+/// The entry of a contract that the access of a report matched: the key of the contract's table
+/// whose list holds it and its place in that list, in configuration order (an `@group` entry
+/// stands for the entries the group writes out there).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContractEntry {
+    /// The contract, as [`Diagnostic::contracts`] gives it.
+    pub contract: u32,
+    pub key: &'static str,
+    pub position: u32,
+}
+
+impl ContractEntry {
+    #[must_use]
+    pub fn new(contract: usize, key: &'static str, position: usize) -> Self {
+        let place = |p: usize| u32::try_from(p).unwrap_or(u32::MAX);
+        Self {
+            contract: place(contract),
+            key,
+            position: place(position),
+        }
+    }
+}
+
 /// A public project function that does what a contract report shows from a place its contract
 /// allows, and the file defining it (the report's help names it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -208,6 +231,13 @@ pub struct Diagnostic {
     /// other rules; written by no output format.
     #[serde(skip)]
     pub contracts: Vec<u32>,
+    /// For each of [`Self::contracts`] whose entry the access matched by its pattern rather than
+    /// by the entry's text (`EFF201`, `MUT208`, `IMP201`), that entry: the first the access
+    /// matches, as the report's target names it. [`Self::contract_locations`] points at it, and
+    /// at the entry whose text is the target for the other contracts. Written by no output
+    /// format.
+    #[serde(skip)]
+    pub contract_entries: Vec<ContractEntry>,
     /// The public project functions that do what a contract report shows from a place its
     /// contract allows, at most three, by fully qualified name: its help names them. Empty for the other
     /// reports and when there is none; written to JSON only when not empty.
@@ -1462,6 +1492,7 @@ mod tests {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            contract_entries: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
             key_target: None,

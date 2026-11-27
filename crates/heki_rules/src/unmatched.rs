@@ -889,7 +889,9 @@ pub(crate) fn unmatched_entries(
             };
             let sources = &cx.config.sources;
             let place = sources.place(kind, key.index, name, position);
-            let defined = sources.entry_at(kind, key.index, name, position);
+            let defined = sources
+                .entry_at(kind, key.index, name, position)
+                .map(|(_, at)| at);
             for &at in at.iter() {
                 let found = &mut found[at];
                 if found.contracts.last() != Some(&key.contract) {

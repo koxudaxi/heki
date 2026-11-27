@@ -570,6 +570,7 @@ mod tests {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            contract_entries: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
             key_target: None,
