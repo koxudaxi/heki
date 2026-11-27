@@ -676,6 +676,20 @@ binds it on the class, and reading it runs no hook. A dataclass that is not froz
 code holding an instance stores, through receivers heki may not type, and so does not keep its
 fields.
 
+What every module binds to the read-only container fields of such classes is a declaration of
+its own (`ModuleDecls::field_values`, completed against pass 1): for each call making an
+instance (exactly the class, a class object that may be a subclass, or a copy replacing fields:
+`dataclasses.replace`, `copy.replace`, a named tuple's `_replace`), whether the value bound to
+each field may change in place. A value of a class of the container families that rejects every
+change (`ContainerFamily::rejects_changes`: `tuple`, `frozenset`, `str`, `range`, `frozendict`,
+`types.MappingProxyType`) cannot; a mutable container, a value of unknown class, a default, or a
+call unpacking `*` or `**` may. Only the functions calling a name the module binds to such a
+class or copy, a name it does not bind, or `_replace` are inferred for it. The declarations join
+the modules' values by class and field (`ProjectDecls::field_rejects_changes`, a key per field in
+the read log, compared across an update like the stores into other modules): a field of a class
+whose family below it holds what its constructions give, which some call makes, and every value
+of which rejects changes, holds no object an in-place change can change (`MUT108`).
+
 A scope nested in a function (a comprehension or generator expression with a scope of its own, a
 lambda, a nested function or class) reads the function's variables through their closure cells.
 A cell holds every value the function binds to the variable, its parameter's and each
