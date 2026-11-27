@@ -3689,16 +3689,12 @@ impl<'a> Extractor<'a> {
         {
             return any;
         }
-        // A comprehension's own scope is the one function it calls.
-        let child_scope = call.method.is_none() && call.callee_var.is_none();
         let span = self.f.block(at.0).insts.get(at.1).map(|i| i.span);
         let library = |symbol: &str, recv| {
             self.library_call_runs_project_code(symbol, span, recv, args, kwargs, call.star, false)
         };
         match self.callees.get(&at)? {
-            Callee::Project(..) => {
-                (!child_scope && !self.targets_complete_at(at)).then_some(KeptRemovalKind::Any)
-            }
+            Callee::Project(..) => (!self.targets_complete_at(at)).then_some(KeptRemovalKind::Any),
             Callee::External(symbol) => {
                 // Calling an instance runs its class's `__call__`: the instance is its receiver.
                 let recv = recv.or(call.callee_var.filter(|_| symbol.ends_with(".__call__")));
@@ -9752,6 +9748,7 @@ fn role_site(
     flags: Option<(bool, bool)>,
 ) -> CallSite {
     let (is_awaited, drives) = flags.unwrap_or((false, false));
+    let runs_bodies_here = matches!(role, SiteRole::Iterate | SiteRole::Call);
     CallSite {
         caller: site.caller.clone(),
         target: site.target.clone(),
@@ -9784,7 +9781,9 @@ fn role_site(
         state_tests: site.state_tests.clone(),
         locks: site.locks,
         shield: site.shield,
-        complete: false,
+        // An iterated generator or an awaited coroutine runs, there, the bodies of the call's
+        // targets: the call's targets are theirs.
+        complete: runs_bodies_here && site.complete,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
         module_member: None,

@@ -2608,7 +2608,9 @@ pub struct CallSite {
     /// is no protocol, every member of a union resolves, and no project subclass's
     /// implementation is missing; for a read that runs property getters, every class the
     /// object may be finds one of them first (`TypeCtx::getter_targets_complete`). Computed
-    /// with [`Self::on_every_return`].
+    /// with [`Self::on_every_return`]. A site where the call's result is iterated or awaited has
+    /// the call's: the bodies it runs there are its targets'. A comprehension in a frame of its
+    /// own (`__comp_<id>`) and a generator expression run the code written there.
     pub complete: bool,
     /// Whether the caller has made the call whenever it returns normally (computed when an
     /// enabled rule reads [`EffectSummary::must_exec`]).
@@ -3360,9 +3362,10 @@ impl OptInFacts {
         dispatch: false,
     };
 
-    /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
+    /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`]
+    /// (`EFF114` builds its cycles over complete calls).
     pub fn site_paths(self) -> bool {
-        self.must_effects || self.kept_values
+        self.must_effects || self.kept_values || self.call_cycles
     }
 }
 

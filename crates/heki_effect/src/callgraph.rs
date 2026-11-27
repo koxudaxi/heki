@@ -275,10 +275,13 @@ fn store_fresh_return(index: &mut ProjectIndex, func: &FuncKey, fact: Option<Fre
 }
 
 /// The propagation nodes on a call cycle ([`CallCycle`]): the members of the components, over
-/// the calls whose callee's body runs on the caller's stack ([`body_runs_on_stack`]), of more
-/// than one node or with a call of the node itself. A cycle lies within the region a
-/// propagation recomputes: the region holds every function sharing a cycle with an edited one,
-/// and every caller of a changed one, each member of its cycle included.
+/// the calls whose targets are every implementation they can run ([`CallSite::complete`]) and
+/// whose callee's body runs on the caller's stack ([`body_runs_on_stack`]), of more than one
+/// node or with a call of the node itself. A target taken from a name alone (a receiver typed by
+/// a protocol, a union member that does not resolve) closes no cycle: whether that function runs
+/// there is what heki does not know. A cycle lies within the region a propagation recomputes:
+/// the region holds every function sharing a cycle with an edited one, and every caller of a
+/// changed one, each member of its cycle included.
 fn on_call_cycles(
     index: &ProjectIndex,
     out: &OutSites,
@@ -293,7 +296,7 @@ fn on_call_cycles(
                 let runs = index
                     .summary(&c.callee)
                     .is_some_and(|callee| body_runs_on_stack(site, callee));
-                if let (true, Some(&j)) = (runs, pos.get(&c.callee)) {
+                if let (true, Some(&j)) = (runs && site.complete, pos.get(&c.callee)) {
                     succ[i].push(j);
                 }
             }

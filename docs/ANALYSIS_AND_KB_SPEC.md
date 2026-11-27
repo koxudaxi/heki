@@ -2607,12 +2607,19 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    into a value.
    - A function is on a call cycle when it is a member of a component, of more than one node or
      with a call of itself, of the propagation region's call graph restricted to the calls whose
-     callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that runs at
-     the call, not a coroutine only created or a generator only made, or a generator iterated
-     there; never a callable run on a worker thread). The components are computed once per
-     propagation; a region always holds every member of a cycle it touches (an edit's region
-     holds every function sharing a cycle with it, a caller region every caller of a changed
-     function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
+     targets are every implementation they can run (`CallSite::complete`: a target found only by
+     its name, such as a member of a protocol the receiver is typed with, closes no cycle) and
+     whose callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that
+     runs at the call, not a coroutine only created or a generator only made, or a generator
+     iterated there; never a callable run on a worker thread). A site where a call's result is
+     iterated or awaited has the call's completeness, and a generator expression's site and a
+     comprehension's frame (`__comp_<id>`, before Python 3.12) are complete (they run the code
+     written there), so a recursion through `max(f(v) for v in xs)`, `max([f(v) for v in xs])`,
+     or `pending = f(v); await pending` keeps its cycle. The
+     way down from a `try` body to a cycle (`Reaches`) still follows every candidate. The
+     components are computed once per propagation; a region always holds every member of a
+     cycle it touches (an edit's region holds every function sharing a cycle with it, a caller
+     region every caller of a changed function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
      whose delivered callee facts reach one (joined during propagation like the other facts, so
      a generator's or a returned generator's iteration counts where it runs), and takes part in
      Early Cutoff.

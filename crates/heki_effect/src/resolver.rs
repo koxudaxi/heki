@@ -11075,6 +11075,11 @@ impl<'a> TypeCtx<'a> {
                 let callee = self.resolve_method(recv, method);
                 self.method_targets_complete(recv, method, &callee)
             }
+            // A comprehension in a frame of its own (before Python 3.12) runs the code written
+            // there and no other.
+            InstKind::Call {
+                callee_var, callee, ..
+            } if heki_ir::comprehension_id(*callee_var, callee).is_some() => true,
             InstKind::Call { callee_var, .. } => {
                 let value = callee_var.and_then(&val);
                 let callee = self.resolve_call(value);
@@ -11087,6 +11092,10 @@ impl<'a> TypeCtx<'a> {
                     Some(Callee::Project(keys, _)) if self.getter_targets_complete(recv, attr, &keys)
                 )
             }
+            // A generator expression runs the code written there and no other.
+            InstKind::MakeGenExpr {
+                func_id: Some(_), ..
+            } => true,
             // A subscript of an object the code names (`numpy.r_[...]`) runs the library's
             // `__getitem__`, unless the project binds the name to another object.
             InstKind::SubscriptLoad { obj, .. } => {
