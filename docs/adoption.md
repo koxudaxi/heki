@@ -28,7 +28,7 @@ Record today's findings, so that only new ones fail, and commit `heki-baseline.t
 configuration, the hook, and the CI step:
 
 ```console
-$ uvx heki==0.9.0 check --baseline heki-baseline.toml --update-baseline
+$ uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline
 ```
 
 ```toml
@@ -41,14 +41,14 @@ baseline = "heki-baseline.toml"
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.9.0
+    rev: v0.10.0
     hooks:
       - id: heki   # heki check --touched on the staged files
 ```
 
 ```yaml
 # A step of the CI job, with uv installed
-- run: uvx heki==0.9.0 check
+- run: uvx heki==0.10.0 check
 ```
 
 The hook shows the reports in and through the staged files, and every regression of the
@@ -177,7 +177,7 @@ fail = true
 - `fail = true` makes the reports of that contract fail the run and leaves every other warning
   and heuristic report advisory. `fail-on = "warning"` would fail on all of them, which a project
   that wants that can still set. Record today's findings in the baseline first
-  (`uvx heki==0.9.0 check --update-baseline`), so that only new ones fail.
+  (`uvx heki==0.10.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
 - A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
   review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
@@ -357,7 +357,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.9.0
+    rev: v0.10.0
     hooks:
       - id: heki
 ```
@@ -378,7 +378,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki==0.9.0 check --touched
+            entry: uvx heki==0.10.0 check --touched
             language: system   # needs uv on PATH
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
@@ -398,7 +398,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: heki check --touched
             language: python
-            additional_dependencies: [heki==0.9.0]
+            additional_dependencies: [heki==0.10.0]
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
@@ -443,14 +443,14 @@ the run now.
 === "GitHub Actions annotations"
 
     ```yaml
-    - run: uvx heki==0.9.0 check --output-format github
+    - run: uvx heki==0.10.0 check --output-format github
     ```
 
 === "Code scanning (SARIF)"
 
     ```yaml
     # The job needs `permissions: security-events: write`.
-    - run: uvx heki==0.9.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
+    - run: uvx heki==0.10.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
     - uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: heki.sarif
@@ -473,7 +473,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.9.0 check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.10.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
