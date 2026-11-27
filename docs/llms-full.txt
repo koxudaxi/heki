@@ -4069,7 +4069,9 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   files below the project root (`heki check pkg/stores`) would find unmatched the entries naming
   code in the others. A file given is checked in its project, so its run judges. With the key
   set, every run judges the files it analyzes.
-- An entry written in a file `include` lists, or in a group, is named with where it is written:
+- An entry written in a file `include` lists, or in a group, is judged as one written in the
+  contract (braces first, a glob holder by its written-out prefix), and is named with where it
+  is written:
   ``warning: `allowed-writers` entry `pkg.store.gone` of write-owners `fields` (from group `store`
   at contracts/store.toml:3) names no function or method in the analyzed files``. A group that no
   contract uses is reported under the same setting:

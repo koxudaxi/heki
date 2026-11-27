@@ -1038,6 +1038,85 @@ allowed-callers = [
     );
 }
 
+const FOLDED_MAIN: &str = r#"[project]
+name = "t"
+
+[tool.heki]
+include = ["contracts/more.toml"]
+
+[tool.heki.lint]
+select = ["MUT204", "IMP201"]
+unmatched-contract-entries = "error"
+
+[tool.heki.groups]
+callers = ["pkg.store:outer{,.*}", "pkg.store:{outr,outter}", "pkg.zz.*:*", "pkg.gone.*:*"]
+
+[[tool.heki.call-owners]]
+name = "main"
+targets = ["pkg.store:Base.op"]
+allowed-callers = ["pkg.store:run", "@callers"]
+"#;
+
+const FOLDED_INCLUDED: &str = r#"[groups]
+stale = ["pkg.store:{run,gone}"]
+more-callers = [
+    "pkg.{store,gone}:run",
+    "pkg.zz.*:*",
+    "pkg.gone_dir.*:*",
+]
+modules = ["pkg.{store,gone_m}", "pkg.gone_pkg.*"]
+
+[[call-owners]]
+name = "included"
+targets = ["pkg.store:{run,gone}"]
+allowed-callers = ["pkg.store:Base.{op,c}", "pkg.zz{,.*}:*", "pkg.gone{,.*}:*", "@more-callers"]
+
+[[import-boundaries]]
+name = "imports"
+importers = ["@modules"]
+allowed-imports = ["os"]
+"#;
+
+/// An entry a group or an included file writes into a contract is judged as one written in the
+/// contract: its braces taken first, a glob holder by its written-out prefix, a module pattern
+/// by its first name. The line names the group and the file and line of the entry, and a group
+/// no contract uses is reported without judging its entries.
+#[test]
+fn entries_from_groups_and_included_files_are_judged_alike() {
+    let p = braces_project("unmatched_folded", "[]", "");
+    p.write("pyproject.toml", FOLDED_MAIN)
+        .write("contracts/more.toml", FOLDED_INCLUDED);
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(
+        lines(&stderr, "error: "),
+        [
+            "the group `stale` (contracts/more.toml:2) is used by no contract",
+            "`allowed-callers` entry `pkg.store:{outr,outter}` of call-owners `main` (from group `callers` at pyproject.toml:12) lists `pkg.store:outr` and `pkg.store:outter`, which name no function or method in the analyzed files; `pkg.store:outer` exists",
+            "`allowed-callers` entry `pkg.gone.*:*` of call-owners `main` (from group `callers` at pyproject.toml:12) names no function or method in the analyzed files",
+            "`targets` entry `pkg.store:{run,gone}` of call-owners `included` (from contracts/more.toml:12) lists `pkg.store:gone`, which names no function, method, or class in the analyzed files",
+            "`allowed-callers` entry `pkg.store:Base.{op,c}` of call-owners `included` (from contracts/more.toml:13) lists `pkg.store:Base.c`, which names no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.gone{,.*}:*` of call-owners `included` (from contracts/more.toml:13) names no function or method in the analyzed files",
+            "`allowed-callers` entry `pkg.{store,gone}:run` of call-owners `included` (from group `more-callers` at contracts/more.toml:4) lists `pkg.gone:run`, which names no function or method in the analyzed files; `pkg.store:run` exists",
+            "`allowed-callers` entry `pkg.gone_dir.*:*` of call-owners `included` (from group `more-callers` at contracts/more.toml:6) names no function or method in the analyzed files",
+            "`importers` entry `pkg.{store,gone_m}` of import-boundaries `imports` (from group `modules` at contracts/more.toml:8) lists `pkg.gone_m`, which names no module in the analyzed files",
+            "`importers` entry `pkg.gone_pkg.*` of import-boundaries `imports` (from group `modules` at contracts/more.toml:8) names no module in the analyzed files",
+        ],
+        "{stdout}{stderr}"
+    );
+    let (code, json, stderr) = p.heki(&["recommend", "--output-format", "json"]);
+    assert_eq!(code, 0, "{json}{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let entry = (report["unmatched_entries"].as_array().unwrap().iter())
+        .find(|e| e["entry"] == "pkg.{store,gone}:run")
+        .unwrap_or_else(|| panic!("{json}"));
+    assert_eq!(entry["alternatives"], serde_json::json!(["pkg.gone:run"]));
+    assert_eq!(
+        entry["written_at"],
+        serde_json::json!([{"file": "contracts/more.toml", "line": 4, "group": "more-callers"}])
+    );
+}
+
 const PROJECT_FIRST_CONTRACTS: &str = r#"
 [[tool.heki.effect-boundaries]]
 name = "pure"
