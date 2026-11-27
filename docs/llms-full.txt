@@ -6741,7 +6741,20 @@ Catalog lookups are exact. These contribute no effect until you add them with
   `sqlalchemy.engine.Engine`, `redis.StrictRedis` for `redis.Redis`;
 - a method the catalog does not list;
 - objects reached through subscripts or framework attributes, which have no known class:
-  `client["app"]["users"]`, Django's `Model.objects`.
+  `client["app"]["users"]`, Django's related managers (`question.choice_set`, a many-to-many
+  field read on an instance).
+
+Django's `Model.objects` is a `Manager` (a `[[class_attributes]]` row of the catalog): reading it
+on a model class, or on `cls` or `type(self)`, gives the manager Django adds to a model that
+declares none, and a name the model's body binds to a manager it declares (`objects =
+StreamManager()`, a project subclass of `models.Manager`) gives that manager's class. Its query
+methods (`get`, `count`, `get_or_create`, ...) send a statement on every call, and its lazy
+ones (`filter`, `exclude`, `all`) give a `QuerySet`. A model whose body may bind another manager
+(a call of a project function, `QuerySet.as_manager()`) has no `objects` to heki, nor does one
+whose `objects` is a manager of a class outside the project. A manager of a library class bound
+under another name (`tree = TreeManager()`) is not seen: heki takes the model to have the
+default `objects`, which Django does not add. An abstract model has no `objects` either, which
+heki does not tell from its `Meta`.
 
 ### Properties
 
