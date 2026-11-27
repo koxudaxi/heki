@@ -16,7 +16,7 @@
 //! the edits and the trial); [`Section`] is what the JSON object shows of them.
 
 use crate::premises::{Premise, READONLY_PARAMETER};
-use crate::project::{Indexed, parse_source};
+use crate::project::{Indexed, ParsedFile, parse_source};
 use crate::recommend::{MAX_LISTED, RecommendError};
 use crate::selection::RuleSelection;
 use heki_ast::{LineIndex, Span};
@@ -86,8 +86,8 @@ pub struct Section {
     /// The groups per kind, after the annotation trial.
     pub counts: Vec<KindCount>,
     pub type_checker: TypeChecker,
-    /// The exact groups by rank, the first 50 (`--all`: every one, and the heuristic groups
-    /// after them).
+    /// The exact groups by rank, the first 50 (`--focus types`: every one; `--all`: every one,
+    /// and the heuristic groups after them).
     pub groups: Vec<Group>,
     /// Whether `groups` holds fewer than there are.
     pub truncated: bool,
@@ -101,6 +101,13 @@ pub struct Section {
     /// `__annotations__`) outside test code: a function such code finds by scanning a module or
     /// a class is not known to heki (assumption T1).
     pub reader_sites: ReaderSites,
+}
+
+impl Section {
+    /// The exact groups and the heuristic ones, over every kind.
+    pub fn totals(&self) -> (usize, usize) {
+        (self.counts.iter()).fold((0, 0), |(e, h), c| (e + c.exact, h + c.heuristic))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -329,25 +336,33 @@ pub struct Suggestions {
     pub tried: bool,
 }
 
+/// Which groups the section lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// The first [`MAX_LISTED`] exact groups by rank; the text shows the first
+    /// [`super::MAX_EXAMPLES`] of them.
+    First,
+    /// Every exact group (`--focus types`).
+    Exact,
+    /// Every group, the heuristic ones last (`--all`).
+    Every,
+}
+
 impl Suggestions {
-    /// The JSON section: the exact groups, the first [`MAX_LISTED`] of them, or with `all` every
-    /// group.
-    pub fn section(&self, all: bool) -> Section {
+    /// The JSON section, with the groups `listing` lists.
+    pub fn section(&self, listing: Listing) -> Section {
         let exact = self
             .groups
             .iter()
             .filter(|g| g.certainty == SuggestionCertainty::Exact)
             .count();
         let heuristic = self.groups.len() - exact;
-        let groups: Vec<Group> = if all {
-            self.groups.clone()
-        } else {
-            self.groups
-                .iter()
-                .take(exact.min(MAX_LISTED))
-                .cloned()
-                .collect()
+        let listed = match listing {
+            Listing::First => exact.min(MAX_LISTED),
+            Listing::Exact => exact,
+            Listing::Every => self.groups.len(),
         };
+        let groups: Vec<Group> = self.groups.iter().take(listed).cloned().collect();
         Section {
             counts: vec![KindCount {
                 kind: READONLY_PARAMETER_KIND.to_owned(),
@@ -363,6 +378,49 @@ impl Suggestions {
             reader_sites: self.reader_sites.clone(),
         }
     }
+}
+
+/// A file the exact groups edit: its text, and the text with their edits.
+#[derive(Debug, Clone)]
+pub struct EditedFile {
+    /// As the edits name it.
+    pub path: String,
+    pub text: String,
+    pub edited: String,
+}
+
+/// The files of `files` the exact groups of `groups` edit, by path, each with the `edits` of
+/// every exact group applied as the annotation trial applies them ([`OffsetMap::apply`]).
+pub fn edited_files(
+    groups: &[Group],
+    files: &[ParsedFile],
+    shown: &dyn Fn(&Path) -> String,
+) -> Vec<EditedFile> {
+    let mut edits: FxHashMap<&str, Vec<(Span, String)>> = FxHashMap::default();
+    let exact = groups
+        .iter()
+        .filter(|g| g.certainty == SuggestionCertainty::Exact);
+    for edit in exact.flat_map(|g| &g.edits) {
+        let span = Span {
+            start: edit.span[0],
+            end: edit.span[1],
+        };
+        let of_file = edits.entry(edit.path.as_str()).or_default();
+        of_file.push((span, edit.replacement.clone()));
+    }
+    let mut edited: Vec<EditedFile> = (files.iter())
+        .filter_map(|f| {
+            let path = shown(&f.path);
+            let (text, _) = OffsetMap::apply(&f.source, edits.get(path.as_str())?);
+            Some(EditedFile {
+                path,
+                text: f.source.clone(),
+                edited: text,
+            })
+        })
+        .collect();
+    edited.sort_by(|a, b| a.path.cmp(&b.path));
+    edited
 }
 
 /// A parameter annotated with a literal container that no premise left out before grouping.
@@ -2531,21 +2589,20 @@ const LABELS: &[(&str, &str)] = &[
     ("list[str]", "a `Sequence[str]` also admits a plain `str`"),
 ];
 
-/// The section as the text prints it: the exact groups by rank, the first
-/// [`super::MAX_EXAMPLES`] of them, or with `all` every group of `section`, the heuristic ones
-/// last with the premises they leave open.
-pub(super) fn render(out: &mut String, section: &Section, all: bool) {
+/// The section as the text prints it: the groups `listing` lists, of [`Listing::First`] the
+/// first [`super::MAX_EXAMPLES`], the heuristic ones last with the premises they leave open.
+pub(super) fn render(out: &mut String, section: &Section, listing: Listing) {
     out.push_str("\nTypes the code already keeps\n");
-    let (exact, heuristic) =
-        (section.counts.iter()).fold((0, 0), |(e, h), c| (e + c.exact, h + c.heuristic));
+    let (exact, heuristic) = section.totals();
     if exact + heuristic == 0 {
         out.push_str("  No read-only parameter to suggest a type for here.\n");
         return;
     }
-    let listed_later = if heuristic > 0 && !all {
-        " (heki recommend --all lists them)"
-    } else {
-        ""
+    let listed_later = match listing {
+        _ if heuristic == 0 => "",
+        Listing::First => " (heki recommend --all lists them)",
+        Listing::Exact => " (heki recommend --focus types --all lists them)",
+        Listing::Every => "",
     };
     let _ = writeln!(
         out,
@@ -2559,13 +2616,9 @@ pub(super) fn render(out: &mut String, section: &Section, all: bool) {
             "  No type checker configuration found: half of each guard is a type checker's.\n",
         ),
     }
-    let shown: Vec<&Group> = if all {
-        section.groups.iter().collect()
-    } else {
-        (section.groups.iter())
-            .filter(|g| g.certainty == SuggestionCertainty::Exact)
-            .take(super::MAX_EXAMPLES)
-            .collect()
+    let shown: Vec<&Group> = match listing {
+        Listing::First => section.groups.iter().take(super::MAX_EXAMPLES).collect(),
+        Listing::Exact | Listing::Every => section.groups.iter().collect(),
     };
     let (exact_rows, heuristic_rows): (Vec<&Group>, Vec<&Group>) = shown
         .iter()
@@ -2574,7 +2627,7 @@ pub(super) fn render(out: &mut String, section: &Section, all: bool) {
     if exact > exact_rows.len() {
         let _ = writeln!(
             out,
-            "    and {} more exact group(s) (heki recommend --all lists them)",
+            "    and {} more exact group(s) (heki recommend --focus types lists them)",
             exact - exact_rows.len()
         );
     }
@@ -2595,6 +2648,11 @@ pub(super) fn render(out: &mut String, section: &Section, all: bool) {
         if shown.iter().any(|g| g.labels.iter().any(|l| l == label)) {
             let _ = writeln!(out, "  {label}: {means}");
         }
+    }
+    if exact > 0 {
+        out.push_str(
+            "  To apply the exact groups: heki recommend --focus types --diff | git apply\n",
+        );
     }
 }
 

@@ -1757,7 +1757,7 @@
           "type": "array"
         },
         "groups": {
-          "description": "The exact groups by rank, the first 50 (`--all`: every one, and the heuristic groups\nafter them).",
+          "description": "The exact groups by rank, the first 50 (`--focus types`: every one; `--all`: every one,\nand the heuristic groups after them).",
           "items": {
             "$ref": "#/$defs/Group"
           },

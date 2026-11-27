@@ -280,10 +280,22 @@ fn header_path(prefix: &str, path: &str) -> String {
     out
 }
 
-/// Unified diff (`--- a/<path>` / `+++ b/<path>`, 3 lines of context); empty if equal.
-pub fn unified_diff(path: &str, old: &str, new: &str, styles: &Stylesheet) -> String {
+/// Unified diff (`--- a/<path>` / `+++ b/<path>`, 3 lines of context) of a source file's text
+/// and its new text, as the bytes a patch tool compares with the file: the lines in the encoding
+/// the old text declares (PEP 263), as `--fix` writes the file, and the header in UTF-8. Empty
+/// if equal.
+pub fn unified_diff(path: &str, old: &str, new: &str, styles: &Stylesheet) -> Vec<u8> {
+    let (header, hunks) = diff_text(path, old, new, styles);
+    // The hunks stay UTF-8 only when the declared encoding cannot hold them, and then `--fix`
+    // refuses to write the file too.
+    let lines = heki_ast::encode_like(old, &hunks).unwrap_or_else(|_| hunks.into_bytes());
+    [header.into_bytes(), lines].concat()
+}
+
+/// The header and the hunks of [`unified_diff`] as text, both empty if equal.
+fn diff_text(path: &str, old: &str, new: &str, styles: &Stylesheet) -> (String, String) {
     if old == new {
-        return String::new();
+        return (String::new(), String::new());
     }
     let a: Vec<&str> = old.split_inclusive('\n').collect();
     let b: Vec<&str> = new.split_inclusive('\n').collect();
@@ -295,11 +307,12 @@ pub fn unified_diff(path: &str, old: &str, new: &str, styles: &Stylesheet) -> St
         .filter(|(_, o)| !matches!(o, Op::Equal(..)))
         .map(|(i, _)| i)
         .collect();
-    let mut out = format!(
+    let header = format!(
         "--- {}\n+++ {}\n",
         paint(styles.deletion, header_path("a/", path)),
         paint(styles.insertion, header_path("b/", path))
     );
+    let mut out = String::new();
     let mut i = 0;
     while i < changed.len() {
         let start = changed[i].saturating_sub(CONTEXT);
@@ -348,13 +361,18 @@ pub fn unified_diff(path: &str, old: &str, new: &str, styles: &Stylesheet) -> St
             }
         }
     }
-    out
+    (header, out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use heki_ast::Span;
+
+    /// [`unified_diff`] as text, uncolored.
+    fn text_diff(path: &str, old: &str, new: &str) -> String {
+        String::from_utf8(unified_diff(path, old, new, &Stylesheet::plain())).unwrap()
+    }
 
     fn edit(start: u32, end: u32, r: &str) -> TextEdit {
         TextEdit {
@@ -446,7 +464,7 @@ mod tests {
                 }
             })
             .collect();
-        let d = unified_diff("big.py", &old, &new, &Stylesheet::plain());
+        let d = text_diff("big.py", &old, &new);
         assert_eq!(d.lines().filter(|l| l.starts_with('-')).count(), 5_001);
         assert_eq!(d.lines().filter(|l| l.starts_with('+')).count(), 5_001);
     }
@@ -474,25 +492,25 @@ mod tests {
     fn unified_diff_hunks() {
         let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
         let new = "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nk";
-        let d = unified_diff("m.py", old, new, &Stylesheet::plain());
+        let d = text_diff("m.py", old, new);
         assert_eq!(
             d,
             "--- a/m.py\n+++ b/m.py\n@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n d\n e\n@@ -8,3 +8,4 @@\n h\n i\n j\n+k\n\\ No newline at end of file\n"
         );
-        assert_eq!(unified_diff("m.py", old, old, &Stylesheet::plain()), "");
-        let ins = unified_diff("m.py", "x\n", "y\nx\n", &Stylesheet::plain());
+        assert_eq!(text_diff("m.py", old, old), "");
+        let ins = text_diff("m.py", "x\n", "y\nx\n");
         assert_eq!(ins, "--- a/m.py\n+++ b/m.py\n@@ -1,1 +1,2 @@\n+y\n x\n");
-        let all = unified_diff("m.py", "", "z\n", &Stylesheet::plain());
+        let all = text_diff("m.py", "", "z\n");
         assert_eq!(all, "--- a/m.py\n+++ b/m.py\n@@ -0,0 +1,1 @@\n+z\n");
         // Names a patch tool would misread are quoted the way `git diff` quotes them.
-        let quoted = unified_diff("x\\\"y\tz\u{1}.py", "a\n", "b\n", &Stylesheet::plain());
+        let quoted = text_diff("x\\\"y\tz\u{1}.py", "a\n", "b\n");
         assert!(
             quoted.starts_with(
                 "--- \"a/x\\\\\\\"y\\tz\\001.py\"\n+++ \"b/x\\\\\\\"y\\tz\\001.py\"\n"
             ),
             "{quoted}"
         );
-        let line_breaks = unified_diff("one\ntwo\r.py", "a\n", "b\n", &Stylesheet::plain());
+        let line_breaks = text_diff("one\ntwo\r.py", "a\n", "b\n");
         assert!(
             line_breaks.starts_with("--- \"a/one\\ntwo\\r.py\"\n+++ \"b/one\\ntwo\\r.py\"\n"),
             "{line_breaks}"

@@ -511,6 +511,14 @@ Options:
       --all
           Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones), and every rule without reports by name
 
+      --focus <FOCUS>
+          Print one section in full, alone: `types`, the suggestions with every exact group (with `--all`, the heuristic ones too). The JSON object keeps every field
+          
+          [possible values: types]
+
+      --diff
+          With `--focus types`, print the exact suggestion groups as one unified diff that `git apply` or `patch -p1` applies, in place of the report: annotations and the imports they need, nothing else. Writes no file
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -558,10 +566,14 @@ Exit codes:
 Examples:
   heki recommend
       advice for the project in the working directory
+  heki recommend --focus types
+      every standard type the code already keeps, as suggestions
 
 Output for programs:
   heki recommend --output-format json
       the advice as one object
+  heki recommend --focus types --diff | git apply
+      the exact suggestions as one unified diff of annotations
   heki recommend --output-format-json-schema
       the JSON Schema of that object
 ```

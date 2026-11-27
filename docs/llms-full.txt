@@ -1416,7 +1416,8 @@ naive rewrite are run on CPython: see [Development](https://heki.koxudaxi.dev/de
 | `\n`, `\r\n`, or lone `\r` line breaks | Fixes work the same, and the lines they insert use the file's own line break. |
 
 `--diff` prints the paths every other output format prints (relative to the working directory),
-so `patch -p1` applies it where heki ran.
+so `patch -p1` applies it where heki ran. It writes the lines in the file's own encoding (a
+PEP 263 Latin-1 declaration included), as `--fix` writes the file, so the patch matches its bytes.
 
 ## Fixes keep type checkers and isort satisfied
 
@@ -1489,7 +1490,9 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
 shows every block of contracts, where the report shows the first 3 of each kind, lists up
 to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5, lists every
 suggestion group, the heuristic ones too, where the text lists the first 3 exact ones, and names
-every rule without reports.
+every rule without reports. `--focus types` prints the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions) alone, with
+every exact group, and `--focus types --diff` prints them as a patch
+([below](https://heki.koxudaxi.dev/recommend/#applying-the-suggestions)).
 
 ## What it prints
 
@@ -1505,10 +1508,11 @@ every rule without reports.
 - **Types the code already keeps**: the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions), counted exact and
   heuristic, and whether heki found a type checker's configuration (without one, half of each
   guard is missing). The first 3 exact groups by rank are listed, each on one line with its
-  place, function and parameter, the annotation now and as proposed, and its labels; `--all`
-  lists every group, the heuristic ones last with the premises they leave open. The lines under
-  them say what each group states, what reports a later change of the type it writes, and what
-  each label shown means. The edits are in the JSON object; none of it enters the block.
+  place, function and parameter, the annotation now and as proposed, and its labels;
+  `--focus types` lists every exact group, and `--all` every group, the heuristic ones last with
+  the premises they leave open. The lines under them say what each group states, what reports a
+  later change of the type it writes, what each label shown means, and the command that applies
+  the exact groups. The edits are in the JSON object; none of it enters the block.
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -1865,6 +1869,7 @@ Types the code already keeps
   Each group states that the parameter itself is never changed, in its function and in every function it is handed to, and that it does not leave them. The edits of a group go together; --output-format json has them.
   After the edit, a type checker reports a change of the parameter in the function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports handing it to a function without annotations that changes it.
   public: a name without a leading underscore along it; callers, overriders, and implementers outside the checked files are not known
+  To apply the exact groups: heki recommend --focus types --diff | git apply
 
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
@@ -1981,6 +1986,26 @@ When the claim holds and only a premise of the edit is open, the group is heuris
 (`[tool.ty]`, `ty.toml`, `[tool.mypy]`, `mypy.ini`, `[tool.pyright]`, `pyrightconfig.json`,
 `[tool.pyrefly]`): half of each guard is the type checker's, the other half `MUT110`.
 
+### Applying the suggestions
+
+`heki recommend --focus types` prints the header and "Types the code already keeps" alone, with
+every exact group; `--all` adds the heuristic ones. The analysis is the same as without it, so
+the groups are too, and with `--output-format json` the object keeps every field, its
+`suggestions.groups` holding every exact group past the cap of 50.
+
+```console
+$ heki recommend --focus types --diff | git apply
+```
+
+`--diff` prints the exact groups as one unified diff with the paths `heki check --diff`
+prints, so `git apply` or `patch -p1` applies it from the same directory. It changes
+annotations and adds the imports they name, nothing else: the edits of the JSON object, applied
+as the annotation trial applied them. Each file keeps its line breaks and its declared encoding.
+A heuristic group is never in it, and the diff is empty when no group is exact. The command
+still writes nothing and exits with `0` (`2` when a file cannot be read or parsed); the count of
+the groups goes to standard error. Run the project's formatter and type checker afterwards, as
+after any `heki check --fix`.
+
 ## JSON output
 
 `--output-format json` prints one object, described by the JSON Schema at
@@ -2003,7 +2028,7 @@ changes meaning.
 | `contracts` | each block the configuration block declares, the first 3 of each kind (`--all`: every one): its kind, its targets (or the packages and modules of its scopes), the candidates it stands for, its entry, confidence, evidence, what the trial reported for its candidates, the class patterns tried with what the pattern trial reported and whether the block names them, and caveats |
 | `contracts_not_shown` | per kind, the blocks past the first 3 and the candidates they stand for |
 | `contract_blockers` | the sites of accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`: how many, the first 5 (`--all`: 50) with the rule, path, line, function, the report as `heki check` writes it, and the candidates and blocks each holds back, and whether the list is cut |
-| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
+| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--focus types`: every exact one; `--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
 | `rejected_contracts` | the candidates a run reported for, each alone, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
 | `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, the names a `{...}` group of it lists that name nothing (`alternatives`, when it lists several), and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
@@ -5503,6 +5528,14 @@ Options:
       --all
           Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones), and every rule without reports by name
 
+      --focus <FOCUS>
+          Print one section in full, alone: `types`, the suggestions with every exact group (with `--all`, the heuristic ones too). The JSON object keeps every field
+          
+          [possible values: types]
+
+      --diff
+          With `--focus types`, print the exact suggestion groups as one unified diff that `git apply` or `patch -p1` applies, in place of the report: annotations and the imports they need, nothing else. Writes no file
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -5550,10 +5583,14 @@ Exit codes:
 Examples:
   heki recommend
       advice for the project in the working directory
+  heki recommend --focus types
+      every standard type the code already keeps, as suggestions
 
 Output for programs:
   heki recommend --output-format json
       the advice as one object
+  heki recommend --focus types --diff | git apply
+      the exact suggestions as one unified diff of annotations
   heki recommend --output-format-json-schema
       the JSON Schema of that object
 ```
