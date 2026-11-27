@@ -8417,16 +8417,14 @@ fn the_kinds_of_read_join_through_cycles_and_long_chains_once() {
     assert_eq!(h0["only_reads"]["reads"]["xs"], json!(["item access"]));
 }
 
-/// `aliases` type aliases of a subscript and a union each, one alias of a union wider than the
-/// bound of parts, and a function casting a value to a subscript `aliases` times and once to a
-/// union doubling its text in each of `DOUBLINGS` links: each type expression is spelled once,
-/// the wide and the doubling union only up to their bound of parts. The wide union has a fixed
-/// width: a chain of operators as long as `aliases` overflows the 1 MiB main thread stack of a
-/// debug build on Windows. The doubling union has few enough links that its values (two a link)
-/// stay within the bound, so only the parts its text writes stop it: without that bound, its
-/// text would grow to 2^`DOUBLINGS` parts.
+/// `aliases` type aliases of a subscript and a union each, one alias of a union of `aliases`
+/// classes, wider than the bound of parts, and a function casting a value to a subscript
+/// `aliases` times and once to a union doubling its text in each of `DOUBLINGS` links: each type
+/// expression is spelled once, the wide and the doubling union only up to their bound of parts.
+/// The doubling union has few enough links that its values (two a link) stay within the bound,
+/// so only the parts its text writes stop it: without that bound, its text would grow to
+/// 2^`DOUBLINGS` parts.
 fn type_expressions(aliases: usize) -> String {
-    const WIDE: usize = 70;
     const DOUBLINGS: usize = 29;
     let mut out = vec![
         "from typing import TypeAlias, cast".to_owned(),
@@ -8442,7 +8440,7 @@ fn type_expressions(aliases: usize) -> String {
             "A{i}: TypeAlias = dict[str, list[tuple[C, int]]] | None"
         ));
     }
-    out.push(format!("Wide = {}", vec!["C"; WIDE].join(" | ")));
+    out.push(format!("Wide = {}", vec!["C"; aliases].join(" | ")));
     out.extend([
         String::new(),
         String::new(),

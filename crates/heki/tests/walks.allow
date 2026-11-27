@@ -9,6 +9,7 @@ heki_effect::callgraph::scc_closure  W2  worklist: reach, Closure, or fixpoint
 heki_effect::capacity::ParamCapacities::of  W2  worklist: fixpoint; stage-2 migration debt
 heki_effect::consumption::expand_through  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::Facts::decompose_at  W1  recursion (calls itself): Memo or Closure
+heki_effect::guards::Facts::decompose_at_node  W1  recursion (through Facts::decompose_at): Memo or Closure
 heki_effect::guards::Facts::find_tests  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::LocalGuards::repeating  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::dominated  W2  worklist: reach, Closure, or fixpoint
@@ -101,6 +102,7 @@ heki_ir::builder::FnBuilder::lower_comprehension_generators  W1  AST lowering, b
 heki_ir::builder::FnBuilder::lower_delete_target  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_display_elems  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_expr  W1  AST lowering, bounded by the IR unit budget
+heki_ir::builder::FnBuilder::lower_expr_node  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_field  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_fields  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_for  W1  AST lowering, bounded by the IR unit budget
@@ -109,14 +111,15 @@ heki_ir::builder::FnBuilder::lower_function_def  W1  AST lowering, bounded by th
 heki_ir::builder::FnBuilder::lower_handlers  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_or_pattern  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_pattern  W1  AST lowering, bounded by the IR unit budget
-heki_ir::builder::FnBuilder::lower_stmt  W1  AST lowering, bounded by the IR unit budget
+heki_ir::builder::FnBuilder::lower_pattern_node  W1  AST lowering, bounded by the IR unit budget
+heki_ir::builder::FnBuilder::lower_stmt_node  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_subscript_index  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_unpacking  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_with  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::resolve_ssa  W2  SSA construction (Braun et al.): each name resolved once per block
 heki_ir::builder::ModuleLowerer::lower_function_body  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::accumulating_updates  W2  worklist: reach, Closure, or fixpoint
-heki_ir::builder::collect_expr_bindings  W1  AST lowering, bounded by the IR unit budget
+heki_ir::builder::collect_expr_bindings_node  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::reaches_var  W2  worklist: reach, Closure, or fixpoint
 heki_ir::dominators::DominatorTree::over  W2  numbers the tree FnShape keeps, each block once
 heki_ir::facts::FnIndex::caps_on_the_way  W1  recursion (through FnIndex::implied_caps): Memo or Closure

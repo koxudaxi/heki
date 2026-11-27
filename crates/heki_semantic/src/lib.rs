@@ -740,25 +740,29 @@ impl<'a> Analyzer<'a> {
     /// The value an `if` test has when the program runs, when it is a `TYPE_CHECKING` guard:
     /// `TYPE_CHECKING` is false, `not TYPE_CHECKING` true.
     fn runtime_guard_value(&self, test: &Expr) -> Option<bool> {
-        match test {
-            Expr::Name(n) => self
-                .type_checking_names
-                .contains(n.id.as_str())
-                .then_some(false),
-            Expr::Attribute(a) => (a.attr.as_str() == "TYPE_CHECKING"
-                && matches!(a.value.as_ref(), Expr::Name(m) if self.imported_names.contains(m.id.as_str())))
-            .then_some(false),
-            Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => {
-                self.runtime_guard_value(&u.operand).map(|v| !v)
-            }
-            _ => None,
+        let mut negated = false;
+        let mut guard = test;
+        while let Expr::UnaryOp(u) = guard
+            && u.op == ast::UnaryOp::Not
+        {
+            negated = !negated;
+            guard = &u.operand;
         }
+        let type_checking = match guard {
+            Expr::Name(n) => self.type_checking_names.contains(n.id.as_str()),
+            Expr::Attribute(a) => {
+                a.attr.as_str() == "TYPE_CHECKING"
+                    && matches!(a.value.as_ref(), Expr::Name(m) if self.imported_names.contains(m.id.as_str()))
+            }
+            _ => false,
+        };
+        type_checking.then_some(negated)
     }
 
     /// The names an assignment binds, for [`Self::note_guard_binding`]: `TYPE_CHECKING = False`
     /// holds the guard's run-time value.
     fn note_assignment_guards(&mut self, target: &Expr, value: Option<&Expr>) {
-        match target {
+        heki_ast::ensure_sufficient_stack(|| match target {
             Expr::Name(n) => {
                 let false_flag = n.id.as_str() == "TYPE_CHECKING"
                     && matches!(value, Some(Expr::BooleanLiteral(b)) if !b.value);
@@ -779,7 +783,7 @@ impl<'a> Analyzer<'a> {
                 .for_each(|e| self.note_assignment_guards(e, None)),
             Expr::Starred(st) => self.note_assignment_guards(&st.value, None),
             _ => {}
-        }
+        })
     }
 
     fn visit_suite(&mut self, suite: &[Stmt]) {
@@ -841,6 +845,10 @@ impl<'a> Analyzer<'a> {
     }
 
     fn visit_stmt(&mut self, stmt: &Stmt) {
+        heki_ast::ensure_sufficient_stack(|| self.visit_stmt_node(stmt))
+    }
+
+    fn visit_stmt_node(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::FunctionDef(func) => self.visit_function_def(func),
             Stmt::ClassDef(cls) => self.visit_class_def(cls),
@@ -1366,6 +1374,10 @@ impl<'a> Analyzer<'a> {
     }
 
     fn visit_pattern(&mut self, pat: &Pattern) {
+        heki_ast::ensure_sufficient_stack(|| self.visit_pattern_node(pat))
+    }
+
+    fn visit_pattern_node(&mut self, pat: &Pattern) {
         match pat {
             Pattern::MatchValue(mv) => self.visit_expr(&mv.value),
             Pattern::MatchSingleton(_) => {}
@@ -1431,6 +1443,10 @@ impl<'a> Analyzer<'a> {
     }
 
     fn visit_expr(&mut self, expr: &Expr) {
+        heki_ast::ensure_sufficient_stack(|| self.visit_expr_node(expr))
+    }
+
+    fn visit_expr_node(&mut self, expr: &Expr) {
         match expr {
             Expr::Name(n) => match n.ctx {
                 ExprContext::Store | ExprContext::Del => {
@@ -1851,13 +1867,28 @@ fn collect_func_annotations(func: &ast::StmtFunctionDef) -> Vec<&Expr> {
     out
 }
 
+/// The dotted name of a name, an attribute chain of one, and the value a subscript subscripts
+/// (`pkg.Base` of `pkg.Base[T]`).
 fn expr_dotted_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Name(n) => Some(n.id.to_string()),
-        Expr::Attribute(a) => Some(format!("{}.{}", expr_dotted_name(&a.value)?, a.attr)),
-        Expr::Subscript(s) => expr_dotted_name(&s.value),
-        _ => None,
+    let mut attrs = Vec::new();
+    let mut part = expr;
+    let root = loop {
+        match part {
+            Expr::Name(n) => break n.id.as_str(),
+            Expr::Attribute(a) => {
+                attrs.push(a.attr.as_str());
+                part = &a.value;
+            }
+            Expr::Subscript(s) => part = &s.value,
+            _ => return None,
+        }
+    };
+    let mut name = root.to_owned();
+    for attr in attrs.iter().rev() {
+        name.push('.');
+        name.push_str(attr);
     }
+    Some(name)
 }
 
 /// The dotted names a subscript passes (`Generic[K, T]`), when it passes names only.
@@ -1932,13 +1963,13 @@ fn string_literals(value: &Expr) -> Option<Vec<String>> {
 /// suites, which may not run).
 fn unconditional_bindings<'s>(stmt: &'s Stmt, out: &mut Vec<&'s str>) {
     fn targets<'s>(e: &'s Expr, out: &mut Vec<&'s str>) {
-        match e {
+        heki_ast::ensure_sufficient_stack(|| match e {
             Expr::Name(n) => out.push(n.id.as_str()),
             Expr::Tuple(t) => t.elts.iter().for_each(|e| targets(e, out)),
             Expr::List(l) => l.elts.iter().for_each(|e| targets(e, out)),
             Expr::Starred(st) => targets(&st.value, out),
             _ => {}
-        }
+        })
     }
     match stmt {
         Stmt::FunctionDef(f) => out.push(f.name.as_str()),

@@ -7651,6 +7651,13 @@ the call graph, or the class hierarchy goes through them:
   question with many deep ones below it runs once per deep one: from the first wait on, the
   decisions take their steps from one budget of the owner, and past it the questions still open
   are unknown.
+- A recursion whose depth follows the source and that keeps no memo `Recursion` could replay
+  (the lowering and the other walks over the syntax tree, a walk down the operands or the copies
+  of a value, the annotation readers) runs each level through `heki_ast::ensure_sufficient_stack`,
+  which moves it to a new stack segment when the thread's stack is nearly used up, as the parser
+  does. A chain of ten thousand operators or calls nested as deep is analyzed as a short one,
+  whatever the stack of the thread (1 MiB for the main thread on Windows); dropping a parsed
+  module takes the tree apart from its leaves the same way.
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
   types of one module) counts the steps of all the owner's walks, and the weight of every fact
   they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR

@@ -1883,6 +1883,10 @@ impl ModuleDecls {
     /// `locals` itself ([`TypeCtx::local_names`]): every name it reads is looked up by
     /// [`Self::lookup`].
     pub(crate) fn resolve_annotation_ty_in(&self, text: &str, locals: &LocalNames) -> Option<Ty> {
+        heki_ast::ensure_sufficient_stack(|| self.resolve_annotation_ty_in_node(text, locals))
+    }
+
+    fn resolve_annotation_ty_in_node(&self, text: &str, locals: &LocalNames) -> Option<Ty> {
         let t = unquote(text);
         let mut parts = split_top_level(t, '|');
         if parts.len() > 1 {
@@ -1998,6 +2002,10 @@ impl ModuleDecls {
     /// [`Self::admits_none`] for an annotation of a local of a function that binds `locals`
     /// itself ([`TypeCtx::local_names`]).
     fn admits_none_in(&self, text: &str, locals: &LocalNames) -> bool {
+        heki_ast::ensure_sufficient_stack(|| self.admits_none_in_node(text, locals))
+    }
+
+    fn admits_none_in_node(&self, text: &str, locals: &LocalNames) -> bool {
         let t = unquote(text);
         let parts = split_top_level(t, '|');
         if parts.len() > 1 {
@@ -2130,24 +2138,26 @@ fn split_top_level(text: &str, sep: char) -> Vec<&str> {
 /// also inside `Annotated`, `Final`, `ClassVar`, and quotes), which the type it names
 /// ([`ModuleDecls::resolve_annotation_ty`]) leaves out.
 fn annotation_allows_none(text: &str) -> bool {
-    let t = unquote(text);
-    let parts = split_top_level(t, '|');
-    if parts.len() > 1 {
-        return parts.iter().any(|p| unquote(p) == "None");
-    }
-    let Some((head, inner)) = subscript(t) else {
-        return t == "None";
-    };
-    match head.rsplit('.').next().unwrap_or(head) {
-        "Optional" => true,
-        "Union" => split_top_level(inner, ',')
-            .iter()
-            .any(|p| unquote(p) == "None"),
-        "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired" | "ReadOnly" => {
-            annotation_allows_none(first_arg(inner))
+    heki_ast::ensure_sufficient_stack(|| {
+        let t = unquote(text);
+        let parts = split_top_level(t, '|');
+        if parts.len() > 1 {
+            return parts.iter().any(|p| unquote(p) == "None");
         }
-        _ => false,
-    }
+        let Some((head, inner)) = subscript(t) else {
+            return t == "None";
+        };
+        match head.rsplit('.').next().unwrap_or(head) {
+            "Optional" => true,
+            "Union" => split_top_level(inner, ',')
+                .iter()
+                .any(|p| unquote(p) == "None"),
+            "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired" | "ReadOnly" => {
+                annotation_allows_none(first_arg(inner))
+            }
+            _ => false,
+        }
+    })
 }
 
 /// `Head[inner]` -> `(Head, inner)`.

@@ -771,7 +771,7 @@ impl<'a> Defs<'a> {
 
     /// Source form of a receiver: `items`, `self.items`, `config.names`.
     fn receiver_name(&self, var: VarId) -> Option<String> {
-        match self.kind(var) {
+        heki_ast::ensure_sufficient_stack(|| match self.kind(var) {
             Some(InstKind::AttrLoad { obj, attr, .. }) => {
                 Some(format!("{}.{attr}", self.receiver_name(*obj)?))
             }
@@ -780,7 +780,7 @@ impl<'a> Defs<'a> {
                 .var_name(var)
                 .filter(|n| !n.starts_with('.'))
                 .map(str::to_owned),
-        }
+        })
     }
 
     // ------------------------------------------------------------------------------ OPT113
@@ -1102,25 +1102,27 @@ impl<'a> Defs<'a> {
 
     /// Source form of a loop-element value: `order.customer_id`, `row["id"]`, `pair[0]`, `k`.
     fn element_text(&self, source: &str, var: VarId) -> String {
-        let named = self.f.var_name(var).filter(|n| !n.starts_with('.'));
-        let (_, inst) = self.insts[&var];
-        match (named, &inst.kind) {
-            (Some(n), _) => n.to_owned(),
-            (None, InstKind::AttrLoad { obj, attr, .. }) => {
-                format!("{}.{attr}", self.element_text(source, *obj))
+        heki_ast::ensure_sufficient_stack(|| {
+            let named = self.f.var_name(var).filter(|n| !n.starts_with('.'));
+            let (_, inst) = self.insts[&var];
+            match (named, &inst.kind) {
+                (Some(n), _) => n.to_owned(),
+                (None, InstKind::AttrLoad { obj, attr, .. }) => {
+                    format!("{}.{attr}", self.element_text(source, *obj))
+                }
+                // A constant subscript, not an unpacked component (whose index spans the target).
+                (None, InstKind::SubscriptLoad { obj, index, .. })
+                    if self.insts[index].1.span != inst.span =>
+                {
+                    format!(
+                        "{}[{}]",
+                        self.element_text(source, *obj),
+                        slice(source, self.insts[index].1.span)
+                    )
+                }
+                _ => squash(slice(source, inst.span)),
             }
-            // A constant subscript, not an unpacked component (whose index spans the target).
-            (None, InstKind::SubscriptLoad { obj, index, .. })
-                if self.insts[index].1.span != inst.span =>
-            {
-                format!(
-                    "{}[{}]",
-                    self.element_text(source, *obj),
-                    slice(source, self.insts[index].1.span)
-                )
-            }
-            _ => squash(slice(source, inst.span)),
-        }
+        })
     }
 }
 

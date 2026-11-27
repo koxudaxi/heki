@@ -148,6 +148,51 @@ pub struct ParsedModule {
     parsed: ruff_python_parser::Parsed<ruff_python_ast::ModModule>,
 }
 
+/// Dropping a tree as it is recurses once per level, past any thread's stack for a chain of
+/// thousands of operators. The tree is taken apart from its leaves up instead, a level at a time
+/// on a stack that grows, and each node dropped once its children are leaves.
+impl Drop for ParsedModule {
+    fn drop(&mut self) {
+        use ruff_python_ast::visitor::transformer::Transformer;
+        let empty =
+            ruff_python_parser::parse_unchecked_source("", ruff_python_ast::PySourceType::Python);
+        let mut module = std::mem::replace(&mut self.parsed, empty).into_syntax();
+        TakeApart.visit_body(&mut module.body);
+    }
+}
+
+/// Replaces each statement, expression, and pattern of a tree by a leaf once its children are
+/// leaves ([`ParsedModule`]'s drop).
+struct TakeApart;
+
+impl ruff_python_ast::visitor::transformer::Transformer for TakeApart {
+    fn visit_stmt(&self, stmt: &mut ruff_python_ast::Stmt) {
+        use ruff_python_ast::visitor::transformer::walk_stmt;
+        ensure_sufficient_stack(|| walk_stmt(self, stmt));
+        *stmt = ruff_python_ast::Stmt::Pass(ruff_python_ast::StmtPass {
+            node_index: Default::default(),
+            range: TextRange::default(),
+        });
+    }
+
+    fn visit_expr(&self, expr: &mut ruff_python_ast::Expr) {
+        use ruff_python_ast::visitor::transformer::walk_expr;
+        ensure_sufficient_stack(|| walk_expr(self, expr));
+        *expr = ruff_python_ast::Expr::NoneLiteral(Default::default());
+    }
+
+    fn visit_pattern(&self, pattern: &mut ruff_python_ast::Pattern) {
+        use ruff_python_ast::visitor::transformer::walk_pattern;
+        ensure_sufficient_stack(|| walk_pattern(self, pattern));
+        *pattern =
+            ruff_python_ast::Pattern::MatchSingleton(ruff_python_ast::PatternMatchSingleton {
+                node_index: Default::default(),
+                range: TextRange::default(),
+                value: ruff_python_ast::Singleton::None,
+            });
+    }
+}
+
 impl ParsedModule {
     pub fn suite(&self) -> &[ruff_python_ast::Stmt] {
         &self.parsed.syntax().body
@@ -313,6 +358,21 @@ pub fn fstring_tail(expr: &ruff_python_ast::Expr) -> Option<String> {
         }
     }
     Some(pieces.into_iter().rev().collect())
+}
+
+/// The stack a level of a deep recursion may still take when [`ensure_sufficient_stack`] lets it
+/// run where it is: the frames up to the next level's check, and what they call.
+const STACK_RED_ZONE: usize = 256 * 1024;
+/// The stack segment [`ensure_sufficient_stack`] gives a recursion past the red zone.
+const STACK_SEGMENT: usize = 4 * 1024 * 1024;
+
+/// Runs `f`, one level of a recursion as deep as the source (the operands of an expression, the
+/// definitions a value is built from), on a new stack segment when the current one has less
+/// than a red zone left, as the parser does. How deep such a recursion goes then depends on the
+/// memory, not on the stack of the thread it runs on (1 MiB for the main thread on Windows,
+/// 2 MiB for worker threads).
+pub fn ensure_sufficient_stack<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, f)
 }
 
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).
