@@ -318,12 +318,15 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   names no project module is no error: the name matches nothing, which `heki check` warns
   about ([Entries that match nothing](#entries-that-match-nothing)).
 - A report of a glob target names the member it matched (`reads
-  `pkg.types.DataType._flag``); one report standing for several members lists the others.
+  `pkg.types.DataType._flag``, and through a protocol the member the protocol declares); one
+  report standing for several members lists the others.
 - An access matching several targets of one contract (a target on a class and one on its
   subclass, a protocol's member and its implementation's attribute) is one report of the
   contract: it names the target configured first among them, and lists the others (`(also
   `A.items`)`).
-- A `Class.attr` target covers the subclasses of the class too.
+- A `Class.attr` target covers the subclasses of the class too, and a read or call through a
+  value typed with a project protocol that only the class and its subclasses implement
+  ([below](#read-owners)).
 - A private name of a class (`__cache`, `__run`: two leading underscores and not two trailing)
   is the member Python's name mangling makes of it (`_Parser__cache` in class `Parser`), and a
   name may spell it either way: `pkg.Parser.__run` and `pkg.Parser._Parser__run` (or
@@ -595,14 +598,24 @@ The read side of `write-owners`. A read is `ref.children`, a read through a loca
 through a class object, which reads the class attribute (`Reference.children`, `cls.children`, a value typed
 `type[Reference]`).
 
-A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
+A read, or a call (`call-owners`, and an effect boundary's `read-targets`, `call-targets`, and
 `allowed-callees`), through a value typed with a project protocol that declares the member is
 judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` reads
-`Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
-implementation called through the protocol keeps what it reads and calls. A write through such
-a value still writes the implementations' attribute. `allowed-protocols` allows the reads, calls,
-and writes through the protocols it names, also through a class object typed `type[P]` of such a
-protocol (see [How contracts report](#how-contracts-report)).
+`Host._m`, and a private method of an implementation called through the protocol keeps what it
+reads and calls. It is also an access of a target `C.m` when heki lists the project classes
+implementing the protocol, there is at least one, and every one of them is `C` or a subclass of
+`C`: with `Impl` the one class implementing `Host`, `h._m` reads `Impl._m`. A call through the
+protocol also needs every method it may run to be a target, as a call through a base class
+does. A protocol that a class outside the target's family implements too gives no report, as a
+value typed with a base class of the family gives none, and neither does a protocol no project
+class implements. A protocol whose implementations heki cannot list (more than eight) leaves the
+access to `unresolved = "report"` (`MUT206`, `MUT207`). An access matching `Impl._m` and a
+`Host._m` target of the same contract is one report, named by the target configured first, and
+`allowed-callees` naming every method a call through the protocol may run allows it, as naming
+the declaration does. A write through such a value still writes the implementations'
+attribute. `allowed-protocols` allows the reads, calls, and writes through the protocols it
+names, also through a class object typed `type[P]` of such a protocol (see [How contracts
+report](#how-contracts-report)).
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |

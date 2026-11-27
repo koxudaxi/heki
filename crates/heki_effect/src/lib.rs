@@ -946,7 +946,9 @@ pub struct TypedFieldReadSite {
 
 impl TypedFieldReadSite {
     /// Whether the read and call contracts count the read: one through a protocol declaring
-    /// the attribute counts as a read of the protocol only, not of its implementations.
+    /// the attribute counts as the read of the protocol, not as one of each implementation (the
+    /// contracts tie that read to a target's class when its family alone implements the
+    /// protocol).
     pub fn counts_for_contracts(&self) -> bool {
         !self.through_protocol
     }

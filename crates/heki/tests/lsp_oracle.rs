@@ -9423,6 +9423,88 @@ fn lsp_diagnostics_equal_a_full_check_through_protocols_a_contract_names() {
     s.lsp.stop(true);
 }
 
+// ------------------------------------------ targets reached through the protocols they implement
+
+const IMPLEMENTED_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204"]
+
+[[tool.heki.call-owners]]
+name = "build"
+targets = ["pkg.impl:Impl.build"]
+allowed-callers = ["pkg.impl:*"]
+
+[[tool.heki.read-owners]]
+name = "table"
+targets = ["pkg.impl.Impl.table"]
+allowed-readers = ["pkg.impl:*"]
+"#;
+
+const IMPLEMENTED_HOST: &str = "from typing import Protocol\n\n\nclass Host(Protocol):\n    table: dict\n\n    def build(self) -> None: ...\n";
+const IMPLEMENTED_IMPL: &str = "class Impl:\n    def __init__(self) -> None:\n        self.table = {}\n\n    def build(self) -> None:\n        pass\n";
+const IMPLEMENTED_OTHER: &str =
+    "class Other:\n    def __init__(self) -> None:\n        self.table = {}\n";
+const IMPLEMENTED_USE: &str = "from pkg.host import Host\n\n\ndef through(h: Host) -> None:\n    h.build()\n    print(h.table)\n";
+
+/// A read and a call through a protocol are a target's while the target's class is the one
+/// implementing the protocol: the accessing module stays as it is while a class of another module
+/// starts implementing the protocol and stops again, and the target's class stops and starts.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_as_classes_start_and_stop_implementing_a_protocol() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/host.py", IMPLEMENTED_HOST.to_owned()),
+        ("pkg/impl.py", IMPLEMENTED_IMPL.to_owned()),
+        ("pkg/other.py", IMPLEMENTED_OTHER.to_owned()),
+        ("pkg/use.py", IMPLEMENTED_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_protocol_implementations",
+        IMPLEMENTED_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT203"), ("pkg/use.py", "MUT204")];
+    let other_implements = IMPLEMENTED_OTHER.replace(
+        "        self.table = {}\n",
+        "        self.table = {}\n\n    def build(self) -> None:\n        pass\n",
+    );
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "a class outside the target's family starts implementing the protocol",
+            vec![save("pkg/other.py", &other_implements)],
+        )
+        .absent(reported),
+        Step::new(
+            "it stops implementing it",
+            vec![save("pkg/other.py", IMPLEMENTED_OTHER)],
+        )
+        .present(reported),
+        Step::new(
+            "the target's class stops implementing the protocol",
+            vec![save(
+                "pkg/impl.py",
+                &IMPLEMENTED_IMPL.replace("        self.table = {}\n", "        self.rows = {}\n"),
+            )],
+        )
+        .absent(reported),
+        Step::new(
+            "it implements it again",
+            vec![save("pkg/impl.py", IMPLEMENTED_IMPL)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ------------------------------------- `__dict__` keys another `write-owners` contract names
 
 const LISTED_KEYS_CONFIG: &str = r#"[project]
