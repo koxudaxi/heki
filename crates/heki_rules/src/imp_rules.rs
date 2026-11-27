@@ -1372,7 +1372,9 @@ struct CutChanges {
 /// whether the rule counts an import of a timing class: moving it into the functions that use
 /// it, and, from Python 3.15 where PEP 810 allows the keyword there, making it `lazy`. None for
 /// an import that does not run where it is written while its module loads (in a function, under
-/// `TYPE_CHECKING`, a lazy import the module body reads), a star import, or a call.
+/// `TYPE_CHECKING`, a lazy import the module body reads), a star import, a call, and an import
+/// whose binding code running while the module loads may read
+/// ([`ImportSite::read_while_loading`]): moved, the read fails, and made lazy, it loads there.
 fn cut_changes(
     cx: &CheckContext<'_>,
     site: &ImportSite,
@@ -1380,6 +1382,7 @@ fn cut_changes(
 ) -> Option<CutChanges> {
     let moves = site.timing == Answer::Known(Timing::Body)
         && !site.lazy
+        && !site.read_while_loading
         && matches!(site.form, ImportForm::Import | ImportForm::From(_));
     let changes = CutChanges {
         function: !counts(Timing::Function),

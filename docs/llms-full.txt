@@ -1195,7 +1195,7 @@ This output is from heki 0.9.0. The full format adds the source line and a `help
   = help: every import cycle of these modules goes through this import: move it into the functions that use it, or make it `lazy`
 ```
 
-heki names an import only after one search of the import graph without it finds the cycle gone, and only a change that takes it out of what the rule counts: `lazy` from Python 3.15 on, where Python allows the keyword, and neither change for a class of imports `cycle-edges` counts. Otherwise the help names the general ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the import of the cycle. `IMP301` and `IMP302` name the one import every chain from the package to the reported module goes through, and `IMP201` with `reach = "import-time"` the one every chain to the forbidden module goes through, each checked the same way.
+heki names an import only after one search of the import graph without it finds the cycle gone, and only a change that takes it out of what the rule counts: `lazy` from Python 3.15 on, where Python allows the keyword, and neither change for a class of imports `cycle-edges` counts. It names no import whose name code running while its module loads may read: the module body with its class bodies, decorators, defaults, bases, and the annotations the target version evaluates in place, the module's functions these call or apply as decorators, and its `__all__`. Moved into a function, such an import leaves that read unbound, and made `lazy`, it loads at the read, still while the module loads. Otherwise the help names the general ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the import of the cycle. `IMP301` and `IMP302` name the one import every chain from the package to the reported module goes through, and `IMP201` with `reach = "import-time"` the one every chain to the forbidden module goes through, each checked the same way.
 
 ## 📦 What package code loads while it loads
 
@@ -9604,7 +9604,8 @@ def uses_a() -> int:
 When one import is on every cycle of the failure's group (the modules importing each other
 while they load), the help names it: moved into the functions that use it, or made `lazy` on
 Python 3.15 and later, it leaves the group with no cycle, so no import of the group fails.
-heki names it only after one search of the group's other imports finds no cycle without it. It
+heki names it only after one search of the group's other imports finds no cycle without it, and
+names no import whose name code running while its module loads may read, as `IMP101` says. It
 is the failing import itself when that one is such an import, else one of the imports the related
 locations show. Without such an import, the help lists the ways out of this failure: import the
 name inside the function that uses it, import the module and read the name where it is used, or
@@ -9982,7 +9983,8 @@ import is in a module a package module loads, not a package module itself, and o
 every chain from a package module to it, the help names that import instead, the one nearest the
 reported import: moved into the functions that use it, or made `lazy` on Python 3.15 and later,
 it takes the report away. heki names it only after one search of what the package modules load
-without it no longer reaches the module.
+without it no longer reaches the module, and names no import whose name code running while its
+module loads may read, as `IMP101` says.
 
 ## Fix safety
 No automatic fix.
@@ -10895,7 +10897,8 @@ The help is the contract's `message`. With `reach = "import-time"`, when one imp
 every chain from the importer to the forbidden module, the help adds it, the one nearest the
 forbidden module: moved into the functions that use it, or made `lazy` on Python 3.15 and later,
 it takes the report away. heki adds it only after one search of what the importer loads without
-it no longer reaches the module. The other `reach` values count the imports in functions and the
+it no longer reaches the module, and adds no import whose name code running while its module
+loads may read, as `IMP101` says. The other `reach` values count the imports in functions and the
 lazy ones, so they name no such import.
 
 ## Fix safety
@@ -11028,9 +11031,14 @@ heki names it only after one search of the group's other imports finds no cycle 
 offers only a change that takes it out of the classes `cycle-edges` counts: no move into a
 function when `"function"` counts, and no `lazy` when `"lazy"` counts, before Python 3.15, or
 where Python rejects the keyword (a class body, a `try` statement). Of several such imports it
-names the one closing the reported cycle, else the first on it. The search reads the import
-graph only: an import whose name the module body uses while it loads cannot move. Without such
-an import, the help lists the general ways out.
+names the one closing the reported cycle, else the first on it. It names no import whose name
+code running while its module loads may read: the module body with its class bodies,
+decorators, defaults, bases, and the annotations the target version evaluates in place, the
+module's functions these call or apply as decorators, and its `__all__`, which a star import of
+the module reads. Moved into a function, such an import leaves that read unbound, and made
+`lazy`, it loads at the read, still while its module loads. An import in a class body binds a
+class attribute, which heki does not follow, so it is never named. Without such an import, the
+help lists the general ways out.
 
 ## Fix safety
 No automatic fix.
@@ -12822,7 +12830,8 @@ extra to install, or declare the distribution in `[project] dependencies`. When 
 a module a base module loads, and one import carries every chain from a base module to it, the
 help names that import instead, the one nearest the reported import: moved into the functions
 that use it, or made `lazy` on Python 3.15 and later, it takes the report away. heki names it
-only after one search of what the base modules load without it no longer reaches the module.
+only after one search of what the base modules load without it no longer reaches the module,
+and names no import whose name code running while its module loads may read, as `IMP101` says.
 
 ## Fix safety
 No automatic fix.

@@ -141,7 +141,8 @@ The help is the contract's `message`. With `reach = "import-time"`, when one imp
 every chain from the importer to the forbidden module, the help adds it, the one nearest the
 forbidden module: moved into the functions that use it, or made `lazy` on Python 3.15 and later,
 it takes the report away. heki adds it only after one search of what the importer loads without
-it no longer reaches the module. The other `reach` values count the imports in functions and the
+it no longer reaches the module, and adds no import whose name code running while its module
+loads may read, as `IMP101` says. The other `reach` values count the imports in functions and the
 lazy ones, so they name no such import.
 
 ## Fix safety

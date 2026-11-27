@@ -9459,3 +9459,50 @@ fn exit_statuses_behind_copy_chains_are_read_from_a_table() {
     };
     assert!(past_budgets(800, &[], shape, counted).is_empty());
 }
+
+/// `c.a` and `c.b` importing each other while they load and reading what the import binds:
+/// `c.a` in its body, `c.b` at the end of a chain of `names` functions its body calls. `c.b`
+/// also imports `names` names of `os.path`, all listed in its `__all__`.
+fn module_read_while_loading(names: usize) -> Project {
+    let p = Project::new("bounds_read_while_loading");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "import c.b
+
+OWNER = c.b
+",
+    );
+    let imports: String = (0..names)
+        .map(|i| format!("from os.path import join as j{i}\n"))
+        .collect();
+    let all: String = (0..names).map(|i| format!("\"j{i}\", ")).collect();
+    let chain: String = (0..names)
+        .map(|i| format!("def g{i}():\n    return g{}()\n\n\n", i + 1))
+        .collect();
+    p.write(
+        "c/b.py",
+        &format!(
+            "import c.a\n{imports}\n__all__ = [{all}]\n\n\n{chain}def g{names}():\n    return \
+             c.a\n\n\nSTART = g0()\n"
+        ),
+    );
+    selecting_import_cycles(p)
+}
+
+/// What a module reads while it loads (its `__all__`, the functions it calls) is collected once
+/// for all its imports: the end of the chain reads the import of the cycle, so no import of the
+/// cycle is named.
+#[test]
+fn the_names_a_module_reads_while_it_loads_are_collected_once() {
+    let diags = check_linear(4_000, module_read_while_loading);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+}

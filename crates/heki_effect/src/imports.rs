@@ -10,15 +10,17 @@ mod circular;
 mod cuts;
 mod distributions;
 mod handlers;
+mod loading;
 
 pub use circular::CircularFailure;
 pub use cuts::{ChainStep, path_cuts};
 pub use distributions::{DeclaredOnly, Distributions, Only};
 pub use handlers::ImportFailure;
 pub(crate) use handlers::ImportHandlers;
+use loading::LoadReads;
 
 use crate::resolver::{FromImport, ProjectDecls, resolve_relative_module};
-use crate::{FileSummary, ModuleInput, is_stub, scc};
+use crate::{CallSite, FileSummary, ModuleInput, is_stub, scc};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, BitSet, Budget, Closure, FnShape, Visit, reach, reach_breadth_first};
 use heki_ir::{
@@ -181,6 +183,13 @@ pub struct ImportSite {
     /// never on a star import or a call.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lazy_allowed: bool,
+    /// Code that runs while the module loads may read what the statement binds
+    /// ([`loading::LoadReads`]): moved into a function, the import leaves that read unbound,
+    /// and made `lazy`, it loads at that read, still while the module loads. So may any code
+    /// read the class attribute an import in a class body binds, which heki does not follow.
+    /// Established only for an `import` or `from` statement the module body runs, not lazy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_while_loading: bool,
 }
 
 impl ImportSite {
@@ -701,11 +710,12 @@ fn handles(f: &IrFunction, from: BlockId, to: BlockId) -> bool {
 }
 
 /// The import facts of `input`: its import statements, read from the semantic model and placed
-/// in the IR, and `by_name`, the by-name calls the summary found. `None` for a typing stub,
-/// whose imports never run.
+/// in the IR, and `by_name`, the by-name calls the summary found among the file's `calls`.
+/// `None` for a typing stub, whose imports never run.
 pub(crate) fn module_imports(
     input: &ModuleInput<'_>,
     mut by_name: Vec<ImportSite>,
+    calls: &[CallSite],
 ) -> Option<ModuleImports> {
     if is_stub(&input.path) {
         return None;
@@ -714,10 +724,19 @@ pub(crate) fn module_imports(
     let statements = (input.semantic.imports.iter())
         .map(|imp| (imp.span, Statement::Import(imp)))
         .chain((input.semantic.star_imports.iter()).map(|star| (star.span, Statement::Star(star))));
+    let reads = OnceCell::new();
     let mut sites: Vec<ImportSite> = statements
         .filter_map(|(span, statement)| {
             let at = placements.placed.get(&span)?;
-            Some(statement_site(input, &placements, span, statement, at))
+            let mut site = statement_site(input, &placements, span, statement, at);
+            if let Statement::Import(imp) = statement
+                && site.timing == Answer::Known(Timing::Body)
+                && !site.lazy
+            {
+                let reads = reads.get_or_init(|| LoadReads::of(input, calls));
+                site.read_while_loading = reads.reads(imp);
+            }
+            Some(site)
         })
         .collect();
     for site in &mut by_name {
@@ -933,6 +952,7 @@ fn statement_site(
         unconditional,
         lazy: is_lazy,
         lazy_allowed,
+        read_while_loading: false,
     }
 }
 

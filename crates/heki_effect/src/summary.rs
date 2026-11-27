@@ -346,7 +346,7 @@ fn extract_module(
         }
     }
     if opt_in.imports
-        && let Some(imports) = module_imports(input, imported_by_name)
+        && let Some(imports) = module_imports(input, imported_by_name, &file.call_sites)
     {
         file.opt_in_tables_mut().imports = Some(Box::new(imports));
     }

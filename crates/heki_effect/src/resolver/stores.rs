@@ -3236,7 +3236,7 @@ struct StoredValue<'t> {
 /// ([`heki_ir::ModuleConstants::str_tuples`]), or to a list of them nothing changes: the module
 /// body uses the list only to bind `__all__` ([`binds_only`]), and no function of the module
 /// grows it ([`heki_ir::ModuleConstants::displays`]).
-pub(super) fn exported_names(input: &ModuleInput<'_>) -> Option<Box<[String]>> {
+pub(crate) fn exported_names(input: &ModuleInput<'_>) -> Option<Box<[String]>> {
     let constants = &input.ir.constants;
     let tuple = constants.str_tuples.get("__all__");
     if tuple.is_none() && !constants.displays.contains_key("__all__") {

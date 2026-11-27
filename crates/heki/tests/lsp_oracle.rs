@@ -9342,7 +9342,8 @@ const CUTS_CONFIG: &str = "[project]\nname = \"acme\"\ndependencies = []\n\n[pro
 
 /// The help of `IMP101` and `IMP302` names the one import every cycle or every chain goes
 /// through, which the imports of other modules decide: a second cycle, or a second chain, that
-/// an edit of another module adds takes the name away, and the edit undone brings it back.
+/// an edit of another module adds takes the name away, and the edit undone brings it back. So
+/// do the reads of what the imports bind while the modules load.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_through_import_cuts() {
     let files = vec![
@@ -9380,6 +9381,27 @@ fn lsp_diagnostics_equal_a_full_check_through_import_cuts() {
                 save("acme/rb.py", "import acme.rc\n"),
                 save("acme/__init__.py", "from acme import api\n"),
             ],
+        )
+        .present(both),
+        Step::new(
+            "two modules of the ring read what their imports bind while they load",
+            vec![
+                save("acme/rb.py", "import acme.rc\n\nOWNER = acme.rc\n"),
+                save("acme/rc.py", "import acme.ra\n\nOWNER = acme.ra\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "the third module reads it while it loads too",
+            vec![save("acme/ra.py", "import acme.rb\n\nOWNER = acme.rb\n")],
+        )
+        .present(both),
+        Step::new(
+            "the third module reads it only in a function",
+            vec![save(
+                "acme/ra.py",
+                "import acme.rb\n\n\ndef owner():\n    return acme.rb\n",
+            )],
         )
         .present(both),
     ];

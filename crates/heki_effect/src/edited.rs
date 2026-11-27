@@ -330,6 +330,13 @@ impl Changes {
         );
         then.imports = (then.imports.take())
             .map(|i| Box::new(i.without_sites(|s| map.in_edit(s.span.start), &restated.imports)));
+        // Whether code running while the module loads reads what a site binds changes only by
+        // the names of the heads, which the annotations read where the target version evaluates
+        // them (`Restated::head_names`): the edit's own reads.
+        let sites_then = (then.imports.iter_mut()).flat_map(|i| &mut i.sites);
+        for (was, is) in (now.imports.iter().flat_map(|i| &i.sites)).zip(sites_then) {
+            is.read_while_loading = was.read_while_loading;
+        }
         let fields = differing_fields(&now, &then, map);
         self.add(None, fields);
     }
