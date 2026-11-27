@@ -7369,7 +7369,7 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | `verify_imports.py` | heki's import facts (`heki inspect --imports`) against CPython: each fixture module is imported first in a fresh interpreter that records the imports the module bodies run, and the `body` edges are compared both ways (every recorded import is one of heki's `body` sites, and every unconditional one heki lists that no `ImportError` handler guards is recorded); an `ast` reader checks the function, `TYPE_CHECKING`, and `lazy` classes. The fixtures under `py315` need CPython 3.15. |
 | `verify_soundness_kb.py` | every claim of the Layer 1 knowledge base (`kb/soundness/builtins.toml`), on the running interpreter |
 | `verify_stdlib_kb.py` | the Layer 2 rows of the standard library that type a value (`kb/ecosystem/stdlib.toml`: attribute rows, the class a method returns, a method's copy of its receiver, the value a holder's method returns), on instances it builds of each class, subclasses too |
-| `verify_container_families.py` | the container family table (`ContainerFamily::TABLE`): each row's class is in its family as the row says, every public class of the standard library that a class can derive from and that implements a family's read-only ABC has a row, the ABCs of the rows are nominal, and what opens a family (a registration, a subclass's `__subclasshook__`) |
+| `verify_container_families.py` | the container family table (`ContainerFamily::TABLE`): each row's class is in its family as the row says, every public class of the standard library that a class can derive from and that implements a family's read-only ABC has a row (and the read-only classes no class can derive from, such as `types.MappingProxyType`, are where the row says), the ABCs of the rows are nominal, and what opens a family (a registration, a subclass's `__subclasshook__`) |
 | `counterexamples.py` | that the naive rewrites heki refuses really change behavior |
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
 | `ir_counterexamples.py` | that the rewrites heki made before the IR modeled a shape (a binding, an alias, a path) change behavior; needs CPython 3.15 |
@@ -13269,13 +13269,27 @@ The rule does not report:
   changes through its own methods); class variables (`ClassVar`); class-level constants of other
   classes; and module-level constants;
 - a container inside the read-only one (`config.tables["a"].append(1)` with a frozen
-  `tables: dict[str, list[int]]`): only the container in the read-only field counts.
+  `tables: dict[str, list[int]]`): only the container in the read-only field counts;
+- a field of a frozen dataclass or `NamedTuple` that holds an object rejecting every change,
+  wherever the project makes an instance of the class or of a subclass: every construction
+  (`Segment(MappingProxyType(meta))`, `cls(...)` in a class method) and every copy replacing the
+  field (`dataclasses.replace(segment, meta=...)`, `segment._replace(meta=...)`) stores a
+  `tuple`, `frozenset`, `str`, `bytes`, `range`, `frozendict`, or `types.MappingProxyType`
+  there. Changing it in place raises (`TypeError`, `AttributeError`) and changes nothing. A
+  dict stored by one construction, a value of a class heki does not know (a parameter
+  annotated `Mapping`), a default, an unpacked argument, a copy of an object of unknown class
+  that may replace a field of that name (`replace(obj, meta={})` with `obj` unannotated), or a
+  class without a construction heki sees keeps the report.
 
 Out of scope: `dataclass_transform`s defined outside the checked files, such as the frozen models
 of `attrs` and Pydantic (heki does not analyze installed packages, so it cannot see the
 transform); properties with a setter; `TypedDict` values read through `.get()`
-(`movie.get("names")`); and objects whose class heki cannot see (an `Any` or unannotated
-receiver).
+(`movie.get("names")`); objects whose class heki cannot see (an `Any` or unannotated
+receiver); and what one instance holds: a field that may hold a dict somewhere is reported
+also where the instance at hand holds a read-only view (`snapshot.meta` of a snapshot that
+another function built with `MappingProxyType`). Instances made where heki does not see the
+call (a class handed on as a callable, `map(Segment, rows)`) are not among the constructions
+the rule reads.
 
 ## What a report states
 
@@ -13290,6 +13304,10 @@ Its premises:
   annotation (assumption R2).
 - **Changed in place**: an item store, a mutator method, or a helper changing its argument. Open
   through a helper: a change on one of its paths is enough.
+- **Changeable object**: the field may hold an object that a change does not reject: some
+  construction or copy stores a mutable container or a value of a class heki does not know
+  there, or heki does not see what every instance holds. Established from the constructions
+  the project makes.
 
 ## Why is this bad?
 A frozen dataclass or a `NamedTuple` promises immutable instances, so code shares them freely: as

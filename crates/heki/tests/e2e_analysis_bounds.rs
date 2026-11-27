@@ -9139,6 +9139,50 @@ fn a_parameter_returned_across_a_long_chain_of_modules_stays_within_the_budgets(
     );
 }
 
+/// The values constructions bind to the read-only container fields of a frozen class
+/// (`ModuleDecls::field_values`): `n` functions, each making an instance of a frozen dataclass of
+/// eight fields with a read-only view in each, and replacing one; a function in another module
+/// changes a field in place, which every value rejects.
+#[test]
+fn values_constructions_bind_to_frozen_fields_are_read_once_per_call() {
+    let shape = |n: usize| {
+        let p = Project::new(&format!("bounds_field_values_{n}"));
+        let fields: Vec<String> = (0..8)
+            .map(|k| format!("    f{k}: Mapping[str, int]"))
+            .collect();
+        let mut model = vec![
+            "from collections.abc import Mapping".to_owned(),
+            "from dataclasses import dataclass, replace".to_owned(),
+            "from types import MappingProxyType".to_owned(),
+            String::new(),
+            String::new(),
+            "@dataclass(frozen=True)".to_owned(),
+            "class Held:".to_owned(),
+        ];
+        model.extend(fields);
+        let views = ["MappingProxyType({})"; 8].join(", ");
+        for i in 0..n {
+            model.extend([
+                String::new(),
+                String::new(),
+                format!("def make{i}() -> Held:"),
+                format!("    held = Held({views})"),
+                "    return replace(held, f0=MappingProxyType({}))".to_owned(),
+            ]);
+        }
+        p.write("heki.toml", "[lint]\nextend-select = [\"MUT108\"]\n")
+            .write("pkg/__init__.py", "")
+            .write("pkg/model.py", &(model.join("\n") + "\n"))
+            .write(
+                "pkg/write.py",
+                "from typing import Any, cast\n\nfrom pkg.model import Held\n\n\ndef write(held: Held) -> None:\n    cast(\"Any\", held.f3)[\"n\"] = 1\n",
+            );
+        p
+    };
+    let changed = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "MUT108").count();
+    assert_eq!(changed(check_linear(2000, shape)), 0);
+}
+
 /// A handler of a recursion with `returns` clauses, each reporting the error and returning an exit
 /// status through a chain of `links` copies of a module constant.
 fn status_through_copies(returns: usize, links: usize) -> String {

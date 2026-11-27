@@ -12,7 +12,9 @@ the project classes a value of a builtin or of a container ABC may be (R2). Chec
      A row that does not resolve is one of the rows of other versions (`ROWS_ELSEWHERE`).
   2. The table is complete: every public class of the standard library that a class can derive
      from and that is a subclass of a family's read-only ABC has a row, under each public name a
-     module gives it (its own module, or a name in the module's `__all__`).
+     module gives it (its own module, or a name in the module's `__all__`). The read-only
+     classes no class can derive from (`range`, `types.MappingProxyType`) have rows too, which
+     check 1 verifies.
   3. The ABCs of the rows are nominal: a class with every method of the ABC that neither derives
      from it nor is registered with it is no subclass, while the structural ABCs (`Iterable`,
      `Collection`, `Sized`, ...) accept it, and none of those has a row.

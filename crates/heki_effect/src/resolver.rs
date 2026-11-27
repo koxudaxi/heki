@@ -55,7 +55,7 @@ pub(crate) mod stores;
 mod type_names;
 mod workspace;
 
-pub use fields::{FieldDefault, InitField, InitFields};
+pub use fields::{Changeable, FieldDefault, FieldValues, InitField, InitFields};
 pub use forwarded::{ForwardedReturn, ForwardingCall};
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
 pub use sentinels::object_sentinel_calls;
@@ -1420,6 +1420,10 @@ pub struct ModuleDecls {
     /// instances of their classes (`stores::record`). Boxed: most modules store into none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stores_elsewhere: Option<Box<StoresElsewhere>>,
+    /// What the module's calls making instances of project classes bind to their read-only
+    /// container fields (`fields::field_values`). Boxed: most modules make none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_values: Option<Box<FieldValues>>,
     /// The types of the module's globals and attributes without what deciding them assumed
     /// reading them, where those differ: they hold once another module stores into the module's
     /// globals or into the instances of its classes (`stores::record`). Boxed: most modules
@@ -1770,6 +1774,7 @@ impl ModuleDecls {
         out.tables.clear();
         out.declared_items.clear();
         out.stores_elsewhere = None;
+        out.field_values = None;
         out.store_fallbacks = None;
         out.global_capacities.clear();
         out
@@ -2785,6 +2790,9 @@ pub struct ProjectDecls {
     /// their classes, joined (`ModuleDecls::stores_elsewhere`), and the modules whose own types
     /// then hold no longer.
     elsewhere: stores::Elsewhere,
+    /// What every project module binds to each read-only container field of a class, by class
+    /// and field (`ModuleDecls::field_values`, [`Self::field_rejects_changes`]).
+    field_values: FxHashMap<(String, String), Changeable>,
     /// Some project module calls `__setstate__` itself (`ModuleDecls::calls_setstate`).
     setstate_called: bool,
     /// The packages whose `__path__` a project module changes (`ModuleDecls::path_changes`, the
@@ -3146,6 +3154,12 @@ impl ProjectDecls {
         out
     }
 
+    /// The joins only the completed declarations decide, which [`DeclPasses`] compares across
+    /// an update.
+    fn completed_joins(&self) -> CompletedJoins {
+        (self.elsewhere.clone(), self.field_values.clone())
+    }
+
     fn indexes(&self) -> Indexes {
         Indexes {
             subclasses: self.subclasses.clone(),
@@ -3269,6 +3283,7 @@ impl ProjectDecls {
             .collect();
         self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
         self.elsewhere = self.stores_elsewhere();
+        self.field_values = self.joined_field_values();
         self.getattr_open = self.getattr_hooks_changed();
         self.changed_paths = self.package_path_changes();
         self.copy_registered = self
@@ -6896,6 +6911,10 @@ pub struct DeclPasses {
     completed: ProjectDecls,
 }
 
+/// The joins over every module that only the completed declarations decide
+/// ([`ProjectDecls::completed_joins`]).
+type CompletedJoins = (stores::Elsewhere, FxHashMap<(String, String), Changeable>);
+
 impl DeclPasses {
     /// From the completed declarations of every module (`.py` implementations after `.pyi`
     /// stubs sharing a module name, so that they win).
@@ -6920,7 +6939,7 @@ impl DeclPasses {
             return DeclKeys::default();
         }
         let before = self.structural.indexes();
-        let before_stores = self.completed.elsewhere.clone();
+        let before_stores = self.completed.completed_joins();
         self.structural.replace(completed.structural());
         self.completed.replace(completed);
         self.changed(&name, Some(&before), &before_stores)
@@ -6929,7 +6948,7 @@ impl DeclPasses {
     /// Forget a deleted module; returns what changed.
     pub fn remove(&mut self, module: &str) -> DeclKeys {
         let before = self.structural.indexes();
-        let before_stores = self.completed.elsewhere.clone();
+        let before_stores = self.completed.completed_joins();
         self.structural.remove(module);
         self.completed.remove(module);
         self.changed(module, Some(&before), &before_stores)
@@ -6937,18 +6956,26 @@ impl DeclPasses {
 
     /// What changed when `module`'s declarations did: the module, the hierarchy indexes that
     /// differ from `before` (unchanged without it: the module's structure stayed), and what
-    /// other modules' stores change that differs from `before_stores`
-    /// (`ProjectDecls::elsewhere`, which the completed declarations decide).
+    /// the joins of the completed declarations give that differs from `before_stores`: what
+    /// other modules' stores change (`ProjectDecls::elsewhere`), and what the modules bind to
+    /// read-only container fields (`ProjectDecls::field_values`).
     fn changed(
         &self,
         module: &str,
         before: Option<&Indexes>,
-        before_stores: &stores::Elsewhere,
+        before_stores: &CompletedJoins,
     ) -> DeclKeys {
         let mut out = before.map_or_else(DeclKeys::default, |b| self.structural.index_changes(b));
         out.modules.insert(module.to_owned());
+        let (elsewhere, field_values) = before_stores;
         out.grown_globals
-            .extend(before_stores.changes(&self.completed.elsewhere));
+            .extend(elsewhere.changes(&self.completed.elsewhere));
+        let now = &self.completed.field_values;
+        for key in field_values.keys().chain(now.keys()) {
+            if field_values.get(key) != now.get(key) {
+                out.class_facts.insert(fields::field_key(&key.0, &key.1));
+            }
+        }
         out
     }
 }
@@ -6973,7 +7000,7 @@ pub(crate) fn update_module_decls(
         return (DeclKeys::default(), Arc::new(completed), reads);
     }
     let completed = Arc::new(completed);
-    let before_stores = passes.completed.elsewhere.clone();
+    let before_stores = passes.completed.completed_joins();
     passes.completed.replace(Arc::clone(&completed));
     let changed = passes.changed(name, before.as_ref(), &before_stores);
     (changed, completed, reads)
@@ -9664,6 +9691,7 @@ fn complete_decls(
         }
     }
     crate::capacity::record(input, &cx, &mut decls);
+    decls.field_values = fields::field_values(input, &cx);
     forwarded::complete(input, &mut decls, project);
     decls
 }
@@ -10508,6 +10536,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     rebound_definitions: BTreeSet::new(),
     made_in: None,
     stores_elsewhere: None,
+    field_values: None,
     store_fallbacks: None,
     calls_setstate: false,
     exports: None,

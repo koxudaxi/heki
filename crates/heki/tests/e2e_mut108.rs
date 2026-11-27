@@ -804,3 +804,278 @@ fn mut108_set_abc_fields_hold_containers() {
         ]
     );
 }
+
+// ============================================================ fields holding immutable objects
+
+/// Fields with the same read-only annotation: one every construction fills with an object that
+/// rejects changes, others with a mutable or unknown one.
+const HELD_MODEL: &str = r#"from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Any, NamedTuple
+
+SHARED: dict[str, Any] = {}
+
+
+@dataclass(frozen=True)
+class Segment:
+    meta: Mapping[str, Any]
+    extra: Mapping[str, Any]
+    tags: Sequence[str] = ()
+
+    @classmethod
+    def empty(cls) -> "Segment":
+        return cls(MappingProxyType({}), SHARED, tags=("a",))
+
+
+def make(meta: Mapping[str, Any]) -> Segment:
+    return Segment(MappingProxyType(dict(meta)), SHARED, tuple(meta))
+
+
+def annotate(segment: Segment, more: Mapping[str, Any]) -> Segment:
+    return replace(segment, meta=MappingProxyType({**segment.meta, **more}))
+
+
+@dataclass(frozen=True)
+class Mixed:
+    meta: Mapping[str, Any]
+
+
+def proxy() -> Mixed:
+    return Mixed(MappingProxyType({}))
+
+
+def plain() -> Mixed:
+    return Mixed({})
+
+
+@dataclass(frozen=True)
+class Base:
+    meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Sub(Base):
+    pass
+
+
+def base() -> Base:
+    return Base(MappingProxyType({}))
+
+
+def sub() -> Sub:
+    return Sub({})
+
+
+@dataclass(frozen=True)
+class Given:
+    meta: Mapping[str, Any]
+
+
+def given(meta: Mapping[str, Any], rest: list[Any]) -> list[Given]:
+    return [Given(meta), Given(*rest)]
+
+
+class Pair(NamedTuple):
+    meta: Mapping[str, Any]
+
+
+def pair() -> Pair:
+    return Pair(MappingProxyType({}))._replace(meta={})
+
+
+@dataclass(frozen=True)
+class Unmade:
+    meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Defaulted:
+    meta: Mapping[str, Any] = MappingProxyType({})
+
+
+def defaulted(changes: dict[str, Any]) -> list[Defaulted]:
+    made = Defaulted(MappingProxyType({}))
+    return [Defaulted(), replace(made, **changes), replace(made, meta=MappingProxyType({}))]
+
+
+def untyped(original):
+    return replace(original, tags=[])
+"#;
+
+const HELD_USE: &str = r#"from typing import Any, cast
+
+from pkg.model import Base, Defaulted, Given, Mixed, Pair, Segment, Unmade
+
+
+def put(mapping):
+    mapping["n"] = 1
+
+
+def write_meta(segment: Segment) -> None:
+    cast("Any", segment.meta)["n"] = 1
+    put(segment.meta)
+    cast("Any", segment.tags).append("x")
+
+
+def write_extra(segment: Segment) -> None:
+    cast("Any", segment.extra)["n"] = 1
+
+
+def write_others(m: Mixed, b: Base, g: Given, p: Pair, u: Unmade, f: Defaulted) -> None:
+    cast("Any", m.meta)["n"] = 1
+    cast("Any", b.meta)["n"] = 1
+    cast("Any", g.meta)["n"] = 1
+    cast("Any", p.meta)["n"] = 1
+    cast("Any", u.meta)["n"] = 1
+    cast("Any", f.meta)["n"] = 1
+"#;
+
+#[test]
+fn mut108_fields_whose_every_value_rejects_changes_are_not_changed() {
+    let p = Project::new("mut108_held_values");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", HELD_MODEL)
+        .write("pkg/use.py", HELD_USE);
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diagnostics(&p, &["--select", "MUT108"])),
+        vec![
+            // Every construction, a replacement, and a class method's `cls(...)` store a
+            // `MappingProxyType` or a `tuple` in `meta` and `tags`: changing them raises.
+            // A copy of an object of unknown class may store a list in any field `tags`.
+            d(u, 13, "write_meta", "Segment.tags"),
+            // `extra` holds a shared dict.
+            d(u, 17, "write_extra", "Segment.extra"),
+            // A proxy on one path and a dict on another.
+            d(u, 21, "write_others", "Mixed.meta"),
+            // A subclass instance holding a dict.
+            d(u, 22, "write_others", "Base.meta"),
+            // A value of unknown class, and an unpacked argument.
+            d(u, 23, "write_others", "Given.meta"),
+            // A named tuple's `_replace` storing a dict.
+            d(u, 24, "write_others", "Pair.meta"),
+            // No construction heki sees.
+            d(u, 25, "write_others", "Unmade.meta"),
+            // A field left at its default, and a copy replacing fields heki cannot name.
+            d(u, 26, "write_others", "Defaulted.meta"),
+        ]
+    );
+    // A copy of an object of unknown class replacing fields heki cannot name may store anything
+    // in any field.
+    let unpacked = "def copy(original, changes):\n    return replace(original, **changes)\n";
+    p.write(
+        "pkg/copies.py",
+        &format!("from dataclasses import replace\n\n\n{unpacked}"),
+    );
+    let found = found(&diagnostics(&p, &["--select", "MUT108"]));
+    assert!(
+        found.contains(&d(u, 11, "write_meta", "Segment.meta")),
+        "{found:#?}"
+    );
+}
+
+/// Constructions and replacements through an attribute of a module (`model.Segment(...)`,
+/// `dataclasses.replace(...)`), and calls heki cannot read.
+const QUALIFIED_MODEL: &str = r#"from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Segment:
+    meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Copied:
+    meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Quiet:
+    meta: Mapping[str, Any]
+"#;
+
+const QUALIFIED_MAKE: &str = r#"import dataclasses
+import dataclasses as dc
+from types import MappingProxyType
+
+from pkg import model
+import pkg.model
+
+
+def segments() -> list[model.Segment]:
+    return [model.Segment({}), model.Segment(MappingProxyType({}))]
+
+
+def copies(c: model.Copied) -> model.Copied:
+    return dataclasses.replace(c, meta={})
+
+
+def quiet(q: model.Quiet) -> list[model.Quiet]:
+    return [
+        pkg.model.Quiet(MappingProxyType({})),
+        dc.replace(q, meta=MappingProxyType({})),
+    ]
+"#;
+
+const QUALIFIED_WRITE: &str = r#"from typing import Any, cast
+
+from pkg.model import Copied, Quiet, Segment
+
+
+def write(s: Segment, c: Copied, q: Quiet) -> None:
+    cast("Any", s.meta)["n"] = 1
+    cast("Any", c.meta)["n"] = 1
+    cast("Any", q.meta)["n"] = 1
+"#;
+
+#[test]
+fn mut108_constructions_through_a_module_attribute_are_read() {
+    let p = Project::new("mut108_qualified");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", QUALIFIED_MODEL)
+        .write("pkg/make.py", QUALIFIED_MAKE)
+        .write("pkg/use.py", QUALIFIED_WRITE);
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diagnostics(&p, &["--select", "MUT108"])),
+        vec![
+            d(u, 7, "write", "Segment.meta"),
+            d(u, 8, "write", "Copied.meta")
+        ]
+    );
+}
+
+#[test]
+fn mut108_constructions_heki_cannot_read_leave_the_fields_open() {
+    let p = Project::new("mut108_unreadable");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", QUALIFIED_MODEL)
+        .write(
+            "pkg/make.py",
+            "from types import MappingProxyType\n\nfrom pkg.model import Quiet\n\n\ndef quiet() -> Quiet:\n    return Quiet(MappingProxyType({}))\n",
+        )
+        .write("pkg/use.py", QUALIFIED_WRITE);
+    let u = "pkg/use.py";
+    let quiet = |p: &Project| found(&diagnostics(p, &["--select", "MUT108"]));
+    assert!(!quiet(&p).contains(&d(u, 9, "write", "Quiet.meta")));
+    for (name, body) in [
+        (
+            "factory",
+            "def build(factory):\n    return factory(meta={})\n",
+        ),
+        (
+            "unpacked",
+            "def build(factory, fields):\n    return factory(**fields)\n",
+        ),
+    ] {
+        p.write("pkg/other.py", body);
+        let found = quiet(&p);
+        assert!(
+            found.contains(&d(u, 9, "write", "Quiet.meta")),
+            "{name}: {found:#?}"
+        );
+    }
+}
