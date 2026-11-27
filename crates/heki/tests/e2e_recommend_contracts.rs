@@ -1683,3 +1683,28 @@ fn a_class_pattern_hiding_a_report_of_a_configured_contract_is_refused() {
     p.write("pyproject.toml", &applied(&existing, block));
     assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
 }
+
+#[test]
+fn a_group_in_the_defaults_table_gives_the_candidate_trials_the_patterns_written_out() {
+    let defaults =
+        |writers: &str| format!("[write-owners-defaults]\nforbidden-writers = {writers}\n");
+    let report = |name: &str, config: &str| {
+        let p = owners(name);
+        p.write("heki.toml", config);
+        recommend_json(&p, &["--ignore", "EFF201", "--all"])
+    };
+    let none = report("recommend_defaults_none", "");
+    let written_out = report(
+        "recommend_defaults_written_out",
+        &defaults("[\"app.util:push\", \"app.api:*\"]"),
+    );
+    let grouped = report(
+        "recommend_defaults_group",
+        &format!(
+            "[groups]\nforbidden = [\"app.util:push\", \"app.api:*\"]\n\n{}",
+            defaults("[\"@forbidden\"]")
+        ),
+    );
+    assert_ne!(written_out["contracts"], none["contracts"]);
+    assert_eq!(grouped["contracts"], written_out["contracts"]);
+}

@@ -524,9 +524,10 @@ pub struct HekiConfig {
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub import_boundaries: Vec<ImportBoundaryRule>,
-    /// The `<contract>-defaults` tables as written. The loaders have folded each into the tables
-    /// of its contract, so the contracts above hold the effective values. A table a tool adds
-    /// to the configuration afterwards takes them through [`with_defaults`].
+    /// The `<contract>-defaults` tables of the main file, their groups expanded. The loaders
+    /// have folded each into the tables of its contract, so the contracts above hold the
+    /// effective values. A table a tool adds to the configuration afterwards takes them through
+    /// [`with_defaults`].
     pub write_owners_defaults: Option<WriteOwnerRule>,
     pub read_owners_defaults: Option<ReadOwnerRule>,
     pub call_owners_defaults: Option<CallOwnerRule>,
@@ -794,13 +795,6 @@ impl ConfigLayout {
             });
         };
         Ok(HekiConfig {
-            write_owners_defaults: written.write_owners_defaults,
-            read_owners_defaults: written.read_owners_defaults,
-            call_owners_defaults: written.call_owners_defaults,
-            readonly_returns_defaults: written.readonly_returns_defaults,
-            invalidation_defaults: written.invalidation_defaults,
-            effect_boundaries_defaults: written.effect_boundaries_defaults,
-            import_boundaries_defaults: written.import_boundaries_defaults,
             groups: written.groups,
             sources: folded.sources,
             ..self.read(path, &text, root)?

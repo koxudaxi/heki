@@ -816,3 +816,26 @@ fn watch_reports_a_directory_it_cannot_list_until_it_can() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[test]
+fn watch_notices_an_included_file_created_after_the_include_failed_the_load() {
+    let p = Project::new("watch_include_recovers");
+    let text = "class Model:\n    def __init__(self) -> None:\n        self.fields: list[int] = []\n\n\ndef bad_write(m: Model) -> None:\n    m.fields = [2]\n";
+    p.write("pkg/__init__.py", "")
+        .write("pkg/m.py", text)
+        .write("heki.toml", "");
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "2");
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    // The include names a file that does not exist yet: the load fails.
+    p.write("heki.toml", "include = [\"contracts/w.toml\"]\n");
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 0 file(s)");
+    assert!(lines.iter().any(|l| l.starts_with("error: ")), "{lines:#?}");
+    // Creating it is noticed, though the main file did not change again.
+    p.write(
+        "contracts/w.toml",
+        "[[write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"pkg.m:ok_write\"]\n",
+    );
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 2 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}

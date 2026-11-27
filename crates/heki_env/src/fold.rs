@@ -678,19 +678,32 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
         || settings
             .iter()
             .any(|s| !s.groups.is_empty() || s.defaults.iter().any(Option::is_some));
-    let text = folds.then(|| written_out(&files[0], &merged));
+    let text = folds.then(|| written_out(&files[0], &merged, &defaults[0]));
     Ok(Folded { text, sources })
 }
 
-/// The main file with its contract tables replaced by `merged`, and its groups and defaults
-/// tables removed. Its settings table is there: a group, a defaults table, or an `include`
+/// The main file with its contract tables replaced by `merged`, its groups removed, and its
+/// defaults tables (`main_defaults`, by kind) written with their groups expanded, so a tool that
+/// adds a table later takes the same values the tables did. Its settings table is there: a group, a defaults table, or an `include`
 /// is in it, or in a file its `include` lists.
-fn written_out(main: &File, merged: &[Vec<Table>]) -> String {
+fn written_out(main: &File, merged: &[Vec<Table>], main_defaults: &[Option<Defaults>]) -> String {
     let mut doc: toml::Table = toml::from_str(&main.text).expect("a configuration that was read");
     let settings = settings_mut(main.layout, &mut doc).expect("a configuration with settings");
     settings.remove(GROUPS);
-    for (kind, tables) in HekiConfig::CONTRACT_KEYS.iter().zip(merged) {
-        settings.remove(&format!("{kind}{SUFFIX}"));
+    for ((kind, tables), defaults) in HekiConfig::CONTRACT_KEYS
+        .iter()
+        .zip(merged)
+        .zip(main_defaults)
+    {
+        let defaults_key = format!("{kind}{SUFFIX}");
+        settings.remove(&defaults_key);
+        if let Some(defaults) = defaults {
+            let table: Table = defaults
+                .iter()
+                .map(|(k, (f, _))| (k.clone(), f.clone()))
+                .collect();
+            settings.insert(defaults_key, toml::Value::Table(value_of(&table)));
+        }
         settings.remove(*kind);
         if tables.is_empty() {
             continue;

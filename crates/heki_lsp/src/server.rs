@@ -396,7 +396,10 @@ impl State {
         // loaded last was invalid.
         let included = heki_env::HekiConfig::file_in(&config_root)
             .map(|main| heki_env::included_files(&main))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .iter()
+            .map(|i| file_path(i))
+            .collect::<Vec<_>>();
         let reloads = |p: &Path| {
             CONFIG_FILES.iter().any(|n| config_root.join(n) == p)
                 || included.iter().any(|i| i == p)
