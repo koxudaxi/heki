@@ -683,7 +683,9 @@ instance (exactly the class, a class object that may be a subclass, or a copy re
 each field may change in place. A value of a class of the container families that rejects every
 change (`ContainerFamily::rejects_changes`: `tuple`, `frozenset`, `str`, `range`, `frozendict`,
 `types.MappingProxyType`) cannot; a mutable container, a value of unknown class, a default, or a
-call unpacking `*` or `**` may. Only the functions calling a name the module binds to such a
+call unpacking `*` or `**` may. A copy of an object of no class heki knows may be of any class:
+what it binds may change the field of that name of every class (every field, when it unpacks
+them). Only the functions calling a name the module binds to such a
 class or copy, a name it does not bind, or `_replace` are inferred for it. The declarations join
 the modules' values by class and field (`ProjectDecls::field_rejects_changes`, a key per field in
 the read log, compared across an update like the stores into other modules): a field of a class

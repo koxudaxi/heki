@@ -809,7 +809,8 @@ fn mut108_set_abc_fields_hold_containers() {
 
 /// Fields with the same read-only annotation: one every construction fills with an object that
 /// rejects changes, others with a mutable or unknown one.
-const HELD_MODEL: &str = r#"from collections.abc import Mapping, Sequence
+const HELD_MODEL: &str = r#"import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, NamedTuple
@@ -887,11 +888,25 @@ def pair() -> Pair:
 @dataclass(frozen=True)
 class Unmade:
     meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Defaulted:
+    meta: Mapping[str, Any] = MappingProxyType({})
+
+
+def defaulted(changes: dict[str, Any]) -> list[Defaulted]:
+    made = Defaulted(MappingProxyType({}))
+    return [Defaulted(), copy.replace(made, **changes), replace(made, meta=MappingProxyType({}))]
+
+
+def untyped(original):
+    return replace(original, tags=[])
 "#;
 
 const HELD_USE: &str = r#"from typing import Any, cast
 
-from pkg.model import Base, Given, Mixed, Pair, Segment, Unmade
+from pkg.model import Base, Defaulted, Given, Mixed, Pair, Segment, Unmade
 
 
 def put(mapping):
@@ -908,12 +923,13 @@ def write_extra(segment: Segment) -> None:
     cast("Any", segment.extra)["n"] = 1
 
 
-def write_others(m: Mixed, b: Base, g: Given, p: Pair, u: Unmade) -> None:
+def write_others(m: Mixed, b: Base, g: Given, p: Pair, u: Unmade, f: Defaulted) -> None:
     cast("Any", m.meta)["n"] = 1
     cast("Any", b.meta)["n"] = 1
     cast("Any", g.meta)["n"] = 1
     cast("Any", p.meta)["n"] = 1
     cast("Any", u.meta)["n"] = 1
+    cast("Any", f.meta)["n"] = 1
 "#;
 
 #[test]
@@ -928,6 +944,8 @@ fn mut108_fields_whose_every_value_rejects_changes_are_not_changed() {
         vec![
             // Every construction, a replacement, and a class method's `cls(...)` store a
             // `MappingProxyType` or a `tuple` in `meta` and `tags`: changing them raises.
+            // A copy of an object of unknown class may store a list in any field `tags`.
+            d(u, 13, "write_meta", "Segment.tags"),
             // `extra` holds a shared dict.
             d(u, 17, "write_extra", "Segment.extra"),
             // A proxy on one path and a dict on another.
@@ -940,6 +958,20 @@ fn mut108_fields_whose_every_value_rejects_changes_are_not_changed() {
             d(u, 24, "write_others", "Pair.meta"),
             // No construction heki sees.
             d(u, 25, "write_others", "Unmade.meta"),
+            // A field left at its default, and a copy replacing fields heki cannot name.
+            d(u, 26, "write_others", "Defaulted.meta"),
         ]
+    );
+    // A copy of an object of unknown class replacing fields heki cannot name may store anything
+    // in any field.
+    let unpacked = "def copy(original, changes):\n    return replace(original, **changes)\n";
+    p.write(
+        "pkg/copies.py",
+        &format!("from dataclasses import replace\n\n\n{unpacked}"),
+    );
+    let found = found(&diagnostics(&p, &["--select", "MUT108"]));
+    assert!(
+        found.contains(&d(u, 11, "write_meta", "Segment.meta")),
+        "{found:#?}"
     );
 }

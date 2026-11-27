@@ -366,7 +366,9 @@ impl ProjectDecls {
 
 /// What a module's calls bind to the read-only container fields of the instances they make
 /// ([`super::ModuleDecls::field_values`]): by the class the call makes (or may make a subclass
-/// of), then the field, whether a value bound there may be changed in place.
+/// of), then the field, whether a value bound there may be changed in place. A copy of an
+/// object of unknown class binds under [`ANY_CLASS`] the fields it may change, by name, or
+/// [`ANY_FIELD`] when it unpacks them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldValues {
     pub bound: BTreeMap<String, BTreeMap<Box<str>, Changeable>>,
@@ -587,7 +589,24 @@ impl Values<'_, '_> {
         tracked: &mut FxHashMap<String, Vec<Box<str>>>,
         out: &mut FieldValues,
     ) {
-        let Some(original) = self.types.ty(r.original) else {
+        let unpacked = r.by_position || r.kwargs.iter().any(|(k, _)| k.is_none());
+        let Some(original) = self
+            .types
+            .ty(r.original)
+            .filter(|t| !t.members().is_empty())
+        else {
+            // A copy of an object of no class heki knows may be one of any class: what it
+            // binds may change the field of that name of any class.
+            if unpacked {
+                out.bind(ANY_CLASS, ANY_FIELD, Changeable::Maybe);
+            }
+            for (k, v) in r.kwargs {
+                if let Some(field) = k
+                    && self.changeable(*v) == Changeable::Maybe
+                {
+                    out.bind(ANY_CLASS, field, Changeable::Maybe);
+                }
+            }
             return;
         };
         for o in original.members() {
@@ -598,9 +617,7 @@ impl Values<'_, '_> {
                     .iter()
                     .find_map(|(k, v)| (k.as_deref() == Some(&**field)).then_some(*v));
                 let value = match named {
-                    _ if r.by_position || r.kwargs.iter().any(|(k, _)| k.is_none()) => {
-                        Changeable::Maybe
-                    }
+                    _ if unpacked => Changeable::Maybe,
                     Some(v) => self.changeable(v),
                     // The copy holds the original's value.
                     None => continue,
@@ -640,7 +657,15 @@ impl ProjectDecls {
             }
         }
         let bases = self.ancestors_of(&class);
-        made && bases.iter().all(|c| bound(c) != Some(Changeable::Maybe))
+        let any = || {
+            self.read(|k| note(&mut k.class_facts, &field_key(ANY_CLASS, attr)));
+            self.read(|k| note(&mut k.class_facts, &field_key(ANY_CLASS, ANY_FIELD)));
+            let by = |field: &str| {
+                (self.field_values).contains_key(&(ANY_CLASS.to_owned(), field.to_owned()))
+            };
+            by(attr) || by(ANY_FIELD)
+        };
+        made && bases.iter().all(|c| bound(c) != Some(Changeable::Maybe)) && !any()
     }
 
     /// [`Self::field_values`]: what every module binds to each read-only container field.
@@ -658,6 +683,12 @@ impl ProjectDecls {
         out
     }
 }
+
+/// The class a copy of an object of unknown class binds fields of ([`FieldValues::bound`]): any.
+const ANY_CLASS: &str = "*";
+
+/// The field such a copy binds when it unpacks a mapping of them or passes positions: any.
+const ANY_FIELD: &str = "*";
 
 /// The key of the declarations' read log ([`super::DeclKeys::class_facts`]) an answer of
 /// [`ProjectDecls::field_rejects_changes`] notes for what the modules bind to the field `attr`
