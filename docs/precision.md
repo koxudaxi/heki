@@ -1,5 +1,81 @@
 # Rule Precision
 
+## At a glance
+
+heki reports a claim only when it can back it. What it can back decides the tier of a report, and
+what it cannot decide gets no report.
+
+```mermaid
+flowchart TD
+    P["Python project"] --> S["heki static analysis<br/>(control flow, call graph, aliases, imports)"]
+    S --> Q{"All premises of<br/>the claim established?"}
+    Q -- "Yes" --> E["exact report<br/>on by default for certified rules;<br/>an error fails heki check"]
+    Q -- "Some premise open" --> H["heuristic report<br/>shown with --heuristic or an explicit select;<br/>does not fail a default run"]
+    Q -- "Cannot establish" --> N["no report<br/>heki stays quiet;<br/>heki recommend lists it under<br/>what heki cannot see"]
+```
+
+The same function-and-rule pair in three shapes. Each output below is from `heki check`.
+
+**A, exact.** `handler` always reaches `requests.get` through `fetch`:
+
+```python
+async def handler(url):
+    return fetch(url)  # fetch always calls requests.get(url)
+```
+
+```console
+$ heki check .
+app.py:9:12: EFF101 (async-blocking-call) [error] `app.fetch` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)
+Found 1 diagnostic(s) in 1 file(s).
+$ echo $?
+1
+```
+
+**B, heuristic.** `fetch` calls `requests.get` only `if refresh:`, so the premise "Every return"
+(the function has made the next call on every path on which it returns) is open:
+
+```python
+def fetch(url, refresh):
+    if refresh:
+        return requests.get(url)
+    return None
+```
+
+```console
+$ heki check .
+All checks passed (1 file(s)).
+note: 5 heuristic rule(s) are off and 1 heuristic report(s) are not shown; enable them with `--heuristic` or `lint.heuristic = true`
+$ heki check --heuristic .
+app.py:11:12: EFF101 (async-blocking-call) [error, heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+Found 1 diagnostic(s) in 1 file(s).
+$ echo $?
+0
+```
+
+**C, no report.** `callback` is a parameter without an annotation, so heki does not follow the call:
+
+```python
+async def handler(url, callback):
+    return callback(url)
+```
+
+```console
+$ heki check --heuristic .
+All checks passed (1 file(s)).
+$ heki recommend .
+  calls heki does not resolve: 1 call(s) in 1 function(s)
+    function     calls  async  loops  why
+    app.handler      1      1      0  parameter `callback` has no annotation (callback)
+```
+
+| Stage | Example | Default `heki check` | With `--heuristic` |
+| ----- | ------- | -------------------- | ------------------ |
+| exact | A | reported, exit code 1 | reported, exit code 1 |
+| heuristic | B | not shown, exit code 0 | reported as `heuristic`, exit code 0 |
+| no report | C | silent, exit code 0 | silent, exit code 0 |
+
+The rest of this page defines the two tiers and says how a rule becomes exact.
+
 Every heki report is **exact** or **heuristic**:
 
 - An exact report is built only from facts heki established. Its claim, what its message states

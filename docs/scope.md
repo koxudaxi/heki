@@ -183,6 +183,8 @@ directions; a heuristic report makes it only for some premises:
 | What heki cannot see | counts as shared and blocks the fix | stops the report | stops it for an unresolved call; does not stop it for the premises its rule page marks open |
 | What you get | the diagnostic names the failed obligation: `[not auto-fixable: ...]` | no report: a missed finding, never a guess | a report labelled `heuristic`, which can be wrong about the code |
 
+[Rule Precision](precision.md#at-a-glance) shows the three outcomes (exact, heuristic, no report) with a run of each.
+
 Each rule page lists the premises of its claim under "What a report states", and which of them
 a heuristic report may not have established ([Rule Precision](precision.md)).
 
