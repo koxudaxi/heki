@@ -7,6 +7,145 @@ configuration keys, diagnostics, and output formats, except what the
 [stability policy](docs/adoption.md#stability-on-the-way-to-10) keeps stable; each change is listed
 under "Breaking changes".
 
+## [0.11.0] - 2026-11-28
+
+### Breaking changes
+
+- A `read-owners` or `call-owners` target `C.m`, and an effect boundary's `read-targets` or
+  `call-targets` entry of that shape, now also matches a read or call through a value typed with
+  a project protocol that declares `m` (`h.build()` with `h: Host`), when heki lists the project
+  classes implementing the protocol, there is at least one, and every one of them is `C` or a
+  subclass of `C`. A call also needs every method it may run to be a target, as through a base
+  class. A protocol that another class implements too, or that no project class implements,
+  matches nothing, and a protocol whose implementations heki cannot list stays with `MUT206` /
+  `MUT207` (`unresolved = "report"`). `allowed-protocols` still allows the accesses through the
+  protocols it names, and writes through a protocol are unchanged. New `MUT203`, `MUT204`, and
+  `EFF201` reports where code reads or calls a target through such a protocol; a contract that
+  lists both `C.m` and `P.m` reports such an access once, named by the target listed first, so a
+  baseline may re-key those entries (same counts). An effect boundary's `allowed-callees` naming
+  every method a call through a protocol may run now allows that call, as naming the protocol's
+  declaration does. (#617)
+- `unmatched-contract-entries` judges more entries (see Changed), so a configuration heki
+  accepted before can now get warnings, and errors under `"error"`. (#616)
+- On the corpus of 378 projects, the default output of 0.11.0 is that of 0.10.0: 275 reports, none
+  added, removed, or changed. With every rule selected, no exact report changes, and the heuristic
+  reports of opt-in rules go from 17,402 to 17,394 (5 fewer `EFF114` and 3 fewer `MUT112`); the
+  other differences are heuristic `EFF103`, `EFF105`, and `EFF114` reports that move or change their
+  text. The contract changes above apply only to projects that configure contracts.
+
+### Added
+
+- `include-overrides = true` on a contract, or in its `<kind>-defaults` table, makes an entry
+  naming a method (`Class.method`, `module:Class.method`) in the keys that name places or
+  callees also name the methods of that name in the project subclasses of `Class`, in any
+  module: `allowed-*`, `forbidden-*`, and the `exempt-methods` patterns of the owner contracts,
+  an effect boundary's `scopes` and `allowed-callees`, and the `invalidators` and
+  `exempt-writers` of `invalidation`. Where the key covers nested scopes (`scopes`, or an entry
+  ending in `{,.*}`), the overrides' nested scopes count too; a private name (`Base.__run`)
+  names the method of `Base` only. The reports are those of the same contract listing every
+  override by hand. Off by default, because it widens what a contract allows: a new subclass's
+  override is allowed without a change of the configuration. An entry still has to name a
+  method of `Class` itself under `unmatched-contract-entries`. (#615)
+- `[groups]` (`[tool.heki.groups]` in a `pyproject.toml`) names a list of entries once: an entry
+  `@name` in a list of a contract, of a `<kind>-defaults` table, or of another group stands for
+  the group's entries, in order, at its place. The entries are written out before the tables
+  are read, so the configuration reports and keys a baseline exactly as the lists written out.
+  Only a whole entry that starts with `@` names a group; an `@` anywhere else is part of the
+  entry. An unknown group and a cycle between groups (each with the chain of names), an empty
+  group, groups that write more than 10,000 entries into one list, and a group name defined
+  twice are configuration errors at their file and line. A group no contract uses is reported under
+  `lint.unmatched-contract-entries`. (#618)
+- `include = ["contracts/store.toml", ...]` in the main configuration file lists further TOML
+  files of contract tables, their defaults tables, and groups, relative to the file that holds
+  `include`, with no globs. The tables of a kind are the main file's, then each included file's
+  in order; a table takes its own key, else its file's defaults table, else the main file's.
+  `heki check`, `heki inspect`, `heki recommend`, `--watch`, and the language server read the
+  included files and reload when one changes. A missing file, a rooted or drive-prefixed path,
+  a file listed twice, the main file listed, `include` in an included file, and any other setting
+  in an included file are configuration errors at their file and line. (#619)
+- An unmatched-entry warning, and `written_at` of an entry of `heki recommend --output-format
+  json`, name where an entry from an included file or a group is written. (#618, #619)
+- The pre-commit hook passes every staged TOML file, and `heki check --touched` shows every
+  report for a file the configuration includes and passes over a TOML file that is no part of
+  the configuration. (#619)
+- Every contract report points at where its contract is defined, and at the entry its target names:
+  JSON `contract_locations`, SARIF related locations, and the language server's related information.
+  The places are those the configuration files write (the main file, an included file, a defaults
+  table, or a group). A contract table generated from another file can name the place of its rule
+  with `source = "path:line"`, and of single entries with `entry-sources = { "<entry>" = "path:line"
+  }`; those places are shown instead. Both are metadata only: matching, baseline keys, and the
+  unmatched-entry check are unchanged. (#620)
+- A warning about an entry that matches nothing names where the entry is written and where its
+  contracts are, and `heki recommend --output-format json` gives them as `entry_at` and
+  `contracts_at`. (#620)
+
+### Changed
+
+- `unmatched-contract-entries` judges more entries, so `heki check` may now warn about stale
+  contract entries it accepted before (errors under `"error"`). Configuration warnings are not
+  findings: baselines and the language server are not affected. (#616)
+  - Braces are taken first. A `{...}` group without an empty alternative lists names and each
+    is judged: `Base.{a,c}` is `Base.a` and `Base.c`, and the warning lists the ones that name
+    nothing. This also applies to a dotted group in the holder of a `Class.attr` target, which
+    was an error only when none of its alternatives named a class (#612). A group with an empty
+    alternative is one name with its extensions: `m:f{,.*}` names something when `m:f` or a
+    scope inside it does, and `pkg.zz{,.*}:*` when `pkg.zz` or a module below it does (a
+    namespace package without `__init__.py` is not reported). Such entries were not judged
+    before.
+  - A glob holder is judged by the parts written out before it: `pkg.zz.*:*` needs a module
+    `pkg.zz` or one below it, and `pkg.*.run_*` needs `pkg`. `*_helper` is still not judged.
+  - The `read-targets`, `call-targets`, and `allowed-callees` of an effect boundary, the
+    `producers` of `readonly-returns`, and the keys of `import-boundaries` are judged when an
+    entry's first name is a module of the project. Entries naming code outside the project
+    (`os.getenv`, `sys.platform`, `<stdlib>`) are still not judged.
+  - An entry a group (`@name`) or an included file writes into a contract is judged by the same
+    rules, and the warning names the group and the file and line it comes from.
+  - `heki recommend --output-format json`: an entry of `unmatched_entries` has a new
+    `alternatives` field, the names of a `{...}` group that name nothing.
+
+### Fixed
+
+- A call on an object the function constructs by calling a project class by name
+  (`Notes().preview()`, `n = Notes(); n.run()`, `helper(Notes())`, and the `self` of the `__init__`
+  the construction runs) runs only what the class's MRO finds, not the overrides of its subclasses.
+  A helper calling a method on its parameter keeps the effects that only a subclass's override
+  reaches with that parameter, so a caller passing an exact instance of the base no longer gets
+  them, while a caller passing its own parameter, `cls(...)`, a factory's result, or a subclass
+  instance still does. EFF101 no longer reports a production coroutine through a test double's
+  override when the coroutine constructs the base class itself, and its witness chain prefers a path
+  that runs for any argument. A construction by name is exact only when the class has no custom
+  metaclass and no `__new__` on its MRO, nothing binds `__new__` on such a class after its body, and
+  the module does not rebind the name. `heki inspect` shows the parameter of each subclass chain and
+  the other parameters it needs (`via_subclasses[].param`, `also`). (#641)
+- A module `__getattr__` bound to the hook a project function returns (`__getattr__, __dir__ =
+  make_hooks(__name__, _EXPORTS)`, also `make_hooks(...)[0]` or a single hook) serves what that hook
+  returns for a name, as a `def __getattr__` does: the function's parameters take the call's
+  arguments, so a closure over the table serves what the table's value for the name gives. A hook
+  (or a `def __getattr__`) handing the table's value to a function of its module that calls it past
+  `isinstance` tests of strings or tuples (`return _load(name, _EXPORTS[name])`) serves what calling
+  the value gives. A hook that stores into the module (`cache=True`), a table changed after the
+  binding, and string or pair entries still leave the name unknown. A module-level table the module
+  body changes in place after binding it is no longer read as a table. (#636)
+- EFF114 no longer reports a process-boundary handler that returns its exit status through a module
+  constant (`PYTHON_ERROR = 4`, `return PYTHON_ERROR`); a name bound more than once or to an open
+  value is still reported. (#639)
+- MUT108 no longer reports an in-place change of a frozen dataclass or `NamedTuple` field when every
+  construction and copy of the class in the project stores an object that rejects the change there
+  (`types.MappingProxyType`, `tuple`, `frozenset`, `range`, `frozendict`): the write raises and
+  changes nothing. A field one construction fills with a dict, with a value of unknown class, or
+  with a default is still reported. The container family table lists `range` and
+  `types.MappingProxyType`. (#640)
+- A `Class.attr` target whose holder is a brace of dotted alternatives
+  (`pkg.{a.Base,a.Sub}.only_sub`) is no longer refused by `unmatched-contract-entries = "error"` as
+  naming no class while it matches reads; it is judged by its alternatives (each one, since #616).
+  (#612)
+
+### Documentation
+
+- The front page gives what heki does and how to try it first, then the details; the type
+  checkers are named alike, and the sidebar follows the order a new user reads. A Design
+  Philosophy page says where heki comes from and the principles it follows. (#630)
+
 ## [0.10.0] - 2026-11-27
 
 ### Breaking changes
@@ -2953,6 +3092,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.11.0]: https://github.com/koxudaxi/heki/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/koxudaxi/heki/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/koxudaxi/heki/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/koxudaxi/heki/compare/v0.7.0...v0.8.0
