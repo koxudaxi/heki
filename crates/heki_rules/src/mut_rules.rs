@@ -1380,7 +1380,12 @@ pub(crate) struct FunctionMatcher {
     /// The text split at its last dot when the last segment is a glob and the text has no module
     /// part: what holds the member (none for a text without a dot), and the member's name.
     member: Option<(Option<DottedPattern>, DottedPattern)>,
-    method: Option<MethodFamily>,
+    method: Option<MethodFamily<FxHashSet<String>>>,
+    /// With `include-overrides` in a declared contract the summaries read, the methods of
+    /// `Class.method` in the subclasses of what the class part names, told by the bases of a
+    /// method's class: the summaries are built before the project's classes are listed
+    /// ([`Self::overrides_in`]).
+    by_bases: Option<MethodFamily<DottedPattern>>,
     /// `<external>.<name>`: the last name of the symbols outside the project the text names,
     /// whatever module or class holds them ([`Self::names_external`]).
     outside: Option<DottedPattern>,
@@ -1395,24 +1400,14 @@ pub(crate) struct FunctionMatcher {
 
 /// The methods a `Class.method` text names in the subclasses of what its class part names: the
 /// overrides of a call target, or of a place or callee entry with `include-overrides`.
+/// `classes`: the classes the class part names and their subclasses (fqn), or the class part.
 #[derive(Debug, Clone)]
-struct MethodFamily {
-    classes: FamilyClasses,
+struct MethodFamily<C> {
+    classes: C,
     name: DottedPattern,
     /// The scopes nested in the methods count too (a key covering nested scopes, a text ending
     /// in [`NESTED_SCOPES`]).
     nested: bool,
-}
-
-/// How a [`MethodFamily`] tells its classes.
-#[derive(Debug, Clone)]
-enum FamilyClasses {
-    /// The classes the class part names and their subclasses (fqn).
-    Listed(FxHashSet<String>),
-    /// The class part, matched against the class of a method and its project bases: for the
-    /// declared contracts the summaries read, which are built before the project's classes are
-    /// listed ([`FunctionMatcher::overrides_in`]).
-    ByBases(DottedPattern),
 }
 
 /// The suffix of an entry that also names the scopes nested in what it names (`m:f{,.*}`).
@@ -1426,7 +1421,7 @@ pub(crate) enum Overrides<'a, 'c> {
     Off,
     /// The project classes, whose subclasses the declarations list.
     Listed(&'a CheckContext<'c>, &'a [ContractClass]),
-    /// The bases of the class of each method ([`FamilyClasses::ByBases`]).
+    /// The bases of the class of each method ([`FunctionMatcher::overrides_in`]).
     ByBases,
 }
 
@@ -1482,7 +1477,7 @@ impl FunctionMatcher {
             let owners = class_set(cx, &holder, all_classes, Subclasses::Covered);
             if !owners.is_empty() {
                 out.method = Some(MethodFamily {
-                    classes: FamilyClasses::Listed(owners),
+                    classes: owners,
                     name: DottedPattern::new(last, context)?,
                     nested: false,
                 });
@@ -1507,32 +1502,42 @@ impl FunctionMatcher {
         let (stem, nested) = text
             .strip_suffix(NESTED_SCOPES)
             .map_or((text, nested), |stem| (stem, true));
-        // A class part the whole text compiles but its own glob does not (`Base.{a,b.c}`)
-        // names no class family.
-        let method = split_last_dot(stem).and_then(|(holder, last)| {
-            let holder = DottedPattern::new(holder, context).ok()?;
-            let classes = match overrides {
-                Overrides::Off => return None,
-                Overrides::Listed(cx, all) => {
-                    FamilyClasses::Listed(class_set(cx, &holder, all, Subclasses::Covered))
-                }
-                Overrides::ByBases => FamilyClasses::ByBases(holder),
-            };
-            let name = DottedPattern::new(last, context).ok()?;
-            Some(MethodFamily {
-                classes,
-                name,
-                nested,
-            })
-        });
-        Ok(Self {
+        let mut out = Self {
             whole,
             member: None,
-            method,
+            method: None,
+            by_bases: None,
             outside: None,
             project_only: false,
             guards: true,
-        })
+        };
+        // A class part the whole text compiles but its own glob does not (`Base.{a,b.c}`)
+        // names no class family.
+        let parts = split_last_dot(stem).and_then(|(holder, last)| {
+            let holder = DottedPattern::new(holder, context).ok()?;
+            Some((holder, DottedPattern::new(last, context).ok()?))
+        });
+        if let Some((holder, name)) = parts {
+            match overrides {
+                Overrides::Off => {}
+                Overrides::Listed(cx, all) => {
+                    let classes = class_set(cx, &holder, all, Subclasses::Covered);
+                    out.method = Some(MethodFamily {
+                        classes,
+                        name,
+                        nested,
+                    });
+                }
+                Overrides::ByBases => {
+                    out.by_bases = Some(MethodFamily {
+                        classes: holder,
+                        name,
+                        nested,
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The matcher of `text` without the methods of a class family: what names a symbol
@@ -1553,6 +1558,7 @@ impl FunctionMatcher {
                 whole,
                 member: None,
                 method: None,
+                by_bases: None,
                 outside: Some(DottedPattern::new(last, context)?),
                 project_only: false,
                 guards: true,
@@ -1571,6 +1577,7 @@ impl FunctionMatcher {
             whole,
             member,
             method: None,
+            by_bases: None,
             outside: None,
             project_only: false,
             guards: true,
@@ -1657,44 +1664,40 @@ impl FunctionMatcher {
     }
 
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
-        self.names_def(&key.fqn(), &key.qualname)
-            || self.method.as_ref().is_some_and(|m| match &m.classes {
-                FamilyClasses::Listed(family) => m.names(key, |owner| family.contains(owner)),
-                FamilyClasses::ByBases(_) => false,
-            })
+        self.names_def(&key.fqn(), &key.qualname) || self.in_method_family(key)
+    }
+
+    /// Whether `key` is a method of the class family of `Class.method` (or, with nested scopes,
+    /// in one), as the project's classes list it.
+    fn in_method_family(&self, key: &FuncKey) -> bool {
+        (self.method.as_ref()).is_some_and(|m| m.names(key, |owner| m.classes.contains(owner)))
     }
 
     /// Whether the text names `key` or a module, class, or function containing it
     /// ([`DottedPattern::names_within`]), or, with `include-overrides`, `key` is in a method of
     /// the class family the text names ([`Self::place`] with nested scopes).
     pub(crate) fn names_within(&self, key: &FuncKey) -> bool {
-        self.whole.names_within(&key.fqn(), &key.qualname)
-            || self.method.as_ref().is_some_and(|m| match &m.classes {
-                FamilyClasses::Listed(family) => m.names(key, |owner| family.contains(owner)),
-                FamilyClasses::ByBases(_) => false,
-            })
+        self.whole.names_within(&key.fqn(), &key.qualname) || self.in_method_family(key)
     }
 
     /// Whether the project function `key` is a method of the class family the text names with
     /// `include-overrides` ([`Overrides::ByBases`]), by the bases of its class in `project`.
     pub(crate) fn overrides_in(&self, project: &ProjectDecls, key: &FuncKey) -> bool {
-        self.method.as_ref().is_some_and(|m| match &m.classes {
-            FamilyClasses::Listed(_) => false,
-            FamilyClasses::ByBases(holder) => m.names(key, |owner| {
+        self.by_bases.as_ref().is_some_and(|m| {
+            m.names(key, |owner| {
                 project.is_project_class(owner)
                     && std::iter::once(owner.to_owned())
                         .chain(project.ancestors_of(owner))
-                        .any(|c| holder.matches_class(&ContractClass::with_qualname(project, c)))
-            }),
+                        .any(|c| {
+                            (m.classes).matches_class(&ContractClass::with_qualname(project, c))
+                        })
+            })
         })
     }
 
     /// The class family of `Class.method` (empty for a function).
     pub(crate) fn method_family(&self) -> Option<&FxHashSet<String>> {
-        self.method.as_ref().and_then(|m| match &m.classes {
-            FamilyClasses::Listed(family) => Some(family),
-            FamilyClasses::ByBases(_) => None,
-        })
+        self.method.as_ref().map(|m| &m.classes)
     }
 
     /// Whether the text is `<external>.<name>`, which names symbols outside the project only.
@@ -1703,7 +1706,7 @@ impl FunctionMatcher {
     }
 }
 
-impl MethodFamily {
+impl<C> MethodFamily<C> {
     /// Whether `key` is a method of a class `in_family` (by its fqn) whose name the family's
     /// name matches or, with nested scopes, a scope inside such a method.
     fn names(&self, key: &FuncKey, in_family: impl Fn(&str) -> bool) -> bool {
