@@ -61,8 +61,8 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         let left_out = match heuristic {
             0 => String::new(),
             n => format!(
-                "; the {n} heuristic one(s) are not in it (heki recommend --focus types --all \
-                 lists them)"
+                "; the {n} heuristic one(s) are not in it ({} --focus types --all lists them)",
+                heki_rules::recommend::analysis_command(&report.analyzed, "recommend")
             ),
         };
         eprintln!(

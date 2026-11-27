@@ -850,6 +850,11 @@ pub struct TextOptions {
     pub ask_fail: bool,
 }
 
+/// `heki <subcommand>` with the paths and options that analyze and select as the run did.
+pub fn analysis_command(analyzed: &Analyzed, subcommand: &str) -> String {
+    rules::analysis_command(analyzed, subcommand)
+}
+
 /// The report as the text output prints it.
 pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
     let mut out = String::new();
@@ -860,7 +865,7 @@ pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
         report.root, analyzed.files, analyzed.functions
     );
     if text.focus == Some(Focus::Types) {
-        types::render(&mut out, &report.suggestions, text.listing);
+        types::render(&mut out, &report.suggestions, text.listing, analyzed);
         // What the analysis takes as the whole project bounds every claim about callers.
         if let Some(note) = left_out_note(&analyzed.left_out) {
             let _ = write!(out, "\nNotes\n  - {note}\n");
@@ -889,7 +894,7 @@ pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
             split.allowed, split.regressions
         );
     }
-    types::render(&mut out, &report.suggestions, text.listing);
+    types::render(&mut out, &report.suggestions, text.listing, analyzed);
     rules::render(
         &mut out,
         &report.rules,

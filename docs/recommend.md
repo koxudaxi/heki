@@ -394,14 +394,14 @@ heki recommend (experimental) on .: 4 file(s), 13 function(s)
 Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
 
 Types the code already keeps
-  2 read-only parameter group(s), exact; 2 heuristic (heki recommend --all lists them)
+  2 read-only parameter group(s), exact; 2 heuristic (heki recommend app --all lists them)
   No type checker configuration found: half of each guard is a type checker's.
     app/report.py:2  total_and_count(rows)  list[int] -> Sequence[int]  public
     app/report.py:9  average(rows)          list[int] -> Sequence[int]  public
   Each group states that the parameter itself is never changed, in its function and in every function it is handed to, and that it does not leave them. The edits of a group go together; --output-format json has them.
   After the edit, a type checker reports a change of the parameter in the function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports handing it to a function without annotations that changes it.
   public: a name without a leading underscore along it; callers, overriders, and implementers outside the checked files are not known
-  To apply the exact groups: heki recommend --focus types --diff | git apply
+  To apply the exact groups: heki recommend app --focus types --diff | git apply
 
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block

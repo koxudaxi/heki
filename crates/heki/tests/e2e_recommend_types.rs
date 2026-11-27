@@ -490,6 +490,12 @@ fn the_text_lists_the_exact_groups_first_and_the_heuristic_ones_with_all() {
         types_text(&p, &["--focus", "types", "--all"]).trim_end(),
         types_text(&p, &["--all"]).trim_end()
     );
+    // The hint names the paths and options the request gave.
+    let (_, sub, _) = p.heki(&["recommend", "app", "--focus", "types"]);
+    assert!(
+        sub.contains("heki recommend app --focus types --diff | git apply"),
+        "{sub}"
+    );
     // What the paths leave out bounds the claims: the note says so under the section.
     let (_, app, _) = p.heki(&["recommend", "app", "--focus", "types"]);
     assert!(
@@ -680,6 +686,43 @@ fn git_apply(p: &Project, diff: &[u8], args: &[&str]) -> (bool, String) {
     )
 }
 
+/// `message` with its source locations (`line 12`, `:12:5`) replaced by a placeholder: an edit
+/// moves them. Every other number stays, so a changed count differs.
+fn without_locations(message: &str) -> String {
+    let chars: Vec<char> = message.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let rest: String = chars[i..].iter().collect();
+        let skip = if rest.starts_with("line ") {
+            out.push_str("line ");
+            i += 5;
+            true
+        } else if chars[i] == ':' && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+            out.push(':');
+            i += 1;
+            true
+        } else {
+            false
+        };
+        if skip {
+            let digits = chars[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+            if digits > 0 {
+                out.push('N');
+            }
+            i += digits;
+            // `:12:5`: the column after a line.
+            if chars.get(i) == Some(&':') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+                continue;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// The reports of `heki check` with every rule, without their line numbers: an import added
 /// above them moves them.
 fn every_report(p: &Project) -> Vec<String> {
@@ -696,7 +739,7 @@ fn every_report(p: &Project) -> Vec<String> {
     let mut keys: Vec<String> = (reports.iter())
         .map(|r| {
             let message = r["message"].as_str().unwrap();
-            let message: String = message.chars().filter(|c| !c.is_ascii_digit()).collect();
+            let message = without_locations(message);
             let at = ["rule_code", "path", "qualname", "target", "certainty"].map(|k| &r[k]);
             format!("{at:?} {message}")
         })

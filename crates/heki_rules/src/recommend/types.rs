@@ -2591,7 +2591,13 @@ const LABELS: &[(&str, &str)] = &[
 
 /// The section as the text prints it: the groups `listing` lists, of [`Listing::First`] the
 /// first [`super::MAX_EXAMPLES`], the heuristic ones last with the premises they leave open.
-pub(super) fn render(out: &mut String, section: &Section, listing: Listing) {
+pub(super) fn render(
+    out: &mut String,
+    section: &Section,
+    listing: Listing,
+    analyzed: &super::Analyzed,
+) {
+    let recommend = super::analysis_command(analyzed, "recommend");
     out.push_str("\nTypes the code already keeps\n");
     let (exact, heuristic) = section.totals();
     if exact + heuristic == 0 {
@@ -2599,10 +2605,10 @@ pub(super) fn render(out: &mut String, section: &Section, listing: Listing) {
         return;
     }
     let listed_later = match listing {
-        _ if heuristic == 0 => "",
-        Listing::First => " (heki recommend --all lists them)",
-        Listing::Exact => " (heki recommend --focus types --all lists them)",
-        Listing::Every => "",
+        _ if heuristic == 0 => String::new(),
+        Listing::First => format!(" ({recommend} --all lists them)"),
+        Listing::Exact => format!(" ({recommend} --focus types --all lists them)"),
+        Listing::Every => String::new(),
     };
     let _ = writeln!(
         out,
@@ -2627,7 +2633,7 @@ pub(super) fn render(out: &mut String, section: &Section, listing: Listing) {
     if exact > exact_rows.len() {
         let _ = writeln!(
             out,
-            "    and {} more exact group(s) (heki recommend --focus types lists them)",
+            "    and {} more exact group(s) ({recommend} --focus types lists them)",
             exact - exact_rows.len()
         );
     }
@@ -2650,8 +2656,9 @@ pub(super) fn render(out: &mut String, section: &Section, listing: Listing) {
         }
     }
     if exact > 0 {
-        out.push_str(
-            "  To apply the exact groups: heki recommend --focus types --diff | git apply\n",
+        let _ = writeln!(
+            out,
+            "  To apply the exact groups: {recommend} --focus types --diff | git apply"
         );
     }
 }
