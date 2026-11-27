@@ -6591,7 +6591,7 @@ fn open_premises_along_shared_chains_are_explained_once_per_call() {
     check_linear(SCALE, shape);
     let out = heki_json(
         &shape(SCALE),
-        &["dump-open-premises", "--select", "EFF101", "."],
+        &["dump-open-premises", "--extend-select", "EFF101", "."],
     );
     let reports = out["reports"].as_array().unwrap();
     assert_eq!(reports.len(), 4000);
@@ -6658,7 +6658,7 @@ fn open_premises_of_many_reports_in_one_function_are_explained_within_its_budget
         &shape(SCALE),
         &[
             "dump-open-premises",
-            "--select",
+            "--extend-select",
             "OPT113,DATA101,MUT114",
             ".",
         ],
@@ -7446,7 +7446,12 @@ fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
     let p = rewrite_candidates_project("bounds_opt_rewrites_premises", 400);
     let out = heki_json(
         &p,
-        &["dump-open-premises", "--select", "OPT103,OPT111", "."],
+        &[
+            "dump-open-premises",
+            "--extend-select",
+            "OPT103,OPT111",
+            ".",
+        ],
     );
     let reports = out["reports"].as_array().unwrap();
     assert_eq!(reports.len(), 2 * MIXED_ITERABLES.len(), "{out:#?}");
@@ -9132,4 +9137,67 @@ fn a_parameter_returned_across_a_long_chain_of_modules_stays_within_the_budgets(
         mut110_callers(&check(&forwarding_modules(n / SCALE))),
         [("use".to_owned(), "exact".to_owned())]
     );
+}
+
+/// A handler of a recursion with `returns` clauses, each reporting the error and returning an exit
+/// status through a chain of `links` copies of a module constant.
+fn status_through_copies(returns: usize, links: usize) -> String {
+    let mut out = vec![
+        "import sys".to_owned(),
+        String::new(),
+        "FAILED = 4".to_owned(),
+        String::new(),
+        String::new(),
+        "def visit(node):".to_owned(),
+        "    return sum(visit(child) for child in node)".to_owned(),
+        String::new(),
+        String::new(),
+        "def main(node, flag):".to_owned(),
+        "    s0 = FAILED".to_owned(),
+    ];
+    for k in 1..=links {
+        out.push(format!("    s{k} = s{}", k - 1));
+    }
+    out.push("    try:".to_owned());
+    out.push("        visit(node)".to_owned());
+    out.push("    except Exception as error:".to_owned());
+    out.push("        print(error, file=sys.stderr)".to_owned());
+    for _ in 0..returns {
+        out.push("        if flag:".to_owned());
+        out.push(format!("            return s{links}"));
+    }
+    out.push(format!("        return s{links}"));
+    out.push("    return 0".to_owned());
+    out.join("\n") + "\n"
+}
+
+/// The exit status of a handler's clause is read through the shape's table of copy roots: returns of
+/// a value behind a long chain of copies take steps linear in the function, and the
+/// clause stays a process boundary.
+#[test]
+fn exit_statuses_behind_copy_chains_are_read_from_a_table() {
+    let shape = |n: usize| {
+        let p = Project::new(&format!("bounds_status_{n}"));
+        p.write("m.py", &status_through_copies(8, n));
+        p
+    };
+    let counted = |p: &Project| {
+        let path = p.dir.join(".walk-steps.json");
+        let args = [
+            "check",
+            "--extend-select",
+            "EFF114",
+            "--output-format",
+            "json",
+            "--walk-steps",
+            path.to_str().unwrap(),
+            ".",
+        ];
+        let out = run(p, &args, &[0, 1]);
+        (
+            serde_json::from_slice::<Vec<Value>>(&out).unwrap(),
+            walk_steps(&path),
+        )
+    };
+    assert!(past_budgets(800, &[], shape, counted).is_empty());
 }

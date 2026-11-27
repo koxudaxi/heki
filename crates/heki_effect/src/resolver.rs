@@ -11619,6 +11619,26 @@ impl<'a> TypeCtx<'a> {
         self.str_constant_with(var, &|v| shape.inst(v), types)
     }
 
+    /// The integer `var` holds in the function of `shape` (through copies): a literal, or a
+    /// module constant ([`Self::module_constant`]) bound to an integer once.
+    pub fn int_constant_in(
+        &self,
+        shape: &FnShape<'_>,
+        var: VarId,
+        types: &FxHashMap<VarId, Val>,
+    ) -> Option<i64> {
+        let module_of = |v: VarId| match types.get(&v)? {
+            Val::Ref(fqn) => Some(fqn.clone()),
+            _ => None,
+        };
+        let globals = |inst: &Inst| self.module_constant(inst, &module_of);
+        // The shape's table of copy roots, not a walk down the chain for each read.
+        match literal(|v| shape.inst(v), &globals, shape.copy_root(var))? {
+            LiteralValue::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+
     /// The value the item `key` of the table `read` reads gives ([`ProjectDecls::table`]):
     /// `Some(None)` for an entry of unknown value, `None` when `read` reads no table or the
     /// table has no such key (reading it raises `KeyError`).
