@@ -13119,8 +13119,9 @@ The rule does not report:
   `tuple`, `frozenset`, `str`, `bytes`, `range`, `frozendict`, or `types.MappingProxyType`
   there. Changing it in place raises (`TypeError`, `AttributeError`) and changes nothing. A
   dict stored by one construction, a value of a class heki does not know (a parameter
-  annotated `Mapping`), a default, an unpacked argument, or a class without a construction
-  heki sees keeps the report.
+  annotated `Mapping`), a default, an unpacked argument, a copy of an object of unknown class
+  that may replace a field of that name (`replace(obj, meta={})` with `obj` unannotated), or a
+  class without a construction heki sees keeps the report.
 
 Out of scope: `dataclass_transform`s defined outside the checked files, such as the frozen models
 of `attrs` and Pydantic (heki does not analyze installed packages, so it cannot see the
