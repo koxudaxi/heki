@@ -362,8 +362,13 @@ impl Touched {
                 .cloned()
                 .collect()
         };
+        // A TOML file that is no configuration file changes no report: the pre-commit hook
+        // passes every staged one, since a file `include` lists may have any name.
+        let other_toml = |p: &PathBuf| p.is_file() && p.extension().is_some_and(|e| e == "toml");
         Some(Self {
-            unknown: not_found(touched),
+            unknown: (not_found(touched).into_iter())
+                .filter(|p| !other_toml(p))
+                .collect(),
             unknown_files: not_found(files),
             files: analyzed_files,
             every_report,
@@ -800,6 +805,7 @@ pub(crate) fn project_wide_files(analysis: &AnalysisArgs, env: &ProjectEnv) -> V
         .map(|n| root.join(n))
         .collect();
     files.extend(analysis.config.clone());
+    files.extend(env.cfg.sources.included.iter().cloned());
     files.extend(baseline_path(analysis, env));
     files
 }
@@ -1151,13 +1157,26 @@ fn report_unmatched_entries(args: &CheckArgs, analyzed: &Analyzed) -> Result<boo
         UnmatchedEntries::Warning => Severity::Warning,
         UnmatchedEntries::Error => Severity::Error,
     };
+    // A group no contract uses names nothing whatever the paths are.
+    let unused_groups = &env.cfg.sources.unused_groups;
+    for group in unused_groups {
+        log!(
+            args.output_format,
+            "{}: the group `{}` ({}:{}) is used by no contract",
+            severity.word(),
+            group.name,
+            group.file,
+            group.line
+        );
+    }
+    let fails = severity == Severity::Error;
     // Without the key, only a run over the whole project judges: an entry naming code in a file
     // the paths leave out would look unmatched.
     if configured.is_none() {
         let limit = recommend::MAX_CENSUS_ENTRIES;
         let (left_out, _) = paths_leave_out(&analyzed.project, 1, limit)?;
         if !left_out.is_empty() {
-            return Ok(false);
+            return Ok(fails && !unused_groups.is_empty());
         }
     }
     let entries = heki_rules::unmatched_entries(env, &analyzed.index, &analyzed.selection)?;
@@ -1169,7 +1188,7 @@ fn report_unmatched_entries(args: &CheckArgs, analyzed: &Analyzed) -> Result<boo
             entry.message()
         );
     }
-    Ok(severity == Severity::Error && !entries.is_empty())
+    Ok(fails && !(entries.is_empty() && unused_groups.is_empty()))
 }
 
 /// Note the project modules the analyzed files import and the paths of the run leave out

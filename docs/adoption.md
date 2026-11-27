@@ -326,8 +326,8 @@ the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
 
 ## pre-commit
 
-The hook passes the staged Python files, and a staged `pyproject.toml`, `heki.toml`, or
-`.heki.toml` at the root, to `heki check --touched`. heki follows calls across files, so it still
+The hook passes the staged Python and TOML files to `heki check --touched`, which passes over a
+TOML file that is not part of the configuration. heki follows calls across files, so it still
 analyzes the whole project, but it shows and fails on only the reports in those files and the
 reports whose call chain reaches one of them: after a change to `app/users.py`, the `EFF101` in
 `app/api.py` that reaches the change through two helpers is shown, and old findings in files the
@@ -343,8 +343,9 @@ report cannot be told from the code after it, so:
   2 touched file(s) (40 file(s) analyzed).`), not that all checks passed.
 - With a baseline, every regression is shown and fails the run, wherever it is (see below).
 - A configuration file can change any report, so naming one (`pyproject.toml`, `heki.toml`,
-  `.heki.toml`, or `hatch.toml` at the root, the summary snapshot, the baseline) shows every
-  report, as a run without `--touched` does: a contract added to `heki.toml` is checked in the
+  `.heki.toml`, or `hatch.toml` at the root, a file the configuration
+  [includes](configuration.md#several-configuration-files), the summary snapshot, the baseline)
+  shows every report, as a run without `--touched` does: a contract added to `heki.toml` is checked in the
   whole project.
 
 Use `--touched` while editing and in the hook, and run the whole project, with the baseline, before

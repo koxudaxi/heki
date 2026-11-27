@@ -939,6 +939,46 @@ fn lsp_reports_invalid_rule_options_as_a_failed_load() {
 }
 
 #[test]
+fn lsp_reloads_when_a_file_the_configuration_includes_changes() {
+    let p = Project::new("lsp_included_config");
+    let text = "class Model:\n    def __init__(self) -> None:\n        self.fields: list[int] = []\n\n\ndef ok_write(m: Model) -> None:\n    m.fields = [1]\n\n\ndef bad_write(m: Model) -> None:\n    m.fields = [2]\n";
+    p.write("pkg/__init__.py", "")
+        .write("pkg/m.py", text)
+        .write("heki.toml", "include = [\"contracts/w.toml\"]\n")
+        .write("contracts/w.toml", "");
+    let a = uri(&p.dir.join("pkg/m.py"));
+    let included = uri(&p.dir.join("contracts/w.toml"));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    lsp.open(&a, text);
+    lsp.settle();
+    assert_eq!(lsp.latest[&a], Vec::<Value>::new());
+    let contract = "[groups]\nwriters = [\"pkg.m:ok_write\"]\n\n[[write-owners]]\nname = \"w\"\ntargets = [\"pkg.m:Model.fields\"]\nallowed-writers = [\"@writers\"]\n";
+    p.write("contracts/w.toml", contract);
+    let changed = json!({"changes": [{"uri": included, "type": 2}]});
+    lsp.notify("workspace/didChangeWatchedFiles", changed.clone());
+    assert_eq!(
+        codes(&lsp.diagnostics(&a, |d| !d.is_empty())),
+        vec!["MUT201"]
+    );
+    // An invalid included file fails the load; fixing it reloads the workspace again.
+    p.write("contracts/w.toml", "[[write-owners]\n");
+    lsp.notify("workspace/didChangeWatchedFiles", changed.clone());
+    let log = lsp.log("the configuration file is not valid TOML");
+    assert_eq!(log["params"]["type"], 2);
+    assert_eq!(lsp.settle()["ready"], false);
+    p.write("contracts/w.toml", contract);
+    lsp.notify("workspace/didChangeWatchedFiles", changed);
+    assert_eq!(
+        codes(&lsp.diagnostics(&a, |d| !d.is_empty())),
+        vec!["MUT201"]
+    );
+    lsp.stop(true);
+}
+
+#[test]
 fn lsp_reloads_when_a_save_finds_the_module_layout_switched() {
     // A client that watches no files: `src/__init__.py` appears without a notification, and the
     // next save reloads the workspace, as `heki check` would see the project.

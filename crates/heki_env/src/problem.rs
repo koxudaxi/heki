@@ -67,6 +67,8 @@ docs_pages! {
     ReadonlyReturns => "configuration/#readonly-returns",
     Invalidation => "configuration/#invalidation",
     ImportBoundaries => "configuration/#import-boundaries",
+    Groups => "configuration/#named-groups",
+    Include => "configuration/#several-configuration-files",
     Imports => "configuration/#imports-toolhekiimports",
     Ecosystem => "configuration/#ecosystem-knowledge-toolhekiecosystem",
     Rules => "rules/",
@@ -106,6 +108,8 @@ impl Docs {
             "import-boundaries" => Self::ImportBoundaries,
             "imports" => Self::Imports,
             "ecosystem" => Self::Ecosystem,
+            "groups" => Self::Groups,
+            "include" => Self::Include,
             _ => Self::TopLevel,
         }
     }
@@ -319,17 +323,23 @@ impl Problem {
     }
 
     /// The location of its configuration value in `config_file`, the file the run read its
-    /// configuration from.
-    pub fn locate(mut self, config_file: Option<&Path>) -> Self {
-        if self.location.is_none()
-            && let (Some(setting), Some(path)) = (&self.setting, config_file)
-            && let Ok(text) = std::fs::read_to_string(path)
-            && let Some(at) = locate_setting(&text, ConfigLayout::of(path), setting)
-        {
-            let (line, column) = line_column(&text, at.start);
-            self = self.at(path, line, column);
+    /// configuration from, else in a file its `include` lists.
+    pub fn locate(self, config_file: Option<&Path>) -> Self {
+        let wanted = self.setting.as_ref().filter(|_| self.location.is_none());
+        let found = wanted.zip(config_file).and_then(|(setting, main)| {
+            let included = crate::included_files(main);
+            (std::iter::once((main.to_path_buf(), ConfigLayout::of(main))))
+                .chain(included.into_iter().map(|p| (p, ConfigLayout::TopLevel)))
+                .find_map(|(path, layout)| {
+                    let text = std::fs::read_to_string(&path).ok()?;
+                    let at = locate_setting(&text, layout, setting)?;
+                    Some((path, line_column(&text, at.start)))
+                })
+        });
+        match found {
+            Some((path, (line, column))) => self.at(&path, line, column),
+            None => self,
         }
-        self
     }
 }
 
@@ -380,16 +390,23 @@ fn to_u32(n: usize) -> u32 {
 }
 
 /// The span of `setting` in the configuration `text`: in its own table, else, for a key an
-/// entry of a contract leaves to its defaults, in the contract's defaults table.
+/// entry of a contract leaves to its defaults, in the contract's defaults table, else, for a
+/// value a group gives, in the group.
 fn locate_setting(text: &str, layout: ConfigLayout, setting: &Setting) -> Option<Range<usize>> {
     let doc = toml_edit::Document::parse(text).ok()?;
     let root = settings_root(doc.as_table(), layout)?;
-    locate_in(root, &setting.table, setting.entry.as_deref(), setting).or_else(|| {
-        let defaults = format!("{}{}", setting.table, crate::defaults::SUFFIX);
-        // Only a key can be defaulted: a setting without one is not found in the defaults.
-        setting.key.as_ref()?;
-        locate_in(root, &defaults, None, setting)
-    })
+    locate_in(root, &setting.table, setting.entry.as_deref(), setting)
+        .or_else(|| {
+            let defaults = format!("{}{}", setting.table, crate::defaults::SUFFIX);
+            // Only a key can be defaulted: a setting without one is not found in the defaults.
+            setting.key.as_ref()?;
+            locate_in(root, &defaults, None, setting)
+        })
+        .or_else(|| {
+            let value = setting.value.as_deref()?;
+            let groups = root.get(crate::fold::GROUPS)?.as_table_like()?;
+            groups.iter().find_map(|(_, item)| value_span(item, value))
+        })
 }
 
 /// The span of the key and value of `setting` in the tables of `table`, those of the entry named

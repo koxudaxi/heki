@@ -23,7 +23,7 @@ use crate::{
     split_last_dot,
 };
 use heki_effect::{AccessKind, ContractClass, FuncKey, ReadKind, Unresolved};
-use heki_env::{HekiConfig, UnmatchedEntries};
+use heki_env::{EntryPlace, HekiConfig, UnmatchedEntries};
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -57,6 +57,10 @@ pub struct UnmatchedEntry {
     /// `unmatched-contract-entries = "error"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub named_at_run_time: bool,
+    /// Where the entry is written when no contract table of the main configuration file holds
+    /// it: in a file `include` lists, or in a group (`@name`); each place once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub written_at: Vec<EntryPlace>,
 }
 
 impl UnmatchedEntry {
@@ -79,8 +83,15 @@ impl UnmatchedEntry {
             ),
             (all, more) => format!("{}, and {more} more", all.join(", ")),
         };
+        let written_at = match self.written_at.as_slice() {
+            [] => String::new(),
+            places => {
+                let places: Vec<String> = places.iter().map(ToString::to_string).collect();
+                format!(" (from {})", places.join(", "))
+            }
+        };
         let mut out = format!(
-            "`{}` entry `{}` of {} {contracts} names no {} in the analyzed files",
+            "`{}` entry `{}` of {} {contracts}{written_at} names no {} in the analyzed files",
             self.key, self.entry, self.kind, self.names_no
         );
         if self.named_at_run_time {
@@ -141,6 +152,8 @@ impl Definition {
 struct Key<'c> {
     /// The contract's name, or `#<position>`.
     contract: String,
+    /// The contract's position among those of its kind.
+    index: usize,
     /// The key as the rules compile it: the contract's kind, a dot, and the key
     /// (`write-owners.targets`).
     context: &'static str,
@@ -181,6 +194,7 @@ fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key
         for &(context, entries, shape) in lists {
             out.push(Key {
                 contract: contract.clone(),
+                index,
                 context,
                 entries,
                 shape,
@@ -726,7 +740,7 @@ pub(crate) fn unmatched_entries(
     let mut judged: FxHashMap<(&str, &str), Option<usize>> = FxHashMap::default();
     for key in keys {
         let (kind, name) = (key.kind(), key.key());
-        for entry in key.entries {
+        for (position, entry) in key.entries.iter().enumerate() {
             let at = match judged.get(&(key.context, entry.as_str())) {
                 Some(at) => *at,
                 None => {
@@ -740,6 +754,7 @@ pub(crate) fn unmatched_entries(
                             names_no: missing.names_no,
                             nearest: missing.nearest,
                             named_at_run_time: missing.named_at_run_time,
+                            written_at: Vec::new(),
                         });
                         found.len() - 1
                     });
@@ -747,10 +762,15 @@ pub(crate) fn unmatched_entries(
                     at
                 }
             };
-            if let Some(at) = at
-                && found[at].contracts.last() != Some(&key.contract)
-            {
+            let Some(at) = at else { continue };
+            if found[at].contracts.last() != Some(&key.contract) {
                 found[at].contracts.push(key.contract.clone());
+            }
+            let sources = &cx.config.sources;
+            if let Some(place) = sources.place(kind, key.index, name, position)
+                && !found[at].written_at.contains(place)
+            {
+                found[at].written_at.push(place.clone());
             }
         }
     }
