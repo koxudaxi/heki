@@ -448,11 +448,57 @@ gives, when they agree: a value read from a table of the module by the name (`TA
 missing `get`), what calling it, or calling a function of the module by its name, gives by that
 function's declarations (`FunctionDecl::declared_return_as_named`: the named object or class every
 return gives, such as a class it defines in its body, also behind `functools.lru_cache`, else the
-class object its annotation names), or the value any other `return` gives, whatever the name.
-Only a named object (`Ty::Ref`: an import, a class, a function) or a class object that may be a
-subclass (`Ty::Class`, `-> type[Base]`) is served. A bare `return`, a value of no type heki
-knows, different objects on different `return`s, and a factory another module defines (no type
-in pass 1) leave the name unknown, as before.
+class object its annotation names), what a function of the module the value is handed to gives
+when it calls it (below), or the value any other `return` gives, whatever the name. Only a named
+object (`Ty::Ref`: an import, a class, a function) or a class object that may be a subclass
+(`Ty::Class`, `-> type[Base]`) is served. A bare `return`, a value of no type heki knows,
+different objects on different `return`s, and a factory another module defines (no type in pass
+1) leave the name unknown, as before. A table the module body changes in place after binding it
+(`TABLE["b"] = other`, `TABLE.update(...)`) is no table (`ModuleDecls::tables`).
+
+A `return` handing the table's value by position to a function of the module
+(`_load(name, TABLE[name])`) serves what calling the value gives when the function, with a
+function object in that parameter, returns only its call (`return entry()`): a branch on
+`isinstance(entry, C)` naming only classes of data values (`str`, `bytes`, `tuple`, `list`,
+`dict`, `set`, `int`, ...), which a function object is no instance of, takes its false way (also
+under `not`), any other test both ways, and every `return` reached must be `entry()`
+(`Hook::calls_its_param`, one walk of the function's blocks within the hook's budget). A value
+that is a string or a pair takes the import branches (`getattr(import_module(entry), name)`),
+which heki does not follow: the name stays unknown.
+
+The hook may also be the function a project function returns, which the module binds once at
+module level, outside a loop: `__getattr__ = make_hook(...)`, `make_hooks(...)[0]`, or one
+target of unpacking it (`__getattr__, __dir__ = make_hooks(__name__, _EXPORTS)`), the function
+imported from the module defining it or the module's own (not followed through a re-export,
+since following names reads what modules serve), with no `*` or `**` argument
+(`GetattrExports::made_by`). The
+function's module records, in pass 1, what each function such a factory returns serves
+(`ModuleDecls::hook_factories`, `resolver::getattr_exports::hook_factories`): a plain
+module-level function every `return` of which gives the same functions taking the name first (a
+function nested in it, or one of its module, also as items of a tuple display) is read by the
+same walk, a closure cell that the factory binds only as one of its parameters (`infer::ParamCells`)
+being a table of one key standing for every key of the table a call passes (`ANY_KEY`). The walk
+is exact for every key the hook's tests do not name: the literals its tests name, and those it
+decides, are kept (`MadeHook::literals`), and a key among them gets nothing. The record says
+what a key gets (`KeyServes`: the value, or what calling it gives, also through a function of
+the factory's module as above), what the literal names the hook decides get, and the factory's
+parameters guarding a store of the hook (`if cache: setattr(module, name, value)`: a branch on
+the cell of a parameter whose true way reaches a store, `setattr`, `delattr`, or a method
+putting entries into a mapping, which the hook reaches no other way; `MadeHook::false_params`).
+A hook that stores anything with those parameters false, a table the factory or a function
+nested in it uses other than by reading it (a test, an item, `get`, `keys`, `values`, `items`,
+unpacking it into a display, `len` and the like), or a hook reading two parameters' tables gets
+no record. The project puts the call's arguments in (`resolver::getattr_exports::Instance`, read
+by `ProjectDecls::served_by_getattr` through the factory module's declarations, so an edit of
+the factory invalidates the module's readers): the table parameter must be bound to a table of
+the module (`ModuleDecls::tables`; a display passed in the call is none), and each guard to a
+false literal (`False`, `None`, `0`), passed or as the default. A key's value is served as
+`GetattrExports::served` would serve it, and calling a function of the module gives what its
+declarations say; what the module itself binds is never served. Another
+module rebinding or storing into the factory, a global of its module the hook reads, the
+module's hook, its table, or a value of the table leaves every name unknown
+(`ProjectDecls::getattr_open`). A function bound under the name without a call
+(`__getattr__ = _impl`) is no hook heki follows.
 
 The chases follow a served name as they follow an import (`ProjectDecls::unbound_name`): a named
 object for every chase, so calling the name, constructing it, and a class based on it are what

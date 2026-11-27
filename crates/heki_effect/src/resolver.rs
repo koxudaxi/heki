@@ -1445,6 +1445,12 @@ pub struct ModuleDecls {
     /// ([`ProjectDecls::served_by_getattr`]). Boxed: few modules have such a hook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub getattr_exports: Option<Box<GetattrExports>>,
+    /// The module-level functions that return a function another module may bind as its
+    /// `__getattr__` (`__getattr__, __dir__ = make_hooks(__name__, _EXPORTS)`), by qualname, with
+    /// what each such hook serves for the arguments of the call making it
+    /// ([`getattr_exports::hook_factories`]). Boxed: few modules have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_factories: Option<Box<BTreeMap<String, Box<[MadeHook]>>>>,
     /// The packages whose `__path__` the module changes, by the fqn its imports give them
     /// (`plugins.__path__.append(d)`), or by its own name when it is a package changing its own
     /// (`__path__ = extend_path(__path__, __name__)`), and how
@@ -1515,6 +1521,86 @@ pub struct GetattrExports {
     /// (`ReturnFact::ty_globals`): another module rebinding one, or storing into one, may make
     /// the hook serve other objects ([`ProjectDecls::getattr_open`]).
     pub globals: Box<[String]>,
+    /// The call of a project function the module binds its `__getattr__` to, when that is
+    /// where the hook comes from: what it serves is what the function's hook
+    /// ([`ModuleDecls::hook_factories`]) serves for the call's arguments
+    /// ([`ProjectDecls::served_by_getattr`]), and `served` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_by: Option<Box<MadeBy>>,
+}
+
+/// The call making a module's `__getattr__` ([`GetattrExports::made_by`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MadeBy {
+    /// The function called, by the fqn the module's names give it.
+    pub factory: String,
+    /// Which item of the tuple the call returns is the hook (`hooks[0]`, the first target of
+    /// an unpacking), `None` for the value itself.
+    pub item: Option<u8>,
+    pub args: Vec<HookArg>,
+    pub kwargs: Vec<(String, HookArg)>,
+}
+
+/// An argument of the call making a module's `__getattr__`, as far as the hook may read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HookArg {
+    /// A global of the module, by its name: the hook reads it as a table when it is one
+    /// ([`ModuleDecls::tables`]).
+    Global(String),
+    /// A literal (`False`, `None`).
+    Literal(ConstLiteral),
+    /// Any other value (`__name__`).
+    Other,
+}
+
+/// What a function a factory returns serves once a module binds it as its `__getattr__`
+/// ([`ModuleDecls::hook_factories`]): under the keys of the table the factory takes, what each
+/// key's value is or what calling it gives, and under the literal names its own code decides,
+/// what [`GetattrExports::served`] would say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MadeHook {
+    /// Which item of the tuple the factory returns the hook is, `None` for the value itself.
+    pub item: Option<u8>,
+    /// The factory's parameter holding the table the hook reads by the name, and what it gives
+    /// for a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<(HookParam, KeyServes)>,
+    /// What the hook serves under the literal names its code decides.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub served: BTreeMap<String, Ty>,
+    /// The literal names the hook's tests or its own tables name: the hook may treat a key of
+    /// the factory's table among them otherwise than the other keys, so such a key gets nothing.
+    #[serde(default, skip_serializing_if = "<[String]>::is_empty")]
+    pub literals: Box<[String]>,
+    /// The factory's parameters that guard a store of the hook (`if cache: setattr(module,
+    /// name, value)`, which may bind the name in the module): each must be bound to a false
+    /// literal for the hook to serve anything.
+    #[serde(default, skip_serializing_if = "<[HookParam]>::is_empty")]
+    pub false_params: Box<[HookParam]>,
+    /// The globals of the factory's module the hook and the factory read (fqns), the factory
+    /// among them ([`GetattrExports::globals`]).
+    pub globals: Box<[String]>,
+}
+
+/// What a hook made by a factory serves under a key of the factory's table
+/// ([`MadeHook::table`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyServes {
+    /// The key's value.
+    Value,
+    /// What calling the key's value gives.
+    Called,
+}
+
+/// A parameter of a hook factory ([`MadeHook`]): what a call binds it to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookParam {
+    pub position: u8,
+    pub name: String,
+    pub pos_only: bool,
+    pub kw_only: bool,
+    /// The default when it is a literal.
+    pub default: Option<ConstLiteral>,
 }
 
 /// How a module changes the `__path__` of a package, the directories Python finds the modules
@@ -3946,20 +4032,45 @@ impl ProjectDecls {
             return Some(found);
         }
         let served = match self.served_by_getattr(m, name) {
-            Some(Ty::Ref(target)) => Some((target.clone(), false)),
-            Some(Ty::Class(class)) if how.reads_type_checking() => Some((class.clone(), true)),
+            Some(Ty::Ref(target)) => Some((target, false)),
+            Some(Ty::Class(class)) if how.reads_type_checking() => Some((class, true)),
             _ => None,
         };
         served.or_else(checked)
     }
 
-    /// What the `__getattr__` of `m` serves under `name` ([`ModuleDecls::getattr_exports`]),
-    /// unless another module may make it serve another object ([`Self::getattr_open`]).
-    fn served_by_getattr<'m>(&self, m: &'m ModuleDecls, name: &str) -> Option<&'m Ty> {
-        let served = m.getattr_exports.as_deref()?.served.get(name)?;
+    /// What the `__getattr__` of `m` serves under `name` ([`ModuleDecls::getattr_exports`],
+    /// or what the hook a factory made serves, [`GetattrExports::made_by`]), unless another
+    /// module may make it serve another object ([`Self::getattr_open`]).
+    fn served_by_getattr(&self, m: &ModuleDecls, name: &str) -> Option<Ty> {
+        let exports = m.getattr_exports.as_deref()?;
         let module = &m.module_name;
         self.read(|k| note(&mut k.grown_globals, &format!("{module}.__getattr__")));
-        (!self.getattr_open.contains(module)).then_some(served)
+        if self.getattr_open.contains(module) {
+            return None;
+        }
+        match exports.made_by.as_deref() {
+            None => exports.served.get(name).cloned(),
+            // Python calls the hook only for a name the module does not bind.
+            Some(_) if m.binds(name) && !m.type_checking_only.contains(name) => None,
+            Some(made) => self.made_hook(m, made)?.serves(name).map(|(ty, _)| ty),
+        }
+    }
+
+    /// The hook the call `made` makes for `m` ([`MadeHook`]), the factory's module read through
+    /// [`Self::module`], when the call binds the parameters the hook depends on as it needs:
+    /// the table to a table of `m`, and each guard of a store to a false literal. The factory
+    /// is the function its fqn names in its module, not followed through re-exports: following
+    /// names reads what modules serve, which this decides.
+    fn made_hook<'p>(
+        &'p self,
+        m: &'p ModuleDecls,
+        made: &'p MadeBy,
+    ) -> Option<getattr_exports::Instance<'p>> {
+        let (fm, qualname) = self.split_module(&made.factory)?;
+        let hook =
+            (fm.hook_factories.as_deref()?.get(qualname)?.iter()).find(|h| h.item == made.item)?;
+        getattr_exports::Instance::of(m, made, hook)
     }
 
     /// [`Self::getattr_open`]: the modules with a `__getattr__` heki follows that another
@@ -3979,8 +4090,12 @@ impl ProjectDecls {
         // global of the module.
         (self.modules.values())
             .filter(|m| {
-                (m.getattr_exports.as_deref())
-                    .is_some_and(|exports| exports.globals.iter().any(|g| touched(g)))
+                let Some(exports) = m.getattr_exports.as_deref() else {
+                    return false;
+                };
+                let made = (exports.made_by.as_deref()).and_then(|made| self.made_hook(m, made));
+                exports.globals.iter().any(|g| touched(g))
+                    || made.is_some_and(|made| made.globals().iter().any(|g| touched(g)))
             })
             .map(|m| m.module_name.clone())
             .collect()
@@ -7520,6 +7635,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.abc_registrations = sentinels::abc_registrations(input, &decls);
     returns::record_return_facts(input, &mut decls, kb);
     decls.getattr_exports = getattr_exports::getattr_exports(input, &decls, kb).map(Box::new);
+    decls.hook_factories = getattr_exports::hook_factories(input, &decls, kb).map(Box::new);
     decls
 }
 
@@ -10393,6 +10509,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     exports: None,
     star_imports: None,
     getattr_exports: None,
+    hook_factories: None,
     path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),

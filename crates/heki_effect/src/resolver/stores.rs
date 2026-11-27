@@ -890,7 +890,8 @@ const TABLE_ENTRIES: usize = 256;
 /// entry, one of whose values is a function, a class, a `functools.partial` object, or an
 /// instance whose fields hold such objects (`crate::types::Args::Fields`), when
 /// no function of the module changes the global's object in place (`changed`,
-/// [`Classifier::changed_globals`]) and nothing may rebind the name (`unfixed`).
+/// [`Classifier::changed_globals`], and the module body's changes of the display it holds) and
+/// nothing may rebind the name (`unfixed`).
 fn tables(
     decls: &ModuleDecls,
     body: &StoringFn<'_>,
@@ -913,12 +914,17 @@ fn tables(
             {
                 continue;
             }
-            let Some(InstKind::DictLiteral { entries, .. }) =
-                shape.inst(shape.copy_root(*value)).map(|i| &i.kind)
+            let display = shape.copy_root(*value);
+            let Some(InstKind::DictLiteral { entries, .. }) = shape.inst(display).map(|i| &i.kind)
             else {
                 continue;
             };
-            if entries.len() > TABLE_ENTRIES {
+            // The module body holds the display in a value: an item it stores there, or a
+            // method it calls on it, changes it after the store (`HANDLERS["b"] = other`).
+            let changed_here = (body.changes.as_ref())
+                .map(|c| c.aliased_by.contains_key(&display))
+                .open_means(true);
+            if entries.len() > TABLE_ENTRIES || changed_here {
                 continue;
             }
             let mut table: Vec<(Box<str>, Option<Ty>)> = Vec::with_capacity(entries.len());

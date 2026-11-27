@@ -822,6 +822,12 @@ const SERVED_USE: &str = "from pkg.served_models import Waiter\n\n\nclass Served
 const SERVED_PATCH: &str =
     "import pkg.served_models\n\n\ndef patch() -> None:\n    pkg.served_models._EXPORTS = {}\n";
 const SERVED_PATCH_NONE: &str = "def patch() -> None:\n    return None\n";
+// A base another module serves from the `__getattr__` a factory of a third module makes
+// (`GetattrExports::made_by`, `ModuleDecls::hook_factories`): served while the factory's hook
+// stores nothing into the module, and not while its `cache` default is true.
+const HOOK_FACTORY: &str = "def _load(name, entry):\n    if isinstance(entry, str):\n        raise ImportError(name)\n    return entry()\n\n\ndef module_hooks(module_name, table, *, cache=False):\n    def module_getattr(name):\n        if name not in table:\n            raise AttributeError(name)\n        value = _load(name, table[name])\n        if cache:\n            setattr(__import__(module_name), name, value)\n        return value\n\n    return module_getattr, None\n";
+const MADE_SERVED: &str = "from pkg.hook_factory import module_hooks\n\n\ndef _waiter() -> type:\n    from pkg.made_models import Waiter\n\n    class _Made(Waiter):\n        pass\n\n    return _Made\n\n\n_EXPORTS = {\"Waiter\": _waiter}\n__getattr__, __dir__ = module_hooks(__name__, _EXPORTS)\n";
+const MADE_SERVED_USE: &str = "from pkg.made_served import Waiter\n\n\nclass MadeWaiter(Waiter):\n    pass\n\n\nasync def serve_made(w: MadeWaiter) -> None:\n    w.wait()\n";
 // A factory function and a class attribute annotated with the callable they hold
 // (`Callable[..., Waiter]`, `FunctionDecl::return_type`, `ClassDecl` attribute types): calling
 // what they hold in other files gives a `Waiter` while the annotation names that one class.
@@ -1959,13 +1965,15 @@ fn steps_returned_types() -> Vec<Step> {
 /// class based on a name another module binds only under `if TYPE_CHECKING:`, while that module
 /// binds it no other way: the wait its method makes is heuristic until the module imports the
 /// name at run time; and a class based on a name another module's `__getattr__` serves, exact
-/// while no file rebinds what the hook reads and heuristic while it serves a class object.
+/// while no file rebinds what the hook reads and heuristic while it serves a class object, also
+/// where the hook is what a factory of a third module makes, while that hook stores nothing.
 fn steps_declared_types() -> Vec<Step> {
     const SITE: &[(&str, &str)] = &[("pkg/generic_site_use.py", "EFF101")];
     const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101 [heuristic]")];
     const LAZY_EXACT: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
     const SERVED: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101")];
     const SERVED_HEURISTIC: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101 [heuristic]")];
+    const MADE: &[(&str, &str)] = &[("pkg/made_use.py", "EFF101")];
     vec![
         Step::new(
             "an attribute typed by the class's type parameter holds the waiting class",
@@ -2049,6 +2057,28 @@ fn steps_declared_types() -> Vec<Step> {
         )
         .present(SERVED)
         .absent(SERVED_HEURISTIC),
+        Step::new(
+            "a base served by the __getattr__ a factory of another module makes",
+            vec![
+                Action::Create("pkg/hook_factory.py", HOOK_FACTORY.to_owned()),
+                Action::Create("pkg/made_served.py", MADE_SERVED.to_owned()),
+                Action::Create("pkg/made_use.py", MADE_SERVED_USE.to_owned()),
+            ],
+        )
+        .present(MADE),
+        Step::new(
+            "the factory's hook stores what it serves by default",
+            vec![save(
+                "pkg/hook_factory.py",
+                &HOOK_FACTORY.replace("cache=False", "cache=True"),
+            )],
+        )
+        .absent(MADE),
+        Step::new(
+            "the factory's hook stores nothing by default again",
+            vec![save("pkg/hook_factory.py", HOOK_FACTORY)],
+        )
+        .present(MADE),
     ]
 }
 

@@ -844,6 +844,538 @@ fn a_name_a_module_getattr_serves_is_what_the_hook_returns() {
     );
 }
 
+/// Hook factories: `module_hooks` makes a hook serving what `_load` gives for the table's value
+/// under the name (a function's call past the tests of strings and pairs), storing it in the
+/// module only when `cache` is true; `version_hook` returns a function of its module deciding
+/// one literal name; `checked_hooks` raises for one literal name before serving a key's call;
+/// `plain_hooks` serves a key's value; `popping_hooks` takes the value out of the table,
+/// `noting_hooks` stores the name in a global, and `wrapped_hooks` serves a list.
+const HOOKS: &str = r#"import sys
+from collections.abc import Callable, Mapping
+from importlib import import_module
+from typing import Any
+
+
+def _load(name: str, entry: Any) -> object:
+    if isinstance(entry, str):
+        return getattr(import_module(entry), name)
+    if not not isinstance(entry, tuple):
+        return getattr(import_module(entry[0]), entry[1])
+    return entry()
+
+
+def module_hooks(
+    module_name: str, table: Mapping[str, Any], *, cache: bool = False
+) -> tuple[Callable[[str], Any], Callable[[], list[str]]]:
+    made_for = sys.modules.get(module_name)
+    if not len(table):
+        raise ValueError(module_name)
+
+    def module_getattr(name: str) -> Any:
+        if name not in table:
+            raise AttributeError(name)
+        value = _load(name, table[name])
+        if cache:
+            setattr(made_for or sys.modules[module_name], name, value)
+        return value
+
+    def module_dir() -> list[str]:
+        return sorted({*vars(made_for or sys.modules[module_name]), *table})
+
+    return module_getattr, module_dir
+
+
+def _version_getattr(name: str) -> Any:
+    if name == "Version":
+        from pkg.base import Base  # noqa: PLC0415
+
+        return Base
+    raise AttributeError(name)
+
+
+def version_hook() -> Callable[[str], Any]:
+    return _version_getattr
+
+
+def checked_hooks(table: Mapping[str, Any]) -> Callable[[str], Any]:
+    def module_getattr(name: str) -> Any:
+        if name in ("Hidden",):
+            raise AttributeError(name)
+        return table[name]()
+
+    return module_getattr
+
+
+def plain_hooks(table: Mapping[str, Any]) -> Callable[[str], Any]:
+    def module_getattr(name: str) -> Any:
+        if sys.flags.optimize:
+            return table.get(name)
+        return table.get(name)
+
+    return module_getattr
+
+
+def popping_hooks(table: dict[str, Any]) -> Callable[[str], Any]:
+    def module_getattr(name: str) -> Any:
+        if name in table:
+            return table.pop(name)()
+        raise AttributeError(name)
+
+    return module_getattr
+
+
+_last_name = ""
+
+
+def noting_hooks(table: Mapping[str, Any]) -> Callable[[str], Any]:
+    def module_getattr(name: str) -> Any:
+        global _last_name
+        _last_name = name
+        return table[name]()
+
+    return module_getattr
+
+
+def wrapped_hooks(table: Mapping[str, Any]) -> Callable[[str], Any]:
+    def module_getattr(name: str) -> Any:
+        if name in table:
+            return [table[name]]
+        raise AttributeError(name)
+
+    return module_getattr
+"#;
+
+/// A module binding its `__getattr__` to what `call` makes, with a table of `entries` and the
+/// `lru_cache` factory of a class based on `Base`, the report's shape.
+fn made(call: &str, entries: &str, after: &str) -> String {
+    format!(
+        r#"from functools import lru_cache
+
+from pkg.base import Base as _Base
+from pkg.hooks import (
+    checked_hooks,
+    module_hooks,
+    noting_hooks,
+    plain_hooks,
+    popping_hooks,
+    wrapped_hooks,
+)
+
+
+@lru_cache(maxsize=1)
+def _get_base_class() -> type:
+    class _StrictBase(_Base):
+        pass
+
+    return _StrictBase
+
+
+_EXPORTS = {{{entries}}}
+{call}
+{after}"#
+    )
+}
+
+const MADE_DISPATCH: &str = r#"from typing import Any
+
+
+def _made() -> type:
+    from pkg.base import Base  # noqa: PLC0415
+
+    class _Made(Base):
+        pass
+
+    return _Made
+
+
+_EXPORTS = {"Base": _made}
+
+
+def _load(name: str, entry: Any) -> object:
+    if name.startswith("_"):
+        raise AttributeError(name)
+    if not isinstance(entry, (str, bytes)):
+        return entry()
+    raise ImportError(name)
+
+
+def _wrap(name: str, entry: Any) -> object:
+    return [entry]
+
+
+_WRAPPED = {"Wrapped": _made}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _WRAPPED:
+        return _wrap(name, _WRAPPED[name])
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    return _load(name, _EXPORTS[name])
+"#;
+
+const MADE_LOCAL: &str = r#"from typing import Any
+
+from pkg.base import Base as _Base
+
+
+def _base() -> type:
+    class _Local(_Base):
+        pass
+
+    return _Local
+
+
+def _hook(table):
+    def module_getattr(name: str) -> Any:
+        return table[name]()
+
+    return module_getattr
+
+
+def _impl(name: str) -> Any:
+    if name == "Aliased":
+        return _Base
+    raise AttributeError(name)
+
+
+_EXPORTS = {"Local": _base}
+__getattr__ = _hook(_EXPORTS)
+"#;
+
+const MADE_ALIAS: &str = r#"from typing import Any
+
+from pkg.base import Base as _Base
+
+
+def _impl(name: str) -> Any:
+    if name == "Aliased":
+        return _Base
+    raise AttributeError(name)
+
+
+_HOOKS = (_impl, None)
+__getattr__ = _HOOKS[0]
+"#;
+
+const MADE_USE: &str = r#"from pkg.made import Base as MadeBase
+from pkg.made_alias import Aliased
+from pkg.made_flagged import Base as FlaggedBase
+from pkg.made_inline import Base as InlineBase
+from pkg.made_local import Local
+from pkg.made_noted import Base as NotedBase
+from pkg.made_wrapped import Base as WrappedBase
+from pkg.made_cached import Base as CachedBase
+from pkg.made_changed import Base as ChangedBase
+from pkg.made_checked import Hidden, Shown
+from pkg.made_dispatch import Base as DispatchBase
+from pkg.made_dispatch import Wrapped as DispatchWrapped
+from pkg.made_index import Base as IndexBase
+from pkg.made_outside import Base as OutsideBase
+from pkg.made_pair import Base as PairBase
+from pkg.made_plain import Plain
+from pkg.made_popped import Base as PoppedBase
+from pkg.made_string import Base as StringBase
+from pkg.made_version import Version
+
+
+class Made(MadeBase):
+    pass
+
+
+class OnAliased(Aliased):
+    pass
+
+
+class Flagged(FlaggedBase):
+    pass
+
+
+class Inline(InlineBase):
+    pass
+
+
+class OnLocal(Local):
+    pass
+
+
+class Noted(NotedBase):
+    pass
+
+
+class Wrapped(WrappedBase):
+    pass
+
+
+class Cached(CachedBase):
+    pass
+
+
+class Changed(ChangedBase):
+    pass
+
+
+class OnHidden(Hidden):
+    pass
+
+
+class OnShown(Shown):
+    pass
+
+
+class Dispatched(DispatchBase):
+    pass
+
+
+class OnDispatchWrapped(DispatchWrapped):
+    pass
+
+
+class Indexed(IndexBase):
+    pass
+
+
+class Outside(OutsideBase):
+    pass
+
+
+class Paired(PairBase):
+    pass
+
+
+class OnPlain(Plain):
+    pass
+
+
+class Popped(PoppedBase):
+    pass
+
+
+class Stringed(StringBase):
+    pass
+
+
+class Versioned(Version):
+    pass
+
+
+def made(obj: Made) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def aliased(obj: OnAliased) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def flagged(obj: Flagged) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def inline(obj: Inline) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def local(obj: OnLocal) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def noted(obj: Noted) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def wrapped(obj: Wrapped) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def cached(obj: Cached) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def changed(obj: Changed) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def hidden(obj: OnHidden) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def shown(obj: OnShown) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def dispatched(obj: Dispatched) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def dispatch_wrapped(obj: OnDispatchWrapped) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def indexed(obj: Indexed) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def outside(obj: Outside) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def paired(obj: Paired) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def plain(obj: OnPlain) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def popped(obj: Popped) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def stringed(obj: Stringed) -> None:
+    obj.copy().__dict__["_mark"] = True
+
+
+def versioned(obj: Versioned) -> None:
+    obj.copy().__dict__["_mark"] = True
+"#;
+
+/// A module `__getattr__` bound to what a project function in another module returns is
+/// followed as a `def` hook is, with the function's parameters bound to the call's arguments:
+/// the report's shape (a closure over the table, unpacked from the pair the factory returns, or
+/// taken by index) serves what `_load` gives for the table's function, which the tests of
+/// strings and pairs let through to its call; the function of its own module a factory returns
+/// serves the literal name it decides; a key the hook tests as a literal gets nothing, the others
+/// what calling their value gives; a key's value is served as it is; a factory of the module
+/// itself serves alike. A `def` hook handing the value to a function of its module calling it
+/// serves the same, and one handing it to a function returning anything else serves nothing. The hook storing into the module (`cache=True`, also a flag heki does not
+/// read as a literal, `bool(_CACHE)`), a table changed after the binding or passed as a display, a factory of a
+/// module outside the project, a factory taking the value out of the table, a hook storing into
+/// a global or serving a list of the value, a function bound under the name without a call
+/// (here an item of a tuple), and
+/// a string or a pair entry (which `_load` imports by name, as no hook heki follows does) leave
+/// the class unknown.
+#[test]
+fn a_module_getattr_a_project_factory_makes_serves_what_its_hook_returns() {
+    let hook = "__getattr__, __dir__ = module_hooks(__name__, _EXPORTS)";
+    let entry = r#""Base": _get_base_class"#;
+    let files = [
+        ("base.py", BASE.to_owned()),
+        ("hooks.py", HOOKS.to_owned()),
+        ("made.py", made(hook, entry, "")),
+        (
+            "made_index.py",
+            made(
+                "__getattr__ = module_hooks(__name__, _EXPORTS)[0]",
+                entry,
+                "",
+            ),
+        ),
+        (
+            "made_cached.py",
+            made(
+                "__getattr__, __dir__ = module_hooks(__name__, _EXPORTS, cache=True)",
+                entry,
+                "",
+            ),
+        ),
+        (
+            "made_changed.py",
+            made(hook, entry, "_EXPORTS[\"Other\"] = _get_base_class\n"),
+        ),
+        (
+            "made_checked.py",
+            made(
+                "__getattr__ = checked_hooks(_EXPORTS)",
+                r#""Hidden": _get_base_class, "Shown": _get_base_class"#,
+                "",
+            ),
+        ),
+        (
+            "made_plain.py",
+            made(
+                "__getattr__ = plain_hooks(_EXPORTS)",
+                r#""Plain": _Base"#,
+                "",
+            ),
+        ),
+        (
+            "made_popped.py",
+            made("__getattr__ = popping_hooks(_EXPORTS)", entry, ""),
+        ),
+        (
+            "made_outside.py",
+            made(hook, entry, "").replace("pkg.hooks import", "lazyhooks import"),
+        ),
+        (
+            "made_string.py",
+            made(hook, r#""Base": "pkg.base", "Other": _get_base_class"#, ""),
+        ),
+        (
+            "made_pair.py",
+            made(
+                hook,
+                r#""Base": ("pkg.base", "Base"), "Other": _get_base_class"#,
+                "",
+            ),
+        ),
+        (
+            "made_version.py",
+            "from pkg.hooks import version_hook\n\n__getattr__ = version_hook()\n".to_owned(),
+        ),
+        ("made_dispatch.py", MADE_DISPATCH.to_owned()),
+        ("made_local.py", MADE_LOCAL.to_owned()),
+        ("made_alias.py", MADE_ALIAS.to_owned()),
+        (
+            "made_flagged.py",
+            made(
+                "__getattr__, __dir__ = module_hooks(__name__, _EXPORTS, cache=bool(_CACHE))",
+                entry,
+                "",
+            )
+            .replace("_EXPORTS = {", "_CACHE = False\n_EXPORTS = {"),
+        ),
+        (
+            "made_inline.py",
+            made(
+                "__getattr__, __dir__ = module_hooks(__name__, {\"Base\": _get_base_class})",
+                entry,
+                "",
+            ),
+        ),
+        (
+            "made_noted.py",
+            made("__getattr__ = noting_hooks(_EXPORTS)", entry, ""),
+        ),
+        (
+            "made_wrapped.py",
+            made("__getattr__ = wrapped_hooks(_EXPORTS)", entry, ""),
+        ),
+        ("use.py", MADE_USE.to_owned()),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(f, t)| (*f, t.as_str())).collect();
+    let p = project("getattr_made", &files);
+    assert_eq!(
+        unknown_receivers(&p),
+        names(&[
+            "dispatch_wrapped",
+            "aliased",
+            "flagged",
+            "inline",
+            "noted",
+            "wrapped",
+            "cached",
+            "changed",
+            "hidden",
+            "outside",
+            "paired",
+            "popped",
+            "stringed",
+            // The hook's `setattr` when `cache` is true.
+            "module_hooks.<locals>.module_getattr",
+        ])
+    );
+}
+
 const LAZY_SERVED: &str = r#"from typing import TYPE_CHECKING, Any
 
 import requests
