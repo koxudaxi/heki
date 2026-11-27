@@ -8144,6 +8144,9 @@ fn handed_back(f: &IrFunction, decls: &ModuleDecls) -> Option<HandedBack> {
     };
     let mut returned = None;
     let mut calls = BTreeSet::new();
+    // The values a return gives that may be an attribute (an attribute's load, a call's result),
+    // with the block of the return.
+    let mut attr_reads: Vec<(VarId, BlockId)> = Vec::new();
     for bb in &f.blocks {
         let Terminator::Return(value) = &bb.terminator else {
             continue;
@@ -8154,11 +8157,14 @@ fn handed_back(f: &IrFunction, decls: &ModuleDecls) -> Option<HandedBack> {
         if let Some(call) = def.and_then(|kind| ForwardingCall::of(kind, &defs, decls, &mut param))
         {
             calls.insert(call);
+            attr_reads.push((root, bb.id));
             continue;
         }
         let this = match def {
             Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                (param_of(handed_back_from(*obj))?, Some(attr.clone()))
+                let param = param_of(handed_back_from(*obj))?;
+                attr_reads.push((root, bb.id));
+                (param, Some(attr.clone()))
             }
             _ => (param_of(root)?, None),
         };
@@ -8179,19 +8185,90 @@ fn handed_back(f: &IrFunction, decls: &ModuleDecls) -> Option<HandedBack> {
                 _ => false,
             })
     };
-    if (returned.as_ref()).is_some_and(|(_, attr)| attr.as_deref().is_some_and(|a| stores(Some(a))))
-    {
+    // So may a function running code between the read and the return (`old = items_of(s);
+    // reset(s); return old`), which may store it; `return items_of(s)` runs none.
+    attr_reads.sort_unstable();
+    let after_read = OnceCell::new();
+    let rebinds_after_read =
+        || *after_read.get_or_init(|| rebinds_after_reads(f, &defs, decls, &attr_reads));
+    let returned_attr = returned.as_ref().and_then(|(_, attr)| attr.as_deref());
+    if returned_attr.is_some_and(|a| stores(Some(a)) || rebinds_after_read()) {
         return None;
     }
     if calls.is_empty() {
         let (param, attr) = returned?;
         return Some(HandedBack::Param(param, attr));
     }
+    let rebinds_attrs = stores(None) || rebinds_after_read();
     Some(HandedBack::Forwarded(Box::new(ForwardedReturn {
         direct: returned,
         calls: calls.into_iter().collect(),
-        stores_attrs: stores(None),
+        rebinds_attrs,
     })))
+}
+
+/// The owner of the budget of [`rebinds_after_reads`].
+const AFTER_READS_OWNER: &str = "heki_effect::resolver::rebinds_after_reads";
+
+/// Whether `f` may rebind an attribute ([`may_rebind_attrs`]) on some path from one of `reads`
+/// (a value and the block returning it, in the order of the values) to that return: after the
+/// value's instruction in its
+/// block, and in the blocks walked back from the return up to that block, which a value's
+/// definition dominates. The returns of one value share a walk; past a budget proportional to
+/// `f`, it may.
+fn rebinds_after_reads(
+    f: &IrFunction,
+    defs: &FxHashMap<VarId, &InstKind>,
+    decls: &ModuleDecls,
+    reads: &[(VarId, BlockId)],
+) -> bool {
+    let rebinds = |insts: &[Inst]| (insts.iter()).any(|i| may_rebind_attrs(&i.kind, defs, decls));
+    if !f.blocks.iter().any(|b| rebinds(&b.insts)) {
+        return false;
+    }
+    let shape = FnShape::new(f);
+    let budget = Budget::of_function(AFTER_READS_OWNER, f);
+    // Each value is an instruction's result (an attribute load, a call).
+    let read_at: FxHashMap<VarId, (BlockId, usize)> = (f.blocks.iter())
+        .flat_map(|b| (b.insts.iter().enumerate()).map(move |(i, inst)| (b.id, i, inst)))
+        .filter_map(|(b, i, inst)| Some((inst.kind.dst()?, (b, i))))
+        .filter(|(v, _)| reads.binary_search_by_key(v, |(read, _)| *read).is_ok())
+        .collect();
+    (reads.chunk_by(|a, b| a.0 == b.0)).any(|returns| {
+        let (read_block, i) = read_at[&returns[0].0];
+        let insts = &f.block(read_block).insts;
+        if !budget.take(insts.len()) || rebinds(&insts[i + 1..]) {
+            return true;
+        }
+        let starts = (returns.iter()).filter_map(|(_, ret)| (*ret != read_block).then_some(*ret));
+        let next = |b: BlockId, out: &mut Vec<BlockId>| out.extend_from_slice(shape.preds(b));
+        let walked = reach(&budget, starts, next, |b| {
+            let insts = &f.block(b).insts;
+            if b == read_block {
+                Visit::Prune
+            } else if !budget.take(insts.len()) || rebinds(insts) {
+                Visit::Stop(())
+            } else {
+                Visit::Expand
+            }
+        });
+        walked != Answer::Known(None)
+    })
+}
+
+/// Whether the instruction `kind` of a function of the module `decls` may rebind an attribute of
+/// an object it does not name: a call (but one handing its argument back,
+/// [`decl_same_object`]), which may store one, directly or through what it calls, or an
+/// `await`, while which other code runs.
+fn may_rebind_attrs(
+    kind: &InstKind,
+    defs: &FxHashMap<VarId, &InstKind>,
+    decls: &ModuleDecls,
+) -> bool {
+    matches!(
+        kind,
+        InstKind::Call { .. } | InstKind::MethodCall { .. } | InstKind::Await { .. }
+    ) && decl_same_object(kind, defs, decls).is_none()
 }
 
 /// The value whose object the instruction `kind` of a function of the module `decls` describes
@@ -11158,23 +11235,32 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Whether a read or call of `name` on `recv` runs one of `keys` whatever class `recv` is:
-    /// every class of a union or implementation of a protocol, as a class of its own, takes
-    /// `name` from one of them ([`ProjectDecls::function_taken`]). A module function, a class
-    /// object, and `super()` dispatch on no instance: they run what they name.
+    /// Whether a read or call of `name` on `recv` runs one of the project functions `callee`
+    /// resolves it to whatever class `recv` is: every class of a union or implementation of a
+    /// protocol, as a class of its own, takes `name` from one of them
+    /// ([`ProjectDecls::function_taken`]). A named object (a function called by name, which
+    /// dispatches on `__call__`, or one read on a module or a class object) runs what it names
+    /// unless the project may bind it again ([`Self::call_targets_complete`],
+    /// [`Self::method_targets_complete`]). `cls` and `super()` dispatch on no instance: they run
+    /// what they name.
     pub(crate) fn runs_on_every_class(
         &self,
         recv: Option<&Val>,
         name: &str,
-        keys: &[FuncKey],
+        callee: &Callee,
     ) -> bool {
+        let runs = |key: &FuncKey| matches!(callee, Callee::Project(keys, _) if keys.contains(key));
         let classes = match recv {
             Some(Val::Union(classes)) => classes.as_slice(),
             Some(Val::Inst(class)) => self
                 .project
                 .protocol_implementers(class)
                 .unwrap_or(std::slice::from_ref(class)),
-            Some(Val::Ref(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_)) | None => {
+            Some(Val::Ref(_)) if name == "__call__" => {
+                return self.call_targets_complete(recv, callee);
+            }
+            Some(Val::Ref(_)) => return self.method_targets_complete(recv, name, callee),
+            Some(Val::Class(_) | Val::Super(_) | Val::OneOf(_)) | None => {
                 return true;
             }
         };
@@ -11186,7 +11272,7 @@ impl<'a> TypeCtx<'a> {
                 self.taken.borrow_mut().insert(key, taken.clone());
                 taken
             });
-            taken.is_some_and(|k| keys.contains(&k))
+            taken.is_some_and(|k| runs(&k))
         })
     }
 

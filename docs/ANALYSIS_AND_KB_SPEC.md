@@ -2109,9 +2109,14 @@ message = "write model state through GenerationStore instead"
        `obj.a`, and so does a call or property read whose every project callee returns
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param`: `node.members().append(1)` and
-       `node.view.append(1)` with `return self.items`; never a `cached_property`), when every
-       class the receiver may be takes the name from one of those callees: along its MRO, the
-       first class binding the name defines one (`ProjectDecls::function_taken`). A call
+       `node.view.append(1)` with `return self.items`; never a `cached_property`, nor a
+       function storing or deleting the attribute, or running a call or an `await` between
+       the read and the return, which may store it: `old = self.items; self.reset(); return
+       old`), when every class the receiver may be
+       takes the name from one of those callees: along its MRO, the first class binding the
+       name defines one (`ProjectDecls::function_taken`), and a function called by name or read
+       on a module or a class object is no name the project may bind again
+       (`ProjectDecls::call_rebound`). A call
        handing back what it is handed is that object itself (`Extractor::build_same_objects`,
        one answer for every reader of the alias facts, and for the project calls the
        construction recorder follows, `Recorder::handed_back`): `typing.cast(T, value)`
@@ -2124,7 +2129,8 @@ message = "write model state through GenerationStore instead"
        parameter the call binds there: completing a module's declarations decides it against
        pass 1, along the calls through every module, as a fixpoint from no fact over the
        functions the calls reach (a cycle of calls decides nothing), within a budget
-       proportional to the module; a function returning any other call's result is open. Such a value is `retyped`: a type
+       proportional to the module; a function returning any other call's result, or a call of
+       a name the project may bind again (`ProjectDecls::call_rebound`), is open. Such a value is `retyped`: a type
        checker types it by the call, so `MUT110` does not leave its changes to one.
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed

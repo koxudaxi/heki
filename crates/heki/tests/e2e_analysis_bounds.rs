@@ -8964,6 +8964,87 @@ fn a_fan_out_of_forwarding_calls_is_charged_for_each_visit() {
     );
 }
 
+/// `a1` and `a2`, each returning one of `branches` calls of functions returning their
+/// parameter, and in another module `use` handing a read-only parameter to `change` through
+/// `b`, which returns what `a1` or `a2` returns.
+fn forwarding_fan_outs(branches: usize) -> Project {
+    let p = Project::new(&format!("bounds_forwarding_fan_outs_{branches}"));
+    let mut lines = Vec::new();
+    for a in ["a1", "a2"] {
+        lines.push(format!("def {a}(x, flag):"));
+        lines.extend((0..branches).map(|i| format!("    if flag == {i}:\n        return g{i}(x)")));
+        lines.extend(["    return x".to_owned(), String::new(), String::new()]);
+    }
+    for i in 0..branches {
+        lines.extend([
+            format!("def g{i}(x):"),
+            "    return x".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    p.write("m.py", &(lines.join("\n") + "\n")).write(
+        "n.py",
+        "from collections.abc import Sequence\n\nfrom m import a1, a2\n\n\ndef b(x, flag):\n    if flag:\n        return a1(x, flag)\n    return a2(x, flag)\n\n\ndef change(x):\n    if isinstance(x, list):\n        x.reverse()\n\n\ndef use(xs: Sequence[int]) -> None:\n    change(b(xs, 0))\n",
+    );
+    p
+}
+
+/// A function's calls are charged before they are read: the module calling two fan-outs of
+/// another module, whose calls together exceed its budget, reads none of the second's calls and
+/// decides nothing (`b` returns no parameter). A shape a size smaller is decided.
+#[test]
+fn a_module_reading_calls_past_its_budget_stops_reading_them() {
+    let found = check_past_budgets(
+        3000,
+        &[
+            "heki_effect::resolver::forwarded",
+            "heki_effect::summary::Extractor::path_facts",
+        ],
+        forwarding_fan_outs,
+    );
+    assert_eq!(mut110_callers(&found), []);
+    assert_eq!(
+        mut110_callers(&check(&forwarding_fan_outs(3000 / SCALE))),
+        [("use".to_owned(), "exact".to_owned())]
+    );
+}
+
+/// `n` returns of one attribute read, past a call on a path to none of them
+/// (`if flag < 0: log(flag); raise ...`): the returns share one walk back to the read.
+fn returns_of_one_read(n: usize) -> String {
+    let mut lines = vec![
+        "def log(flag):".to_owned(),
+        "    print(flag)".to_owned(),
+        String::new(),
+        String::new(),
+        "def pick(s, flag):".to_owned(),
+        "    items = s.items".to_owned(),
+        "    if flag < 0:".to_owned(),
+        "        log(flag)".to_owned(),
+        "        raise ValueError".to_owned(),
+    ];
+    lines.extend((0..n).map(|i| format!("    if flag == {i}:\n        return items")));
+    lines.push("    return items".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// Whether a call may rebind the attribute between its read and each return is one walk of the
+/// blocks between them, whatever the number of returns. (The paths of so many branches spend
+/// the summary's path budget.)
+#[test]
+fn many_returns_of_one_attribute_read_share_one_walk() {
+    check_past_budgets(
+        3000,
+        &["heki_effect::summary::Extractor::path_facts"],
+        |n| {
+            let p = Project::new(&format!("bounds_returns_of_one_read_{n}"));
+            p.write("m.py", &returns_of_one_read(n));
+            p
+        },
+    );
+}
+
 /// A chain of modules, each function returning what the one of the module before returns: each
 /// module's completion walks the rest of the chain, within a budget proportional to the module,
 /// past which it decides nothing. A chain a size smaller is decided.

@@ -4395,7 +4395,8 @@ fn steps_protocol_reads() -> Vec<Step> {
 /// returning what a function of another module returns of its parameter hands the caller's
 /// object back as itself when both do (`FunctionDecl::returns_param`, which completing its
 /// module's declarations decides against the other module's): either one copying instead
-/// changes what the caller's call hands back.
+/// changes what the caller's call hands back, and so does either function becoming a name the
+/// project binds again (`ProjectDecls::call_rebound`).
 fn steps_mut110() -> Vec<Step> {
     let callers_mutable = RO_CALLERS
         .replace("items: Sequence[int]", "items: list[int]")
@@ -4573,6 +4574,32 @@ fn steps_mut110() -> Vec<Step> {
         Step::new(
             "the function two modules below returns its parameter again",
             vec![save("pkg/ro/same.py", RO_SAME)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the module below binds that function again: the call may run another",
+            vec![save(
+                "pkg/ro/same.py",
+                &format!("{RO_SAME}\n\ndef swap():\n    global same\n    same = list\n"),
+            )],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "it binds the function once again",
+            vec![save("pkg/ro/same.py", RO_SAME)],
+        )
+        .present(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "the forwarding module stores another object into the function below",
+            vec![save(
+                "pkg/ro/forward.py",
+                &format!("import pkg.ro.same as m\n{RO_FORWARD}\n\ndef swap():\n    m.same = list\n"),
+            )],
+        )
+        .absent(&[("pkg/ro/forward_use.py", "MUT110")]),
+        Step::new(
+            "it stores nothing there again",
+            vec![save("pkg/ro/forward.py", RO_FORWARD)],
         )
         .present(&[("pkg/ro/forward_use.py", "MUT110")]),
     ]

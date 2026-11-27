@@ -2419,17 +2419,17 @@ impl<'a> Extractor<'a> {
             }
             _ => return None,
         };
-        let Callee::Project(keys, binds_recv) = callee else {
+        let Callee::Project(keys, binds_recv) = &callee else {
             return None;
         };
         // The argument each callee returns the attribute of: `None` for the receiver, else
         // the position among the call's arguments (a static method binds no receiver).
         let mut returned: Option<(Option<usize>, Option<&str>)> = None;
         let mut decls = Vec::with_capacity(keys.len());
-        for key in &keys {
+        for key in keys {
             let decl = self.cx.project.function_decl(key)?;
             let (param, attr) = decl.returns_param.as_ref()?;
-            let binds = binds_recv && !decl.is_staticmethod;
+            let binds = *binds_recv && !decl.is_staticmethod;
             let this = (
                 usize::from(*param).checked_sub(usize::from(binds)),
                 attr.as_deref(),
@@ -2441,7 +2441,7 @@ impl<'a> Extractor<'a> {
         }
         let (position, attr) = returned?;
         let (value, name) = dispatch;
-        if !self.cx.runs_on_every_class(self.val(value), name, &keys) {
+        if !self.cx.runs_on_every_class(self.val(value), name, &callee) {
             return None;
         }
         // A keyword binds the parameter where no position does, if it names it in every callee

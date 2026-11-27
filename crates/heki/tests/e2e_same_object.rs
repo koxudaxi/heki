@@ -433,9 +433,11 @@ class Box:
 }
 
 /// An attribute of a parameter that a function returns through a call of another function
-/// returning it (`items_via`) is that attribute: a change of what the call returns changes the
-/// argument's attribute. A function storing an attribute after the call (`take_items`) may
-/// return what the attribute held before, so its result is an object of unknown origin.
+/// returning it (`items_via`), or after code that stores no attribute (`checked`), is that
+/// attribute: a change of what the call returns changes the argument's attribute. A function
+/// storing an attribute after the call (`take_items`), or calling a function that may store it
+/// between the read and the return (`kept_through_reset`, `kept_directly`), may return what the
+/// attribute held before, so its result is an object of unknown origin.
 #[test]
 fn an_attribute_returned_through_a_call_is_the_attribute() {
     let p = project("same_object_attribute_through_a_call");
@@ -462,6 +464,41 @@ def touch_via(s, other):
 
 def touch_taken(s, other):
     take_items(s, other).append(1)
+
+
+def reset(s):
+    s.items = []
+
+
+def kept_through_reset(s):
+    items = items_of(s)
+    reset(s)
+    return items
+
+
+def kept_directly(s):
+    items = s.items
+    reset(s)
+    return items
+
+
+def checked(s):
+    items = s.items
+    if items is None:
+        raise ValueError
+    return items
+
+
+def touch_kept(s):
+    kept_through_reset(s).append(1)
+
+
+def touch_kept_directly(s):
+    kept_directly(s).append(1)
+
+
+def touch_checked(s):
+    checked(s).append(1)
 ",
     );
     let changed = |name: &str| -> Vec<(String, Value)> {
@@ -477,6 +514,23 @@ def touch_taken(s, other):
         changed("app.attrs.touch_taken"),
         [("other".to_owned(), items())]
     );
+    // `reset` changes `s.items` in each; only a change of the attribute at the call of
+    // `append` is a change made here.
+    let changed_here = |name: &str| -> Vec<bool> {
+        let (_, out, err) = p.heki(&["inspect", "--output-format", "json", name]);
+        let got: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {err}"));
+        (got["changes"]["params"].as_array().unwrap().iter())
+            .map(|c| c["direct"].as_bool().unwrap())
+            .collect()
+    };
+    for (name, here) in [
+        ("touch_via", true),
+        ("touch_checked", true),
+        ("touch_kept", false),
+        ("touch_kept_directly", false),
+    ] {
+        assert_eq!(changed_here(&format!("app.attrs.{name}")), [here], "{name}");
+    }
 }
 
 /// A function a cast hands back is the function itself to `references = "calls"`: handing the

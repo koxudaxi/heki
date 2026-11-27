@@ -1165,3 +1165,87 @@ fn mut110_follows_parameters_returned_through_calls() {
     );
     assert_eq!(chain(&diags[0]), vec![(u.into(), 13), (u.into(), 9)]);
 }
+
+/// A call of a name the project may bind again may run another object: `forwarded_too` (which
+/// another module replaces), `through_rebound` (whose callee another module replaces), `via_own`
+/// (whose callee its module binds again), and `replaced` itself (called directly) return no
+/// parameter; `forwarded`, through names nothing binds again, still does.
+#[test]
+fn mut110_follows_no_call_of_a_name_bound_again() {
+    let p = Project::new("mut110_forwarded_rebound");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/same.py",
+            r#"def identity(x):
+    return x
+
+
+def replaced(x):
+    return x
+
+
+def forwarded(x):
+    return identity(x)
+
+
+def forwarded_too(x):
+    return identity(x)
+
+
+def through_rebound(x):
+    return replaced(x)
+
+
+def own(x):
+    return x
+
+
+def via_own(x):
+    return own(x)
+
+
+def swap():
+    global own
+    own = list
+"#,
+        )
+        .write(
+            "pkg/other.py",
+            "from pkg import same\n\n\ndef replace():\n    same.forwarded_too = list\n    same.replaced = list\n",
+        )
+        .write(
+            "pkg/use.py",
+            r#"from collections.abc import Sequence
+
+from pkg.same import forwarded, forwarded_too, replaced, through_rebound, via_own
+
+
+def change(x):
+    if isinstance(x, list):
+        x.reverse()
+
+
+def kept(xs: Sequence[int]):
+    change(forwarded(xs))
+
+
+def replaced_forwarder(xs: Sequence[int]):
+    change(forwarded_too(xs))
+
+
+def replaced_callee(xs: Sequence[int]):
+    change(through_rebound(xs))
+
+
+def bound_again(xs: Sequence[int]):
+    change(via_own(xs))
+
+
+def replaced_directly(xs: Sequence[int]):
+    change(replaced(xs))
+"#,
+        );
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(found(&diags), vec![d("pkg/use.py", 12, "kept", "xs")]);
+    assert_eq!(diags[0]["certainty"], "exact");
+}

@@ -24,10 +24,11 @@ pub struct ForwardedReturn {
     pub direct: Option<(u8, Option<String>)>,
     /// The calls whose result a return gives, each once.
     pub calls: Box<[ForwardingCall]>,
-    /// The function stores or deletes an attribute: what a call returned of an attribute of its
-    /// argument (`items = items_of(node); node.items = []; return items`) may no longer be the
-    /// attribute.
-    pub stores_attrs: bool,
+    /// The function stores or deletes an attribute, or may run code between a call and the
+    /// return giving its result: what the call returned of an attribute of its argument
+    /// (`items = items_of(node); node.items = []; return items`, `items = items_of(node);
+    /// reset(node); return items`) may no longer be the attribute.
+    pub rebinds_attrs: bool,
 }
 
 /// A call whose result a function returns ([`ForwardedReturn`]): a module global called by name
@@ -154,7 +155,7 @@ enum CallReturns {
 /// A function of the fixpoint: its [`ForwardedReturn`], each call resolved.
 struct Node {
     direct: Option<(u8, Option<String>)>,
-    stores_attrs: bool,
+    rebinds_attrs: bool,
     calls: Vec<CallReturns>,
 }
 
@@ -221,8 +222,10 @@ fn decide<'d>(
     }
     let expand = |i: usize, out: &mut Vec<usize>| {
         let forwards = keys[i];
-        // Past the budget the walk answers open at its next step, or the test after it does.
-        budget.take(forwards.calls.len());
+        // Past the budget the node is not read, and nothing is decided without it.
+        if !budget.take(forwards.calls.len()) {
+            return;
+        }
         let calls = (forwards.calls.iter())
             .map(|call| {
                 let Some((key, callee)) = callee(project, call) else {
@@ -250,7 +253,7 @@ fn decide<'d>(
             .collect();
         nodes[i] = Some(Node {
             direct: forwards.direct.clone(),
-            stores_attrs: forwards.stores_attrs,
+            rebinds_attrs: forwards.rebinds_attrs,
             calls,
         });
     };
@@ -283,8 +286,10 @@ fn decide<'d>(
     // Each visit inspects every call of the node, so a node with many calls that is visited
     // again for each callee resolving pays for them all: the calls are charged on each visit.
     let walked = fixpoint(budget, spec, |i, facts| {
-        budget.take(nodes[i].calls.len());
-        returned(&nodes[i], facts)
+        budget
+            .take(nodes[i].calls.len())
+            .then(|| returned(&nodes[i], facts))
+            .flatten()
     });
     walked
         .map(Some)
@@ -328,7 +333,7 @@ fn returned(node: &Node, facts: &Facts<Returned>) -> Option<Returned> {
                 },
             },
         };
-        if this.1.is_some() && node.stores_attrs {
+        if this.1.is_some() && node.rebinds_attrs {
             return Some(Returned::Other);
         }
         if *returned.get_or_insert_with(|| this.clone()) != this {
@@ -342,7 +347,8 @@ fn returned(node: &Node, facts: &Facts<Returned>) -> Option<Returned> {
 }
 
 /// The project function `call` calls, as `project` names it, and its key: not a method, whose
-/// receiver or class a call by this name would not bind as a parameter.
+/// receiver or class a call by this name would not bind as a parameter, nor a function the
+/// project may bind again, whose call may run another object ([`ProjectDecls::call_rebound`]).
 fn callee<'p>(
     project: &'p ProjectDecls,
     call: &ForwardingCall,
@@ -350,6 +356,9 @@ fn callee<'p>(
     let Ty::Ref(fqn) = project.named_ty(&call.callee) else {
         return None;
     };
+    if project.call_rebound(&fqn) {
+        return None;
+    }
     match project.symbol(&fqn) {
         Symbol::Function(key, decl) if !decl.is_method => Some((key, decl)),
         _ => None,
