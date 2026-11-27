@@ -1602,10 +1602,10 @@ def int_or_shared(shared, fresh):
 /// a branch, a loop, an unpacking before it, and a `try`. Not followed: another key, a negative
 /// one, a key opened between the store and the read (a store with an unknown key or `True`, a
 /// deletion, `update`, `|=`, a call the container is handed to, any call or `yield` for a
-/// parameter or a container stored elsewhere, a store through another container that may be it,
-/// an unpacking after it), a container of unknown class, a key overwritten, and a new object
-/// stored in the caller's state (`opts["s"] = {}` where the key is missing), which is that
-/// state's on every path.
+/// parameter or a container stored elsewhere, in an attribute or a global, a store through
+/// another container that may be it, an unpacking after it), a container of unknown class, a key
+/// overwritten, and a new object stored in the caller's state (`opts["s"] = {}` where the key is
+/// missing), which is that state's on every path.
 const CONSTANT_KEYS: &str = r#"def log():
     pass
 
@@ -1761,7 +1761,7 @@ def negative_index(rows=None):
     table = [None]
     table[0] = rows or []
     table[-1].append(1)
-    return table
+    return table[0]
 
 
 def unpacked_after(extra, headers=None):
@@ -1796,14 +1796,15 @@ def param_then_unknown_key(opts: dict, cache: dict, name, headers=None):
 def merged_in_place(extra, headers=None):
     kwargs = {}
     kwargs["headers"] = headers or {}
+    before = kwargs
     kwargs |= extra
-    kwargs["headers"]["X"] = "1"
+    before["headers"]["X"] = "1"
     return kwargs
 
 
 def streamed(opts: dict, headers=None):
     opts["headers"] = headers or {}
-    yield
+    yield headers
     opts["headers"]["X"] = "1"
 
 
@@ -1821,6 +1822,16 @@ def in_try(headers=None):
         log()
     except ValueError:
         kwargs["headers"] = {}
+    kwargs["headers"]["X"] = "1"
+    return kwargs
+
+
+def remembered(headers=None):
+    global LAST
+    kwargs = {}
+    kwargs["headers"] = headers or {}
+    LAST = kwargs
+    log()
     kwargs["headers"]["X"] = "1"
     return kwargs
 "#;
@@ -1843,7 +1854,7 @@ fn mut112_follows_values_stored_at_constant_keys() {
             d(k, 47, "after_branch", "kwargs[\"headers\"]"),
             d(k, 53, "unpacked_before", "kwargs[\"headers\"]"),
             d(k, 62, "in_loop", "kwargs[\"headers\"]"),
-            d(k, 216, "in_try", "kwargs[\"headers\"]"),
+            d(k, 217, "in_try", "kwargs[\"headers\"]"),
         ],
         "{diags:#?}"
     );
