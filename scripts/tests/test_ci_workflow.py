@@ -304,6 +304,13 @@ def cache_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+PUSH_ONLY_SAVE_CONDITIONS = {
+    "github.event_name == 'push' && steps.heki.outputs.cache-hit != 'true'",
+    "runner.os == 'Linux' && github.event_name == 'push'",
+}
+"""The conditions a step that writes one of heki's caches may have: a push to main, nothing else."""
+
+
 def test_only_a_push_to_main_writes_the_heki_caches(
     workflow: dict[str, Any], docs_workflow: dict[str, Any]
 ) -> None:
@@ -314,7 +321,8 @@ def test_only_a_push_to_main_writes_the_heki_caches(
             # `actions/cache` itself saves in its post step, on every event.
             assert not uses(step, "actions/cache"), step
             if uses(step, "actions/cache/save"):
-                assert "github.event_name == 'push'" in step["if"], step
+                # The whole condition, so that `push || pull_request` cannot pass for push-only.
+                assert step["if"] in PUSH_ONLY_SAVE_CONDITIONS, step
     for step in cache_steps(docs_workflow):
         if uses(step, "Swatinem/rust-cache"):
             assert step["with"]["save-if"] == "${{ github.event_name == 'push' }}"
