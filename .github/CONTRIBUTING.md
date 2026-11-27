@@ -59,28 +59,44 @@ cargo run -p heki -- rule --all
 
 # heki_semantic against the CPython symtable, both ways (zero disagreements; CI runs 3.11-3.15)
 python3.15 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/
+# Import facts against CPython, both ways (zero disagreements; CI runs 3.11-3.15)
+python3.15 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 # Layer 1 knowledge base sentinels
 python3.15 tests/sentinel/verify_soundness_kb.py
+# Layer 2 rows of the standard library that type a value, on the running interpreter
+python3.15 tests/sentinel/verify_stdlib_kb.py
+# The container family table (`ContainerFamily`) against the running interpreter
+python3.15 tests/sentinel/verify_container_families.py
+# Layer 2 rows against releases of their distributions (needs uv and PyPI; its own workflow)
+uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py
 # Adversarial Soundness counterexamples (every one Blocked or Disproved)
 python3.15 tests/difftest/counterexamples.py
 python3.15 tests/difftest/soundness_e2e_counterexamples.py
+# Classes a value of a container ABC may be (each runs project code the exact claim rules out)
+python3.15 tests/difftest/container_abc_counterexamples.py
+# Calls that may run an implementation heki does not see (the exact claim rules them out)
+python3.15 tests/difftest/cached_result_counterexamples.py
 # Shapes the IR models (frames, bindings, paths); CPython 3.15 only (template strings, PEP 798)
 python3.15 tests/difftest/ir_counterexamples.py
 # Generated documentation
 cargo build --release -p heki
 python3.15 scripts/build_docs.py --heki target/release/heki --check
 python3.15 scripts/build_llms_txt.py --check
-# Peak memory of `heki check` and the `--watch` engine on a generated project
+# Peak heap of `heki check` and the `--watch` engine on a generated project (a counting build)
+cargo build --release -p heki --features count-alloc
 python3.15 scripts/check_memory.py --heki target/release/heki
+# Analysis cost of generated shapes at the largest size heki models (1 s / 1 GiB per shape)
+python3.15 scripts/check_walk_shapes.py --heki target/release/heki
 # The scripts of the release workflows
 uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
 ```
 
 ## New rules
 
-A new rule has to pass the gate in [docs/scope.md](../docs/scope.md#how-a-rule-gets-into-heki): what a single-file
-syntax check, a type checker, or an import-graph checker can decide belongs to Ruff, ty, or tach. heki takes only what
-needs control flow, the call graph, or alias facts.
+A new rule has to pass the gate in [docs/scope.md](../docs/scope.md#how-a-rule-gets-into-heki). A check that the syntax
+of one file decides belongs to a linter, a type error to a type checker, and what one import statement decides (its
+order, its form, a banned name) to a linter. heki takes what needs control flow, the call graph, alias facts, or the
+project's import facts, which include the import walls and import cycles of ADR-022.
 
 A new rule is also measured on a corpus and reviewed by hand before it is enabled by default. The maintainer runs the
 corpus: say in the pull request whether the rule can make exact reports, and the maintainer takes it from there.
