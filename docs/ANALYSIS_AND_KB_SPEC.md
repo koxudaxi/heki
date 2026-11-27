@@ -3333,6 +3333,13 @@ stores in the instance: neither it nor its metaclass defines `__setattr__`, `__d
 (`django.db.models.Model`: `pk`). A store of another name the project's classes do not bind in
 their bodies is a plain one (`ProjectDecls::bases_store_plainly`, the `MUT101` **Plain write**
 premise, and `invokes::attribute_access_runs_project_code`).
+An entry's `delegates_to` lists the names of an instance that the class's catalogued methods
+look up on it (`django.db.models.Manager`: `get_queryset`, `_queryset_class`, `__init__`,
+`model`, `_db`, `_hints`). A method's row describes a call on an instance of a project subclass
+only when no project class before the library class along its MRO binds one of them
+(`ProjectDecls::replaces_delegate`): otherwise the call's targets are not every implementation
+it runs (the **Every implementation** premise), and through `super()` the same holds for every
+class the instance may be.
 
 A fourth table, `[[attributes]]` (`heki_kb::AttributeType`), gives the class of what reading an
 attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat"`,

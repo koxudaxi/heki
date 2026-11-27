@@ -807,6 +807,8 @@ heki reports: `Subscriptions._cycle` suspends at a `yield` while iterating `self
 | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | an in-place change of a value that is new on one path and borrowed state on another | heuristic, experimental, opt-in |
 | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/), [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | an attribute that a `@cached_property` reads, changed without invalidating the cache, and a read of such a stale property | exact, experimental, opt-in |
 
+A write is a plain store, one premise of an exact `MUT101` or `MUT111` report, only when every base of the class is a project class, a plain one, or a library base the ecosystem catalog lists as keeping what its subclasses' code stores in the instance. Django's `models.Model` is one: neither it nor its metaclass defines attribute hooks, so a write of an attribute a model's code sets (in `__init__` or a method) is a plain store, and a stale `@cached_property` over it is an exact report once the rules are switched on. A class-body field (`expires = models.DateTimeField()`, which Django replaces with a descriptor) and `pk` (a property of `Model`) keep the report heuristic.
+
 ## 🔂 Single-use values used twice or not at all
 
 An iterator or a generator gives each item once. Reading it a second time sees nothing, and a generator that nobody iterates never runs its body.
@@ -883,6 +885,11 @@ Two rules are exact and run by default, and two more are exact by default and ar
 | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) | a loop over data whose every iteration sends a database statement | exact, default |
 
 `EFF103` also has heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration). They appear with `--heuristic`.
+
+`EFF103` knows Django's model managers from the ecosystem catalog. `Model.objects`, read on a model class or on `cls`, is the `Manager` Django adds, or the manager the model's body declares (`objects = StreamManager()`, a project subclass of `models.Manager`). Its query methods (`get`, `count`, `create`, `get_or_create`, `update`, ...) send a statement on every call, so calling one per item of a loop over data is an exact, default `EFF103` report; `filter`, `exclude`, and `all` only build a `QuerySet`. A method the manager adds is followed as project code. Some managers keep the report heuristic (with `--heuristic`) or unknown:
+
+- a manager that binds a name its query methods use (`get_queryset`, `_queryset_class`, `__init__`) runs its own code under them: heuristic. So is a model's default `objects` while the project defines such a manager, since heki takes a `Manager` to be possibly an instance of any project subclass;
+- a manager `from_queryset()` or `as_manager()` builds, one of a class outside the project, and related managers (`question.choice_set`, a many-to-many field read on an instance) are unknown: they add no effect.
 
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/#a-generator-that-is-never-iterated). Both are exact and run by default.
 
@@ -6744,17 +6751,21 @@ Catalog lookups are exact. These contribute no effect until you add them with
   `client["app"]["users"]`, Django's related managers (`question.choice_set`, a many-to-many
   field read on an instance).
 
-Django's `Model.objects` is a `Manager` (a `[[class_attributes]]` row of the catalog): reading it
-on a model class, or on `cls` or `type(self)`, gives the manager Django adds to a model that
+Django's `Model.objects` is a `Manager` (a `[[class_attributes]]` row of the catalog): reading
+it on a model class, or on `cls` or `type(self)`, gives the manager Django adds to a model that
 declares none, and a name the model's body binds to a manager it declares (`objects =
 StreamManager()`, a project subclass of `models.Manager`) gives that manager's class. Its query
-methods (`get`, `count`, `get_or_create`, ...) send a statement on every call, and its lazy
-ones (`filter`, `exclude`, `all`) give a `QuerySet`. A model whose body may bind another manager
-(a call of a project function, `QuerySet.as_manager()`) has no `objects` to heki, nor does one
-whose `objects` is a manager of a class outside the project. A manager of a library class bound
-under another name (`tree = TreeManager()`) is not seen: heki takes the model to have the
-default `objects`, which Django does not add. An abstract model has no `objects` either, which
-heki does not tell from its `Meta`.
+methods (`get`, `count`, `get_or_create`, ...) send a statement on every call, and its lazy ones
+(`filter`, `exclude`, `all`) give a `QuerySet`. A manager that binds a name those methods use
+(`get_queryset`, `_queryset_class`, `__init__`: the catalog's `delegates_to` of `Manager`) runs
+its own code under them, which the rows do not describe: a query through it is heuristic, and so
+is one through a `Manager` while the project defines such a manager (R2). A model whose body may
+bind another manager (a call of a project function, `QuerySet.as_manager()`) has no `objects` to
+heki, nor does one whose `objects` is a manager of a class outside the project or of one
+`Manager.from_queryset()` builds. A manager of a library class bound under another name (`tree =
+TreeManager()`) is not seen: heki takes the model to have the default `objects`, which Django
+does not add. An abstract model has no `objects` either, which heki does not tell from its
+`Meta`.
 
 ### Properties
 

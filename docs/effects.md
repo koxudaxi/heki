@@ -15,6 +15,11 @@ Two rules are exact and run by default, and two more are exact by default and ar
 
 `EFF103` also has heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration). They appear with `--heuristic`.
 
+`EFF103` knows Django's model managers from the ecosystem catalog. `Model.objects`, read on a model class or on `cls`, is the `Manager` Django adds, or the manager the model's body declares (`objects = StreamManager()`, a project subclass of `models.Manager`). Its query methods (`get`, `count`, `create`, `get_or_create`, `update`, ...) send a statement on every call, so calling one per item of a loop over data is an exact, default `EFF103` report; `filter`, `exclude`, and `all` only build a `QuerySet`. A method the manager adds is followed as project code. Some managers keep the report heuristic (with `--heuristic`) or unknown:
+
+- a manager that binds a name its query methods use (`get_queryset`, `_queryset_class`, `__init__`) runs its own code under them: heuristic. So is a model's default `objects` while the project defines such a manager, since heki takes a `Manager` to be possibly an instance of any project subclass;
+- a manager `from_queryset()` or `as_manager()` builds, one of a class outside the project, and related managers (`question.choice_set`, a many-to-many field read on an instance) are unknown: they add no effect.
+
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](ownership.md#a-generator-that-is-never-iterated). Both are exact and run by default.
 
 One more rule runs by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because it can be wrong about the code:

@@ -10713,7 +10713,8 @@ const MANAGER_USE: &str = "from pkg.models import Stream\n\n\ndef fetch(ids: lis
 
 /// A model's manager is the class its body binds, which another module declares: the query per
 /// item through it goes when the manager class stops deriving from `models.Manager`, and when
-/// the model binds another value, and comes back.
+/// the model binds another value, is heuristic while the manager binds `get_queryset`, and
+/// comes back.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
     let files = vec![
@@ -10724,6 +10725,7 @@ fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
     ];
     let mut s = Session::start_with("lsp_oracle_model_managers", MANAGER_CONFIG, files, false);
     let queries: &[(&str, &str)] = &[("pkg/use.py", "EFF103")];
+    let guessed: &[(&str, &str)] = &[("pkg/use.py", "EFF103 [heuristic]")];
     let steps = [
         Step::new("initial index", Vec::new()).present(queries),
         Step::new(
@@ -10736,6 +10738,23 @@ fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
         .absent(queries),
         Step::new(
             "it derives from `models.Manager` again",
+            vec![save("pkg/managers.py", MANAGER_CLASS)],
+        )
+        .present(queries),
+        Step::new(
+            "the manager binds `get_queryset`, which its query methods call",
+            vec![save(
+                "pkg/managers.py",
+                &MANAGER_CLASS.replace(
+                    "    pass\n",
+                    "    def get_queryset(self):\n        return super().get_queryset()\n",
+                ),
+            )],
+        )
+        .present(guessed)
+        .absent(queries),
+        Step::new(
+            "it binds none again",
             vec![save("pkg/managers.py", MANAGER_CLASS)],
         )
         .present(queries),

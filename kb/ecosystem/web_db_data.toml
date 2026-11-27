@@ -3353,6 +3353,18 @@ effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
+# The query methods run what `self.get_queryset()` gives, which `BaseManager.get_queryset`
+# builds as `self._queryset_class(model=self.model, using=self._db, hints=self._hints)` from
+# what `BaseManager.__init__` and `contribute_to_class` set. A project manager that binds one
+# of these names (a `get_queryset` returning an evaluated or a custom QuerySet, a
+# `_queryset_class`, an `__init__`) runs its own code under the rows above, so they describe
+# only managers that bind none of them (checked in Django 3.2.25, 4.2.20, 5.2.8, 6.0:
+# `db/models/manager.py`).
+[[entries]]
+symbol = "django.db.models.Manager"
+delegates_to = ["__init__", "get_queryset", "_queryset_class", "model", "_db", "_hints"]
+opaque_to_layer3 = true
+
 # Reading `objects` on a model class gives the `Manager` `ModelBase._prepare` adds to a model
 # that declares no manager, along its MRO (`Options.managers`), and a name a model's body binds
 # to a manager gives, on the class, a copy of that manager (`ManagerDescriptor.__get__`), of its

@@ -6982,8 +6982,10 @@ impl ProjectDecls {
 
     /// Whether an instance of exactly `class` calling `method` runs one of `callee`: the
     /// definition its MRO finds is a target (a library one, [`Self::inherited_external`], only
-    /// as the call's single target), or it has none and the call raises. A protocol has
-    /// implementations no class names, and a base heki knows nothing of may define the method.
+    /// as the call's single target, and only when the class binds none of the names the library
+    /// method looks up on the instance, [`Self::replaces_delegate`]), or it has none and the call
+    /// raises. A protocol has implementations no class names, and a base heki knows nothing of
+    /// may define the method.
     fn runs_a_target(
         &self,
         class: &str,
@@ -7008,10 +7010,37 @@ impl ProjectDecls {
                 Inherited::Absent => true,
                 other => matches!(
                     (other, callee),
-                    (Inherited::External(external), Callee::External(s)) if *s == external
+                    (Inherited::External(external), Callee::External(s))
+                        if *s == external && !self.replaces_delegate(&mro, &external, kb)
                 ),
             },
         }
+    }
+
+    /// Whether a project class before the library class of the method `symbol` along `mro`
+    /// binds a name the catalog says the library's methods look up on the instance
+    /// (`heki_kb::EcosystemEntry::delegates_to`, R3: Django's `Manager.get_queryset`), in its
+    /// body or methods or by a store elsewhere: the call then runs that binding, which the
+    /// method's row does not describe.
+    pub(crate) fn replaces_delegate(
+        &self,
+        mro: &[String],
+        symbol: &str,
+        kb: &EffectiveEcosystemKb,
+    ) -> bool {
+        let library = symbol.rsplit_once('.').map_or(symbol, |(class, _)| class);
+        let names = kb.delegates_of(library);
+        if names.is_empty() {
+            return false;
+        }
+        let before = &mro[..mro.iter().position(|c| c == library).unwrap_or(mro.len())];
+        let own = before.iter().filter(|c| self.is_project_class(c));
+        let binds = |c: &String| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c)
+                .is_some_and(|d| names.iter().any(|n| d.members.contains(n)))
+        };
+        own.into_iter().any(binds) || names.iter().any(|n| self.lookup_rebound(before, n))
     }
 
     /// Resolve `class.method` on an object that is exactly `class`: the class object itself
@@ -11183,11 +11212,22 @@ impl<'a> TypeCtx<'a> {
             Recv::Ref(owner) => !self
                 .project
                 .call_rebound(&self.project.object_named(&format!("{owner}.{method}"))),
+            // The library method `super()` finds looks names up on the instance, of any class
+            // the value may be (R2).
             Recv::Super(owner) => {
                 let owner = self.project.canonical(owner);
                 let mro = self.project.mro(&owner);
                 let after = mro.iter().position(|c| *c == owner).map_or(0, |i| i + 1);
+                let replaced = |symbol: &str| {
+                    let library = symbol.rsplit_once('.').map_or(symbol, |(c, _)| c);
+                    !self.kb.delegates_of(library).is_empty()
+                        && (self.project.value_classes(&owner).iter()).any(|c| {
+                            let mro = self.project.mro(c);
+                            self.project.replaces_delegate(&mro, symbol, self.kb)
+                        })
+                };
                 !self.project.lookup_rebound(&mro[after..], method)
+                    && !matches!(callee, Callee::External(symbol) if replaced(symbol))
             }
         }
     }

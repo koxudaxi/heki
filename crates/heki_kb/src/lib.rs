@@ -406,6 +406,12 @@ pub struct EcosystemEntry {
     /// no data descriptor but the names listed (`django.db.models.Model`: its `pk` property).
     /// `None` when the catalog does not say. A name a subclass's body binds is that class's own.
     pub plain_attributes_except: Option<Vec<String>>,
+    /// The names of an instance that the methods the catalog lists for the class look up on
+    /// it, which a subclass may bind (Django's `Manager`: its query methods call
+    /// `self.get_queryset()`, which builds `self._queryset_class`). A method's row describes a
+    /// call on an instance of a subclass only when no class before this one along the
+    /// subclass's MRO binds one of them; otherwise the call runs what the subclass binds.
+    pub delegates_to: Vec<String>,
     /// An instance of this class built without a value for a field starts from the field's
     /// default itself when the default is hashable, and from a deep copy of an unhashable one
     /// (pydantic 2's `BaseModel`, through `pydantic-core`). A field that validates its default
@@ -1729,6 +1735,13 @@ impl EffectiveEcosystemKb {
             .lookup(base)
             .and_then(|e| e.plain_attributes_except.as_ref()))
         .is_some_and(|except| !except.iter().any(|name| name == attr))
+    }
+
+    /// The names the catalogued methods of the library class `class` look up on the instance
+    /// ([`EcosystemEntry::delegates_to`]).
+    pub fn delegates_of(&self, class: &str) -> &[String] {
+        self.lookup(class)
+            .map_or(&[], |e| e.delegates_to.as_slice())
     }
 
     /// The rows of `[[class_attributes]]` for the library base `base` ([`ClassAttribute`]).
@@ -4204,6 +4217,22 @@ mod tests {
                 s(&["django.db.models.Model"]),
                 EcosystemEntry {
                     plain_attributes_except: Some(vec!["pk".to_owned()]),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&[DJANGO_MANAGER]),
+                EcosystemEntry {
+                    delegates_to: [
+                        "__init__",
+                        "get_queryset",
+                        "_queryset_class",
+                        "model",
+                        "_db",
+                        "_hints",
+                    ]
+                    .map(str::to_owned)
+                    .to_vec(),
                     ..entry(&[])
                 },
             ),

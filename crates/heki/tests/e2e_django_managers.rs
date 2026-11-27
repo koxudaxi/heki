@@ -261,3 +261,136 @@ fn model_base_writes_are_plain() {
         ]
     );
 }
+
+const OVERRIDING_MANAGERS: &str = r#"from django.db import models
+
+
+class Books(models.QuerySet):
+    def count(self):
+        return 0
+
+
+class Live(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(live=True)
+
+    def total(self):
+        return super().count()
+
+
+class Named(models.Manager):
+    def named(self, name):
+        return self.filter(name=name)
+
+    def total(self):
+        return super().count()
+
+
+class Chosen(models.Manager):
+    _queryset_class = Books
+
+
+BookManager = models.Manager.from_queryset(Books)
+
+
+class Shelved(models.Manager.from_queryset(Books)):
+    pass
+
+
+class Article(models.Model):
+    objects = Live()
+
+
+class Note(models.Model):
+    objects = Named()
+
+
+class Box(models.Model):
+    objects = Chosen()
+
+
+class Book(models.Model):
+    objects = BookManager()
+
+
+class Shelf(models.Model):
+    objects = Shelved()
+
+
+class Stream(models.Model):
+    pass
+
+
+def tp_inherited_query(ids: list[int]) -> None:
+    for i in ids:
+        Note.objects.count()
+
+
+def tp_inherited_through_super(ids: list[int]) -> None:
+    for i in ids:
+        Note.objects.total()
+
+
+def tn_overriding_get_queryset(ids: list[int]) -> None:
+    for i in ids:
+        Article.objects.count()
+        Article.objects.total()
+
+
+def tn_own_queryset_class(ids: list[int]) -> None:
+    for i in ids:
+        Box.objects.count()
+
+
+def tn_from_queryset(ids: list[int]) -> None:
+    for i in ids:
+        Book.objects.count()
+        Shelf.objects.count()
+
+
+def tn_default_manager_with_an_overriding_subclass(ids: list[int]) -> None:
+    for i in ids:
+        Stream.objects.count()
+"#;
+
+const COUNT: &str = "django.db.models.Manager.count";
+
+/// A manager's query methods run what its `get_queryset()` gives: a manager that binds
+/// `get_queryset` or `_queryset_class` (or a subclass of one, which a default `Manager` may be,
+/// R2) runs its own code under them, so a query through it per item is a heuristic N+1, also
+/// through `super()`. A manager that only adds methods keeps the inherited query exact, and
+/// one `from_queryset()` builds is unknown.
+#[test]
+fn managers_binding_what_their_queries_use() {
+    assert_eq!(
+        check(
+            "django_overriding_managers",
+            "app/models.py",
+            OVERRIDING_MANAGERS,
+            "EFF103"
+        ),
+        vec![
+            d(62, "EFF103", "tp_inherited_query", COUNT),
+            d(67, "EFF103", "tp_inherited_through_super", COUNT),
+            d(
+                72,
+                "EFF103 [heuristic]",
+                "tn_overriding_get_queryset",
+                COUNT
+            ),
+            d(
+                73,
+                "EFF103 [heuristic]",
+                "tn_overriding_get_queryset",
+                COUNT
+            ),
+            d(78, "EFF103 [heuristic]", "tn_own_queryset_class", COUNT),
+            d(
+                89,
+                "EFF103 [heuristic]",
+                "tn_default_manager_with_an_overriding_subclass",
+                COUNT
+            ),
+        ]
+    );
+}
