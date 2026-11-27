@@ -8819,6 +8819,57 @@ fn the_names_a_module_getattr_serves_take_linear_steps() {
     assert!(message.contains(&more), "{message}");
 }
 
+/// A module binding its `__getattr__` to the hook a factory of another module makes over a
+/// table of `n` factories, the hook handing the table's value to a function that tests it `n`
+/// times against a class of data values before calling it, and a module basing a class on each
+/// name it serves and calling its waiting method.
+fn made_served_names(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_getattr_made_{n}"));
+    p.write("pkg/__init__.py", "");
+    let tests: String = (0..n)
+        .map(|_| "    if isinstance(entry, str):\n        raise ImportError(name)\n")
+        .collect();
+    p.write(
+        "pkg/hooks.py",
+        &format!(
+            "def _load(name, entry):\n{tests}    return entry()\n\n\ndef make_hook(table):\n    def module_getattr(name):\n        if name not in table:\n            raise AttributeError(name)\n        return _load(name, table[name])\n\n    return module_getattr\n"
+        ),
+    );
+    let table: String = (0..n).map(|i| format!("\"T{i}\": _make, ")).collect();
+    p.write(
+        "pkg/lazy.py",
+        &format!(
+            "import time\n\nfrom pkg.hooks import make_hook\n\n\nclass Base:\n    def wait(self) -> None:\n        time.sleep(1)\n\n\ndef _make() -> type:\n    class _Made(Base):\n        pass\n\n    return _Made\n\n\n_TABLE = {{{table}}}\n__getattr__ = make_hook(_TABLE)\n"
+        ),
+    );
+    let uses: String = (0..n)
+        .map(|i| {
+            format!(
+                "\n\nclass OnT{i}(lazy.T{i}):\n    pass\n\n\nasync def wait_t{i}(obj: OnT{i}) -> None:\n    obj.wait()\n"
+            )
+        })
+        .collect();
+    p.write("pkg/use.py", &format!("from pkg import lazy\n{uses}"));
+    p
+}
+
+/// What the hook a factory makes serves is decided in the factory's module by the same walk,
+/// with one walk of the function the hook hands the value to: the steps grow linearly with the
+/// keys and the tests, and every class based on a key has the waiting method.
+#[test]
+fn the_names_a_factory_made_module_getattr_serves_take_linear_steps() {
+    let n = 8 * SCALE;
+    let found = check_linear(n, made_served_names);
+    let blocking: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .collect();
+    assert_eq!(blocking.len(), 1);
+    let message = blocking[0]["message"].as_str().unwrap();
+    let more = format!("(+{} more async call sites", n - 1);
+    assert!(message.contains(&more), "{message}");
+}
+
 /// A module `__getattr__` testing its name against a display of `n` literals, then making `n`
 /// tests of something else before it returns the class a factory of the module defines, and a
 /// module basing a class on the first name and calling its waiting method.
