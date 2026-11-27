@@ -6,11 +6,11 @@
 ## Docs
 
 - [Overview](https://heki.koxudaxi.dev/): 🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust
-- [Scope and Limitations](https://heki.koxudaxi.dev/scope/): This page says what heki checks, what it leaves to other tools, where its knowledge comes from, and what it does when it cannot tell
 - [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable: its Python package ships only that executable and installs no Python dependencies into your environment
 - [Getting Started](https://heki.koxudaxi.dev/getting-started/): This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules
 - [Rules](https://heki.koxudaxi.dev/rules/): heki has 55 rules in four families
 - [Rule Precision](https://heki.koxudaxi.dev/precision/): heki reports a claim only when it can back it
+- [Scope and Limitations](https://heki.koxudaxi.dev/scope/): This page says what heki checks, what it leaves to other tools, where its knowledge comes from, and what it does when it cannot tell
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 - [Development](https://heki.koxudaxi.dev/development/): This page covers building and testing heki, its checks against CPython, the memory budget, the documentation, releases, and the crates
 
@@ -25,7 +25,7 @@
 
 ## Usage
 
-- [Configuration](https://heki.koxudaxi.dev/configuration/): heki reads [tool.heki] from pyproject.toml, or a heki.toml / .heki.toml file with the same keys without the tool.heki prefix
+- [Configuration & Contracts](https://heki.koxudaxi.dev/configuration/): heki reads [tool.heki] from pyproject.toml, or a heki.toml / .heki.toml file with the same keys without the tool.heki prefix
 - [Adopting heki in a Code Base](https://heki.koxudaxi.dev/adoption/): An existing code base usually has findings you cannot fix at once
 - [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostic that fails the run (warnings and heuristic reports are reported without failing it), 1 an exact error diagnostic, or any diagnostic with --fail-on warning (lint.fail-on), among the Ratchet regressions when a baseline is used (or a refused --update-baseline, or pending --diff changes), 2 configuration / I/O / syntax errors
 - [Output Formats](https://heki.koxudaxi.dev/output-formats/): Every JSON format heki writes has a JSON Schema in the repository, so that CI, governance tools, and coding agents can check what they read

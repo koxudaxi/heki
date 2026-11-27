@@ -78,8 +78,13 @@ RECOMMEND_EXAMPLE = ("recommend", "app")
 README = ROOT / "README.md"
 EXAMPLE_IMAGE = DOCS / "assets" / "example-check.svg"
 # The examples at the top of the README, as `crates/heki/tests/e2e_readme_examples.rs` reads
-# them: from the first `### ` heading to the sentence after the last one.
-EXAMPLES_END = "\nRuff, ty, Pyrefly, pyright, and mypy"
+# them: from the first `### ` heading to the sentence after the last one, which says that the
+# image is `heki check` on them.
+EXAMPLES_END = "\nThe image at the top is `heki check` on these examples"
+EXAMPLE_COMMAND = "heki check"
+# The blocks of the examples that are files of their project: Python files, and the contract
+# table of `heki.toml`.
+EXAMPLE_FILE_LANGUAGES = ("python", "toml")
 FENCED_BLOCK = re.compile(r"^```(\w+)\n(.*?)^```$", re.MULTILINE | re.DOTALL)
 # The width of the terminal the image shows: longer lines wrap at a space.
 TERMINAL_COLUMNS = 100
@@ -375,12 +380,14 @@ def cli_page(heki: Path) -> str:
     return "\n".join(lines)
 
 
-def example_files(text: str, page: Path) -> dict[str, str]:
-    """The files of the Python blocks of `text`, a part of `page`, each named on its first line
-    (`# app/users.py`)."""
+def example_files(
+    text: str, page: Path, languages: tuple[str, ...] = ("python",)
+) -> dict[str, str]:
+    """The files of the blocks in `languages` of `text`, a part of `page`, each named on its first
+    line (`# app/users.py`)."""
     files: dict[str, str] = {}
     for language, block in FENCED_BLOCK.findall(text):
-        if language == "python":
+        if language in languages:
             path = block.splitlines()[0].removeprefix("# ")
             if path in files:
                 sys.exit(f"{shown(page)}: two examples write `{path}`")
@@ -419,29 +426,22 @@ def recommend_example(heki: Path) -> str:
     return f"```console\n$ heki {' '.join(RECOMMEND_EXAMPLE)}\n{out.stdout}```\n"
 
 
-def readme_examples(readme: str) -> tuple[str, dict[str, str]]:
-    """The command the README's examples run, and the files of all of them: each Python block
-    names its file on its first line (`# app/users.py`)."""
+def readme_examples(readme: str) -> dict[str, str]:
+    """The files of all of the README's examples: each Python or TOML block names its file on its
+    first line (`# app/users.py`, `# heki.toml`)."""
     start = readme.index("\n### ")
     examples = readme[start : readme.index(EXAMPLES_END, start)]
-    files = example_files(examples, README)
-    commands = {
-        text.splitlines()[0].removeprefix("$ ")
-        for language, text in FENCED_BLOCK.findall(examples)
-        if language == "console"
-    }
-    if len(commands) != 1:
-        sys.exit(f"README.md: the examples run different commands: {sorted(commands)}")
-    return commands.pop(), files
+    return example_files(examples, README, EXAMPLE_FILE_LANGUAGES)
 
 
 def example_image(heki: Path) -> str:
-    """The command of the README's examples, run with `--color always` in one project holding
+    """`heki check` on the README's examples, run with `--color always` in one project holding
     the files of all of them, drawn as a terminal shows what it prints."""
-    command, files = readme_examples(README.read_text(encoding="utf-8"))
+    files = readme_examples(README.read_text(encoding="utf-8"))
+    command = EXAMPLE_COMMAND
     out = run_in_project(heki, files, [*command.split()[1:], "--color", "always"])
-    # The first example's exact error fails the run (exit code 1); exit code 2 says the examples
-    # could not be checked.
+    # The examples' errors fail the run (exit code 1); exit code 2 says the examples could not be
+    # checked.
     if out.returncode not in (0, 1):
         sys.exit(f"`{command}` on the README's examples failed ({out.returncode}):\n{out.stderr}")
     prompt = f"\x1b[36m$\x1b[0m {command}\n"

@@ -8,7 +8,6 @@ extra_css = ["stylesheets/heki.css"]
 
 nav = [
   { "Overview" = "index.md" },
-  { "Scope and Limitations" = "scope.md" },
   { "Installation" = "installation.md" },
   { "Getting Started" = "getting-started.md" },
   { "Features" = [
@@ -20,13 +19,14 @@ nav = [
     { "Coding Agent Guardrails" = "coding-agents.md" },
   ]},
   { "Usage" = [
-    { "Configuration" = "configuration.md" },
+    { "Configuration & Contracts" = "configuration.md" },
     { "Adopting heki in a Code Base" = "adoption.md" },
     { "CLI Reference" = "cli-reference.md" },
     { "Output Formats" = "output-formats.md" },
   ]},
   { "Rules" = "rules/index.md" },
   { "Rule Precision" = "precision.md" },
+  { "Scope and Limitations" = "scope.md" },
   { "Experimental Features" = "experimental.md" },
   { "Integrations" = [
     { "Editors (LSP)" = "lsp.md" },

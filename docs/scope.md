@@ -29,7 +29,7 @@ and what it does when it cannot tell.
 | Tool | Looks at | Example |
 | ---- | -------- | ------- |
 | A linter such as [Ruff](https://docs.astral.sh/ruff/) | Syntax and style, one file at a time | `time.sleep()` written directly in an `async def`; a discarded `asyncio.create_task(...)` |
-| A type checker such as [ty](https://github.com/astral-sh/ty) | Whether values match their declared types | a `str` passed where an `int` is expected |
+| A type checker such as mypy, Pyright, Pyrefly, or ty | Whether values match their declared types | a `str` passed where an `int` is expected |
 | An import-graph checker such as [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter) | Which modules may import which | `app.api` importing `app.db` when the declared layers forbid it; planned in heki: these tools' contracts read as heki contracts, and which imports run while a module loads |
 | heki | What code does, not what types it has: effects and aliases, through any number of calls | an `async def` that reaches `requests.get` three helpers away; a model field written outside the store that owns it; an attribute `__hash__` reads changing after the object went into a `set` |
 
@@ -41,7 +41,7 @@ scope around it is a single-file linter's check (flake8-async's `ASYNC102`); `EF
 needs the call graph: which awaits reach a cancellation checkpoint through helpers, and which
 helpers and callers shield them.
 
-### Clean for Ruff, ty, and tach; broken all the same
+### Clean for Ruff, mypy, Pyright, Pyrefly, ty, and tach; broken all the same
 
 ```python
 # app/clients.py
@@ -105,7 +105,7 @@ Each of these passes, because each tool sees one step:
 | Command | Sees | Does not see |
 | ------- | ---- | ------------ |
 | `ruff check --select ASYNC,B,RUF,PERF,PL,SIM,FURB,S` | `requests.get` only when it is written in the `async def` itself | the call three helpers down |
-| `ty check` | a `list[str]` passed where a `list[str]` is expected | that `add_default` changes `Model.fields` |
+| your type checker (`mypy`, `pyright`, `pyrefly check`, `ty check`) | a `list[str]` passed where a `list[str]` is expected | that `add_default` changes `Model.fields` |
 | `tach check` (with `app.api` → `app.users` → `app.clients` declared) | `app.api` importing `app.users`, which is allowed | what `load_user` does |
 
 heki follows the call into `load_user` and the alias into `add_default`:
@@ -117,6 +117,18 @@ app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (through a 
 Found 2 diagnostic(s) in 4 file(s).
 note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
+
+## What Python leaves open
+
+Other languages enforce some of what heki checks when the code compiles. In Python nothing does,
+so heki reports the code that breaks the expectation.
+
+| What Python leaves open | What other languages enforce | What heki checks |
+| --- | --- | --- |
+| Any code can change any object it reaches | ownership and borrowing (Rust; [each idea mapped to heki](ownership.md#if-you-know-rust)), `const` / `readonly` | read-only parameters, fields, and views changed through helpers (`MUT110`, `MUT108`, `MUT120`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
+| A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
+| Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT208`) |
+| Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
 
 ## Where heki pays off
 
@@ -134,7 +146,7 @@ checker cover most of what matters, and heki reports little.
 | Check | Use instead |
 | ----- | ----------- |
 | Style, formatting, and syntax | a linter such as Ruff |
-| Type errors | a type checker such as ty |
+| Type errors | a type checker such as mypy, Pyright, Pyrefly, or ty |
 | Import order, required imports, import conventions, relative-import style, and the `lazy` policy of one file | a linter such as Ruff (`I`, `ICN`, `TID252`, `TID254`, `TID255`), or isort for the order |
 | Dead code and duplicated code | Ruff or [vulture](https://github.com/jendrikseipp/vulture) |
 | Constant-factor micro-optimizations, such as hoisting `re.compile` | no heki rule |
@@ -536,9 +548,9 @@ in order:
 
 1. **Can the syntax of one file decide it?** Then it belongs in a linter such as Ruff.
 2. **Is it a type error, or can an annotation express it?** Then it belongs in a type checker
-   such as ty. heki's part is to say where the code already keeps what such an annotation would
-   state, so that the annotation can be written and the type checker checks it from then on
-   (planned in [`heki recommend`](recommend.md),
+   such as mypy, Pyright, Pyrefly, or ty. heki's part is to say where the code already keeps
+   what such an annotation would state, so that the annotation can be written and the type
+   checker checks it from then on (planned in [`heki recommend`](recommend.md),
    [ADR-023](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-023)).
 3. **Can one import statement decide it?** Its order, its form, or a banned name: then it
    belongs in a linter such as Ruff.

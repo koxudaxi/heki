@@ -1,7 +1,9 @@
 # Editors (LSP)
 
 `heki server` (alias `heki lsp`) is a Language Server Protocol server on stdin / stdout: it shows
-heki's diagnostics and fixes while you edit, with the results `heki check` reports.
+heki's diagnostics and fixes while you edit, with the results `heki check` reports. It checks no
+types, so run it beside the language server of your type checker, whether that is mypy, Pyright,
+Pyrefly, or ty; the Helix example pairs it with Pyright, and the others work the same way.
 
 ## Set up your editor
 

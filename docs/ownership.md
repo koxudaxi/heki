@@ -297,7 +297,7 @@ heki reports: only a truth test reads what `parse_extra` returns, and `parse_ext
 
 ## 🦀 If you know Rust
 
-Nothing here is enforced when Python compiles the code. heki reports the places where the code breaks the expectation that a Rust compiler would hold it to.
+Nothing here is enforced when Python compiles the code. heki reports the places where the code breaks the expectation that a Rust compiler would hold it to. [What Python leaves open](scope.md#what-python-leaves-open) puts these next to the effect and immutability checks.
 
 | Rust | Closest in heki | How Python differs |
 | --- | --- | --- |
