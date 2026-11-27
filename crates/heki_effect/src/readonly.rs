@@ -644,7 +644,8 @@ impl FamilyLevel {
 /// One class of the container families of `list`, `dict`, and `set`, by the fqn an annotation
 /// or a base resolves to: the one table the readers of these classes share. It lists the
 /// standard library's public classes of the families that a class can derive from, as
-/// `tests/sentinel/verify_container_families.py` checks against CPython.
+/// `tests/sentinel/verify_container_families.py` checks against CPython, and the read-only
+/// classes of the families that no class can derive from (`range`, `types.MappingProxyType`).
 #[derive(Debug, Clone, Copy)]
 pub struct ContainerFamily {
     pub class: &'static str,
@@ -698,6 +699,7 @@ impl ContainerFamily {
                 Implements { mutable: true },
             ),
             row!("builtins.bytes", List, Native { mutable: false }),
+            row!("builtins.range", List, Native { mutable: false }),
             row!("builtins.str", List, Native { mutable: false }),
             row!("builtins.tuple", List, Native { mutable: false }),
             row!("typing.NamedTuple", List, Native { mutable: false }),
@@ -820,6 +822,7 @@ impl ContainerFamily {
             row!("importlib.metadata.SelectableGroups", Dict, Lineage),
             row!("logging.config.ConvertingDict", Dict, Lineage),
             row!("builtins.frozendict", Dict, Native { mutable: false }),
+            row!("types.MappingProxyType", Dict, Native { mutable: false }),
             row!("collections.ChainMap", Dict, Implements { mutable: true }),
             row!("typing.ChainMap", Dict, Implements { mutable: true }),
             row!("collections.UserDict", Dict, Implements { mutable: true }),
@@ -899,6 +902,18 @@ impl ContainerFamily {
                 .collect()
         });
         BY_CLASS.get(class).copied()
+    }
+
+    /// Whether an instance of exactly `class` rejects every change its family's mutable ABC
+    /// lists: an item store, a deletion, or a mutator method raises (`tuple`, `frozenset`,
+    /// `types.MappingProxyType`).
+    pub fn rejects_changes(class: &str) -> bool {
+        Self::of(class).is_some_and(|r| {
+            matches!(
+                r.role,
+                FamilyRole::Native { mutable: false } | FamilyRole::Implements { mutable: false }
+            )
+        })
     }
 
     /// The role of `class` in its family, if it has one.

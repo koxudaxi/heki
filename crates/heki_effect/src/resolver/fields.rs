@@ -8,14 +8,18 @@
 
 use super::sentinels::{field_default, init_left_on, named_value};
 use super::{
-    ModuleDecls, NAMED_TUPLE_BASES, PLAIN_BASES, ProjectDecls, dataclass_decorator,
-    decorator_parts, keyword_bool, note, qualifiers, unquote,
+    ModuleDecls, NAMED_TUPLE_BASES, PLAIN_BASES, ProjectDecls, ReadOnlyKind, TypeCtx,
+    dataclass_decorator, decorator_parts, keyword_bool, note, qualifiers, unquote,
 };
 use crate::ModuleInput;
+use crate::infer::Inferred;
+use crate::readonly::ContainerFamily;
+use crate::types::Ty;
 use heki_ir::walk::FnShape;
 use heki_ir::{ConstLiteral, GlobalStores, InstKind, IrFunction, VarId};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The parameters the generated constructor of a class takes for its own fields, in order
 /// ([`super::ClassDecl::init_fields`]).
@@ -358,4 +362,465 @@ impl ProjectDecls {
             FieldDefault::Other => false,
         }
     }
+}
+
+/// What a module's calls bind to the read-only container fields of the instances they make
+/// ([`super::ModuleDecls::field_values`]): by the class the call makes (or may make a subclass
+/// of), then the field, whether a value bound there may be changed in place. A copy of an
+/// object of unknown class binds under [`ANY_CLASS`] the fields it may change, by name, or
+/// [`ANY_FIELD`] when it unpacks them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldValues {
+    pub bound: BTreeMap<String, BTreeMap<Box<str>, Changeable>>,
+}
+
+/// Whether the values a module binds to one field may be changed in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Changeable {
+    /// Every one is an instance of a class rejecting every change of its container family
+    /// ([`ContainerFamily::rejects_changes`]).
+    No,
+    /// One is a mutable container, a value of a class heki does not know, or a default.
+    Maybe,
+}
+
+impl FieldValues {
+    fn bind(&mut self, class: &str, field: &str, value: Changeable) {
+        let fields = self.bound.entry(class.to_owned()).or_default();
+        let joined = fields.entry(field.into()).or_insert(value);
+        *joined = (*joined).max(value);
+    }
+}
+
+/// [`super::ModuleDecls::field_values`] of a module: what each call making an instance of a
+/// project class whose generated constructor binds read-only container fields
+/// ([`ProjectDecls::constructor_fields`], [`ProjectDecls::readonly_attr`]) binds to them, by the
+/// class's own call (`Segment(...)`), a class object that may be a subclass (`cls(...)`), or a
+/// copy with fields replaced (`dataclasses.replace(segment, meta=...)`,
+/// `segment._replace(meta=...)`). A call that may bind fields heki does not see (`*` or `**`
+/// unpacking, a replacement by position) binds a value that may change to each of them.
+///
+/// Only a function that may make such a call is inferred ([`may_make_instances`]).
+pub(super) fn field_values(input: &ModuleInput<'_>, cx: &TypeCtx<'_>) -> Option<Box<FieldValues>> {
+    let mut out = FieldValues::default();
+    let mut tracked: FxHashMap<String, Vec<Box<str>>> = FxHashMap::default();
+    for f in &input.ir.functions {
+        if !may_make_instances(f, cx, &mut tracked) {
+            continue;
+        }
+        let types = cx.infer_types(f);
+        let values = Values { cx, types: &types };
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            match &inst.kind {
+                InstKind::Call {
+                    callee_var,
+                    args,
+                    kwargs,
+                    star_from,
+                    ..
+                } => {
+                    let target = match callee_var.and_then(|c| types.ty(c)) {
+                        Some(Ty::Ref(fqn)) => Target::Named(fqn.clone()),
+                        Some(Ty::Class(class)) => Target::Class(class.clone()),
+                        Some(_) => Target::Other,
+                        None => Target::Unknown,
+                    };
+                    values.call(target, args, kwargs, *star_from, &mut tracked, &mut out);
+                }
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    star_from,
+                    ..
+                } if method == "_replace" => {
+                    let replaced = Replaced {
+                        original: *recv,
+                        by_position: !args.is_empty() || star_from.is_some(),
+                        kwargs,
+                    };
+                    values.replaced(&replaced, &mut tracked, &mut out);
+                }
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    star_from,
+                    ..
+                } => {
+                    // `module.Class(...)` and `module.replace(...)` read as a method of the
+                    // module object.
+                    let target = match types.ty(*recv) {
+                        Some(Ty::Ref(module)) => {
+                            Target::Named(cx.project.canonical(&format!("{module}.{method}")))
+                        }
+                        Some(_) => Target::Other,
+                        None => Target::Unknown,
+                    };
+                    values.call(target, args, kwargs, *star_from, &mut tracked, &mut out);
+                }
+                _ => {}
+            }
+        }
+    }
+    (!out.bound.is_empty()).then(|| Box::new(out))
+}
+
+/// Whether `f` may make an instance [`field_values`] records: it calls a name the module binds to
+/// a class with tracked fields ([`tracked_fields`]) or to a copy the catalog lists
+/// (`dataclasses.replace`), a name the module does not bind (a parameter such as `cls`, a local
+/// alias, a local import), or a `_replace` method.
+fn may_make_instances(
+    f: &IrFunction,
+    cx: &TypeCtx<'_>,
+    tracked: &mut FxHashMap<String, Vec<Box<str>>>,
+) -> bool {
+    let defs: FxHashMap<VarId, &InstKind> = (f.blocks.iter().flat_map(|b| &b.insts))
+        .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
+        .collect();
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .any(|inst| match &inst.kind {
+            InstKind::Call { callee, .. } => match cx.module.resolve_dotted(callee, false) {
+                None => true,
+                Some(fqn) => {
+                    let fqn = cx.project.canonical(&fqn);
+                    !tracked_fields(cx.project, &fqn, tracked).is_empty()
+                        || cx.catalog(&fqn).is_some_and(|e| e.copy_sanitizer.is_some())
+                }
+            },
+            InstKind::MethodCall { recv, method, .. } => {
+                method == "_replace" || may_name_instances(&defs, *recv, method, cx, tracked)
+            }
+            _ => false,
+        })
+}
+
+/// Whether `recv.method(...)` may call a class with tracked fields or a copy the catalog lists:
+/// the dotted name it reads resolves to one, or a name the module does not bind; a receiver
+/// that no instruction of the function defines (a parameter) may be anything.
+fn may_name_instances(
+    defs: &FxHashMap<VarId, &InstKind>,
+    recv: VarId,
+    method: &str,
+    cx: &TypeCtx<'_>,
+    tracked: &mut FxHashMap<String, Vec<Box<str>>>,
+) -> bool {
+    let Some(text) = dotted_text(defs, recv) else {
+        return !defs.contains_key(&recv);
+    };
+    match cx.module.resolve_dotted(&format!("{text}.{method}"), false) {
+        None => true,
+        Some(fqn) => {
+            let fqn = cx.project.canonical(&fqn);
+            !tracked_fields(cx.project, &fqn, tracked).is_empty()
+                || cx.catalog(&fqn).is_some_and(|e| e.copy_sanitizer.is_some())
+        }
+    }
+}
+
+/// The dotted name a chain of attribute reads of a name spells (`pkg.model`).
+fn dotted_text(defs: &FxHashMap<VarId, &InstKind>, v: VarId) -> Option<String> {
+    let mut attrs: Vec<&str> = Vec::new();
+    let mut at = v;
+    // Each step reads the object an earlier definition made, so the chain ends.
+    loop {
+        match defs.get(&at)? {
+            InstKind::LoadGlobal { name, .. }
+            | InstKind::LoadName { name, .. }
+            | InstKind::LoadDeref { name, .. } => {
+                attrs.push(name);
+                attrs.reverse();
+                return Some(attrs.join("."));
+            }
+            InstKind::AttrLoad { obj, attr, .. } => {
+                attrs.push(attr);
+                at = *obj;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The read-only container fields ([`ProjectDecls::readonly_attr`]: of a frozen class, or
+/// declared `Final` / `ReadOnly`) the generated constructor of the project class `class` binds,
+/// kept by class.
+fn tracked_fields<'t>(
+    project: &ProjectDecls,
+    class: &str,
+    tracked: &'t mut FxHashMap<String, Vec<Box<str>>>,
+) -> &'t [Box<str>] {
+    tracked.entry(class.to_owned()).or_insert_with(|| {
+        let Some(fields) = project.constructor_fields(class) else {
+            return Vec::new();
+        };
+        fields
+            .iter()
+            .filter(|f| {
+                project.readonly_attr(class, &f.name).is_some_and(|ro| {
+                    ro.holds_container
+                        && matches!(ro.kind, ReadOnlyKind::Frozen | ReadOnlyKind::Declared)
+                })
+            })
+            .map(|f| f.name.clone())
+            .collect()
+    })
+}
+
+/// A copy of `original` with the fields `kwargs` names replaced, or (`by_position`) fields heki
+/// cannot name.
+struct Replaced<'i> {
+    original: VarId,
+    by_position: bool,
+    kwargs: &'i [(Option<String>, VarId)],
+}
+
+/// The values one function's calls bind, by its inferred types.
+struct Values<'v, 'a> {
+    cx: &'v TypeCtx<'a>,
+    types: &'v Inferred,
+}
+
+/// What a call's callee is, by the types of the function.
+enum Target {
+    /// A named object: a class, a function, a module attribute.
+    Named(String),
+    /// A class object that may be a subclass (`cls`).
+    Class(String),
+    /// Something heki types, that is no class object or named object.
+    Other,
+    /// Nothing heki knows: it may be a class of the project.
+    Unknown,
+}
+
+impl Values<'_, '_> {
+    /// What a call binds to the tracked fields, by its callee.
+    fn call(
+        &self,
+        target: Target,
+        args: &[VarId],
+        kwargs: &[(Option<String>, VarId)],
+        star_from: Option<u8>,
+        tracked: &mut FxHashMap<String, Vec<Box<str>>>,
+        out: &mut FieldValues,
+    ) {
+        match target {
+            Target::Named(fqn) | Target::Class(fqn) if self.cx.project.is_project_class(&fqn) => {
+                let fields = tracked_fields(self.cx.project, &fqn, tracked);
+                self.constructed(&fqn, fields, args, kwargs, star_from, out);
+            }
+            Target::Named(fqn)
+                if !args.is_empty()
+                    && self
+                        .cx
+                        .catalog(&fqn)
+                        .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+            {
+                let replaced = Replaced {
+                    original: args[0],
+                    by_position: args.len() > 1 || star_from.is_some(),
+                    kwargs,
+                };
+                self.replaced(&replaced, tracked, out);
+            }
+            Target::Unknown => self.unreadable(kwargs, star_from, out),
+            _ => {}
+        }
+    }
+
+    /// A call of a callee heki does not know, which may make an instance of any class: what it
+    /// binds by keyword may change the field of that name, and a `*` or `**` unpacking, any
+    /// field. Positions given to a callee heki cannot name at all are not read: that is a
+    /// callback or a function far more often than a class.
+    fn unreadable(
+        &self,
+        kwargs: &[(Option<String>, VarId)],
+        star_from: Option<u8>,
+        out: &mut FieldValues,
+    ) {
+        let unpacked = star_from.is_some() || kwargs.iter().any(|(k, _)| k.is_none());
+        if unpacked {
+            out.bind(ANY_CLASS, ANY_FIELD, Changeable::Maybe);
+        }
+        for (k, v) in kwargs {
+            if let Some(field) = k
+                && self.changeable(*v) == Changeable::Maybe
+            {
+                out.bind(ANY_CLASS, field, Changeable::Maybe);
+            }
+        }
+    }
+
+    /// Whether the value `v` may be changed in place.
+    fn changeable(&self, v: VarId) -> Changeable {
+        let fixed = match self.types.ty(v) {
+            Some(t @ (Ty::Inst(_) | Ty::Union(_))) => {
+                (t.members().iter()).all(|o| ContainerFamily::rejects_changes(&o.class))
+            }
+            _ => false,
+        };
+        if fixed {
+            Changeable::No
+        } else {
+            Changeable::Maybe
+        }
+    }
+
+    /// A call of the class `class` (or of a subclass, through a class object), whose generated
+    /// constructor binds the read-only container fields `fields`.
+    fn constructed(
+        &self,
+        class: &str,
+        fields: &[Box<str>],
+        args: &[VarId],
+        kwargs: &[(Option<String>, VarId)],
+        star_from: Option<u8>,
+        out: &mut FieldValues,
+    ) {
+        if fields.is_empty() {
+            return;
+        }
+        let order = self
+            .cx
+            .project
+            .constructor_fields(class)
+            .unwrap_or_default();
+        let positional: Vec<&str> = order
+            .iter()
+            .filter(|f| !f.kw_only)
+            .map(|f| &*f.name)
+            .collect();
+        let unpacked = star_from.is_some() || kwargs.iter().any(|(k, _)| k.is_none());
+        for field in fields {
+            let by_keyword = kwargs
+                .iter()
+                .find_map(|(k, v)| (k.as_deref() == Some(&**field)).then_some(*v));
+            let at = positional.iter().position(|p| *p == &**field);
+            let value = match (by_keyword, at.and_then(|i| args.get(i))) {
+                _ if unpacked => Changeable::Maybe,
+                (Some(v), None) | (None, Some(&v)) => self.changeable(v),
+                // A default, or a call raising `TypeError`.
+                _ => Changeable::Maybe,
+            };
+            out.bind(class, field, value);
+        }
+    }
+
+    /// A copy of an instance of a project class with tracked fields, which makes an instance of
+    /// the original's class holding the replaced fields' new values.
+    fn replaced(
+        &self,
+        r: &Replaced<'_>,
+        tracked: &mut FxHashMap<String, Vec<Box<str>>>,
+        out: &mut FieldValues,
+    ) {
+        let unpacked = r.by_position || r.kwargs.iter().any(|(k, _)| k.is_none());
+        let Some(original) = self
+            .types
+            .ty(r.original)
+            .filter(|t| !t.members().is_empty())
+        else {
+            // A copy of an object of no class heki knows may be one of any class: what it
+            // binds may change the field of that name of any class.
+            if unpacked {
+                out.bind(ANY_CLASS, ANY_FIELD, Changeable::Maybe);
+            }
+            for (k, v) in r.kwargs {
+                if let Some(field) = k
+                    && self.changeable(*v) == Changeable::Maybe
+                {
+                    out.bind(ANY_CLASS, field, Changeable::Maybe);
+                }
+            }
+            return;
+        };
+        for o in original.members() {
+            let class = self.cx.project.canonical(&o.class);
+            for field in tracked_fields(self.cx.project, &class, tracked) {
+                let named = r
+                    .kwargs
+                    .iter()
+                    .find_map(|(k, v)| (k.as_deref() == Some(&**field)).then_some(*v));
+                let value = match named {
+                    _ if unpacked => Changeable::Maybe,
+                    Some(v) => self.changeable(v),
+                    // The copy holds the original's value.
+                    None => continue,
+                };
+                out.bind(&class, field, value);
+            }
+        }
+    }
+}
+
+impl ProjectDecls {
+    /// Whether the field `attr` of an instance of the project class `class` holds an object
+    /// that rejects every in-place change (`MUT108`): `class` and each of its subclasses hold in
+    /// it what their constructions bind ([`Self::field_holds_given`]), some module makes an
+    /// instance of one of them, and every value any module binds there
+    /// ([`ModuleDecls::field_values`], also through a copy or a class object of a base class)
+    /// rejects the changes ([`Changeable::No`]).
+    pub fn field_rejects_changes(&self, class: &str, attr: &str) -> bool {
+        let class = self.canonical(class);
+        let mut family = self.subclasses_of(&class);
+        family.push(class.clone());
+        if !family.iter().all(|c| self.field_holds_given(c, attr)) {
+            return false;
+        }
+        let bound = |c: &str| {
+            self.read(|k| note(&mut k.class_facts, &field_key(c, attr)));
+            self.field_values
+                .get(&(c.to_owned(), attr.to_owned()))
+                .copied()
+        };
+        let mut made = false;
+        for c in &family {
+            match bound(c) {
+                Some(Changeable::Maybe) => return false,
+                Some(Changeable::No) => made = true,
+                None => {}
+            }
+        }
+        let bases = self.ancestors_of(&class);
+        let any = || {
+            self.read(|k| note(&mut k.class_facts, &field_key(ANY_CLASS, attr)));
+            self.read(|k| note(&mut k.class_facts, &field_key(ANY_CLASS, ANY_FIELD)));
+            let by = |field: &str| {
+                (self.field_values).contains_key(&(ANY_CLASS.to_owned(), field.to_owned()))
+            };
+            by(attr) || by(ANY_FIELD)
+        };
+        made && bases.iter().all(|c| bound(c) != Some(Changeable::Maybe)) && !any()
+    }
+
+    /// [`Self::field_values`]: what every module binds to each read-only container field.
+    pub(super) fn joined_field_values(&self) -> FxHashMap<(String, String), Changeable> {
+        let mut out: FxHashMap<(String, String), Changeable> = FxHashMap::default();
+        for m in self.modules.values() {
+            for (class, fields) in m.field_values.iter().flat_map(|v| &v.bound) {
+                for (field, value) in fields {
+                    let key = (self.canonical(class), field.to_string());
+                    let joined = out.entry(key).or_insert(*value);
+                    *joined = (*joined).max(*value);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The class a copy of an object of unknown class binds fields of ([`FieldValues::bound`]): any.
+const ANY_CLASS: &str = "*";
+
+/// The field such a copy binds when it unpacks a mapping of them or passes positions: any.
+const ANY_FIELD: &str = "*";
+
+/// The key of the declarations' read log ([`super::DeclKeys::class_facts`]) an answer of
+/// [`ProjectDecls::field_rejects_changes`] notes for what the modules bind to the field `attr`
+/// of the class `class`.
+pub(super) fn field_key(class: &str, attr: &str) -> String {
+    format!("{class}.{attr}")
 }

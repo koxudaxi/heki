@@ -204,12 +204,16 @@ impl Rule<'_, '_> {
     }
 
     /// `(class, attr)` is read-only, of a kind a selected rule reports: a field or declaration
-    /// (`MUT108`), or a view's property (`MUT120`).
+    /// (`MUT108`), or a view's property (`MUT120`). A field whose every value rejects changes
+    /// (a `tuple`, a `types.MappingProxyType`) is none: changing it in place raises.
     fn readonly(&self, class: &str, attr: &str) -> Option<ReadOnlyAttr> {
-        let ro = self.cx.decls.readonly_attr(class, attr)?;
+        let decls = self.cx.decls;
+        let ro = decls.readonly_attr(class, attr)?;
         let selected = match ro.kind {
             ReadOnlyKind::View => self.views,
-            ReadOnlyKind::Frozen | ReadOnlyKind::Declared => self.fields,
+            ReadOnlyKind::Frozen | ReadOnlyKind::Declared => {
+                self.fields && !decls.field_rejects_changes(class, attr)
+            }
         };
         selected.then_some(ro)
     }

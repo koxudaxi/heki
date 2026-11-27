@@ -440,6 +440,12 @@ const RECORDS: &str = "from typing import dataclass_transform\n\n\n@dataclass_tr
 const FROZEN_MODEL: &str = "from dataclasses import dataclass, field\n\nfrom pkg.frozen.records import record\n\n\n@dataclass\nclass Config:\n    tags: list[str] = field(default_factory=list)\n\n\n@record\nclass Entry:\n    names: list[str]\n";
 const FROZEN_HELPERS: &str = "def add_default(tags):\n    tags.append(\"default\")\n\n\ndef clear_names(entry):\n    entry.names.clear()\n";
 const CONFIGURE: &str = "from pkg.frozen.helpers import add_default, clear_names\nfrom pkg.frozen.model import Config, Entry\n\n\ndef configure(config: Config) -> None:\n    add_default(config.tags)\n\n\ndef reset(entry: Entry) -> None:\n    clear_names(entry)\n";
+// `MUT108` of a field every construction fills with an object rejecting changes
+// (`ModuleDecls::field_values`): the construction in another module switches between a
+// `MappingProxyType` and a dict.
+const HELD_MODEL: &str = "from collections.abc import Mapping\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Held:\n    meta: Mapping[str, int]\n";
+const HELD_MAKE: &str = "from types import MappingProxyType\n\nfrom pkg.held.model import Held\n\n\ndef make() -> Held:\n    return Held(MappingProxyType({}))\n";
+const HELD_WRITE: &str = "from typing import Any, cast\n\nfrom pkg.held.model import Held\n\n\ndef write(held: Held) -> None:\n    cast(\"Any\", held.meta)[\"n\"] = 1\n";
 
 // `MUT120`: a read-only view (a protocol of properties without a setter) in one module, helpers
 // that do not see its type in a second, and a function holding the view in a third.
@@ -1172,6 +1178,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/frozen/model.py", FROZEN_MODEL),
         ("pkg/frozen/helpers.py", FROZEN_HELPERS),
         ("pkg/frozen/configure.py", CONFIGURE),
+        ("pkg/held/__init__.py", ""),
+        ("pkg/held/model.py", HELD_MODEL),
+        ("pkg/held/make.py", HELD_MAKE),
+        ("pkg/held/write.py", HELD_WRITE),
         ("pkg/roview/__init__.py", ""),
         ("pkg/roview/model.py", RO_VIEW),
         ("pkg/roview/helpers.py", RO_VIEW_HELPERS),
@@ -3029,7 +3039,9 @@ fn steps_module_members() -> Vec<Step> {
 /// The helper then moves the change of the field to a function of its own and back while its
 /// summary stays the same: the call chain of the report ends at the first function whose body
 /// changes the field (`heki_rules::ChainFacts`, as in [`steps_mut110`], for a slot of the
-/// argument).
+/// argument). Last, the construction of another frozen class in another module switches the
+/// object it stores in a field between a `MappingProxyType`, which rejects the change, and a
+/// dict (`ModuleDecls::field_values`).
 fn steps_mut108() -> Vec<Step> {
     let transform = RECORDS.replace(
         "@dataclass_transform()",
@@ -3084,6 +3096,32 @@ fn steps_mut108() -> Vec<Step> {
             vec![save("pkg/frozen/model.py", FROZEN_MODEL)],
         )
         .absent(&[("pkg/frozen/configure.py", "MUT108")]),
+        Step::new(
+            "the construction in another module fills the frozen field with a dict",
+            vec![Action::Save(
+                "pkg/held/make.py",
+                HELD_MAKE.replace("Held(MappingProxyType({}))", "Held({})"),
+            )],
+        )
+        .present(&[("pkg/held/write.py", "MUT108")]),
+        Step::new(
+            "the construction fills it with a read-only view again",
+            vec![save("pkg/held/make.py", HELD_MAKE)],
+        )
+        .absent(&[("pkg/held/write.py", "MUT108")]),
+        Step::new(
+            "a construction through the module attribute fills it with a dict",
+            vec![Action::Save(
+                "pkg/held/make.py",
+                "from types import MappingProxyType\n\nfrom pkg.held import model\n\n\ndef make() -> model.Held:\n    return model.Held(MappingProxyType({}))\n\n\ndef other() -> model.Held:\n    return model.Held({})\n".to_owned(),
+            )],
+        )
+        .present(&[("pkg/held/write.py", "MUT108")]),
+        Step::new(
+            "the qualified constructions fill it with read-only views again",
+            vec![save("pkg/held/make.py", HELD_MAKE)],
+        )
+        .absent(&[("pkg/held/write.py", "MUT108")]),
     ]
 }
 
