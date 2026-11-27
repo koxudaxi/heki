@@ -804,3 +804,142 @@ fn mut108_set_abc_fields_hold_containers() {
         ]
     );
 }
+
+// ============================================================ fields holding immutable objects
+
+/// Fields with the same read-only annotation: one every construction fills with an object that
+/// rejects changes, others with a mutable or unknown one.
+const HELD_MODEL: &str = r#"from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Any, NamedTuple
+
+SHARED: dict[str, Any] = {}
+
+
+@dataclass(frozen=True)
+class Segment:
+    meta: Mapping[str, Any]
+    extra: Mapping[str, Any]
+    tags: Sequence[str] = ()
+
+    @classmethod
+    def empty(cls) -> "Segment":
+        return cls(MappingProxyType({}), SHARED, tags=("a",))
+
+
+def make(meta: Mapping[str, Any]) -> Segment:
+    return Segment(MappingProxyType(dict(meta)), SHARED, tuple(meta))
+
+
+def annotate(segment: Segment, more: Mapping[str, Any]) -> Segment:
+    return replace(segment, meta=MappingProxyType({**segment.meta, **more}))
+
+
+@dataclass(frozen=True)
+class Mixed:
+    meta: Mapping[str, Any]
+
+
+def proxy() -> Mixed:
+    return Mixed(MappingProxyType({}))
+
+
+def plain() -> Mixed:
+    return Mixed({})
+
+
+@dataclass(frozen=True)
+class Base:
+    meta: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Sub(Base):
+    pass
+
+
+def base() -> Base:
+    return Base(MappingProxyType({}))
+
+
+def sub() -> Sub:
+    return Sub({})
+
+
+@dataclass(frozen=True)
+class Given:
+    meta: Mapping[str, Any]
+
+
+def given(meta: Mapping[str, Any], rest: list[Any]) -> list[Given]:
+    return [Given(meta), Given(*rest)]
+
+
+class Pair(NamedTuple):
+    meta: Mapping[str, Any]
+
+
+def pair() -> Pair:
+    return Pair(MappingProxyType({}))._replace(meta={})
+
+
+@dataclass(frozen=True)
+class Unmade:
+    meta: Mapping[str, Any]
+"#;
+
+const HELD_USE: &str = r#"from typing import Any, cast
+
+from pkg.model import Base, Given, Mixed, Pair, Segment, Unmade
+
+
+def put(mapping):
+    mapping["n"] = 1
+
+
+def write_meta(segment: Segment) -> None:
+    cast("Any", segment.meta)["n"] = 1
+    put(segment.meta)
+    cast("Any", segment.tags).append("x")
+
+
+def write_extra(segment: Segment) -> None:
+    cast("Any", segment.extra)["n"] = 1
+
+
+def write_others(m: Mixed, b: Base, g: Given, p: Pair, u: Unmade) -> None:
+    cast("Any", m.meta)["n"] = 1
+    cast("Any", b.meta)["n"] = 1
+    cast("Any", g.meta)["n"] = 1
+    cast("Any", p.meta)["n"] = 1
+    cast("Any", u.meta)["n"] = 1
+"#;
+
+#[test]
+fn mut108_fields_whose_every_value_rejects_changes_are_not_changed() {
+    let p = Project::new("mut108_held_values");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", HELD_MODEL)
+        .write("pkg/use.py", HELD_USE);
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diagnostics(&p, &["--select", "MUT108"])),
+        vec![
+            // Every construction, a replacement, and a class method's `cls(...)` store a
+            // `MappingProxyType` or a `tuple` in `meta` and `tags`: changing them raises.
+            // `extra` holds a shared dict.
+            d(u, 17, "write_extra", "Segment.extra"),
+            // A proxy on one path and a dict on another.
+            d(u, 21, "write_others", "Mixed.meta"),
+            // A subclass instance holding a dict.
+            d(u, 22, "write_others", "Base.meta"),
+            // A value of unknown class, and an unpacked argument.
+            d(u, 23, "write_others", "Given.meta"),
+            // A named tuple's `_replace` storing a dict.
+            d(u, 24, "write_others", "Pair.meta"),
+            // No construction heki sees.
+            d(u, 25, "write_others", "Unmade.meta"),
+        ]
+    );
+}
