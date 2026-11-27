@@ -15,7 +15,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -26,16 +26,16 @@ description = "Static checker for Python that tracks side effects and mutations 
 [workspace.dependencies]
 # Internal crates (crates.io needs a version next to each path; it must equal
 # `workspace.package.version`, which the release workflow checks)
-heki_ast = { path = "crates/heki_ast", version = "0.10.0" }
-heki_env = { path = "crates/heki_env", version = "0.10.0" }
-heki_semantic = { path = "crates/heki_semantic", version = "0.10.0" }
-heki_ir = { path = "crates/heki_ir", version = "0.10.0" }
-heki_kb = { path = "crates/heki_kb", version = "0.10.0" }
-heki_soundness = { path = "crates/heki_soundness", version = "0.10.0" }
-heki_effect = { path = "crates/heki_effect", version = "0.10.0" }
-heki_rules = { path = "crates/heki_rules", version = "0.10.0" }
-heki_diagnostics = { path = "crates/heki_diagnostics", version = "0.10.0" }
-heki_lsp = { path = "crates/heki_lsp", version = "0.10.0" }
+heki_ast = { path = "crates/heki_ast", version = "0.11.0" }
+heki_env = { path = "crates/heki_env", version = "0.11.0" }
+heki_semantic = { path = "crates/heki_semantic", version = "0.11.0" }
+heki_ir = { path = "crates/heki_ir", version = "0.11.0" }
+heki_kb = { path = "crates/heki_kb", version = "0.11.0" }
+heki_soundness = { path = "crates/heki_soundness", version = "0.11.0" }
+heki_effect = { path = "crates/heki_effect", version = "0.11.0" }
+heki_rules = { path = "crates/heki_rules", version = "0.11.0" }
+heki_diagnostics = { path = "crates/heki_diagnostics", version = "0.11.0" }
+heki_lsp = { path = "crates/heki_lsp", version = "0.11.0" }
 
 # Frontend parser (STRICTLY isolated to heki_ast per ADR-009 / ADR-016)
 ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5" }
