@@ -11087,6 +11087,10 @@ impl<'a> TypeCtx<'a> {
                     Some(Callee::Project(keys, _)) if self.getter_targets_complete(recv, attr, &keys)
                 )
             }
+            // A generator expression runs the code written there and no other.
+            InstKind::MakeGenExpr {
+                func_id: Some(_), ..
+            } => true,
             _ => false,
         }
     }

@@ -9696,6 +9696,7 @@ fn role_site(
     flags: Option<(bool, bool)>,
 ) -> CallSite {
     let (is_awaited, drives) = flags.unwrap_or((false, false));
+    let iterated = role == SiteRole::Iterate;
     CallSite {
         caller: site.caller.clone(),
         target: site.target.clone(),
@@ -9728,7 +9729,9 @@ fn role_site(
         state_tests: site.state_tests.clone(),
         locks: site.locks,
         shield: site.shield,
-        complete: false,
+        // An iterated result runs, there, the bodies of the generator functions the call's
+        // targets are: the call's targets are theirs.
+        complete: iterated && site.complete,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
         module_member: None,

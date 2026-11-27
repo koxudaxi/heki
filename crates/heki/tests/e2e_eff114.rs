@@ -8,7 +8,9 @@
 //! tuple, a name from a dependency, the standard library, or a star import), a clause raising on a
 //! path or exiting, a CLI boundary, a body reaching no cycle (or one only through a worker thread,
 //! a coroutine only created, or a generator only made), `except*`, a `finally` body on the way, and
-//! a module whose `Exception` is its own class; the opt-in selection, and `heki rule`.
+//! a module whose `Exception` is its own class; the opt-in selection, and `heki rule`. Cycles
+//! are closed only by calls heki establishes: a cycle through a protocol member found by name is
+//! none, while the way down to a cycle may go through one.
 
 mod common;
 
@@ -959,4 +961,189 @@ fn a_module_constant_status_is_a_cli_boundary() {
             "fallback_value"
         ]
     );
+}
+
+/// Cycles over the calls heki establishes: a getter reading the same member of an object typed
+/// with a protocol closes no cycle, while direct and mutual recursion, a helper calling into one,
+/// a method of a known class with an override off the cycle, an override of an abstract method
+/// called in a comprehension, a cached function, and one defined twice close one, and the way
+/// down to a cycle may go through a protocol call. Every report is heuristic.
+const CYCLES: &str = r#"import functools
+import os
+from abc import ABC, abstractmethod
+from typing import Protocol
+
+FAST = bool(os.environ.get("FAST"))
+
+
+def walk(node):
+    total = 1
+    for child in node.children:
+        total += walk(child)
+    return total
+
+
+def measure(node):
+    try:
+        return walk(node)
+    except Exception:
+        return 0
+
+
+class Backend(Protocol):
+    @property
+    def bits(self) -> int: ...
+
+
+class Wrapper:
+    def __init__(self, backend: Backend) -> None:
+        self._backend = backend
+
+    @property
+    def bits(self) -> int:
+        return self._backend.bits
+
+
+def window(w: Wrapper) -> int:
+    try:
+        return w.bits
+    except Exception:
+        return 15
+
+
+class Runner(Protocol):
+    def run(self, node) -> int: ...
+
+
+class Walker:
+    def run(self, node) -> int:
+        return walk(node)
+
+
+def through_protocol(r: Runner, node):
+    try:
+        return r.run(node)
+    except Exception:
+        return 0
+
+
+def even(n):
+    if n == 0:
+        return True
+    return odd(n - 1)
+
+
+def odd(n):
+    if n == 0:
+        return False
+    return even(n - 1)
+
+
+def parity(n):
+    try:
+        return even(n)
+    except Exception:
+        return None
+
+
+def outer(node):
+    return walk(node) + 1
+
+
+def through_helper(node):
+    try:
+        return outer(node)
+    except Exception:
+        return 0
+
+
+class Visitor:
+    def visit(self, node):
+        for child in node.children:
+            self.visit(child)
+
+
+class Printer(Visitor):
+    def visit(self, node):
+        return None
+
+
+def visited(v: Visitor, node):
+    try:
+        v.visit(node)
+    except Exception:
+        return False
+    return True
+
+
+class Shape(ABC):
+    @abstractmethod
+    def area(self) -> int: ...
+
+
+class Group(Shape):
+    def __init__(self, parts: list[Shape]) -> None:
+        self.parts = parts
+
+    def area(self) -> int:
+        return sum([part.area() for part in self.parts])
+
+
+def group_area(group: Group) -> int:
+    try:
+        return group.area()
+    except Exception:
+        return 0
+
+
+@functools.lru_cache(maxsize=None)
+def cached_depth(node) -> int:
+    return 1 + max([cached_depth(c) for c in node], default=0)
+
+
+def cached(node):
+    try:
+        return cached_depth(node)
+    except Exception:
+        return 0
+
+
+if FAST:
+    def fold(x):
+        return fold(x[1:]) if x else 0
+else:
+    def fold(x):
+        return fold(x[:-1]) if x else 0
+
+
+def folded(x):
+    try:
+        return fold(x)
+    except Exception:
+        return 0
+"#;
+
+#[test]
+fn cycles_are_closed_by_calls_heki_establishes_and_reached_through_any_call() {
+    let p = Project::new("eff114_established_cycles");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/cycles.py", CYCLES);
+    let diags = diagnostics(&p, SELECT);
+    let path = "pkg/cycles.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(path, 19, "measure"),
+            d(path, 56, "through_protocol"),
+            d(path, 75, "parity"),
+            d(path, 86, "through_helper"),
+            d(path, 104, "visited"),
+            d(path, 125, "group_area"),
+            d(path, 137, "cached"),
+            d(path, 152, "folded"),
+        ]
+    );
+    for report in diags.iter().filter(|r| r["rule_code"] == "EFF114") {
+        assert_eq!(report["certainty"], "heuristic", "{report:#?}");
+    }
 }
