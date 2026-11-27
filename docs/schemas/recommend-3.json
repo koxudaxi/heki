@@ -2163,7 +2163,7 @@
           "type": "array"
         },
         "contracts_at": {
-          "description": "Where each contract of `contracts` is defined, in their order: as its `source` names\nit, else its table.",
+          "description": "Where the contracts of `contracts` are defined, each defining table once, in their\norder: as its `source` names it, else its table. Contracts of one name defined in\nseveral tables list every table.",
           "items": {
             "$ref": "#/$defs/EntryPlace"
           },

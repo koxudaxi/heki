@@ -71,8 +71,9 @@ pub struct UnmatchedEntry {
     /// Where the entry is defined: each place once, as `entry-sources` names it, else as
     /// written (in a table, or in a group).
     pub entry_at: Vec<EntryPlace>,
-    /// Where each contract of `contracts` is defined, in their order: as its `source` names
-    /// it, else its table.
+    /// Where the contracts of `contracts` are defined, each defining table once, in their
+    /// order: as its `source` names it, else its table. Contracts of one name defined in
+    /// several tables list every table.
     pub contracts_at: Vec<EntryPlace>,
 }
 
@@ -893,8 +894,11 @@ pub(crate) fn unmatched_entries(
                 let found = &mut found[at];
                 if found.contracts.last() != Some(&key.contract) {
                     found.contracts.push(key.contract.clone());
-                    let table = sources.contract(kind, key.index);
-                    found.contracts_at.extend(table.map(|t| t.place.clone()));
+                }
+                if let Some(table) = sources.contract(kind, key.index)
+                    && !found.contracts_at.contains(&table.place)
+                {
+                    found.contracts_at.push(table.place.clone());
                 }
                 if let Some(defined) = defined
                     && !found.entry_at.contains(&defined.place)

@@ -6,11 +6,11 @@
 //! the one file would give, and a baseline keys its reports as that file would.
 
 use crate::defaults::SUFFIX;
-use crate::problem::{line_column, settings_root, tables_at};
+use crate::problem::{LineStarts, line_column, settings_root, tables_at};
 use crate::{ConfigError, ConfigLayout, Docs, HekiConfig, Problem, Setting};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -778,6 +778,7 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
     };
     let defined = Defined {
         files,
+        starts: files.iter().map(|f| LineStarts::of(&f.text)).collect(),
         shown: &shown,
         root,
     };
@@ -794,9 +795,9 @@ pub(crate) fn fold(files: &[File], root: &Path) -> Result<Folded, ConfigError> {
                     .map(|e| {
                         (e.file != 0 || e.group.is_some()).then(|| EntryPlace {
                             file: shown[e.file].clone(),
-                            line: e
-                                .offset
-                                .map_or(1, |o| line_column(&files[e.file].text, o).0),
+                            line: e.offset.map_or(1, |o| {
+                                defined.starts[e.file].line_column(&files[e.file].text, o).0
+                            }),
                             group: e.group.clone(),
                         })
                     })
@@ -884,6 +885,8 @@ fn merge(files: &[File], settings: &[Settings], groups: &Groups) -> Result<Merge
 /// names them (`shown`), and the project root a named place is relative to.
 struct Defined<'f> {
     files: &'f [File],
+    /// The line starts of each of `files`.
+    starts: Vec<LineStarts>,
     shown: &'f [String],
     root: &'f Path,
 }
@@ -899,11 +902,16 @@ impl Defined<'_> {
             None => self.written(origin.file, origin.offset, None),
         };
         let mut named: HashMap<&str, DefinedAt> = HashMap::new();
+        let held: HashSet<&str> = (table.values())
+            .filter_map(|field| match field {
+                Field::List(entries) => Some(entries),
+                Field::Value(_) => None,
+            })
+            .flatten()
+            .map(|e| e.text.as_str())
+            .collect();
         for (entry, value, at) in &origin.entry_sources {
-            let held = table.values().any(|field| {
-                matches!(field, Field::List(entries) if entries.iter().any(|e| e.text == *entry))
-            });
-            if !held {
+            if !held.contains(entry.as_str()) {
                 return Err(file.error(*at, FoldProblem::UnknownEntrySource(entry.clone())));
             }
             let place = (self.named(ENTRY_SOURCES, value)).map_err(|p| file.error(*at, p))?;
@@ -935,7 +943,9 @@ impl Defined<'_> {
 
     /// The place at `offset` of the file at `file`, in the group `group`.
     fn written(&self, file: usize, offset: Option<usize>, group: Option<String>) -> DefinedAt {
-        let (line, column) = offset.map_or((1, 1), |o| line_column(&self.files[file].text, o));
+        let (line, column) = offset.map_or((1, 1), |o| {
+            self.starts[file].line_column(&self.files[file].text, o)
+        });
         DefinedAt {
             path: self.files[file].path.clone(),
             column,

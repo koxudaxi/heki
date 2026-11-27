@@ -258,3 +258,75 @@ allowed-writers = [\"pkg.m.outside\"]
         "{stdout}{stderr}"
     );
 }
+
+/// A write-owners contract of `entries` targets, one per line, in the main file (`included`
+/// false) or in an included file.
+fn many_entries(name: &str, entries: usize, included: bool) -> Project {
+    let list: String = (0..entries)
+        .map(|k| format!("    \"pkg.m.Model.field_{k:06}\",\n"))
+        .collect();
+    let table = if included {
+        "write-owners"
+    } else {
+        "tool.heki.write-owners"
+    };
+    let owner = format!(
+        "[[{table}]]\nname = \"fields\"\ntargets = [\n{list}]\nallowed-writers = [\"pkg.m.outside\"]\n"
+    );
+    let p = Project::new(name);
+    p.write("pkg/__init__.py", "").write("pkg/m.py", MODEL);
+    if included {
+        p.write("heki-owners.toml", &owner).write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki]\ninclude = [\"heki-owners.toml\"]\n",
+        );
+    } else {
+        p.write(
+            "pyproject.toml",
+            &format!("[project]\nname = \"t\"\n\n{owner}"),
+        );
+    }
+    p
+}
+
+/// The seconds `heki check` takes on the project.
+fn seconds(p: &Project) -> f64 {
+    let started = std::time::Instant::now();
+    let (_, stdout, stderr) = p.check(&["--select", "MUT201"]);
+    assert!(!stderr.contains("error"), "{stdout}{stderr}");
+    started.elapsed().as_secs_f64()
+}
+
+#[test]
+fn loading_the_places_of_many_entries_takes_linear_time() {
+    for included in [false, true] {
+        let small = seconds(&many_entries("locations_scale_small", 5_000, included));
+        let large = seconds(&many_entries("locations_scale_large", 40_000, included));
+        // Eight times the entries: linear growth is about 8, quadratic about 64. The floor keeps
+        // a fast small run from making the ratio noisy.
+        assert!(
+            large < 24.0 * small.max(0.25),
+            "included {included}: {small:.2}s for 5000 entries, {large:.2}s for 40000"
+        );
+    }
+}
+
+#[test]
+fn contracts_of_one_name_each_get_their_place_in_the_warning() {
+    let config = "\
+[[tool.heki.write-owners]]
+name = \"fields\"
+targets = [\"pkg.m.Model.gone\"]
+allowed-writers = [\"pkg.m.outside\"]
+
+[[tool.heki.write-owners]]
+name = \"fields\"
+targets = [\"pkg.m.Model.gone\"]
+allowed-writers = [\"pkg.m.outside\"]
+";
+    let (_, stdout, stderr) = project("locations_same_name", config).check(&[]);
+    assert!(
+        stderr.contains("contracts at pyproject.toml:4, pyproject.toml:9)"),
+        "{stdout}{stderr}"
+    );
+}
