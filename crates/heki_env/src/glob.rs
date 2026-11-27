@@ -63,6 +63,40 @@ pub fn add_to_set(set: &mut GlobSetBuilder, pattern: &str) -> Result<(), Error> 
     Ok(())
 }
 
+/// The patterns without a `{...}` group that `pattern` stands for: every group is written out
+/// as one pattern per alternative (`pkg.{a.Base,a.Sub}` is `pkg.a.Base` and `pkg.a.Sub`), the
+/// same alternatives [`globs`] gives `globset` to match. `None` for text `globset` rejects (an
+/// unclosed group or class), and when it stands for more than [`MAX_GLOBS`].
+pub fn alternatives(pattern: &str) -> Option<Vec<String>> {
+    let mut at = 0;
+    let alternatives = parse(pattern, &mut at, false)?;
+    let sequence: Vec<Piece<'_>> = alternatives.into_iter().flatten().collect();
+    write_out(&sequence)
+}
+
+fn write_out(sequence: &[Piece<'_>]) -> Option<Vec<String>> {
+    let mut done = vec![String::new()];
+    for piece in sequence {
+        let options = match piece {
+            Piece::Text(text) => vec![(*text).to_owned()],
+            Piece::Group(alternatives) => {
+                let mut all = Vec::new();
+                for alternative in alternatives {
+                    all.extend(write_out(alternative)?);
+                }
+                all
+            }
+        };
+        if done.len() * options.len() > MAX_GLOBS {
+            return None;
+        }
+        done = (done.iter())
+            .flat_map(|head| options.iter().map(move |option| format!("{head}{option}")))
+            .collect();
+    }
+    Some(done)
+}
+
 /// The patterns without an empty alternative that `pattern` stands for: the pattern itself
 /// unless a `{...}` group has one. Text `globset` rejects (an unclosed group or class) is
 /// returned as it is, for `globset` to report. `None` when it stands for more than
@@ -199,6 +233,20 @@ mod tests {
             let expanded: Vec<String> = expanded.into_iter().map(str::to_owned).collect();
             assert_eq!(expand(pattern), Some(expanded), "{pattern}");
         }
+    }
+
+    #[test]
+    fn alternatives_write_out_every_group() {
+        for (pattern, written) in [
+            ("pkg.f", vec!["pkg.f"]),
+            ("pkg.{a.Base,a.Sub}", vec!["pkg.a.Base", "pkg.a.Sub"]),
+            ("x{a{,b},c}", vec!["xa", "xab", "xc"]),
+        ] {
+            let written: Vec<String> = written.into_iter().map(str::to_owned).collect();
+            assert_eq!(alternatives(pattern), Some(written), "{pattern}");
+        }
+        assert_eq!(alternatives("x{a"), None);
+        assert_eq!(alternatives(&"{a,b}".repeat(9)), None);
     }
 
     #[cfg(not(windows))]

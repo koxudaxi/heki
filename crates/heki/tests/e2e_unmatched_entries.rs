@@ -861,6 +861,45 @@ fn each_kind_of_entry_is_judged_by_what_its_rule_matches() {
     );
 }
 
+/// A `{...}` group in the holder of a `Class.attr` target may hold dotted alternatives, as a
+/// module glob can: `pkg.{a.Base,a.Sub}.only_sub` names the attribute of both classes and is no
+/// error, while a group none of whose alternatives is a class is one.
+#[test]
+fn a_holder_brace_may_hold_dotted_alternatives() {
+    let p = Project::new("unmatched_dotted_brace_holder");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\"]\n\
+         unmatched-contract-entries = \"error\"\n\n\
+         [[tool.heki.read-owners]]\nname = \"dotted\"\n\
+         targets = [\"pkg.{a.Base,a.Sub}.only_sub\"]\nallowed-readers = [\"pkg.a:*\"]\n\n\
+         [[tool.heki.read-owners]]\nname = \"gone\"\n\
+         targets = [\"pkg.{a.Gone,a.Nope}.only_sub\"]\nallowed-readers = [\"pkg.a:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/a.py",
+        "class Base:\n    pass\n\n\nclass Sub(Base):\n    only_sub = 1\n",
+    )
+    .write(
+        "pkg/b.py",
+        "from pkg.a import Sub\n\n\ndef read(s: Sub) -> int:\n    return s.only_sub\n",
+    );
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(
+        lines(&stderr, "error: "),
+        [
+            "`targets` entry `pkg.{a.Gone,a.Nope}.only_sub` of read-owners `gone` names no class in the analyzed files"
+        ],
+        "{stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("outside the read owners of `dotted`"),
+        "{stdout}{stderr}"
+    );
+}
+
 /// An entry many contracts hold is one line, naming the first three contracts and counting the
 /// others.
 #[test]

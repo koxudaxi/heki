@@ -2848,6 +2848,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   a class defined in it, their methods), where `pkg.run:outer` names `outer` alone. It works
   wherever a configured text is a glob, module patterns, `exclude`, and `per-file-ignores`
   included.
+- A `{...}` group may hold dotted alternatives, in the holder of a `Class.attr` target too:
+  `pkg.{a.Base,a.Sub}.only_sub` is `pkg.a.Base.only_sub` and `pkg.a.Sub.only_sub`, and
+  `heki check` judges the entry by the alternatives, so it names no class only when none of
+  them does ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
