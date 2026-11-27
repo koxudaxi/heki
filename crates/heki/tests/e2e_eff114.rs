@@ -1147,3 +1147,68 @@ fn cycles_are_closed_by_calls_heki_establishes_and_reached_through_any_call() {
         assert_eq!(report["certainty"], "heuristic", "{report:#?}");
     }
 }
+
+/// A comprehension in a frame of its own (Python 3.11) and a coroutine saved and awaited later
+/// close their cycles as a comprehension inlined (3.12) and an awaited call do; a method found by
+/// its name on a receiver of unknown class closes none.
+const FRAMES: &str = r#"class Node:
+    def __init__(self, inner):
+        self.inner = inner
+
+    def size(self):
+        return self.inner.size()
+
+
+def node_size(n: Node):
+    try:
+        return n.size()
+    except Exception:
+        return 0
+
+
+def depth(xs):
+    return 1 + max([depth(x) for x in xs], default=0)
+
+
+def measured(xs):
+    try:
+        return depth(xs)
+    except Exception:
+        return 0
+
+
+async def descend(node):
+    total = 1
+    for child in node.children:
+        pending = descend(child)
+        total += await pending
+    return total
+
+
+async def walked(node):
+    try:
+        return await descend(node)
+    except Exception:
+        return 0
+"#;
+
+#[test]
+fn comprehension_frames_and_saved_coroutines_close_cycles_on_every_target_version() {
+    for version in ["3.11", "3.12"] {
+        let p = Project::new(&format!("eff114_frames_{}", version.replace('.', "")));
+        p.write("pkg/__init__.py", "")
+            .write("pkg/frames.py", FRAMES);
+        let diags = diagnostics(
+            &p,
+            &["--extend-select", "EFF114", "--target-version", version],
+        );
+        assert_eq!(
+            found(&diags),
+            vec![
+                d("pkg/frames.py", 23, "measured"),
+                d("pkg/frames.py", 38, "walked"),
+            ],
+            "target {version}"
+        );
+    }
+}
