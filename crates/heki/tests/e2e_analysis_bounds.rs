@@ -9104,7 +9104,7 @@ fn values_constructions_bind_to_frozen_fields_are_read_once_per_call() {
             "class Held:".to_owned(),
         ];
         model.extend(fields);
-        let views = vec!["MappingProxyType({})"; 8].join(", ");
+        let views = ["MappingProxyType({})"; 8].join(", ");
         for i in 0..n {
             model.extend([
                 String::new(),

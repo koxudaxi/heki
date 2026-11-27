@@ -417,7 +417,9 @@ pub(super) fn field_values(input: &ModuleInput<'_>, cx: &TypeCtx<'_>) -> Option<
                     star_from,
                     ..
                 } => match types.ty(*c) {
-                    Some(Ty::Ref(class) | Ty::Class(class)) if cx.project.is_project_class(class) => {
+                    Some(Ty::Ref(class) | Ty::Class(class))
+                        if cx.project.is_project_class(class) =>
+                    {
                         let fields = tracked_fields(cx.project, class, &mut tracked);
                         values.constructed(class, fields, args, kwargs, *star_from, &mut out);
                     }
@@ -465,18 +467,21 @@ fn may_make_instances(
     cx: &TypeCtx<'_>,
     tracked: &mut FxHashMap<String, Vec<Box<str>>>,
 ) -> bool {
-    f.blocks.iter().flat_map(|b| &b.insts).any(|inst| match &inst.kind {
-        InstKind::Call { callee, .. } => match cx.module.resolve_dotted(callee, false) {
-            None => true,
-            Some(fqn) => {
-                let fqn = cx.project.canonical(&fqn);
-                !tracked_fields(cx.project, &fqn, tracked).is_empty()
-                    || cx.catalog(&fqn).is_some_and(|e| e.copy_sanitizer.is_some())
-            }
-        },
-        InstKind::MethodCall { method, .. } => method == "_replace",
-        _ => false,
-    })
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .any(|inst| match &inst.kind {
+            InstKind::Call { callee, .. } => match cx.module.resolve_dotted(callee, false) {
+                None => true,
+                Some(fqn) => {
+                    let fqn = cx.project.canonical(&fqn);
+                    !tracked_fields(cx.project, &fqn, tracked).is_empty()
+                        || cx.catalog(&fqn).is_some_and(|e| e.copy_sanitizer.is_some())
+                }
+            },
+            InstKind::MethodCall { method, .. } => method == "_replace",
+            _ => false,
+        })
 }
 
 /// The read-only container fields ([`ProjectDecls::readonly_attr`]: of a frozen class, or
@@ -522,11 +527,16 @@ impl Values<'_, '_> {
     /// Whether the value `v` may be changed in place.
     fn changeable(&self, v: VarId) -> Changeable {
         let fixed = match self.types.ty(v) {
-            Some(t @ (Ty::Inst(_) | Ty::Union(_))) => (t.members().iter())
-                .all(|o| ContainerFamily::rejects_changes(&o.class)),
+            Some(t @ (Ty::Inst(_) | Ty::Union(_))) => {
+                (t.members().iter()).all(|o| ContainerFamily::rejects_changes(&o.class))
+            }
             _ => false,
         };
-        if fixed { Changeable::No } else { Changeable::Maybe }
+        if fixed {
+            Changeable::No
+        } else {
+            Changeable::Maybe
+        }
     }
 
     /// A call of the class `class` (or of a subclass, through a class object), whose generated
@@ -543,8 +553,16 @@ impl Values<'_, '_> {
         if fields.is_empty() {
             return;
         }
-        let order = self.cx.project.constructor_fields(class).unwrap_or_default();
-        let positional: Vec<&str> = order.iter().filter(|f| !f.kw_only).map(|f| &*f.name).collect();
+        let order = self
+            .cx
+            .project
+            .constructor_fields(class)
+            .unwrap_or_default();
+        let positional: Vec<&str> = order
+            .iter()
+            .filter(|f| !f.kw_only)
+            .map(|f| &*f.name)
+            .collect();
         let unpacked = star_from.is_some() || kwargs.iter().any(|(k, _)| k.is_none());
         for field in fields {
             let by_keyword = kwargs
@@ -575,9 +593,14 @@ impl Values<'_, '_> {
         for o in original.members() {
             let class = self.cx.project.canonical(&o.class);
             for field in tracked_fields(self.cx.project, &class, tracked) {
-                let named = r.kwargs.iter().find_map(|(k, v)| (k.as_deref() == Some(&**field)).then_some(*v));
+                let named = r
+                    .kwargs
+                    .iter()
+                    .find_map(|(k, v)| (k.as_deref() == Some(&**field)).then_some(*v));
                 let value = match named {
-                    _ if r.by_position || r.kwargs.iter().any(|(k, _)| k.is_none()) => Changeable::Maybe,
+                    _ if r.by_position || r.kwargs.iter().any(|(k, _)| k.is_none()) => {
+                        Changeable::Maybe
+                    }
                     Some(v) => self.changeable(v),
                     // The copy holds the original's value.
                     None => continue,
@@ -604,7 +627,9 @@ impl ProjectDecls {
         }
         let bound = |c: &str| {
             self.read(|k| note(&mut k.class_facts, &field_key(c, attr)));
-            self.field_values.get(&(c.to_owned(), attr.to_owned())).copied()
+            self.field_values
+                .get(&(c.to_owned(), attr.to_owned()))
+                .copied()
         };
         let mut made = false;
         for c in &family {
