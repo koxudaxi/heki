@@ -48,7 +48,7 @@ app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap
 Found 1 diagnostic(s) in 4 file(s).
 ```
 
-The run exits with code 1. `read-owners` and `call-owners` take the same shape with `allowed-readers` and `allowed-callers`.
+The run exits with code 1. `read-owners` and `call-owners` take the same shape with `allowed-readers` and `allowed-callers`. A target covers the subclasses of its class too, and a read or call through a value typed with a project `Protocol` that only the class and its subclasses implement: with `Order` the one class implementing `HasItems`, `cart.items` with `cart: HasItems` reads `Order.items` ([`read-owners`](configuration.md#read-owners)).
 
 ### Every change must be announced
 

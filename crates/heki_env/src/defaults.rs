@@ -3,11 +3,10 @@
 //!
 //! A table's own key wins, and a list is the table's whole or the default's whole, never both.
 //! `name` and `targets` identify one contract and cannot be defaulted. The defaults are folded
-//! into the text before the tables are read, so each reader (a check, `heki inspect`) sees the
-//! effective values; a tool that adds a table to the configuration (`heki recommend` trying a
-//! candidate) takes them through [`with_defaults`].
+//! into the text before the tables are read ([`crate::fold`]), so each reader (a check, `heki
+//! inspect`) sees the effective values; a tool that adds a table to the configuration (`heki
+//! recommend` trying a candidate) takes them through [`with_defaults`].
 
-use crate::{ConfigLayout, HekiConfig};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -16,41 +15,6 @@ pub(crate) const NOT_DEFAULTED: [&str; 2] = ["name", "targets"];
 
 /// The suffix of a contract key's defaults table: `call-owners-defaults`.
 pub(crate) const SUFFIX: &str = "-defaults";
-
-/// `text`, a configuration that reads as TOML, with each `<contract>-defaults` table removed
-/// and its keys written into the tables of its contract that do not set them.
-pub(crate) fn expand(layout: ConfigLayout, text: &str) -> String {
-    let mut table: toml::Table = toml::from_str(text).expect("a configuration that was read");
-    let settings = settings_mut(layout, &mut table).expect("a configuration with defaults tables");
-    for kind in HekiConfig::CONTRACT_KEYS {
-        fold(settings, kind);
-    }
-    toml::to_string(&table).expect("a configuration table serializes")
-}
-
-/// The table that holds the settings of a file of `layout`.
-fn settings_mut(layout: ConfigLayout, table: &mut toml::Table) -> Option<&mut toml::Table> {
-    let Some(prefix) = layout.table_prefix() else {
-        return Some(table);
-    };
-    prefix
-        .split('.')
-        .try_fold(table, |t, part| t.get_mut(part)?.as_table_mut())
-}
-
-fn fold(settings: &mut toml::Table, kind: &str) {
-    let Some(toml::Value::Table(defaults)) = settings.remove(&format!("{kind}{SUFFIX}")) else {
-        return;
-    };
-    let Some(toml::Value::Array(entries)) = settings.get_mut(kind) else {
-        return;
-    };
-    for entry in entries.iter_mut().filter_map(toml::Value::as_table_mut) {
-        for (key, value) in &defaults {
-            entry.entry(key).or_insert_with(|| value.clone());
-        }
-    }
-}
 
 /// `entry`, a contract table written after the configuration was read, with the keys it leaves
 /// unset (no value, an empty string or list) taken from `defaults`, as the same table written in

@@ -2,6 +2,7 @@
 
 mod declared;
 mod defaults;
+mod fold;
 pub mod glob;
 pub mod problem;
 mod published;
@@ -10,6 +11,7 @@ mod stdlib;
 
 pub use declared::{Declared, EntryPoint, normalize_distribution, requirement_name};
 pub use defaults::with_defaults;
+pub use fold::{ConfigSources, EntryPlace, FoldProblem, UnusedGroup, included_files};
 pub use problem::{Docs, Explain, Problem, Setting};
 pub use published::{SCHEMA_SITE, published_schema};
 pub use stdlib::is_stdlib_module;
@@ -522,9 +524,10 @@ pub struct HekiConfig {
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub import_boundaries: Vec<ImportBoundaryRule>,
-    /// The `<contract>-defaults` tables as written. The loaders have folded each into the tables
-    /// of its contract, so the contracts above hold the effective values. A table a tool adds
-    /// to the configuration afterwards takes them through [`with_defaults`].
+    /// The `<contract>-defaults` tables of the main file, their groups expanded. The loaders
+    /// have folded each into the tables of its contract, so the contracts above hold the
+    /// effective values. A table a tool adds to the configuration afterwards takes them through
+    /// [`with_defaults`].
     pub write_owners_defaults: Option<WriteOwnerRule>,
     pub read_owners_defaults: Option<ReadOwnerRule>,
     pub call_owners_defaults: Option<CallOwnerRule>,
@@ -534,6 +537,16 @@ pub struct HekiConfig {
     pub import_boundaries_defaults: Option<ImportBoundaryRule>,
     pub imports: ImportsConfig,
     pub ecosystem: Vec<EcosystemOverride>,
+    /// Further files of contract tables, their defaults tables, and groups, relative to this
+    /// file; the loaders fold them in ([`fold`]).
+    pub include: Vec<String>,
+    /// Named lists of entries: an entry `@name` of a list of a contract, a defaults table, or
+    /// another group stands for the group's entries. The loaders write them out.
+    pub groups: BTreeMap<String, Vec<String>>,
+    /// What the loaders read besides this file, and where the contract entries come from (not
+    /// a `[tool.heki]` key).
+    #[serde(skip)]
+    pub sources: ConfigSources,
     /// The version `project.requires-python` of the project's `pyproject.toml` selects
     /// ([`requires_python_lower_bound`]): the `target-version` default (read by the loaders,
     /// not a `[tool.heki]` key).
@@ -621,6 +634,13 @@ pub enum ConfigError {
         entry: String,
         reason: &'static str,
     },
+    /// The included files or the groups do not fold into one configuration.
+    #[error("{problem}")]
+    Fold {
+        path: PathBuf,
+        position: Option<(u32, u32)>,
+        problem: FoldProblem,
+    },
 }
 
 impl Explain for ConfigError {
@@ -680,6 +700,11 @@ impl Explain for ConfigError {
             Self::TopLevelSetting { path, key, position } => at(problem, path, position)
                 .help(format!("a `pyproject.toml` holds heki's settings under `[tool.heki]`: move `{key}` into `[tool.heki]` (or its table, `[tool.heki.{key}]`)"))
                 .docs(Docs::ConfigTables),
+            Self::Fold {
+                path,
+                position,
+                problem: fold,
+            } => fold.explain(at(problem, path, position)),
             Self::SourceRoot { path, entry, .. } => problem
                 .help("list directories relative to the project root: `src = [\"src\"]`")
                 .docs(Docs::SourceRoots)
@@ -755,23 +780,24 @@ impl ConfigLayout {
     /// project's `pyproject.toml` at `root`, so the same file gives the same configuration
     /// wherever it sits.
     ///
-    /// A `<contract>-defaults` table gives the keys its contract's tables leave out: the
-    /// contracts of the configuration returned are the expanded tables, and its errors name the
-    /// file as written.
+    /// The configuration is folded into one ([`fold`]): the files `include` lists join it, each
+    /// `@name` entry stands for the entries of its group, and a `<contract>-defaults` table
+    /// gives the keys its contract's tables leave out. The contracts of the configuration
+    /// returned are the folded tables, and its errors name the file and line as written.
     pub fn parse(self, path: &Path, text: &str, root: &Path) -> Result<HekiConfig, ConfigError> {
         let written = self.read(path, text, root)?;
-        if !written.declares_defaults() {
-            return Ok(written);
-        }
+        let files = fold::read_files(self, path, text, root)?;
+        let folded = fold::fold(&files, root)?;
+        let Some(text) = folded.text else {
+            return Ok(HekiConfig {
+                sources: folded.sources,
+                ..written
+            });
+        };
         Ok(HekiConfig {
-            write_owners_defaults: written.write_owners_defaults,
-            read_owners_defaults: written.read_owners_defaults,
-            call_owners_defaults: written.call_owners_defaults,
-            readonly_returns_defaults: written.readonly_returns_defaults,
-            invalidation_defaults: written.invalidation_defaults,
-            effect_boundaries_defaults: written.effect_boundaries_defaults,
-            import_boundaries_defaults: written.import_boundaries_defaults,
-            ..self.read(path, &defaults::expand(self, text), root)?
+            groups: written.groups,
+            sources: folded.sources,
+            ..self.read(path, &text, root)?
         })
     }
 
@@ -1121,6 +1147,8 @@ impl HekiConfig {
         "import-boundaries-defaults",
         "imports",
         "ecosystem",
+        "include",
+        "groups",
     ];
 
     /// The keys of the contracts, each an array of tables (docs/configuration.md, "Contracts").
@@ -1133,17 +1161,6 @@ impl HekiConfig {
         "invalidation",
         "import-boundaries",
     ];
-
-    /// Whether a `<contract>-defaults` table is written.
-    fn declares_defaults(&self) -> bool {
-        self.write_owners_defaults.is_some()
-            || self.read_owners_defaults.is_some()
-            || self.call_owners_defaults.is_some()
-            || self.readonly_returns_defaults.is_some()
-            || self.invalidation_defaults.is_some()
-            || self.effect_boundaries_defaults.is_some()
-            || self.import_boundaries_defaults.is_some()
-    }
 
     /// Whether a contract is declared: a table of one of [`Self::CONTRACT_KEYS`].
     pub fn declares_contracts(&self) -> bool {
@@ -1598,6 +1615,9 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
             import_boundaries_defaults: Some(ImportBoundaryRule::default()),
             imports: ImportsConfig::default(),
             ecosystem: Vec::new(),
+            include: Vec::new(),
+            groups: BTreeMap::new(),
+            sources: ConfigSources::default(),
             requires_python: None,
             project_name: None,
             workspaces: Vec::new(),

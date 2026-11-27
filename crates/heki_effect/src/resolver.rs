@@ -3438,7 +3438,7 @@ impl ProjectDecls {
 
     /// The project classes implementing the project protocol `class` structurally
     /// (`Self::protocol_implementations`); `None` when `class` is no protocol or too many do.
-    pub(crate) fn protocol_implementers(&self, class: &str) -> Option<&[String]> {
+    pub fn protocol_implementers(&self, class: &str) -> Option<&[String]> {
         self.protocol(class).flatten()
     }
 

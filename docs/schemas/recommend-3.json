@@ -561,6 +561,34 @@
       ],
       "type": "object"
     },
+    "EntryPlace": {
+      "additionalProperties": false,
+      "description": "Where a contract entry is written when no contract table of the main configuration file holds\nits text: in a table of an included file, or in a group.",
+      "properties": {
+        "file": {
+          "description": "The file, relative to the project root when it is below it.",
+          "type": "string"
+        },
+        "group": {
+          "description": "The group that holds the entry, when it comes from one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "The line of the entry (from 1).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ],
+      "type": "object"
+    },
     "Evidence": {
       "additionalProperties": false,
       "description": "What a candidate rests on, from the discovery run.",
@@ -2158,6 +2186,13 @@
           "description": "Existing names like the entry, written as the entry is, the closest first (at most\nthree).",
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "written_at": {
+          "description": "Where the entry is written when no contract table of the main configuration file holds\nit: in a file `include` lists, or in a group (`@name`); each place once.",
+          "items": {
+            "$ref": "#/$defs/EntryPlace"
           },
           "type": "array"
         }
