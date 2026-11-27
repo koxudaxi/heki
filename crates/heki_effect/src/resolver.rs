@@ -4704,7 +4704,11 @@ impl ProjectDecls {
         let star_bound = |c: &str, init: &PlainInit| {
             let module = self.split_module(c).map(|(m, _)| m);
             (init.builtins.iter()).any(|name| {
-                module.is_some_and(|m| self.star_binding(m, name) != StarBinding::Unbound)
+                module.is_some_and(|m| {
+                    !m.binds(name)
+                        && (m.star_imports.iter().flatten())
+                            .any(|source| self.star_import_may_bind(&m.module_name, source, name))
+                })
             })
         };
         let mut from = 0;
@@ -4725,9 +4729,18 @@ impl ProjectDecls {
                 break;
             };
             let Some(init) = d.plain_init.as_deref() else {
-                let as_defined = (self.own_method(&mro[i], "__init__"))
-                    .and_then(|k| self.function_decl(&k))
-                    .is_some_and(|f| f.called_as_defined);
+                let decl =
+                    (self.own_method(&mro[i], "__init__")).and_then(|k| self.function_decl(&k));
+                // A static or class method `__init__` is not handed the instance, and its
+                // call ends the chain.
+                if decl
+                    .as_ref()
+                    .is_some_and(|f| f.called_as_defined && (f.is_staticmethod || f.is_classmethod))
+                {
+                    all_plain = false;
+                    break;
+                }
+                let as_defined = decl.is_some_and(|f| f.called_as_defined);
                 return if as_defined {
                     Constructor::HandsToInit
                 } else {

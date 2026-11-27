@@ -486,7 +486,9 @@ Calling a project class keeps of the new object what the `__init__` the call run
 (`REGISTRY.append(self)`), or handing it to a helper that keeps it, makes an object another part
 of the program holds, as the same store in the function would; one handing it to a helper that
 only stores attributes on it keeps nothing. An `__init__` of a class outside the project (a
-pydantic model's, a dataclass's) keeps nothing. No construction gives a new object when the
+pydantic model's, a dataclass's) keeps nothing of the object itself; two things it runs are not
+followed yet: a property setter run by an attribute store, and a project `__post_init__` or
+`model_post_init` a generated initializer calls (#601). No construction gives a new object when the
 class may return an existing instance (an `Enum`, a `__new__`), has a metaclass other than
 `type` or `abc.ABCMeta` or a base heki names no class for, or runs an `__init__` a decorator
 replaces or the project rebinds outside the class body (`Base.__init__ = other` in any module).

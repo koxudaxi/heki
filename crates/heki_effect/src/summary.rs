@@ -8503,8 +8503,10 @@ impl<'a> Extractor<'a> {
         match callee {
             Callee::External(symbol) if self.adds_to_container(symbol, call) => {}
             Callee::External(symbol) => {
+                // A bare allocation runs no `__init__`: it stays new whatever one keeps.
+                let bare = symbol.ends_with(".__new__");
                 let new_instance = (call.constructs.as_deref()).is_some_and(|c| {
-                    matches!(self.constructor(c), Constructor::KeepsNothing { .. })
+                    bare || matches!(self.constructor(c), Constructor::KeepsNothing { .. })
                 });
                 self.external_escapes(
                     symbol,

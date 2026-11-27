@@ -1592,6 +1592,15 @@ class Starred:
         self.children = list()
 "#;
 
+const KEEPING_OUTSIDE: &str = r#"from outside_pkg import *
+
+
+class StarredOutside:
+    def __init__(self) -> None:
+        self.flag = False
+        self.children = list()
+"#;
+
 const KEEPING_MODEL: &str = r#"import functools
 
 from pkg.base import REGISTRY, Base, PlainBase, ReboundBase
@@ -1651,6 +1660,18 @@ class Traced:
         self.flag = False
 
 
+class Static:
+    @staticmethod
+    def __init__(value: str) -> None:
+        REGISTRY.append(value)
+
+
+class Bare:
+    def __init__(self) -> None:
+        self.flag = False
+        REGISTRY.append(self)
+
+
 class Quiet(PlainBase):
     def __init__(self) -> None:
         super().__init__()
@@ -1670,7 +1691,20 @@ class Reboundish(ReboundBase):
 "#;
 
 const KEEPING_PASSES: &str = r#"from pkg.base import REGISTRY
-from pkg.model import Derived, Handing, Holder, Node, Published, Quiet, Reboundish, Setup, Traced
+from pkg.model import (
+    Bare,
+    Derived,
+    Handing,
+    Holder,
+    Node,
+    Published,
+    Quiet,
+    Reboundish,
+    Setup,
+    Static,
+    Traced,
+)
+from pkg.outside import StarredOutside
 from pkg.starred import Starred
 
 
@@ -1740,6 +1774,32 @@ def through_getattribute_dict() -> Holder:
     return h
 
 
+def appends_to_an_externally_starred_list() -> StarredOutside:
+    h = StarredOutside()
+    part = Node()
+    h.children.append(part)
+    part.flag = True
+    return h
+
+
+def static_initializer() -> Static:
+    n = Static("x")
+    n.flag = True
+    return n
+
+
+def bare_allocation() -> Bare:
+    b = object.__new__(Bare)
+    b.flag = True
+    return b
+
+
+def full_construction() -> Bare:
+    b = Bare()
+    b.flag = True
+    return b
+
+
 def setup_keeps_nothing() -> Setup:
     s = Setup()
     s.flag = True
@@ -1775,7 +1835,7 @@ requires-python = ">=3.12"
 
 [[tool.heki.write-owners]]
 name = "flags"
-targets = ["Node.flag", "Published.flag", "Derived.flag", "Handing.flag", "Traced.flag", "Setup.flag", "Quiet.flag", "Holder.flag"]
+targets = ["Node.flag", "Published.flag", "Derived.flag", "Handing.flag", "Traced.flag", "Setup.flag", "Quiet.flag", "Holder.flag", "Static.flag", "Bare.flag"]
 allowed-writers = ["pkg.model.*"]
 fresh-objects = "allow"
 "#;
@@ -1789,6 +1849,7 @@ fn constructors_keeping_the_instance_they_make() {
         .write("pkg/rebind.py", KEEPING_REBIND)
         .write("pkg/compat.py", KEEPING_COMPAT)
         .write("pkg/starred.py", KEEPING_STARRED)
+        .write("pkg/outside.py", KEEPING_OUTSIDE)
         .write("pkg/model.py", KEEPING_MODEL)
         .write("pkg/passes.py", KEEPING_PASSES);
     let found = reports(&diagnostics(&p), KEEPING_PASSES);
@@ -1803,6 +1864,8 @@ fn constructors_keeping_the_instance_they_make() {
         at("slice_store", "part.flag = True"),
         at("through_getattr_dict", "part.flag = True"),
         at("through_getattribute_dict", "part.flag = True"),
+        at("appends_to_an_externally_starred_list", "part.flag = True"),
+        at("full_construction", "b.flag = True"),
     ];
     expected.sort();
     assert_eq!(found, expected);
