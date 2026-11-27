@@ -6237,7 +6237,7 @@ Each of these passes, because each tool sees one step:
 | Command | Sees | Does not see |
 | ------- | ---- | ------------ |
 | `ruff check --select ASYNC,B,RUF,PERF,PL,SIM,FURB,S` | `requests.get` only when it is written in the `async def` itself | the call three helpers down |
-| your type checker (`mypy`, `pyright`, `pyrefly check`, `ty check`) | a `list[str]` passed where a `list[str]` is expected | that `add_default` changes `Model.fields` |
+| your type checker (`mypy app`, `pyright`, `pyrefly check`, `ty check`) | a `list[str]` passed where a `list[str]` is expected | that `add_default` changes `Model.fields` |
 | `tach check` (with `app.api` → `app.users` → `app.clients` declared) | `app.api` importing `app.users`, which is allowed | what `load_user` does |
 
 heki follows the call into `load_user` and the alias into `add_default`:
