@@ -163,6 +163,176 @@ fn r09_an_attribute_of_the_loop_element_or_of_a_fresh_object_does_not_accumulate
     );
 }
 
+const STR_PIECES: &str = r#"class Buffer:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def join_piece(self, rows) -> None:
+        for row in rows:
+            self.text += "".join(row)
+
+    def format_method(self, rows) -> None:
+        for row in rows:
+            self.text += "{}:{}".format(row, 1)
+
+    def format_with_text(self, rows) -> None:
+        for row in rows:
+            self.text += "{}!".format(row)
+
+    def format_of_exact_operand(self, rows) -> None:
+        for row in rows:
+            self.text += "{:>3}".format(len(row))
+
+    def template_in_a_local(self, rows) -> None:
+        template = "{}!"
+        for row in rows:
+            self.text += template.format(row)
+
+    def lone_field_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "{}".format(row)
+
+    def lone_indexed_field_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "{0}".format(row)
+
+    def lone_field_with_spec_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "{:>3}".format(row)
+
+    def lone_field_with_nested_spec_of_unknown(self, rows, width) -> None:
+        for row in rows:
+            self.text += "{:{}}".format(row, width)
+
+    def str_of_int(self, rows) -> None:
+        for row in rows:
+            self.text += str(len(row))
+
+    def repr_of_int(self, rows) -> None:
+        for row in rows:
+            self.text += repr(len(row))
+
+    def ascii_of_str(self, rows) -> None:
+        for row in rows:
+            self.text += ascii("x")
+
+    def format_of_int(self, rows) -> None:
+        for row in rows:
+            self.text += format(len(row), "x")
+
+    def percent_of_int(self, rows) -> None:
+        for row in rows:
+            self.text += "%d" % len(row)
+
+    def field_of_int(self, rows) -> None:
+        for row in rows:
+            self.text += f"{len(row)}"
+
+    def fields(self, rows) -> None:
+        for row in rows:
+            self.text += f"{row}!"
+
+    def concatenation(self, rows) -> None:
+        for row in rows:
+            self.text += str(len(row)) + "!"
+
+    def str_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += str(row)
+
+    def repr_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += repr(row)
+
+    def format_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += format(row)
+
+    def field_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += f"{row}"
+
+    def prefixed_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "-" + str(row)
+
+    def chain_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += str(row) + "-" + repr(row) + "-" + ascii(row)
+
+    def too_deep_a_chain(self, rows) -> None:
+        for row in rows:
+            self.text += str(row) + str(row) + str(row) + str(row) + str(row) + str(row)
+
+    def through_a_local(self, rows) -> None:
+        for row in rows:
+            piece = repr(row)
+            self.text += piece
+
+    def starred(self, rows) -> None:
+        for row in rows:
+            self.text += str(*row)
+
+    def percent_of_unknown(self, rows) -> None:
+        for row in rows:
+            self.text += "%s" % row
+
+    def percent_of_tuple(self, rows) -> None:
+        for row in rows:
+            self.text += "%s" % (len(row),)
+
+    def join_with_unknown_separator(self, sep, rows) -> None:
+        for row in rows:
+            self.text += sep.join(row)
+
+    def unknown_call(self, rows, convert) -> None:
+        for row in rows:
+            self.text += convert(row)
+
+    def shadowed(self, rows, str) -> None:
+        for row in rows:
+            self.text += str(len(row))
+"#;
+
+#[test]
+fn str_pieces_of_known_type_are_reported_and_a_piece_of_unknown_type_is_not() {
+    // A `str` subclass instance returned by another class's `__str__`, `__repr__`, or
+    // `__format__` is not an exact `str`: `str(row)` of an unknown `row` is a heuristic report
+    // (see `a_str_piece_of_unknown_class_leaves_its_exact_type_open`). A piece that may be of
+    // any type (`convert(row)`, `"%s" % row`, `sep.join(row)`) stays silent.
+    assert_reports(
+        "reg_str_pieces",
+        STR_PIECES,
+        "OPT103",
+        &[
+            ("Buffer.join_piece", "OPT103"),
+            ("Buffer.format_method", "OPT103"),
+            ("Buffer.format_with_text", "OPT103"),
+            ("Buffer.format_of_exact_operand", "OPT103"),
+            ("Buffer.template_in_a_local", "OPT103"),
+            ("Buffer.lone_field_of_unknown", "OPT103"),
+            ("Buffer.lone_indexed_field_of_unknown", "OPT103"),
+            ("Buffer.lone_field_with_spec_of_unknown", "OPT103"),
+            ("Buffer.lone_field_with_nested_spec_of_unknown", "OPT103"),
+            ("Buffer.str_of_int", "OPT103"),
+            ("Buffer.repr_of_int", "OPT103"),
+            ("Buffer.ascii_of_str", "OPT103"),
+            ("Buffer.format_of_int", "OPT103"),
+            ("Buffer.percent_of_int", "OPT103"),
+            ("Buffer.field_of_int", "OPT103"),
+            ("Buffer.fields", "OPT103"),
+            ("Buffer.concatenation", "OPT103"),
+            ("Buffer.str_of_unknown", "OPT103"),
+            ("Buffer.repr_of_unknown", "OPT103"),
+            ("Buffer.format_of_unknown", "OPT103"),
+            ("Buffer.field_of_unknown", "OPT103"),
+            ("Buffer.prefixed_unknown", "OPT103"),
+            ("Buffer.chain_of_unknown", "OPT103"),
+            ("Buffer.through_a_local", "OPT103"),
+        ],
+    );
+}
+
 // =================================================================================== OPT110
 
 const R06_BYTES_DISPLAY: &str = r#"def bytes_display(r, values) -> None:

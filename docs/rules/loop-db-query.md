@@ -13,7 +13,8 @@ too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, 
 and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
 `list(query)`),
 the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
-variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
+variants), `pymongo`, `redis`, and DynamoDB commands, the `execute()` of a supabase-py / postgrest
+query, `pandas.read_sql`, and project functions
 that reach them, also when an offloading API runs them on a worker thread per item (`await
 asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once

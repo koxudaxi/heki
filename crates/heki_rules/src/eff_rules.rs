@@ -15,7 +15,7 @@ use crate::{
     CheckContext, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
+use heki_diagnostics::{Certainty, ContractEntry, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::resolver::NoItems;
 use heki_effect::with_paths;
@@ -1019,12 +1019,13 @@ const FORBID_TOKENS: &[(&str, &[ExecEffectKind])] = &[
     ("reads-environment", &[]),
 ];
 
-/// The execution effects the `forbid` tokens of `boundary` forbid.
+/// The execution effects the `forbid` tokens of `boundary` forbid, each with the place in
+/// `forbid` of the first token forbidding it.
 pub(crate) fn forbidden_effects(
     boundary: &EffectBoundaryRule,
-) -> Result<BTreeSet<ExecEffectKind>, RuleConfigError> {
-    let mut effects = BTreeSet::new();
-    for token in &boundary.forbid {
+) -> Result<BTreeMap<ExecEffectKind, usize>, RuleConfigError> {
+    let mut effects = BTreeMap::new();
+    for (position, token) in boundary.forbid.iter().enumerate() {
         let Some((_, kinds)) = FORBID_TOKENS.iter().find(|(t, _)| t == token) else {
             return Err(RuleConfigError::UnknownForbid {
                 boundary: boundary.name.clone(),
@@ -1033,7 +1034,9 @@ pub(crate) fn forbidden_effects(
                 values: FORBID_NAMES.as_slice(),
             });
         };
-        effects.extend(kinds.iter().copied());
+        for &kind in *kinds {
+            effects.entry(kind).or_insert(position);
+        }
     }
     Ok(effects)
 }
@@ -1050,12 +1053,17 @@ static FORBID_EXPECTED: LazyLock<String> = LazyLock::new(|| {
 
 /// One parsed `[[tool.heki.effect-boundaries]]` contract.
 struct Boundary<'r> {
+    /// The contract's place among the effect boundaries ([`Diagnostic::contracts`]).
+    index: usize,
     name: &'r str,
     /// How a report names the contract ([`heki_env::contract_label`]).
     label: String,
     scopes: Vec<FunctionMatcher>,
-    effects: BTreeSet<ExecEffectKind>,
-    mutates_params: bool,
+    /// The forbidden execution effects, with the place in `forbid` of the token forbidding each
+    /// ([`forbidden_effects`]).
+    effects: BTreeMap<ExecEffectKind, usize>,
+    /// The place in `forbid` of `mutates-params`.
+    mutates_params: Option<usize>,
     writes_targets: bool,
     write_targets: Vec<ContractTarget>,
     /// Writes reported unless `allow_writes` names them (with or without `writes-targets`).
@@ -1073,7 +1081,8 @@ struct Boundary<'r> {
     note: Option<&'r str>,
     /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
     allow_fresh: bool,
-    reads_environment: bool,
+    /// The place in `forbid` of `reads-environment`.
+    reads_environment: Option<usize>,
     /// `import-probes = "report"`: `reads-environment` also forbids import probes.
     import_probes: bool,
     /// `unresolved = "report"`: what the boundary cannot judge in the reach is reported.
@@ -1185,23 +1194,31 @@ impl Boundary<'_> {
 
     /// The container `Class.attr` of the entry targets (`Class.attr["key"]`) the boundary judges
     /// the item write `w` by, when it names some for the written attribute and allows no write of
-    /// the whole container: `writes-targets` entries, or `write-universe` ones. `own_init` leaves
-    /// out a class's own initialization.
+    /// the whole container: `writes-targets` entries, or `write-universe` ones; with the list and
+    /// place of the first such entry. `own_init` leaves out a class's own initialization.
     fn names_entries_of(
         &self,
         w: &TypedFieldWriteSite,
         own_init: &dyn Fn(&ContractTarget) -> bool,
-    ) -> Option<String> {
+    ) -> Option<(String, (&'static str, usize))> {
         let allowed = self
             .allow_writes
             .iter()
             .any(|a| a.key.is_none() && a.matches(&w.class_qualname, &w.attr));
-        let targets = self.write_targets.iter().filter(|_| self.writes_targets);
-        let entry = targets
-            .chain(&self.write_universe)
-            .find(|t| t.key.is_some() && t.matches(&w.class_qualname, &w.attr) && !own_init(t))?;
+        fn in_list<'t>(
+            key: &'static str,
+            list: &'t [ContractTarget],
+        ) -> impl Iterator<Item = ((&'static str, usize), &'t ContractTarget)> {
+            (list.iter().enumerate()).map(move |(position, t)| ((key, position), t))
+        }
+        let targets = in_list("write-targets", &self.write_targets);
+        let ((key, position), entry) = (targets.filter(|_| self.writes_targets))
+            .chain(in_list("write-universe", &self.write_universe))
+            .find(|(_, t)| {
+                t.key.is_some() && t.matches(&w.class_qualname, &w.attr) && !own_init(t)
+            })?;
         let (container, _) = split_item(&entry.text)?;
-        (!allowed).then(|| container.to_owned())
+        (!allowed).then(|| (container.to_owned(), (key, position)))
     }
 
     /// Whether the boundary checks writes: `writes-targets`, or a `write-universe`.
@@ -1219,7 +1236,7 @@ impl Boundary<'_> {
                 .and_then(EcosystemEntry::environment_access)
                 == Some(kind)
         };
-        self.reads_environment
+        self.reads_environment.is_some()
             && match access.kind {
                 AccessKind::Call => {
                     tagged(EnvironmentAccess::Call)
@@ -1246,7 +1263,8 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
     let mut out = Vec::new();
     for (index, b) in cx.config.effect_boundaries.iter().enumerate() {
         let effects = forbidden_effects(b)?;
-        let forbids = |token: &str| b.forbid.iter().any(|t| t == token);
+        let position = |token: &str| b.forbid.iter().position(|t| t == token);
+        let forbids = |token: &str| position(token).is_some();
         for (token, key, targets) in [
             ("writes-targets", "write-targets", &b.write_targets),
             ("reads-targets", "read-targets", &b.read_targets),
@@ -1265,7 +1283,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
         }
         let import_probes =
             reports_import_probes(b.import_probes.as_deref(), "effect-boundaries", &b.name)?;
-        if import_probes && !forbids("reads-environment") {
+        if import_probes && position("reads-environment").is_none() {
             return Err(RuleConfigError::ImportProbesWithoutEnvironment(
                 b.name.clone(),
             ));
@@ -1282,11 +1300,12 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
         };
         let overrides = Overrides::of(b.include_overrides, cx, &all_classes);
         out.push(Boundary {
+            index,
             name: &b.name,
             label: boundary_label(index, &b.name),
             scopes: scope_entries(&b.scopes, "effect-boundaries.scopes", overrides)?,
             effects,
-            mutates_params: forbids("mutates-params"),
+            mutates_params: position("mutates-params"),
             writes_targets: forbids("writes-targets"),
             write_targets: targets(&b.write_targets, "effect-boundaries.write-targets")?,
             write_universe: targets(&b.write_universe, "effect-boundaries.write-universe")?,
@@ -1316,7 +1335,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             )?,
             note: b.message.as_deref(),
             allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
-            reads_environment: forbids("reads-environment"),
+            reads_environment: position("reads-environment"),
             import_probes,
             report_unresolved: reports_unresolved(
                 b.unresolved.as_deref(),
@@ -1360,11 +1379,7 @@ pub(crate) fn eff201(
             for (bi, b) in boundaries.iter().enumerate() {
                 if b.in_scope(&key) && done.insert((key.clone(), bi)) {
                     let reach = Reach::search(cx, (&sites, &references), b, (&key, f.span));
-                    let reported = out.len();
                     reach.report(cx, b, unit, f, &key, out);
-                    for d in &mut out[reported..] {
-                        d.contracts = contract_places([bi]);
-                    }
                 }
             }
         }
@@ -1477,28 +1492,31 @@ struct Found {
     span: Span,
     /// The kind of the first site (`direct_attr`, ..., or `calls` / `constructs`).
     kind: &'static str,
+    /// The entry of the boundary the first site matched, when its key does not tell it (a
+    /// `write-universe` write, an item write under a key heki cannot tell): its list and place.
+    entry: Option<(&'static str, usize)>,
     sites: BTreeSet<SiteId>,
 }
 
-/// Record `site` under `key`, keeping the first violation `first` builds.
+/// Record `site` under `key`, keeping the first violation `first` builds; the record.
 fn note<K: Ord>(
     map: &mut BTreeMap<K, Found>,
     key: K,
     site: SiteId,
     first: impl FnOnce() -> (Vec<CallHop>, Span, &'static str),
-) {
-    map.entry(key)
-        .or_insert_with(|| {
-            let (chain, span, kind) = first();
-            Found {
-                chain,
-                span,
-                kind,
-                sites: BTreeSet::new(),
-            }
-        })
-        .sites
-        .insert(site);
+) -> &mut Found {
+    let found = map.entry(key).or_insert_with(|| {
+        let (chain, span, kind) = first();
+        Found {
+            chain,
+            span,
+            kind,
+            entry: None,
+            sites: BTreeSet::new(),
+        }
+    });
+    found.sites.insert(site);
+    found
 }
 
 /// The first environment read of a scope function (`reads-environment`): its kind and name, and
@@ -1517,6 +1535,7 @@ fn note_environment(
             chain,
             span,
             kind: kind.describe(),
+            entry: None,
             sites: BTreeSet::new(),
         };
         (found, kind, name)
@@ -1667,7 +1686,7 @@ impl<'a> Reach<'a> {
                         for e in effects
                             .iter()
                             .chain(on_full)
-                            .filter(|e| b.effects.contains(*e))
+                            .filter(|e| b.effects.contains_key(*e))
                         {
                             let nodes = &reach.nodes;
                             note(&mut reach.exec, *e, (func.fqn(), site.span), || {
@@ -2060,17 +2079,18 @@ impl<'a> Reach<'a> {
         }
         // A class's own initialization (constructing a fresh object) is not a write.
         let own_init = |t: &ContractTarget| self.initializes(cx, i, &t.classes, w.obj_params);
-        let mut buckets: Vec<WriteBucket> = Vec::new();
+        // Each bucket, with the entry it matched when the bucket does not tell it.
+        let mut buckets: Vec<(WriteBucket, Option<(&'static str, usize)>)> = Vec::new();
         if b.writes_targets {
             buckets.extend(
                 write_hits(&b.write_targets, w)
                     .into_iter()
                     .filter(|(_, t)| !own_init(t))
-                    .map(|(ti, _)| WriteBucket::Target(ti)),
+                    .map(|(ti, _)| (WriteBucket::Target(ti), None)),
             );
         }
         if buckets.is_empty()
-            && let Some((_, t)) = write_hits(&b.write_universe, w)
+            && let Some((ui, t)) = write_hits(&b.write_universe, w)
                 .into_iter()
                 .find(|(_, t)| !own_init(t))
         {
@@ -2078,19 +2098,20 @@ impl<'a> Reach<'a> {
                 Some(_) => t.text.clone(),
                 None => undeclared_text(&t.text, &w.attr),
             };
-            buckets.push(WriteBucket::Undeclared(text));
+            buckets.push((WriteBucket::Undeclared(text), Some(("write-universe", ui))));
         }
         if buckets.is_empty()
             && w.key_from == EntryKey::Unknown
-            && let Some(container) = b.names_entries_of(w, &own_init)
+            && let Some((container, entry)) = b.names_entries_of(w, &own_init)
         {
-            buckets.push(WriteBucket::UnresolvedKey(container));
+            buckets.push((WriteBucket::UnresolvedKey(container), Some(entry)));
         }
         let nodes = &self.nodes;
-        for bucket in buckets {
-            note(&mut self.writes, bucket, (nodes[i].0.fqn(), w.span), || {
+        for (bucket, entry) in buckets {
+            let found = note(&mut self.writes, bucket, (nodes[i].0.fqn(), w.span), || {
                 (chain(nodes), w.span, w.kind.describe())
             });
+            found.entry = found.entry.or(entry);
         }
     }
 
@@ -2588,7 +2609,14 @@ impl<'a> Reach<'a> {
     ) {
         let forbids = |what: String| format!("{what}, which {} forbids", b.label);
         let help = || b.note.map(str::to_owned);
-        let mut emit = |found: &Found, target: String, message: String| {
+        // The contract of a report, and the entry of it the access matched.
+        let of_boundary = |d: &mut Diagnostic, entry: Option<(&'static str, usize)>| {
+            d.contracts = contract_places([b.index]);
+            d.contract_entries = (entry.into_iter())
+                .map(|(list, position)| ContractEntry::new(b.index, list, position))
+                .collect();
+        };
+        let mut emit = |found: &Found, target: String, message: String, entry| {
             let span = found.chain.first().map_or(found.span, |h| h.span);
             if let Some(d) = cx.emit(
                 out,
@@ -2602,8 +2630,10 @@ impl<'a> Reach<'a> {
                 &found.chain,
             ) {
                 d.sites = u32::try_from(found.sites.len()).unwrap_or(u32::MAX);
+                of_boundary(d, entry);
             }
         };
+        let forbid = |position: Option<usize>| position.map(|p| ("forbid", p));
         for (effect, found) in &self.exec {
             let sink = found.chain.last().map_or("", |h| h.callee.as_str());
             let via = match found.chain.as_slice() {
@@ -2612,7 +2642,12 @@ impl<'a> Reach<'a> {
             };
             let name = effect_name(*effect);
             let message = forbids(format!("`{}` reaches {name} (`{sink}`{via})", key.qualname));
-            emit(found, name.to_owned(), message);
+            emit(
+                found,
+                name.to_owned(),
+                message,
+                forbid(b.effects.get(effect).copied()),
+            );
         }
         let via_first = |found: &Found| {
             found
@@ -2630,21 +2665,21 @@ impl<'a> Reach<'a> {
                         "`{}` writes `{target}` ({}{via})",
                         key.qualname, found.kind
                     ));
-                    emit(found, target.clone(), message);
+                    emit(found, target.clone(), message, Some(("write-targets", *ti)));
                 }
                 WriteBucket::Undeclared(attr) => {
                     let message = format!(
                         "`{}` writes `{attr}` ({}{via}), which {} does not allow",
                         key.qualname, found.kind, b.label
                     );
-                    emit(found, attr.clone(), message);
+                    emit(found, attr.clone(), message, found.entry);
                 }
                 WriteBucket::UnresolvedKey(container) => {
                     let message = format!(
                         "`{}` writes an entry of `{container}` under a key heki cannot tell ({}{via}), where {} names some of its entries",
                         key.qualname, found.kind, b.label
                     );
-                    emit(found, format!("{container}[?]"), message);
+                    emit(found, format!("{container}[?]"), message, found.entry);
                 }
             }
         }
@@ -2657,7 +2692,12 @@ impl<'a> Reach<'a> {
                 "`{}` reads `{target}` ({}{via})",
                 key.qualname, found.kind
             ));
-            emit(found, format!("reads:{target}"), message);
+            emit(
+                found,
+                format!("reads:{target}"),
+                message,
+                Some(("read-targets", *ti)),
+            );
         }
         for (group, found) in &self.calls {
             let (target, called) = group_texts(&b.call_targets, group, None);
@@ -2666,7 +2706,9 @@ impl<'a> Reach<'a> {
                 _ => String::new(),
             };
             let message = forbids(format!("`{}` {} {called}{via}", key.qualname, found.kind));
-            emit(found, format!("calls:{target}"), message);
+            // The first of the targets the call matches, as the report's target lists them.
+            let first = group.first().map(|&t| ("call-targets", t));
+            emit(found, format!("calls:{target}"), message, first);
         }
         if let Some((found, kind, name)) = &self.environment {
             let what = match kind {
@@ -2688,7 +2730,12 @@ impl<'a> Reach<'a> {
                 "`{}` reads the environment ({what}{via})",
                 key.qualname
             ));
-            emit(found, "reads-environment".to_owned(), message);
+            emit(
+                found,
+                "reads-environment".to_owned(),
+                message,
+                forbid(b.reads_environment),
+            );
         }
         for (kind, found) in &self.unjudged {
             let cannot = format!("{} cannot tell what it does there", b.label);
@@ -2728,9 +2775,9 @@ impl<'a> Reach<'a> {
                     (target, message)
                 }
             };
-            emit(found, target, message);
+            emit(found, target, message, None);
         }
-        if b.mutates_params {
+        if let Some(position) = b.mutates_params {
             let (bits, sites) = self.mutated_params(cx, f.params.len());
             if bits != 0 {
                 let names: Vec<String> = f
@@ -2757,6 +2804,7 @@ impl<'a> Reach<'a> {
                     &[],
                 ) {
                     d.sites = u32::try_from(sites.len().max(1)).unwrap_or(u32::MAX);
+                    of_boundary(d, forbid(Some(position)));
                 }
             }
         }

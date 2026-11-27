@@ -499,6 +499,12 @@ pub struct Dispatch {
     /// the type the code calls it through, while the callees are the implementations it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared: Option<FuncKey>,
+    /// The project protocol the receiver is typed with, when it declares the method
+    /// (`pkg.Host` of `h.build()` with `h: Host`), as the receiver expression tells it: a static
+    /// method binds no receiver to a parameter, and a class method binds the class, so the
+    /// callees' parameters do not tell it. A reference keeps it too, without [`Self::declared`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
     /// Parameters of the caller the receiver may be, as itself (`cls.m()`, `self.m()`,
     /// `super().m()`: bit 0), for a call of a class method, which binds the class and no value of
     /// the caller, or of a static method, which binds no receiver at all: the first bound
@@ -2791,6 +2797,11 @@ impl CallSite {
     /// ([`Dispatch::recv_params`]).
     pub fn recv_params(&self) -> u64 {
         self.dispatch.as_ref().map_or(0, |d| d.recv_params)
+    }
+
+    /// The project protocol the receiver is typed with ([`Dispatch::protocol`]).
+    pub fn receiver_protocol(&self) -> Option<&str> {
+        self.dispatch.as_ref()?.protocol.as_deref()
     }
 
     /// The class of the receiver ([`Dispatch::receiver`]).

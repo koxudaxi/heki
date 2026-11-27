@@ -139,7 +139,8 @@ method through the class and take its calls over). The call is one of a target `
 too when heki lists the classes implementing the protocol, there is at least one, each is
 `Model` or a subclass of it, and every method the call may run is a target, as for a call
 through a base class; a protocol that another class implements too, or that no project class
-implements, calls no target of `Model`'s.
+implements, calls no target of `Model`'s. A static or class method the protocol declares, called
+through such a value, is judged the same way.
 
 A target's last segment names the function, method, or class: a glob there matches within that
 name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,

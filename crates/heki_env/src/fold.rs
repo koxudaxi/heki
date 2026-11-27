@@ -120,17 +120,18 @@ impl ConfigSources {
         })
     }
 
-    /// Where the entry at `position` of the key `key` of that contract is defined.
+    /// The text of the entry at `position` of the key `key` of that contract, and where it is
+    /// defined.
     pub fn entry_at(
         &self,
         kind: &str,
         table: usize,
         key: &str,
         position: usize,
-    ) -> Option<&DefinedAt> {
+    ) -> Option<(&str, &DefinedAt)> {
         let contract = self.contracts.get(&(kind.to_owned(), table))?;
         let (_, entries) = contract.entries.iter().find(|(k, _)| k == key)?;
-        entries.get(position).map(|(_, at)| at)
+        entries.get(position).map(|(text, at)| (text.as_str(), at))
     }
 }
 

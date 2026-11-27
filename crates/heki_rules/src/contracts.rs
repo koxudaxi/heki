@@ -73,14 +73,13 @@ impl InvalidationNames {
     }
 
     /// The first target naming attribute `attr` of an object of class `classes[0]` (`classes`:
-    /// the class and its project bases), as configured.
+    /// the class and its project bases): its place in `targets`, and its text as configured.
     ///
     /// A private name of the class a target names is held mangled with it: `C.__cache` names
     /// `_C__cache`.
-    pub(crate) fn target(&self, classes: &[ContractClass], attr: &str) -> Option<&str> {
-        self.targets
-            .iter()
-            .find(|(_, class, a)| {
+    pub(crate) fn target(&self, classes: &[ContractClass], attr: &str) -> Option<(usize, &str)> {
+        (self.targets.iter().enumerate())
+            .find(|(_, (_, class, a))| {
                 classes.iter().any(|c| {
                     class.matches_class(c)
                         && (a.matches(attr)
@@ -88,7 +87,7 @@ impl InvalidationNames {
                                 .is_some_and(|written| a.matches(written)))
                 })
             })
-            .map(|(text, _, _)| text.as_str())
+            .map(|(i, (text, _, _))| (i, text.as_str()))
     }
 }
 
@@ -762,7 +761,7 @@ impl Declared {
         let mut blocking_scopes = Vec::new();
         for boundary in &config.effect_boundaries {
             let forbidden = forbidden_effects(boundary)?;
-            if BLOCKING_EFFECTS.iter().all(|e| forbidden.contains(e)) {
+            if BLOCKING_EFFECTS.iter().all(|e| forbidden.contains_key(e)) {
                 let overrides = Overrides::of(boundary.include_overrides, cx, &all_classes);
                 let context = "effect-boundaries.scopes";
                 blocking_scopes.extend(scope_entries(&boundary.scopes, context, overrides)?);

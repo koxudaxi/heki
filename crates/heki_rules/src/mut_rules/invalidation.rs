@@ -12,12 +12,12 @@
 use super::{MergedReports, is_private, place_functions};
 use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{ContractEntry, Diagnostic};
 use heki_effect::{
     Construction, ContractClass, CoveredAfter, FuncKey, Reach, UnmetWrite, body_runs_at,
     builds_written_object, is_initializer, reach_across,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
 pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<(), RuleConfigError> {
@@ -35,6 +35,13 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
         .invalidation
         .iter()
         .map(|_| MergedReports::default())
+        .collect();
+    // Per contract: the place in `targets` of the target each report's target names.
+    let mut entries: Vec<FxHashMap<String, usize>> = cx
+        .config
+        .invalidation
+        .iter()
+        .map(|_| FxHashMap::default())
         .collect();
     for path in paths {
         let Some(unit) = cx.unit(path) else {
@@ -65,11 +72,15 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                 // The configured target that names the write, as the summary matched it.
                 let classes = ContractClass::lineage(&names, cx.decls, &u.class_qualname);
                 let contract = &names.invalidations[usize::from(u.contract)];
-                let target = contract
-                    .target(&classes, &u.attr)
-                    .map_or_else(|| format!("{}.{}", u.class_qualname, u.attr), str::to_owned);
+                let matched = contract.target(&classes, &u.attr);
+                let target = (matched.map(|(_, text)| text.to_owned()))
+                    .unwrap_or_else(|| format!("{}.{}", u.class_qualname, u.attr));
                 let (report_target, named) =
                     reported_names(&rule.name, &target, &u.class_qualname, &u.attr);
+                if let Some((position, _)) = matched {
+                    (entries[usize::from(u.contract)].entry(report_target.clone()))
+                        .or_insert(position);
+                }
                 let writer = u
                     .via_chain
                     .last()
@@ -110,10 +121,11 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
         let rule = &cx.config.invalidation[c];
         let contract = &names.invalidations[c];
         let bit = u8::try_from(c).expect("at most `MAX_INVALIDATIONS` contracts");
+        let emitted = out.len();
         m.emit(cx, ("MUT208", "announcing writers"), out, |examples| {
             let reported = |class: &str, attr: &str| {
                 let classes = ContractClass::lineage(&names, cx.decls, class);
-                let target = contract.target(&classes, attr)?;
+                let (_, target) = contract.target(&classes, attr)?;
                 Some(reported_names(&rule.name, target, class, attr))
             };
             let mut add = |key, path, (report_target, named): (String, String)| {
@@ -153,6 +165,12 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                 }
             }
         });
+        for d in &mut out[emitted..] {
+            let entry = entries[c].get(&d.target);
+            d.contract_entries = (entry.into_iter())
+                .map(|&position| ContractEntry::new(c, "targets", position))
+                .collect();
+        }
     }
     Ok(())
 }

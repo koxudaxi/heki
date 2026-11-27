@@ -11096,6 +11096,11 @@ impl<'a> TypeCtx<'a> {
             InstKind::MakeGenExpr {
                 func_id: Some(_), ..
             } => true,
+            // A subscript of an object the code names (`numpy.r_[...]`) runs the library's
+            // `__getitem__`, unless the project binds the name to another object.
+            InstKind::SubscriptLoad { obj, .. } => {
+                matches!(val(*obj), Some(Val::Ref(fqn)) if !self.project.call_rebound(fqn))
+            }
             _ => false,
         }
     }

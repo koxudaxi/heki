@@ -69,7 +69,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     _ => *v,
                 };
                 let inst = defs.get(&call_var)?;
-                let call = CallInst::of(&inst.kind)?;
+                let call = CallInst::of_or_subscript(&inst.kind)?;
                 if !combines(shape, &defs, &call, lc.phi_var) {
                     return None;
                 }
@@ -316,7 +316,7 @@ impl UpdateDecision<'_, '_> {
 fn holds_previous(shape: &FnShape<'_>, kind: &InstKind, previous: VarId) -> bool {
     let is_previous = |v: VarId| shape.copy_root(v) == shape.copy_root(previous);
     // `pd.concat(...)` is a method call on the module: its data is the first argument.
-    CallInst::of(kind).is_some_and(|call| {
+    CallInst::of_or_subscript(kind).is_some_and(|call| {
         call.recv.is_some_and(|(recv, _)| is_previous(recv))
             || call.args.first().is_some_and(|&first| {
                 is_previous(first)
