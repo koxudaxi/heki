@@ -1670,13 +1670,13 @@ impl FunctionMatcher {
     /// Whether `key` is a method of the class family of `Class.method` (or, with nested scopes,
     /// in one), as the project's classes list it.
     fn in_method_family(&self, key: &FuncKey) -> bool {
-        (self.method.as_ref()).is_some_and(|m| m.names(key, |owner| m.classes.contains(owner)))
+        (self.method.as_ref()).is_some_and(|m| m.has_method(key, |owner| m.classes.contains(owner)))
     }
 
     /// Whether the text names `key` or a module, class, or function containing it
     /// ([`DottedPattern::names_within`]), or, with `include-overrides`, `key` is in a method of
     /// the class family the text names ([`Self::place`] with nested scopes).
-    pub(crate) fn names_within(&self, key: &FuncKey) -> bool {
+    pub(crate) fn encloses(&self, key: &FuncKey) -> bool {
         self.whole.names_within(&key.fqn(), &key.qualname) || self.in_method_family(key)
     }
 
@@ -1684,7 +1684,7 @@ impl FunctionMatcher {
     /// `include-overrides` ([`Overrides::ByBases`]), by the bases of its class in `project`.
     pub(crate) fn overrides_in(&self, project: &ProjectDecls, key: &FuncKey) -> bool {
         self.by_bases.as_ref().is_some_and(|m| {
-            m.names(key, |owner| {
+            m.has_method(key, |owner| {
                 project.is_project_class(owner)
                     && std::iter::once(owner.to_owned())
                         .chain(project.ancestors_of(owner))
@@ -1709,7 +1709,7 @@ impl FunctionMatcher {
 impl<C> MethodFamily<C> {
     /// Whether `key` is a method of a class `in_family` (by its fqn) whose name the family's
     /// name matches or, with nested scopes, a scope inside such a method.
-    fn names(&self, key: &FuncKey, in_family: impl Fn(&str) -> bool) -> bool {
+    fn has_method(&self, key: &FuncKey, in_family: impl Fn(&str) -> bool) -> bool {
         let q = key.qualname.as_str();
         let scopes = std::iter::once(q)
             .chain((q.match_indices('.').map(|(i, _)| &q[..i])).filter(|_| self.nested));
@@ -1717,7 +1717,7 @@ impl<C> MethodFamily<C> {
             scope.rsplit_once('.').is_some_and(|(owner, _)| {
                 // A method overrides by the name its class holds it under: a private name
                 // (`__run`, held as `_Sub__run`) is its own class's, and overrides nothing.
-                self.name.matches(&mangling::member_name(scope))
+                self.name.matches_whole(&mangling::member_name(scope))
                     && in_family(&format!("{}.{owner}", key.module))
             })
         })

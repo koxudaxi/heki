@@ -1081,9 +1081,9 @@ struct Boundary<'r> {
 }
 
 /// Whether an entry names `key`, its qualname, or a module / class / function containing it
-/// ([`FunctionMatcher::names_within`]).
+/// ([`FunctionMatcher::encloses`]).
 pub(crate) fn names_function(entries: &[FunctionMatcher], key: &FuncKey) -> bool {
-    entries.iter().any(|p| p.names_within(key))
+    entries.iter().any(|p| p.encloses(key))
 }
 
 /// The matchers of the entries `texts` of a key covering the scopes nested in what it names
