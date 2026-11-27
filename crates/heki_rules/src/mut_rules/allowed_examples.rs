@@ -9,7 +9,7 @@
 //! every edit above it, which leaves the facts the help names the same.
 
 use super::call_owners::split_arguments;
-use super::{Allowance, AllowanceKeys, Named, patterns, split_item};
+use super::{Allowance, AllowanceKeys, Named, Overrides, patterns, split_item};
 use crate::{CheckContext, DottedPattern, last_name};
 use heki_diagnostics::AllowedExample;
 use heki_effect::{EffectSummary, FileSummary, FuncKey, ProjectIndex, SiteRole};
@@ -159,18 +159,23 @@ pub(super) fn place_functions<'a>(
 struct OwnedNames {
     allowances: Vec<Allowance>,
     names: Vec<DottedPattern>,
+    /// A contract has `include-overrides`, whose entries name overrides in classes the
+    /// configuration alone does not tell: every function may be a place.
+    overrides: bool,
 }
 
 impl OwnedNames {
     /// `None` for a pattern that does not compile.
     fn new<'c>(
-        contracts: impl Iterator<Item = (AllowanceKeys<'c>, &'c [String])>,
+        contracts: impl Iterator<Item = (AllowanceKeys<'c>, &'c [String], Option<bool>)>,
         context: &'static str,
         name: impl Fn(&'c str) -> &'c str,
     ) -> Option<Self> {
         let mut out = Self::default();
-        for (keys, targets) in contracts {
-            out.allowances.push(Allowance::new(&keys).ok()?);
+        for (keys, targets, include_overrides) in contracts {
+            out.allowances
+                .push(Allowance::new(&keys, Overrides::Off).ok()?);
+            out.overrides |= include_overrides == Some(true);
             for t in targets {
                 out.names.push(DottedPattern::new(name(t), context).ok()?);
             }
@@ -179,7 +184,7 @@ impl OwnedNames {
     }
 
     fn places(&self, func: &FuncKey) -> bool {
-        self.allowances.iter().any(|a| a.names_place(func))
+        self.overrides || self.allowances.iter().any(|a| a.names_place(func))
     }
 
     /// Whether `name` may be the name of a target: as written, or a private member mangled
@@ -199,6 +204,9 @@ pub struct ExampleOwners {
     readers: OwnedNames,
     callers: OwnedNames,
     exempt_writers: Vec<DottedPattern>,
+    /// An `invalidation` contract has `include-overrides`: every function may be an exempt
+    /// writer ([`OwnedNames::overrides`]).
+    exempt_overrides: bool,
     invalidation: bool,
 }
 
@@ -212,7 +220,7 @@ impl ExampleOwners {
                 forbidden: (&r.forbidden_writers, "write-owners.forbidden-writers"),
                 exempt: (&r.exempt_methods, "write-owners.exempt-methods"),
             };
-            (keys, r.targets.as_slice())
+            (keys, r.targets.as_slice(), r.include_overrides)
         });
         let readers = config.read_owners.iter().map(|r| {
             let keys = AllowanceKeys {
@@ -220,7 +228,7 @@ impl ExampleOwners {
                 forbidden: (&r.forbidden_readers, "read-owners.forbidden-readers"),
                 exempt: (&r.exempt_methods, "read-owners.exempt-methods"),
             };
-            (keys, r.targets.as_slice())
+            (keys, r.targets.as_slice(), r.include_overrides)
         });
         let callers = config.call_owners.iter().map(|r| {
             let keys = AllowanceKeys {
@@ -228,7 +236,7 @@ impl ExampleOwners {
                 forbidden: (&r.forbidden_callers, "call-owners.forbidden-callers"),
                 exempt: (&r.exempt_methods, "call-owners.exempt-methods"),
             };
-            (keys, r.targets.as_slice())
+            (keys, r.targets.as_slice(), r.include_overrides)
         });
         let calls = "call-owners.targets";
         let exempt = config.invalidation.iter().flat_map(|r| &r.exempt_writers);
@@ -242,6 +250,8 @@ impl ExampleOwners {
                 last_name(split_arguments(t, calls).map_or(t, |(name, _)| name))
             })?,
             exempt_writers: patterns(&exempt, "invalidation.exempt-writers").ok()?,
+            exempt_overrides: (config.invalidation.iter())
+                .any(|r| r.include_overrides == Some(true)),
             invalidation: !config.invalidation.is_empty(),
         };
         let owners = [&out.writers, &out.readers, &out.callers];
@@ -250,7 +260,8 @@ impl ExampleOwners {
 
     fn exempt_writer(&self, func: &FuncKey) -> bool {
         let fqn = func.fqn();
-        (self.exempt_writers.iter()).any(|p| p.matches_def(&fqn, &func.qualname))
+        self.exempt_overrides
+            || (self.exempt_writers.iter()).any(|p| p.matches_def(&fqn, &func.qualname))
     }
 }
 

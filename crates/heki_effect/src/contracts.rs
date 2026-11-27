@@ -69,6 +69,19 @@ impl ContractClass {
     }
 }
 
+/// The bits a project function has as a method of the class family that a `Class.method`
+/// entry of a contract with `include-overrides` names, told by the bases of its class in the
+/// project declarations ([`Contracts::override_roles`]). Summarizing the function's file reads
+/// them, so a change of the family takes part in Early Cutoff, and propagation reads them from
+/// the summary without the declarations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverrideRoles {
+    /// The bits of [`Contracts::exempt_writer`].
+    pub exempt_writer: u64,
+    /// The bits of [`Contracts::writer_contexts`].
+    pub writer_contexts: u64,
+}
+
 /// What the declared contracts say about a name, as far as the summaries need it. Masks have
 /// one bit per `invalidation` contract, in configuration order (at most 64 contracts).
 pub trait Contracts: Debug + Send + Sync {
@@ -97,6 +110,14 @@ pub trait Contracts: Debug + Send + Sync {
 
     /// The contracts that name the function an exempt writer: its writes need no announcement.
     fn exempt_writer(&self, fqn: &str, qualname: &str) -> u64;
+
+    /// The bits of [`Self::invalidator_of`] that the project function `func` has as a method of
+    /// the class family a `Class.method` entry of a contract with `include-overrides` names, by
+    /// the bases of its class in `project`.
+    fn overriding_invalidator(&self, func: &FuncKey, project: &ProjectDecls) -> u64;
+
+    /// [`OverrideRoles`] of the project function `func`, by the bases of its class in `project`.
+    fn override_roles(&self, func: &FuncKey, project: &ProjectDecls) -> OverrideRoles;
 
     /// How the `write-owners` contracts treat a write made inside the function: bit `2k` when
     /// contract `k` allows it (an allowed writer or an exempt method), bit `2k + 1` when the

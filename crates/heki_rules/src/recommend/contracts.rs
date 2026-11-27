@@ -20,10 +20,10 @@
 
 use super::block::set_keys;
 use super::{LeftOut, MAX_EXAMPLES, MAX_LISTED, RunLabel};
-use crate::DottedPattern;
 use crate::census::{Accesses, AttributeUse, Census, ModuleUse};
 use crate::contracts::Declared;
 use crate::eff_rules::names_function;
+use crate::mut_rules::{FunctionMatcher, Overrides};
 use crate::names_module_literally;
 use crate::selection::RuleSelection;
 use heki_diagnostics::Diagnostic;
@@ -447,7 +447,7 @@ impl Entry {
         };
         Some(Allowance {
             functions: (allowed.iter())
-                .filter_map(|p| DottedPattern::new(p, "allowed").ok())
+                .filter_map(|p| FunctionMatcher::place(p, "allowed", Overrides::Off, true).ok())
                 .collect(),
             own_receiver: own_receiver.as_deref() == Some("allow"),
         })
@@ -456,7 +456,7 @@ impl Entry {
 
 /// The functions an ownership entry allows to access its targets after construction.
 struct Allowance {
-    functions: Vec<DottedPattern>,
+    functions: Vec<FunctionMatcher>,
     /// Every access through the receiver of the method making it (`own-receiver = "allow"`).
     own_receiver: bool,
 }

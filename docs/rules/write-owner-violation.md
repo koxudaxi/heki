@@ -354,5 +354,9 @@ No automatic fix.
     bases, is allowed, for the protocol's member and each implementation's attribute alike.
   - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
     names the subprotocols of the protocols it matches, or those protocols only.
+  - `include-overrides`: `true` or `false` (default): whether an entry naming a method
+    (`Class.method`, `module:Class.method`) in `allowed-writers`, `forbidden-writers`, and the `exempt-methods`
+    patterns also names the methods of that name in the
+    project subclasses of `Class` (a private name overrides nothing).
   - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
     key of a target's class that no target of any `write-owners` contract names.

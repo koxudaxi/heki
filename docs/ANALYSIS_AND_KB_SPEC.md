@@ -1386,6 +1386,18 @@ a flag fits the room the site's layout leaves, where the protocol's name would g
 reads the protocol's declaration, which may sit in another module, so it takes part in Early
 Cutoff.
 
+`EffectSummary.override_roles` holds, only when an `invalidation` or `write-owners` contract sets
+`include-overrides = true`, what those contracts say of the function as a method of the class
+family a `Class.method` entry names (`Contracts::override_roles`: the `exempt-writers` bits and
+the `write-owners` writer contexts), told by the bases of its class in the declarations. The
+summaries are built before the project's classes are listed, so the class part is matched
+against the class of each method and its project bases rather than a list of subclasses;
+propagation reads the bits from the summary (`invalidation::propagate_facts`, the contexts of a
+copied write chain), where no declarations are at hand. The bases may sit in another module, so
+the bits take part in Early Cutoff, and a summary reading them records the declarations it read.
+The invalidator bits of a callee (`Contracts::overriding_invalidator`) are read the same way at
+the call, in the caller's summary.
+
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
 the call on every normal path, and the next call; set on `Iterate` / `Through` sites too), with

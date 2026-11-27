@@ -137,6 +137,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("allowed-protocols", r#"["pkg.protocols.Writable"]"#),
     ("protocol-subclasses", "false"),
     ("references", r#""calls""#),
+    ("include-overrides", "true"),
     (
         "write-owners.allowed-writers",
         r#"["pkg.parser.generation.*"]"#,

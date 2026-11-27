@@ -522,6 +522,7 @@ unresolved = "report"
 | `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](#how-contracts-report). |
 | `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](#how-contracts-report). |
 | `protocol-subclasses` | `true` | `false`: an `allowed-protocols` pattern names the protocols it matches, not their subprotocols (a protocol deriving from an allowed one stays judged). |
+| `include-overrides` | `false` | `true`: an entry naming a method (`Class.method`, `module:Class.method`) in `allowed-writers`, `forbidden-writers`, and the `exempt-methods` patterns also names the methods of that name in the project subclasses of `Class`. See [Allowed and forbidden functions](#allowed-and-forbidden-functions). |
 | `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written; with `unresolved = "report"`, also on an object of unknown class (`MUT205`). |
 
 A container entry (`Class.attr["key"]`):
@@ -723,6 +724,7 @@ report](#how-contracts-report)).
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 | `protocol-subclasses` | `true` | As in `write-owners`. |
+| `include-overrides` | `false` | As in `write-owners`, for `allowed-readers`, `forbidden-readers`, and the `exempt-methods` patterns. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -759,6 +761,7 @@ The call side of `write-owners`.
 | `targets-call-each-other` | `"allow"` | `"allow"` or `"report"`: whether a target may call the other targets of the contract. `"report"` judges each target like the one target of a contract with the same keys, so one contract listing independent targets reports what one contract per target reports for every call whose candidates all belong to one target. A call that may reach several targets (`obj.reset()` on `obj: Base` with `A.reset` and `B.reset` listed) is judged once for each target it may reach, with only that target guarded, and is reported when any of those judgements reports it; no contract of one target judges that call whole. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 | `protocol-subclasses` | `true` | As in `write-owners`. |
+| `include-overrides` | `false` | As in `write-owners`, for `allowed-callers`, `forbidden-callers`, and the `exempt-methods` patterns (the `targets` cover the overrides of a `Class.method` target always). |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -980,6 +983,28 @@ allowed-readers = ["pkg.parser.index.*"]
 
   So `outer{,.*}` is needed in `allowed-*` and `forbidden-*` only for nested `def`s that
   `attribution` does not attribute to `outer`, and in `targets` for nested definitions.
+- With `include-overrides = true` on a contract (or in its [defaults table](#defaults-for-the-tables-of-a-kind)),
+  an entry naming a method, `Class.method` or `module:Class.method`, in the keys that name places
+  or callees (`allowed-*`, `forbidden-*`, the `exempt-methods` patterns, an effect boundary's
+  `scopes` and `allowed-callees`, and the `invalidators` and `exempt-writers` of `invalidation`)
+  also names the methods of that name in the project subclasses of `Class`, in any module: the
+  family a `call-owners` target `Class.method` covers. Where the key covers nested scopes
+  (`scopes`, `allowed-callees`, or an entry ending in `{,.*}`), the overrides' nested scopes count too. A private
+  name (`Base.__run`) names the method of `Base` only: a subclass's `__run` is its own. The
+  reports are those of the same contract listing every override by hand, so the key is off by
+  default: it widens what a contract allows, and a new subclass's override is allowed without a
+  change of the configuration, which a project using the configuration as a review wall should
+  know. An entry still has to name a method of `Class` itself, and is judged as before ([Entries that
+  match nothing](#entries-that-match-nothing)): an `allowed-callees` entry only when its first name
+  is a module of the project, as that section says.
+
+  ```toml
+  [[tool.heki.call-owners]]
+  name = "hook"
+  targets = ["pkg.store:Store.op"]
+  allowed-callers = ["pkg.hooks:Base.hook{,.*}"]  # and every override of `hook`, nested scopes included
+  include-overrides = true
+  ```
 - An access counts as one by a forbidden function when the function that is reported, a private
   helper it hands the access through, or the function making the access is forbidden (with
   `attribution = "lexical"`, the function holding the access).
@@ -1031,6 +1056,7 @@ import-probes = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
+| `include-overrides` | `false` | `true`: a `scopes` or `allowed-callees` entry naming a method (`Class.method`, `module:Class.method`) also names the methods of that name in the project subclasses of `Class`, with the scopes nested in them. See [Allowed and forbidden functions](#allowed-and-forbidden-functions). |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
 | `message` | none | The help of every report of the boundary. |
 | `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
@@ -1161,6 +1187,7 @@ message = "tell the store which models changed"
 | `targets` | `[]` | `Class.attr` attributes whose writes must be announced. |
 | `invalidators` | `[]` | Functions or methods whose call announces the change. |
 | `exempt-writers` | `[]` | Functions whose writes need no announcement of their own: the owner's operations, which announce or batch the change themselves, and construction methods. |
+| `include-overrides` | `false` | `true`: an `invalidators` or `exempt-writers` entry naming a method (`Class.method`, `module:Class.method`) also names the methods of that name in the project subclasses of `Class`. See [Allowed and forbidden functions](#allowed-and-forbidden-functions). |
 | `message` | none | The help of every report of the contract. |
 | `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 
