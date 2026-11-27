@@ -7,38 +7,45 @@
 🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust. It tracks side
 effects and mutations across function calls, and checks a 100,000-line project in a few seconds.
 
-Ruff checks syntax and style, and ty, mypy, and Pyright check types. heki checks what your code
-does: which effects a call reaches and which state it changes, across functions and files.
+Ruff checks syntax and style, and mypy, Pyright, Pyrefly, and ty check types. heki checks what
+your code does: which effects a call reaches and which state it changes, across functions and
+files.
 
-Out of the box, it catches blocking calls in `async` code, database queries in loops, quadratic
-loops, and in-place changes to read-only parameters and to `lru_cache` results. You can also
-write your project's own rules as [contracts](https://heki.koxudaxi.dev/configuration/#contracts),
-such as which functions may change a field or reach I/O.
+It works on two levels. With no configuration, it catches bugs such as blocking calls in `async`
+code, database queries in loops, and in-place changes to read-only parameters. On top of that, it
+enforces the walls your project writes as
+[contracts](https://heki.koxudaxi.dev/configuration/#contracts): which functions may change a
+field, call a function, or reach I/O.
 
-![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def, and EFF103 a database query one helper below a loop, each with its call chain](https://raw.githubusercontent.com/koxudaxi/heki/main/docs/assets/example-check.svg)
+![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def with no configuration, and MUT201 a write to Order.items through a helper outside the functions a contract allows, each with its call chain](https://raw.githubusercontent.com/koxudaxi/heki/main/docs/assets/example-check.svg)
 
 📚 [Documentation](https://heki.koxudaxi.dev/) ·
 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) ·
-📏 [Rules](https://heki.koxudaxi.dev/rules/)
+📏 [Rules](https://heki.koxudaxi.dev/rules/) ·
+📜 [Contracts](https://heki.koxudaxi.dev/configuration/#contracts)
 
 [![PyPI](https://img.shields.io/pypi/v/heki)](https://pypi.org/project/heki/)
 [![Python versions](https://img.shields.io/pypi/pyversions/heki)](https://pypi.org/project/heki/)
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
-⚡ Try it in your project's root, without installing: `uvx heki==0.10.0 check`. Then follow
-[Try it in 5 minutes](#try-it-in-5-minutes).
+⚡ Try it in your project's root, without installing: `uvx heki check`. Then follow
+[Try it in 5 minutes](#-try-it-in-5-minutes).
 
 ---
 
-### A blocking call two helpers below an `async def`
+### A bug found with no configuration
+
+Each file looks fine on its own: the bug is in the call chain.
 
 ```python
 # app/users.py
 import requests
 
+
 def fetch_name(user_id: int) -> str:
     return requests.get(f"https://api.example.com/users/{user_id}", timeout=5).text
+
 
 def load_user(user_id: int) -> dict[str, str]:
     return {"id": str(user_id), "name": fetch_name(user_id)}
@@ -48,175 +55,84 @@ def load_user(user_id: int) -> dict[str, str]:
 # app/api.py
 from app.users import load_user
 
+
 async def get_user(user_id: int) -> dict[str, str]:
     return load_user(user_id)
 ```
 
-```console
-$ heki check
-app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
-  |
-5 |     return load_user(user_id)
-  |            ^
-  = related: app/api.py:5:12: `get_user` calls `app.users.load_user`
-  = related: app/users.py:8:41: `load_user` calls `app.users.fetch_name`
-  = related: app/users.py:5:12: `fetch_name` calls `requests.get`
-  = help: offload it with `asyncio.to_thread`, or use an async client
+### A wall your project writes
 
-Found 1 diagnostic(s) in 2 file(s).
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
-EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
+Only the functions in `app.store` may change `Order.items`. Write that down once:
+
+```toml
+# heki.toml
+[[write-owners]]
+name = "order-store"
+targets = ["app.models.Order.items"]
+allowed-writers = ["app.store.*"]
+message = "change Order.items through app.store"
+fail = true   # a report of this contract fails the run
 ```
-
-### A query one helper below a loop
 
 ```python
-# app/orders.py
-import sqlite3
-
-def customer_name(cursor: sqlite3.Cursor, customer_id: int) -> str:
-    cursor.execute("SELECT name FROM customers WHERE id = ?", (customer_id,))
-    return str(cursor.fetchone()[0])
-
-def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> list[str]:
-    lines: list[str] = []
-    for order_id, customer_id in orders:
-        lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
-    return lines
+# app/models.py
+class Order:
+    def __init__(self) -> None:
+        self.items: list[str] = []
 ```
 
-```console
-$ heki check
-app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
-   |
-11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
-   |                                     ^
-  = related: app/orders.py:11:37: `order_summaries` calls `app.orders.customer_name`
-  = related: app/orders.py:5:5: `customer_name` calls `sqlite3.Cursor.execute`
-  = help: batch the queries, or load the data once before the loop
+```python
+# app/store.py
+from app.models import Order
 
-Found 1 diagnostic(s) in 1 file(s).
-heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports, which can be wrong about the code and count as warnings; `fail-on = "warning"` in the lint settings makes them fail it.
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
-EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
+
+def add_item(order: Order, item: str) -> None:
+    order.items.append(item)
 ```
 
-Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
-Strict settings don't help either: the second example is fully annotated and passes Ruff's `ANN`
-rules, `mypy --strict`, pyright's strict mode, and Pyrefly's `strict` preset. It still sends one
-query per order.
+`app/checkout.py` changes the list through a helper in another file:
+
+```python
+# app/util.py
+def append_to(items: list[str], item: str) -> None:
+    items.append(item)
+```
+
+```python
+# app/checkout.py
+from app.models import Order
+from app.util import append_to
+
+
+def add_gift_wrap(order: Order) -> None:
+    append_to(order.items, "gift-wrap")
+```
+
+The image at the top is `heki check` on these examples: `EFF101` with no configuration, and
+`MUT201` from the contract. The same code passes mypy, Pyright, Pyrefly, and ty in strict mode
+(`mypy --strict`, Pyright's `strict`, Pyrefly's `strict` preset, every ty rule as an error), and
+Ruff with every rule on asks only for docstrings and copyright lines.
 
 ### How heki differs
 
 | Tool | Models | heki adds |
 | --- | --- | --- |
 | Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
-| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` / `AbstractSet` arguments |
+| mypy, Pyright, Pyrefly, ty | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` / `AbstractSet` arguments |
 | tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; import rules that know when each import runs (experimental); planned: reading these tools' contracts as heki contracts |
 
-heki leaves syntax, style, and types to these tools, so use it next to them. Its configuration,
-suppression comments, and output formats follow Ruff's.
-[What Python leaves open](https://heki.koxudaxi.dev/#what-python-leaves-open) compares its checks
-with what Rust and Haskell enforce.
-
-### Installation
-
-```console
-$ uv tool install heki      # or: pipx install heki / pip install heki
-$ uvx heki check            # run without installing
-```
-
-heki ships prebuilt wheels on PyPI for Linux (x86-64, AArch64, x86-64 musl), macOS (Apple silicon,
-Intel), and Windows (x86-64). `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
-toolchain and compile nothing. Building from source is for other platforms and for development:
-see [Installation](https://heki.koxudaxi.dev/installation/).
-
-### Try it in 5 minutes
-
-1. In your project's root (the directory with `pyproject.toml`), run `uvx heki==0.10.0 check`. An
-   exact error, like the first example above, fails the run (exit code 1). Warnings, like the
-   second, are printed but don't fail it unless you pass `--fail-on warning`.
-
-2. Ask what fits the project with [`heki recommend`](https://heki.koxudaxi.dev/recommend/)
-   (experimental). It writes no file, and it helps most when the first step finds nothing, as on
-   the [sample service](https://github.com/koxudaxi/heki/tree/main/tests/sample_service) in
-   heki's tests:
-
-    ```console
-    $ uvx heki==0.10.0 check
-    All checks passed (4 file(s)).
-    ...
-    hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
-    $ uvx heki==0.10.0 recommend
-    heki recommend (experimental) on .: 4 file(s), 11 function(s)
-    ...
-    Types the code already keeps
-      1 read-only parameter group(s), exact; 0 heuristic
-      No type checker configuration found: half of each guard is a type checker's.
-        app/report.py:8  total(prices)  list[float] -> Sequence[float]  public
-    ...
-    What heki cannot see (no report either way)
-      calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
-        name                  calls  async  loops  if it waits     if it sends a query
-        stripe.Charge.create      1      1      0  EFF101 1 exact  -
-    ...
-    Contract candidates
-      write-owners  app.models:Order.*  high
-        written by 1 function(s), all in app.store (add_item), changed in place; read in 2 other module(s)
-    ...
-    ```
-
-    `total` only reads `prices`, so its annotation can say so. heki's catalog doesn't say what
-    `stripe.Charge.create` does, so heki reports nothing through it. If the call waits on the
-    network, `EFF101` would report it in `async def checkout`. Only `app.store` writes
-    `Order.items`, so the report ends with the keys that make that a contract.
-
-3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and
-   a CI step. If the project has findings today, record them in a
-   [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only new ones
-   fail: `uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline`, then
-   `baseline = "heki-baseline.toml"` in `[tool.heki]`. The
-   [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups ready
-   to copy.
-
-> [!WARNING]
-> 🧪 **Pre-release.** Rules, configuration keys, diagnostics, and output formats can change
-> between releases without a deprecation period, and the release notes list every change. Pin the
-> version (`heki==0.10.0`, and the hook's `rev`) so upgrades happen only when you choose. The
-> default rules are exact and ready for pull request checks. Heuristic rules, including the
-> contract rules, can be wrong about the code. Every output labels their reports, and they count
-> as warnings. `heki recommend`, `heki inspect`, `heki skill`, and `heki check --generate-prompt`
-> are experimental, as are the rules marked experimental. Please
-> [report](https://github.com/koxudaxi/heki/issues) what heki gets wrong on your code.
-
-### Usage
-
-```console
-$ heki check                                    # check the project
-$ heki check --heuristic                        # also run the heuristic rules
-$ heki check --diff                             # preview proven-safe fixes
-$ heki check --fix                              # apply them
-$ heki check --baseline heki-baseline.toml      # fail only on new findings
-$ heki rule EFF101                              # explain a rule
-$ heki server                                   # LSP server for editors
-$ heki inspect app.users.load_user              # what one function does (experimental)
-$ heki recommend                                # configuration advice (experimental)
-```
+Use heki next to these tools; its configuration, suppression comments, and output formats follow
+Ruff's. [Design Philosophy](https://heki.koxudaxi.dev/philosophy/) says why heki works this way
+and compares its checks with what Rust and Haskell enforce.
 
 ## 🧭 What heki can do
 
-| Area | What it covers |
-| --- | --- |
-| [State ownership and mutation](https://heki.koxudaxi.dev/ownership/) | Changes to read-only parameters, `lru_cache` results, and frozen fields, and contracts for who may write, read, or call what |
-| [Async, I/O, and execution effects](https://heki.koxudaxi.dev/effects/) | Blocking calls in `async def`, queries and clients in loops, lock hazards, effect boundaries, and effect snapshots |
-| [Imports and module boundaries](https://heki.koxudaxi.dev/imports/) | Import cycles, import-order crashes, test and development code loaded by a package, and import boundaries (experimental) |
-| [Proven performance rewrites](https://heki.koxudaxi.dev/fixes/) | `OPT` findings, and the rewrites `heki check --fix` applies only after proving them |
-| [Function inspection and configuration advice](https://heki.koxudaxi.dev/recommend/) | What one function does with `heki inspect`, and the rules and contracts that fit a project with `heki recommend` (both experimental) |
-| [Coding-agent architecture walls](https://heki.koxudaxi.dev/coding-agents/) | Contracts, a Stop hook, JSON output, and an Agent Skill that keep an agent inside your architecture |
+### ✅ Bug checks with no configuration
 
-## ✅ Exact rules
-
-These rules run by default. Each report shows the chain of calls that leads to it.
+These rules run by default, and each report shows the chain of calls that leads to it. Every
+report they made on 378 packages (about 30.75 million lines) and on a frozen holdout of 100 more
+was checked by hand, with no false claim
+([Rule precision](https://heki.koxudaxi.dev/precision/#certifications)).
 
 | What goes wrong | Rule |
 | --- | --- |
@@ -231,54 +147,19 @@ These rules run by default. Each report shows the chain of calls that leads to i
 | A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` |
 
 The size-dependent rewrites (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact
-too, but opt-in, because the loops they report were rarely large enough to matter.
+too, but opt-in. The other rules are heuristic or opt-in ([Rules](https://heki.koxudaxi.dev/rules/)).
 
-Two reviewers check by hand every report an exact rule makes on the development corpus (378
-packages and 30.75 million lines, plus packages added for rules with few reports). Every report of
-one run on a frozen holdout of 100 packages is checked too. A rule is certified only when both
-have zero false claims. `EFF101` and `EFF103` had 287 and 103 reports on the corpus and 152 and
-122 on the holdout. [Rule precision](https://heki.koxudaxi.dev/precision/#certifications) lists every
-certified rule. The other rules are heuristic or opt-in; see
-[Rules](https://heki.koxudaxi.dev/rules/).
+`heki check --fix` applies an `OPT` rewrite only when it proves, under CPython's semantics, that
+the program behaves the same ([Fixes and safety](https://heki.koxudaxi.dev/fixes/)). More by
+problem: [async and execution effects](https://heki.koxudaxi.dev/effects/),
+[state ownership and mutation](https://heki.koxudaxi.dev/ownership/), and
+[imports and module boundaries](https://heki.koxudaxi.dev/imports/).
 
-## 📜 Contracts
+### 📜 Walls you write: contracts and coding agents
 
-Most projects have rules of their own, kept today by code review, AST scripts, or run-time checks
-in tests. With heki you write them down as contracts, in `heki.toml` or under `[tool.heki]` in
-`pyproject.toml`. This one says that only the functions in `app.store` may change `Order.items`:
-
-```toml
-# heki.toml
-[[write-owners]]
-name = "order-store"
-targets = ["app.models.Order.items"]
-allowed-writers = ["app.store.*"]
-message = "change Order.items through app.store"
-fail = true   # a report of this contract fails the run
-```
-
-A function in `app/api.py` that appends to `order.items` through a helper breaks it:
-
-```console
-$ heki check
-app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap` writes `app.models.Order.items` (through a helper) via `app.api._append` outside the write owners of `order-store`
-  |
-9 |     _append(order.items, "gift-wrap")
-  |     ^
-  = related: app/api.py:9:5: `add_gift_wrap` calls `app.api._append`
-  = help: change Order.items through app.store
-
-Found 1 diagnostic(s) in 3 file(s).
-```
-
-The run exits with code 1.
-
-heki follows aliases, helpers, and subclasses, with no decorators and nothing added at run time.
-The contract rules aren't [certified](https://heki.koxudaxi.dev/precision/#certifications) yet, so
-their reports are warnings. `fail = true` makes that table's reports fail the run. Record today's
-findings in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) first.
-
-There is a contract for each kind of rule:
+Write the rules your project keeps by review today as contract tables in `heki.toml` or under
+`[tool.heki]`. heki follows aliases, helpers, and subclasses, with nothing added at run time.
+Contract reports are heuristic, so they are warnings until the table sets `fail = true`.
 
 | What you want to keep | Contract | Main keys |
 | --------------------- | -------- | --------- |
@@ -290,41 +171,85 @@ There is a contract for each kind of rule:
 | Code in `app.render` makes no blocking call | `effect-boundaries` | `scopes = ["app.render.*"]`, `forbid = ["blocking"]` |
 | `app.domain` imports nothing from `app.web`, even lazily or inside a function | `import-boundaries` (experimental) | `importers = ["app.domain.*"]`, `forbidden-imports = ["app.web", "app.web.*"]` |
 
-See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key.
+See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key. A coding agent
+can miss a rule written in its instructions, but not a contract that `heki check` enforces:
 
-## 🤖 Teams and coding agents
-
-A coding agent can miss a rule written in `AGENTS.md` or `CLAUDE.md`. Write it as a contract
-instead, and `heki check` enforces it. List `heki.toml` and `heki-baseline.toml` in `CODEOWNERS`.
-Then moving a wall takes a reviewed change, and an agent can't move one to make a report go away.
-
-- The contract's `message` starts the help line of its reports, so the agent reads it as the fix.
-- A [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code) runs
-  `heki check` when Claude Code is about to end its turn and sends a failing report back, so the
-  agent keeps working until the check passes.
-- [`heki inspect app.api.checkout`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
-  (experimental) shows what one function reaches, changes, keeps, and returns, with the call
-  chains, so an agent doesn't have to read its callees.
-- `--output-format json` gives agents every check as JSON, and the
+- List `heki.toml` and `heki-baseline.toml` in `CODEOWNERS`: moving a wall takes a review.
+- A contract's `message` starts the help line of its reports, so the agent reads it as the fix.
+- A [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code) sends a
+  failing check back before the agent ends its turn.
+- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
+  (experimental) shows what one function reaches, changes, and returns.
+- `--output-format json` gives every check as JSON, and the
   [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental)
-  (experimental) teaches them the routine after an edit and how to adopt heki in a repository.
-- [`heki snapshot`](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103) with `MUT103`
-  reports a function that gained an effect, which a diff doesn't show.
-- [The whole setup, end to end](https://heki.koxudaxi.dev/coding-agents/#the-whole-setup-end-to-end)
-  has the CI workflow that checks each pull request against these walls, the hook, and the skill.
+  (experimental) teaches the routine after an edit.
+  [Coding agents](https://heki.koxudaxi.dev/coding-agents/) has the whole setup.
 
-## 🔧 Rewrites proven under CPython's semantics
+## 🚀 Try it in 5 minutes
 
-The `OPT` rules find quadratic list, dict, set, bytes, and queue patterns. `heki check --fix`
-rewrites one only when it proves the program behaves the same. It trusts no type annotation and
-keeps evaluation order and exceptions. It doesn't update an object in place while anything else
-refers to it, or count on a builtin the module rebinds. When a proof fails, the report names the
-missing obligation instead of offering a fix.
+1. In your project's root (the directory with `pyproject.toml`), run `uvx heki check`. An exact
+   error, like `EFF101` above, fails the run (exit code 1). Warnings are printed but don't fail it
+   unless you pass `--fail-on warning`.
 
-`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`).
-`--include-size-dependent` adds the size-dependent ones, such as a `collections.deque` for
-`list.pop(0)` (`OPT120`). [Fixes and safety](https://heki.koxudaxi.dev/fixes/) shows each rewrite
-and what it must prove.
+2. Ask what fits the project with [`heki recommend`](https://heki.koxudaxi.dev/recommend/)
+   (experimental). It writes no file and helps most when the first step finds nothing, as on
+   heki's [sample service](https://github.com/koxudaxi/heki/tree/main/tests/sample_service):
+
+    ```console
+    $ uvx heki check
+    All checks passed (4 file(s)).
+    ...
+    $ uvx heki recommend
+    ...
+    Contract candidates
+      write-owners  app.models:Order.*  high
+        written by 1 function(s), all in app.store (add_item), changed in place; read in 2 other module(s)
+    ```
+
+    Only `app.store` writes `Order.items`, so heki proposes that wall with the keys to add.
+    [Getting started](https://heki.koxudaxi.dev/getting-started/#ask-what-fits-the-project) shows
+    more of the report.
+
+3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and
+   a CI step, and record today's findings in a
+   [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only new ones
+   fail: `uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline`. The
+   [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups ready
+   to copy.
+
+> [!WARNING]
+> 🧪 **Pre-release.** Rules, configuration keys, and output formats can change in any release,
+> and the release notes list every change. Pin the version (`heki==0.10.0`, and the hook's `rev`)
+> so upgrades happen only when you choose. The default rules are exact. Heuristic rules,
+> experimental rules, and experimental commands run only when you ask for them, and every output
+> labels heuristic reports. Please [report](https://github.com/koxudaxi/heki/issues) what heki
+> gets wrong.
+
+## 📦 Installation
+
+```console
+$ uv tool install heki      # or: pipx install heki / pip install heki
+$ uvx heki check            # run without installing
+```
+
+heki ships prebuilt wheels on PyPI for Linux (x86-64, AArch64, x86-64 musl), macOS (Apple silicon,
+Intel), and Windows (x86-64). `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
+toolchain and compile nothing. Building from source is for other platforms and for development:
+see [Installation](https://heki.koxudaxi.dev/installation/).
+
+## ⌨️ Usage
+
+```console
+$ heki check                                    # check the project
+$ heki check --heuristic                        # also run the heuristic rules
+$ heki check --diff                             # preview proven-safe fixes
+$ heki check --fix                              # apply them
+$ heki check --baseline heki-baseline.toml      # fail only on new findings
+$ heki rule EFF101                              # explain a rule
+$ heki server                                   # LSP server for editors
+$ heki inspect app.users.load_user              # what one function does (experimental)
+$ heki recommend                                # configuration advice (experimental)
+```
 
 ## 🪜 pre-commit and CI
 
@@ -360,20 +285,17 @@ features can change in any release: `heki recommend`, `heki inspect`, `heki skil
 `--generate-prompt`, and the rules marked experimental
 ([the list](https://heki.koxudaxi.dev/experimental/)).
 
-## 🎯 Scope
-
-When heki isn't sure, it doesn't report. It works from its own analysis, a catalog of library
-behavior, and the contracts you declare. [Scope and limitations](https://heki.koxudaxi.dev/scope/)
-says what it checks and what it leaves to other tools.
-
 ## 📚 Documentation
 
 **👉 [heki.koxudaxi.dev](https://heki.koxudaxi.dev/)**
 
+When heki isn't sure, it doesn't report.
+[Scope and limitations](https://heki.koxudaxi.dev/scope/) says what it checks, where its
+knowledge comes from, and what it leaves to other tools.
+
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
-- 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
-- ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 53 rules
+- ⚙️ [Configuration & Contracts](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - every rule, with its tier
 - 📐 [Rule precision](https://heki.koxudaxi.dev/precision/) - exact and heuristic rules, and how they are measured
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI

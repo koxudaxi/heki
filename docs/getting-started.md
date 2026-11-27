@@ -57,16 +57,41 @@ $ heki check app/api.py
 `heki recommend` (experimental) analyzes the project as `heki check` does and says which
 parameter types and contracts the code already keeps, which rules would report here, and what
 heki could not see, with the keys to add to `[tool.heki]`. It writes no file. A run of `heki check` that shows nothing, on a
-project without contracts or a baseline, ends with a line that points to it:
+project without contracts or a baseline, ends with a line that points to it. On the
+[sample service](https://github.com/koxudaxi/heki/tree/main/tests/sample_service) in heki's
+tests:
 
 ```console
+$ heki check
+All checks passed (4 file(s)).
+...
+hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
 $ heki recommend
+heki recommend (experimental) on .: 4 file(s), 11 function(s)
+...
+Types the code already keeps
+  1 read-only parameter group(s), exact; 0 heuristic
+  No type checker configuration found: half of each guard is a type checker's.
+    app/report.py:8  total(prices)  list[float] -> Sequence[float]  public
+...
+What heki cannot see (no report either way)
+  calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
+    name                  calls  async  loops  if it waits     if it sends a query
+    stripe.Charge.create      1      1      0  EFF101 1 exact  -
+...
+Contract candidates
+  write-owners  app.models:Order.*  high
+    written by 1 function(s), all in app.store (add_item), changed in place; read in 2 other module(s)
+...
 ```
 
-See [Configuration Advice](recommend.md), and the
-[excerpt](index.md#try-it-in-5-minutes) of its report on a project where `heki check` finds
-nothing. To adopt heki in a repository, start from the
-[starter recipes](adoption.md#starter-recipes).
+`total` only reads `prices`, so its annotation can say so. heki's catalog doesn't say what
+`stripe.Charge.create` does, so heki reports nothing through it. If the call waits on the
+network, `EFF101` would report it in `async def checkout`. Only `app.store` writes `Order.items`,
+so the report ends with the keys that make that a contract.
+
+See [Configuration Advice](recommend.md) for the whole report. To adopt heki in a repository,
+start from the [starter recipes](adoption.md#starter-recipes).
 
 ## Read a diagnostic
 

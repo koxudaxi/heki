@@ -159,13 +159,13 @@ fn docs_check_fails_on_a_stale_example_image() {
     let docs = DocsTree::new("example_image");
     assert_eq!(docs.build_docs(&[]).0, 0);
     // The README's examples as a terminal shows them: the rule codes in bold red, the severity in
-    // bold yellow.
+    // bold bright red.
     let image = docs.0.read("docs/assets/example-check.svg");
     assert!(
         image.contains(r#"class="b f1">EFF101</tspan>"#)
-            && image.contains(r#"class="b f1">EFF103</tspan>"#)
-            && image.contains(r#"class="b f3">warning</tspan>"#)
-            && image.contains(">Found 2 diagnostic(s) in 3 file(s).</tspan>"),
+            && image.contains(r#"class="b f1">MUT201</tspan>"#)
+            && image.matches(r#"class="b f9">error</tspan>"#).count() == 2
+            && image.contains(">Found 2 diagnostic(s) in 6 file(s).</tspan>"),
         "{image}"
     );
     assert_eq!(docs.build_docs(&["--check"]).0, 0);
