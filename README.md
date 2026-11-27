@@ -122,8 +122,8 @@ Ruff with every rule on asks only for docstrings and copyright lines.
 | tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; import rules that know when each import runs (experimental); planned: reading these tools' contracts as heki contracts |
 
 Use heki next to these tools; its configuration, suppression comments, and output formats follow
-Ruff's. [What Python leaves open](https://heki.koxudaxi.dev/scope/#what-python-leaves-open)
-compares its checks with what Rust and Haskell enforce.
+Ruff's. [Design Philosophy](https://heki.koxudaxi.dev/philosophy/) says why heki works this way
+and compares its checks with what Rust and Haskell enforce.
 
 ## 🧭 What heki can do
 

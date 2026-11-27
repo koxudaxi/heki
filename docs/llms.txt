@@ -9,6 +9,7 @@
 - [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable: its Python package ships only that executable and installs no Python dependencies into your environment
 - [Getting Started](https://heki.koxudaxi.dev/getting-started/): This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules
 - [Rules](https://heki.koxudaxi.dev/rules/): heki has 55 rules in four families
+- [Design Philosophy](https://heki.koxudaxi.dev/philosophy/): heki asks nothing of your code and never runs it
 - [Rule Precision](https://heki.koxudaxi.dev/precision/): heki reports a claim only when it can back it
 - [Scope and Limitations](https://heki.koxudaxi.dev/scope/): This page says what heki checks, what it leaves to other tools, where its knowledge comes from, and what it does when it cannot tell
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes

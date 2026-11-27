@@ -41,6 +41,8 @@ scope around it is a single-file linter's check (flake8-async's `ASYNC102`); `EF
 needs the call graph: which awaits reach a cancellation checkpoint through helpers, and which
 helpers and callers shield them.
 
+[Design Philosophy](philosophy.md) says why heki is built this way and what Python leaves open.
+
 ### Clean for Ruff, mypy, Pyright, Pyrefly, ty, and tach; broken all the same
 
 ```python
@@ -117,18 +119,6 @@ app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (through a 
 Found 2 diagnostic(s) in 4 file(s).
 note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
-
-## What Python leaves open
-
-Other languages enforce some of what heki checks when the code compiles. In Python nothing does,
-so heki reports the code that breaks the expectation.
-
-| What Python leaves open | What other languages enforce | What heki checks |
-| --- | --- | --- |
-| Any code can change any object it reaches | ownership and borrowing (Rust; [each idea mapped to heki](ownership.md#if-you-know-rust)), `const` / `readonly` | read-only parameters, fields, and views changed through helpers (`MUT110`, `MUT108`, `MUT120`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
-| A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
-| Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT208`) |
-| Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
 
 ## Where heki pays off
 
