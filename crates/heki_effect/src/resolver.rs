@@ -1573,10 +1573,14 @@ pub struct MadeHook {
     #[serde(default, skip_serializing_if = "<[String]>::is_empty")]
     pub literals: Box<[String]>,
     /// The factory's parameters that guard a store of the hook (`if cache: setattr(module,
-    /// name, value)`, which may bind the name in the module): each must be bound to a false
-    /// literal for the hook to serve anything.
+    /// name, value)`, which may bind the name in the module).
     #[serde(default, skip_serializing_if = "<[HookParam]>::is_empty")]
-    pub false_params: Box<[HookParam]>,
+    pub guards: Box<[HookParam]>,
+    /// The combinations of [`Self::guards`], as bit sets of their positions, that reach a
+    /// store when taken together (`if cache: if enabled: setattr(...)` is the pair): the hook
+    /// serves only when the call binds to a false literal at least one guard of each.
+    #[serde(default, skip_serializing_if = "<[u32]>::is_empty")]
+    pub storing: Box<[u32]>,
     /// The globals of the factory's module the hook and the factory read (fqns), the factory
     /// among them ([`GetattrExports::globals`]).
     pub globals: Box<[String]>,

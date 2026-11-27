@@ -1376,6 +1376,146 @@ fn a_module_getattr_a_project_factory_makes_serves_what_its_hook_returns() {
     );
 }
 
+const GUARD_HOOKS: &str = r#"import sys
+
+
+def nested_hooks(table, cache=False, enabled=False):
+    def module_getattr(name):
+        if name not in table:
+            raise AttributeError(name)
+        value = table[name]()
+        if cache:
+            if enabled:
+                setattr(sys.modules[__name__], name, value)
+        return value
+
+    return module_getattr
+
+
+def sized_hooks(table):
+    count = list(table)
+
+    def module_getattr(name):
+        return table[name]()
+
+    return module_getattr
+
+
+def shadowed_hooks(table, list):
+    count = list(table)
+
+    def module_getattr(name):
+        return table[name]()
+
+    return module_getattr
+"#;
+
+/// A module binding its `__getattr__` to `call`, a factory of `pkg.guard_hooks`, serving a
+/// class based on `Base`, and a function writing into an object of it.
+fn guarded(case: &str, factory: &str, call: &str) -> (String, String) {
+    let module = format!(
+        r#"from pkg.base import Base as _Base
+from pkg.guard_hooks import {factory}
+
+
+def _base() -> type:
+    class _Made(_Base):
+        pass
+
+    return _Made
+
+
+_EXPORTS = {{"Base": _base}}
+__getattr__ = {call}
+"#
+    );
+    let user = format!(
+        r#"from pkg.made_{case} import Base as {case}_base
+
+
+class On_{case}({case}_base):
+    pass
+
+
+def {case}(obj: On_{case}) -> None:
+    obj.copy().__dict__["_mark"] = True
+"#
+    );
+    (module, user)
+}
+
+/// The hook's store behind two parameters (`if cache:` then `if enabled:`) is reached only when
+/// the call passes both as true; the table is read-only to `list(table)` only where `list` is
+/// the builtin, not a parameter of the factory.
+#[test]
+fn store_guards_are_decided_together_and_read_only_calls_name_the_builtin() {
+    let cases = [
+        (
+            "both",
+            "nested_hooks",
+            "nested_hooks(_EXPORTS, cache=True, enabled=True)",
+        ),
+        ("one", "nested_hooks", "nested_hooks(_EXPORTS, cache=True)"),
+        ("sized", "sized_hooks", "sized_hooks(_EXPORTS)"),
+        (
+            "shadowed",
+            "shadowed_hooks",
+            "shadowed_hooks(_EXPORTS, list)",
+        ),
+    ];
+    let mut files = vec![
+        ("base.py".to_owned(), BASE.to_owned()),
+        ("guard_hooks.py".to_owned(), GUARD_HOOKS.to_owned()),
+    ];
+    for (case, factory, call) in cases {
+        let (module, user) = guarded(case, factory, call);
+        files.push((format!("made_{case}.py"), module));
+        files.push((format!("use_{case}.py"), user));
+    }
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(f, t)| (f.as_str(), t.as_str()))
+        .collect();
+    let p = project("getattr_guards", &files);
+    assert_eq!(
+        unknown_receivers(&p),
+        names(&["both", "shadowed", "nested_hooks.<locals>.module_getattr"])
+    );
+}
+
+/// A factory returning a function of its module reads that name: another module rebinding it
+/// leaves what the hook serves open.
+#[test]
+fn rebinding_the_function_a_factory_returns_leaves_the_made_hook_open() {
+    let use_version = r#"from pkg.made_version import Version
+
+
+class Versioned(Version):
+    pass
+
+
+def versioned(obj: Versioned) -> None:
+    obj.copy().__dict__["_mark"] = True
+"#;
+    let made_version = "from pkg.hooks import version_hook\n\n__getattr__ = version_hook()\n";
+    let rebind = "import pkg.hooks\n\n\ndef other(name):\n    return None\n\n\npkg.hooks._version_getattr = other\n";
+    let base = [
+        ("base.py", BASE),
+        ("hooks.py", HOOKS),
+        ("made_version.py", made_version),
+        ("use.py", use_version),
+    ];
+    let plain = project("getattr_version_plain", &base);
+    assert_eq!(
+        unknown_receivers(&plain),
+        names(&["module_hooks.<locals>.module_getattr"])
+    );
+    let mut files = base.to_vec();
+    files.push(("rebind.py", rebind));
+    let rebound = project("getattr_version_rebound", &files);
+    assert!(unknown_receivers(&rebound).contains("versioned"));
+}
+
 const LAZY_SERVED: &str = r#"from typing import TYPE_CHECKING, Any
 
 import requests

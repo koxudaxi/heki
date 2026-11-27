@@ -1132,7 +1132,7 @@ fn made_hook(
     {
         return None;
     }
-    let false_params = store_guards(&shape, |cell| param_of(cell))?;
+    let (guards, storing) = store_guards(&shape, |cell| param_of(cell))?;
     let decided = decider.hook_serves(&shape, name, table.map(|(cell, _)| cell), &[factory])?;
     // Without what a key gets, which keys are among the literals is not known: nothing.
     let table = match table {
@@ -1140,7 +1140,9 @@ fn made_hook(
         None => None,
     };
     (table.is_some() || !decided.served.is_empty()).then_some(())?;
+    // The factory's own reads decide which hook it returns (`return _hook` loads a global).
     let mut globals = own_globals(&shape, decls);
+    globals.extend(own_globals(&FnShape::new(factory), decls));
     globals.push(format!("{}.{}", decls.module_name, factory.qualname));
     let served = (decided.served.into_iter())
         .map(|(key, (ty, read))| {
@@ -1155,9 +1157,10 @@ fn made_hook(
         table,
         served,
         literals: decided.literals.into_iter().collect(),
-        false_params: (false_params.into_iter())
+        guards: (guards.into_iter())
             .map(|p| hook_param(factory, p))
             .collect::<Option<_>>()?,
+        storing: storing.into(),
         globals: globals.into(),
     })
 }
@@ -1197,13 +1200,21 @@ fn only_read(ir: &ModuleIr, cells: &ParamCells, factory: &IrFunction, param: u8)
             g.blocks.iter().all(|b| {
                 let phis = (b.phis.iter()).all(|phi| phi.incoming.iter().all(|(_, x)| !holds(*x)));
                 let returned = matches!(b.terminator, Terminator::Return(Some(x)) if holds(x));
-                phis && !returned && b.insts.iter().all(|i| reads_only(&shape, &i.kind, &holds))
+                phis && !returned
+                    && b.insts
+                        .iter()
+                        .all(|i| reads_only(ir, &shape, &i.kind, &holds))
             })
         })
 }
 
 /// Whether the instruction `kind` only reads what the values `holds` names hold.
-fn reads_only(shape: &FnShape<'_>, kind: &InstKind, holds: &impl Fn(VarId) -> bool) -> bool {
+fn reads_only(
+    ir: &ModuleIr,
+    shape: &FnShape<'_>,
+    kind: &InstKind,
+    holds: &impl Fn(VarId) -> bool,
+) -> bool {
     let reads = kind.operands().into_iter().any(holds);
     !reads
         || match kind {
@@ -1226,6 +1237,7 @@ fn reads_only(shape: &FnShape<'_>, kind: &InstKind, holds: &impl Fn(VarId) -> bo
                 (elems.iter().enumerate()).all(|(i, e)| !holds(*e) || shape.is_starred(*dst, i))
             }
             InstKind::Call {
+                callee_var,
                 callee,
                 args,
                 kwargs,
@@ -1236,6 +1248,7 @@ fn reads_only(shape: &FnShape<'_>, kind: &InstKind, holds: &impl Fn(VarId) -> bo
                     "len" | "sorted" | "list" | "tuple" | "set" | "frozenset" | "iter"
                 ) && args.len() == 1
                     && kwargs.is_empty()
+                    && is_builtin_load(ir, shape, *callee_var, callee)
             }
             other => matches!(
                 other,
@@ -1244,12 +1257,37 @@ fn reads_only(shape: &FnShape<'_>, kind: &InstKind, holds: &impl Fn(VarId) -> bo
         }
 }
 
-/// The factory's parameters guarding a store of the hook `shape` ([`MadeHook::false_params`]):
-/// a branch on the closure cell of one (`if cache:`) whose true way reaches a store that the
-/// hook reaches no other way. `None` when the hook stores anything with every such parameter
-/// false: a store of a name, an attribute, or an item, `setattr` or `delattr`, or a method
-/// putting entries into a mapping.
-fn store_guards(shape: &FnShape<'_>, param_of: impl Fn(&str) -> Option<u8>) -> Option<Vec<u8>> {
+/// Whether the callee value `callee_var` of a call spelled `callee` is a global load of the real
+/// builtin of that name: not a parameter or a local of the name, nor a name the module rebinds.
+fn is_builtin_load(
+    ir: &ModuleIr,
+    shape: &FnShape<'_>,
+    callee_var: Option<VarId>,
+    callee: &str,
+) -> bool {
+    let constants = &ir.constants;
+    !constants.dynamic
+        && !constants.shadowed.contains(callee)
+        && matches!(
+            callee_var.and_then(|v| shape.inst(shape.copy_root(v))).map(|i| &i.kind),
+            Some(InstKind::LoadGlobal { name, is_lazy_import: false, .. }) if name == callee
+        )
+}
+
+/// The most factory parameters a hook's store guards may name: every combination of them is
+/// decided at the factory ([`MadeHook::storing`]).
+const MAX_GUARDS: usize = 6;
+
+/// The factory's parameters guarding a store of the hook `shape` ([`MadeHook::guards`]) and
+/// the combinations of them that reach a store ([`MadeHook::storing`]): a guard is a branch on
+/// the closure cell of a parameter (`if cache:`), whose true way is cut when the parameter is
+/// not among the open ones. `None` when the hook stores anything with every guard closed (a
+/// store of a name, an attribute, or an item, `setattr` or `delattr`, or a method putting
+/// entries into a mapping), or has more than [`MAX_GUARDS`] guards.
+fn store_guards(
+    shape: &FnShape<'_>,
+    param_of: impl Fn(&str) -> Option<u8>,
+) -> Option<(Vec<u8>, Vec<u32>)> {
     let f = shape.f;
     let guard = |b: BlockId| match f.block(b).terminator {
         Terminator::Branch { cond, then_bb, .. } => {
@@ -1270,12 +1308,21 @@ fn store_guards(shape: &FnShape<'_>, param_of: impl Fn(&str) -> Option<u8>) -> O
             kind => kind.dst().is_none() && !matches!(kind, InstKind::ExitWith { .. }),
         })
     };
-    // Whether the hook may store with the guards of every parameter but `open` false.
-    let may_store = |open: Option<u8>| {
+    let mut params: Vec<u8> = (shape.rpo().iter())
+        .filter_map(|b| Some(guard(*b)?.0))
+        .collect();
+    params.sort_unstable();
+    params.dedup();
+    (params.len() <= MAX_GUARDS).then_some(())?;
+    // Whether the hook may store with the guards of the parameters in `open` taken.
+    let may_store = |open: u32| {
         let budget = Budget::of_function("heki_effect::resolver::getattr_exports::store_guards", f);
         let next = |b: BlockId, out: &mut Vec<BlockId>| {
             let cut = guard(b)
-                .filter(|(p, _)| Some(*p) != open)
+                .filter(|(p, _)| {
+                    let at = params.iter().position(|q| q == p);
+                    at.is_none_or(|at| open & (1 << at) == 0)
+                })
                 .map(|(_, then)| then);
             out.extend(shape.succs(b).filter(|s| Some(*s) != cut));
         };
@@ -1291,16 +1338,13 @@ fn store_guards(shape: &FnShape<'_>, param_of: impl Fn(&str) -> Option<u8>) -> O
             Answer::Known(None)
         )
     };
-    if may_store(None) {
+    if may_store(0) {
         return None;
     }
-    let mut params: Vec<u8> = (shape.rpo().iter())
-        .filter_map(|b| Some(guard(*b)?.0))
+    let storing = (0..1u32 << params.len())
+        .filter(|open| may_store(*open))
         .collect();
-    params.sort_unstable();
-    params.dedup();
-    params.retain(|p| may_store(Some(*p)));
-    Some(params)
+    Some((params, storing))
 }
 
 /// The hook a module's call of a factory makes ([`ProjectDecls::served_by_getattr`]): the
@@ -1324,13 +1368,21 @@ impl<'p> Instance<'p> {
                 ConstLiteral::None | ConstLiteral::Bool(false) | ConstLiteral::Int(0)
             )
         };
-        let guarded = (hook.false_params.iter()).all(|p| match bound(made, p) {
-            Bound::Arg(HookArg::Literal(literal)) | Bound::Default(Some(literal)) => {
-                false_literal(literal)
-            }
-            _ => false,
-        });
-        guarded.then_some(())?;
+        // The guards the call does not bind to a false literal are open: no combination of
+        // them may reach a store.
+        let open = (hook.guards.iter().enumerate())
+            .filter(|(_, p)| match bound(made, p) {
+                Bound::Arg(HookArg::Literal(literal)) | Bound::Default(Some(literal)) => {
+                    !false_literal(literal)
+                }
+                _ => true,
+            })
+            .fold(0u32, |mask, (i, _)| mask | (1 << i));
+        (hook
+            .storing
+            .iter()
+            .all(|combination| combination & open != *combination))
+        .then_some(())?;
         let table = match &hook.table {
             Some((param, serves)) => match bound(made, param) {
                 Bound::Arg(HookArg::Global(name)) => {

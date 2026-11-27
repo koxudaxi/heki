@@ -484,7 +484,7 @@ what a key gets (`KeyServes`: the value, or what calling it gives, also through 
 the factory's module as above), what the literal names the hook decides get, and the factory's
 parameters guarding a store of the hook (`if cache: setattr(module, name, value)`: a branch on
 the cell of a parameter whose true way reaches a store, `setattr`, `delattr`, or a method
-putting entries into a mapping, which the hook reaches no other way; `MadeHook::false_params`).
+putting entries into a mapping, which the hook reaches no other way; `MadeHook::guards`, `MadeHook::storing`).
 A hook that stores anything with those parameters false, a table the factory or a function
 nested in it uses other than by reading it (a test, an item, `get`, `keys`, `values`, `items`,
 unpacking it into a display, `len` and the like), or a hook reading two parameters' tables gets
