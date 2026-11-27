@@ -2445,7 +2445,10 @@ fn steps_method_lookups() -> Vec<Step> {
     ]
 }
 
-const XN_CORE: &str = "class Notes:\n    def preview(self) -> int:\n        return 1\n\n\ndef prepare(notes: Notes) -> int:\n    return notes.preview()\n";
+const XN_BASE: &str = "class Root:\n    pass\n";
+const XN_BASE_NEW: &str =
+    "class Root:\n    def __new__(cls):\n        return object.__new__(cls)\n";
+const XN_CORE: &str = "from pkg.xn_base import Root\n\n\nclass Notes(Root):\n    def preview(self) -> int:\n        return 1\n\n\ndef prepare(notes: Notes) -> int:\n    return notes.preview()\n";
 const XN_EXACT: &str = "from pkg.xn_core import Notes, prepare\n\n\nasync def concrete() -> int:\n    return prepare(Notes())\n";
 const XN_OPEN: &str = "from pkg.xn_core import Notes, prepare\n\n\nasync def from_argument(notes: Notes) -> int:\n    return prepare(notes)\n";
 const XN_GATE: &str = "import time\n\nfrom pkg.xn_core import Notes, prepare\n\n\nclass Gate(Notes):\n    def preview(self) -> int:\n        time.sleep(1)\n        return 1\n\n\nasync def gated() -> int:\n    return prepare(Gate())\n";
@@ -2453,12 +2456,14 @@ const XN_GATE: &str = "import time\n\nfrom pkg.xn_core import Notes, prepare\n\n
 /// A subclass in another module overriding a method a helper calls on its parameter: a caller
 /// passing an instance of exactly the base class runs only the base's implementation, a caller
 /// passing its own parameter or an instance of the subclass may run the subclass's
-/// (`EffectSummary::provided_effects`), as the subclass is added and removed.
+/// (`EffectSummary::provided_effects`), as the subclass is added and removed. A `__new__` added
+/// to a base in a third module makes the construction no exact instance.
 fn steps_exact_instances() -> Vec<Step> {
     vec![
         Step::new(
             "a helper calls a method on its parameter, called with an exact instance and with a parameter",
             vec![
+                Action::Create("pkg/xn_base.py", XN_BASE.to_owned()),
                 Action::Create("pkg/xn_core.py", XN_CORE.to_owned()),
                 Action::Create("pkg/xn_exact.py", XN_EXACT.to_owned()),
                 Action::Create("pkg/xn_open.py", XN_OPEN.to_owned()),
@@ -2480,6 +2485,20 @@ fn steps_exact_instances() -> Vec<Step> {
             ("pkg/xn_exact.py", "EFF101 [heuristic]"),
             ("pkg/xn_exact.py", "EFF101"),
         ]),
+        Step::new(
+            "the base of the class defines `__new__`",
+            vec![save("pkg/xn_base.py", XN_BASE_NEW)],
+        )
+        .present(&[
+            ("pkg/xn_exact.py", "EFF101 [heuristic]"),
+            ("pkg/xn_open.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "the base defines no `__new__` again",
+            vec![save("pkg/xn_base.py", XN_BASE)],
+        )
+        .present(&[("pkg/xn_open.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/xn_exact.py", "EFF101 [heuristic]")]),
         Step::new(
             "the subclass is deleted",
             vec![Action::Delete("pkg/xn_gate.py")],
