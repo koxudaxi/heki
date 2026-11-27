@@ -13362,7 +13362,8 @@ It does not report:
 - a CLI boundary: a clause that reports the error (`print(..., file=sys.stderr)`,
   `sys.stderr.write`, `traceback.print_exc()`, or a `logging` call with the exception:
   `logger.exception(...)`, `exc_info=...`, or the exception as an argument) and returns an
-  integer constant, an exit status, on every `return`;
+  integer constant, an exit status, on every `return` (a literal, or a module-level name bound
+  once to an integer);
 - a `try` body whose calls reach no call cycle, or reach one only through a call heki cannot
   resolve, a coroutine only created, or a function run on another thread
   (`asyncio.to_thread`, `loop.run_in_executor`);

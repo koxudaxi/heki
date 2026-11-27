@@ -1025,6 +1025,12 @@ const ORDER_USE: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order
 const ORDER_USE_SORTED: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d), sort_keys=True))\n";
 // A clause around a call into another module (`EFF114`): the call cycle closes and opens there.
 const REC_HANDLER: &str = "from pkg.rec_walk import descend\n\n\ndef visit(node):\n    return descend(node)\n\n\ndef measure(node):\n    try:\n        return visit(node)\n    except Exception:\n        return 0\n";
+// A handler reporting the error and returning its exit status through a constant of another
+// module (`EFF114`): the status is an integer, a string, or bound twice.
+const REC_STATUS_CODES: &str = "FAILED = 4\n";
+const REC_STATUS_CODES_TEXT: &str = "FAILED = \"4\"\n";
+const REC_STATUS_CODES_REBOUND: &str = "FAILED = 4\nFAILED = 5\n";
+const REC_STATUS: &str = "import sys\n\nfrom pkg.rec_status_codes import FAILED\n\n\ndef visit(node):\n    return sum(visit(child) for child in node)\n\n\ndef main(node):\n    try:\n        visit(node)\n        return 0\n    except Exception as error:\n        print(error, file=sys.stderr)\n        return FAILED\n";
 const REC_WALK: &str = "def descend(node):\n    return len(node)\n";
 const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):\n    return sum(rec_handler.visit(child) for child in node)\n";
 // A function of another module handed to a thread and to `filter` (`EFF115`): it changes between
@@ -1187,6 +1193,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/order_use.py", ORDER_USE),
         ("pkg/rec_handler.py", REC_HANDLER),
         ("pkg/rec_walk.py", REC_WALK),
+        ("pkg/rec_status.py", REC_STATUS),
+        ("pkg/rec_status_codes.py", REC_STATUS_CODES),
         ("pkg/coro_jobs.py", CORO_JOBS),
         ("pkg/coro_use.py", CORO_USE),
         ("pkg/locked_base.py", LOCKED_BASE),
@@ -5894,6 +5902,26 @@ fn steps_eff114() -> Vec<Step> {
             vec![save("pkg/rec_walk.py", REC_WALK)],
         )
         .absent(&[("pkg/rec_handler.py", "EFF114")]),
+        Step::new(
+            "the exit status constant of another module becomes a string",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES_TEXT)],
+        )
+        .present(&[("pkg/rec_status.py", "EFF114")]),
+        Step::new(
+            "it is an integer again",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES)],
+        )
+        .absent(&[("pkg/rec_status.py", "EFF114")]),
+        Step::new(
+            "it is bound twice",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES_REBOUND)],
+        )
+        .present(&[("pkg/rec_status.py", "EFF114")]),
+        Step::new(
+            "it is bound once again",
+            vec![save("pkg/rec_status_codes.py", REC_STATUS_CODES)],
+        )
+        .absent(&[("pkg/rec_status.py", "EFF114")]),
     ]
 }
 
