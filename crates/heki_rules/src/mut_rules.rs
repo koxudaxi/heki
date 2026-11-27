@@ -3305,31 +3305,30 @@ pub(crate) fn mut201(
             "write-owners",
             "write-owners.targets",
         )?;
-        let allowance = Allowance::new(
-            &AllowanceKeys {
-                allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
-                forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
-                exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
-            },
-            Overrides::of(rule.include_overrides, cx, &all_classes),
-        )?
-        .with_attribution(attribution(
-            rule.attribution.as_deref(),
-            "write-owners",
-            &rule.name,
-        )?)
-        .with_own_receiver(allows_own_receiver(
-            rule.own_receiver.as_deref(),
-            "write-owners",
-            &rule.name,
-        )?)
-        .with_protocols(named_protocols(
-            cx,
-            &all_classes,
-            (&rule.allowed_protocols, rule.protocol_subclasses),
-            "write-owners.allowed-protocols",
-        )?)
-        .with_escaping(escaping_for(cx, report_unresolved, &escaping));
+        let keys = AllowanceKeys {
+            allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+            forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+            exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+        };
+        let overrides = Overrides::of(rule.include_overrides, cx, &all_classes);
+        let allowance = Allowance::new(&keys, overrides)?
+            .with_attribution(attribution(
+                rule.attribution.as_deref(),
+                "write-owners",
+                &rule.name,
+            )?)
+            .with_own_receiver(allows_own_receiver(
+                rule.own_receiver.as_deref(),
+                "write-owners",
+                &rule.name,
+            )?)
+            .with_protocols(named_protocols(
+                cx,
+                &all_classes,
+                (&rule.allowed_protocols, rule.protocol_subclasses),
+                "write-owners.allowed-protocols",
+            )?)
+            .with_escaping(escaping_for(cx, report_unresolved, &escaping));
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;

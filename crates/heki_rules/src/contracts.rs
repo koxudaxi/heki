@@ -764,11 +764,8 @@ impl Declared {
             let forbidden = forbidden_effects(boundary)?;
             if BLOCKING_EFFECTS.iter().all(|e| forbidden.contains(e)) {
                 let overrides = Overrides::of(boundary.include_overrides, cx, &all_classes);
-                blocking_scopes.extend(scope_entries(
-                    &boundary.scopes,
-                    "effect-boundaries.scopes",
-                    overrides,
-                )?);
+                let context = "effect-boundaries.scopes";
+                blocking_scopes.extend(scope_entries(&boundary.scopes, context, overrides)?);
             }
         }
         Ok(Self {
@@ -969,14 +966,13 @@ impl<'c> ContractRoles<'c> {
             .call_owners
             .iter()
             .map(|rule| {
-                let callers = Allowance::new(
-                    &AllowanceKeys {
-                        allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
-                        forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
-                        exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
-                    },
-                    Overrides::of(rule.include_overrides, cx, &all_classes),
-                )?;
+                let keys = AllowanceKeys {
+                    allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
+                    forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
+                    exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
+                };
+                let overrides = Overrides::of(rule.include_overrides, cx, &all_classes);
+                let callers = Allowance::new(&keys, overrides)?;
                 let targets = rule
                     .targets
                     .iter()
@@ -990,13 +986,10 @@ impl<'c> ContractRoles<'c> {
             .iter()
             .map(|rule| {
                 let overrides = Overrides::of(rule.include_overrides, cx, &all_classes);
+                let callees = "effect-boundaries.allowed-callees";
                 Ok((
                     scope_entries(&rule.scopes, "effect-boundaries.scopes", overrides)?,
-                    scope_entries(
-                        &rule.allowed_callees,
-                        "effect-boundaries.allowed-callees",
-                        overrides,
-                    )?,
+                    scope_entries(&rule.allowed_callees, callees, overrides)?,
                 ))
             })
             .collect::<Result<_, RuleConfigError>>()?;
