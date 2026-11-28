@@ -3680,12 +3680,14 @@ import-probes = "report"
 | `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners` (also with an argument list). An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
 | `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
+| `read-universe` | `[]` | `Class.attr` entries: a reached read of one that `allow-reads` does not name is reported, once per read `Class.attr`, in every form `reads-targets` follows. |
+| `allow-reads` | `[]` | `Class.attr` reads the boundary allows, exempt from `read-targets` too. Needs `read-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `include-overrides` | `false` | `true`: a `scopes` or `allowed-callees` entry naming a method (`Class.method`, `module:Class.method`) also names the methods of that name in the project subclasses of `Class`, with the scopes nested in them. See [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time, and a read of one `read-targets` or `read-universe` names on an object of unknown class, or under a name computed at run time (`getattr(x, name)`, a `__dict__` key heki cannot read, the `__dict__` used whole) on an object that may be of one of their classes. A call that may run more functions than heki follows (eight) is judged when `allowed-callees` names every one of them. Each kind is one report per scope function, at the first one with its chain. |
 | `message` | none | The help of every report of the boundary. |
 | `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 
@@ -5743,7 +5745,8 @@ A report of a contract rule gives, in `contract_locations` of the JSON diagnosti
 configuration defines each contract it is of, then the entry of the contract the report is
 about, when there is one. For `effect-boundaries` (`EFF201`), `invalidation` (`MUT208`), and
 `import-boundaries` (`IMP201`), that is the entry the access matched, glob or module part
-included: the `call-targets`, `read-targets`, `write-targets`, or `write-universe` entry, or the
+included: the `call-targets`, `read-targets`, `write-targets`, `write-universe`, or
+`read-universe` entry, or the
 `forbid` token, of a boundary; the `targets` entry of an invalidation contract; the
 `forbidden-imports` pattern of a forbidden import, or the `relative-imports` one of a module
 imported by its full name. A report of an access several entries match points at the first,
@@ -10232,6 +10235,10 @@ count for a read.
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
   boundary. Without `allow-writes`, the boundary allows no write of the universe.
+- `read-universe` with `allow-reads` does the same for reads: a reached read of a `read-universe`
+  entry that no `allow-reads` entry names is reported, in every form `reads-targets` follows,
+  and `allow-reads` also exempts reads from `read-targets`. A read of an object of another class
+  is no read of the universe.
 - An entry target (`Class.attr["key"]`, in `write-targets`, `write-universe`, or `allow-writes`)
   also matches the writes a store operation makes with the key a call passes it: `set_extra(field,
   "init", v)`, where `set_extra` writes `field.extras[key]`, writes `Field.extras["init"]`,
@@ -10282,9 +10289,19 @@ heki resolves to no function (`HANDLERS[kind](https://heki.koxudaxi.dev/rules/..
 called), a function it does not model (`eval`, a body too large) or whose body only a stub
 declares, and a write of an attribute `write-targets` or `write-universe` names on an object of
 unknown class or under a name computed at run time (`thing.required = True` of an unannotated
-`thing`, `setattr(thing, name, v)`); a class's own initialization is none, so constructing an
-object whose initializer runs `setattr(self, name, v)`, itself or in a helper it hands `self` to,
-is not reported. Each kind is reported once per scope function, at the call
+`thing`, `setattr(thing, name, v)`), and a read of an attribute `read-targets` (with
+`reads-targets`) or `read-universe` names on an object of unknown class (`other.debug` of an
+unannotated `other`; a glob matches there the names its classes have from project code, as for
+`MUT206`), or under a name heki cannot read on an object that may be of one of their classes or
+of unknown class (`getattr(config, name)`, `hasattr(config, name)`, `config.__dict__[name]`, and
+the `__dict__` or `vars(config)` used whole: anything but a read or write of one key, an `in`
+test, or iterating its keys); a class's own initialization is none, so constructing an
+object whose initializer runs `setattr(self, name, v)` or `getattr(self, name)`, itself or in a
+helper it hands `self` to, is not reported. A call that may run more functions than heki follows
+(eight: the implementations of a method, the getters of a property, or the values of a table or
+a name, `for step in STEPS: step.run(state)` over a table of many steps) is judged when
+`allowed-callees` names every one of them, since the search would not enter them; one value
+outside `allowed-callees`, or a value heki cannot list, keeps the call unresolved. Each kind is reported once per scope function, at the call
 in the scope function starting the shortest chain to the first one, with the chain; calls and
 writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
 cannot see, so no report does not mean the scope stays inside the boundary.
@@ -10384,11 +10401,16 @@ No automatic fix.
     `allow-writes` names them; the diagnostic target is the entry, with a glob attribute replaced
     by the written one (`pass:DataModel.fields` for `DataModel.*`).
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
+  - `read-universe`: `Class.attr` entries whose reached reads are reported unless `allow-reads`
+    names them; the diagnostic target is the entry, with a glob attribute replaced by the read
+    one (`pass:reads:Config.debug` for `Config.*`).
+  - `allow-reads`: `Class.attr` reads the boundary allows (needs `read-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
   - `unresolved`: `"ignore"` (default) or `"report"`: whether what the boundary cannot judge in
     the reach is reported (diagnostic targets `checks:unresolved-calls`,
-    `checks:unresolved-writes:required`).
+    `checks:unresolved-writes:required`, `checks:unresolved-reads:debug`, and
+    `checks:unresolved-reads:*` for a name heki cannot read).
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a
     reference handing a `call-targets` entry on, with `"calls-and-bases"` a class statement
     naming one among its bases, and with `"reads"` any other use of its value, counts for

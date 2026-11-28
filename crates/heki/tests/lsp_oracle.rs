@@ -3699,6 +3699,74 @@ fn steps_glob_members() -> Vec<Step> {
     ]
 }
 
+/// An effect boundary reporting what it cannot judge, with a `read-universe` and
+/// `allowed-callees`: a call through a table of more functions than heki follows is judged
+/// while `allowed-callees` names each of them (`heki_effect::Blind::Unresolved::values`, kept
+/// with the calling file), so the table's module gaining a value from elsewhere reports the
+/// call; a helper in another file reading a universe object's attribute under a computed name
+/// (`EffectSummary::computed_reads`) reports the scope function calling it.
+fn steps_boundary_reads_and_callees() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"glue\"\nscopes = [\"pkg.glue:*\"]\nread-universe = [\"Knob.*\"]\nallowed-callees = [\"pkg.knob_steps:*\"]\nunresolved = \"report\"\n"
+    );
+    let model = "class Knob:\n    def __init__(self) -> None:\n        self.level = 0\n";
+    let steps: String = (0..10)
+        .map(|k| format!("def f{k}(knob):\n    return None\n\n\n"))
+        .collect();
+    let table = |extra: &str| {
+        let names: Vec<String> = (0..10).map(|k| format!("\"f{k}\": f{k}")).collect();
+        format!(
+            "from pkg.knob_steps import {}\n{extra}\nTABLE = {{{}}}\n",
+            (0..10)
+                .map(|k| format!("f{k}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            names.join(", ")
+        )
+    };
+    let other = table("from pkg.knob_other import g0 as f9\n");
+    let peek = |body: &str| format!("def peek(knob, key):\n    return {body}\n");
+    let glue = "from pkg.knob_model import Knob\nfrom pkg.knob_peek import peek\nfrom pkg.knob_table import TABLE\n\n\ndef run(knob, kind):\n    TABLE[kind](knob)\n\n\ndef look(knob: Knob, key: str):\n    return peek(knob, key)\n";
+    vec![
+        Step::new(
+            "a table of ten allowed callees, and a helper reading nothing",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/knob_model.py", model.to_owned()),
+                Action::Create("pkg/knob_steps.py", steps),
+                Action::Create(
+                    "pkg/knob_other.py",
+                    "def g0(knob):\n    return None\n".to_owned(),
+                ),
+                Action::Create("pkg/knob_table.py", table("")),
+                Action::Create("pkg/knob_peek.py", peek("None")),
+                Action::Create("pkg/glue.py", glue.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/glue.py", "EFF201")]),
+        Step::new(
+            "the table's module binds one value to a function of another module",
+            vec![save("pkg/knob_table.py", &other)],
+        )
+        .present(&[("pkg/glue.py", "EFF201")]),
+        Step::new(
+            "it binds the allowed function again",
+            vec![save("pkg/knob_table.py", &table(""))],
+        )
+        .absent(&[("pkg/glue.py", "EFF201")]),
+        Step::new(
+            "the helper reads the object under a computed name",
+            vec![save("pkg/knob_peek.py", &peek("getattr(knob, key)"))],
+        )
+        .present(&[("pkg/glue.py", "EFF201")]),
+        Step::new(
+            "the helper reads nothing again",
+            vec![save("pkg/knob_peek.py", &peek("None"))],
+        )
+        .absent(&[("pkg/glue.py", "EFF201")]),
+    ]
+}
+
 /// Step 5c: environment reads below an effect boundary. No summary records them, so the report
 /// of the scope function above, and of the module body the boundary names, follows the helper's
 /// own accesses: a read of `sys.platform`, a call of `os.getenv` (whose call site the report's
@@ -8549,6 +8617,7 @@ sessions!(editing, Session::start, {
     environment: steps_environment,
     outside_targets: steps_outside_targets,
     glob_members: steps_glob_members,
+    boundary_reads_and_callees: steps_boundary_reads_and_callees,
     keys_fresh_strict: steps_keys_fresh_strict,
     files: steps_files,
     configuration: steps_configuration,

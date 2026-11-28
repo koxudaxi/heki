@@ -7015,7 +7015,7 @@ impl ProjectDecls {
         let mro = self.declared_mro(&class);
         let found = self.definitions_along(&mro, &class, method, skip_self, !skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
-            return Callee::TooMany;
+            return Callee::TooMany(Some(found.into()));
         }
         if found.is_empty() {
             return self
@@ -7329,7 +7329,7 @@ impl ProjectDecls {
         let found = self.definitions(&class, attr, skip_self, overrides, is_getter);
         match found.len() {
             0 => None,
-            n if n > CHA_CANDIDATE_LIMIT => Some(Callee::TooMany),
+            n if n > CHA_CANDIDATE_LIMIT => Some(Callee::TooMany(Some(found.into()))),
             _ => Some(Callee::Project(found, true)),
         }
     }
@@ -9217,7 +9217,7 @@ fn definitions_bound_again<'i>(
         let Some(mut objects) = objects else { continue };
         objects.sort();
         objects.dedup();
-        if (1..=crate::types::MAX_NAMED).contains(&objects.len()) {
+        if !objects.is_empty() {
             out.push((*name, objects));
         }
     }
@@ -10862,7 +10862,7 @@ fn union_targets(
     let mut keys: Vec<FuncKey> = Vec::new();
     let mut binds = None;
     let mut external: Option<String> = None;
-    for class in classes {
+    for (i, class) in classes.iter().enumerate() {
         match each(class) {
             Callee::Project(found, b) => {
                 // A method call on an instance binds the receiver (a static method's binding
@@ -10880,13 +10880,24 @@ fn union_targets(
                 }
                 external = Some(symbol);
             }
-            Callee::TooMany => return Callee::TooMany,
+            // Past the cap: the call runs too many functions whatever the other classes give,
+            // and they only tell whether heki lists them all.
+            too_many @ Callee::TooMany(_) => {
+                let rest = classes[i + 1..].iter().filter_map(|c| match each(c) {
+                    Callee::Unresolved if absent(c) => None,
+                    callee => Some(callee),
+                });
+                let listed = external
+                    .is_none()
+                    .then(|| listed_rest(keys, std::iter::once(too_many).chain(rest)));
+                return Callee::TooMany(listed.flatten());
+            }
             Callee::Unresolved if absent(class) => {}
             Callee::Unresolved => return Callee::Unresolved,
         }
     }
     match (binds, external) {
-        (Some(_), None) if keys.len() > CHA_CANDIDATE_LIMIT => Callee::TooMany,
+        (Some(_), None) if keys.len() > CHA_CANDIDATE_LIMIT => Callee::TooMany(Some(keys.into())),
         (Some(b), None) => Callee::Project(keys, b),
         (None, Some(symbol)) => Callee::External(symbol),
         _ => Callee::Unresolved,
@@ -10897,14 +10908,46 @@ fn union_targets(
 /// on one): the project functions of all, when they bind the receiver alike, or the one external
 /// function they all resolve it to; anything else leaves the call unresolved.
 fn named_targets(fqns: &[String], each: impl Fn(&str) -> Callee) -> Callee {
-    let mut out: Option<Callee> = None;
-    for fqn in fqns {
-        match join_either(out, each(fqn)) {
+    join_all(None, fqns.iter().map(|f| each(f))).unwrap_or(Callee::Unresolved)
+}
+
+/// [`join_either`] of `out` and each of `callees` in turn, up to the first that ends the join.
+/// A join ending past [`CHA_CANDIDATE_LIMIT`] functions still lists the rest
+/// ([`listed_rest`]).
+fn join_all(mut out: Option<Callee>, mut callees: impl Iterator<Item = Callee>) -> Option<Callee> {
+    while let Some(callee) = callees.next() {
+        match join_either(out, callee) {
             Ok(joined) => out = Some(joined),
-            Err(targets) => return targets,
+            Err(Callee::TooMany(Some(keys))) => {
+                return Some(Callee::TooMany(listed_rest(keys.to_vec(), callees)));
+            }
+            Err(targets) => return Some(targets),
         }
     }
-    out.unwrap_or(Callee::Unresolved)
+    out
+}
+
+/// The project functions a call past [`CHA_CANDIDATE_LIMIT`] functions may run ([`Callee::TooMany`]):
+/// `keys`, and those of each of `rest`, the values not joined yet; `None` once one of them is not
+/// a project function heki lists (a library function, a value heki does not resolve). How the
+/// functions bind the receiver does not matter here: the list names what the call may run.
+fn listed_rest(
+    mut keys: Vec<FuncKey>,
+    rest: impl Iterator<Item = Callee>,
+) -> Option<Arc<[FuncKey]>> {
+    for callee in rest {
+        let more: &[FuncKey] = match &callee {
+            Callee::Project(more, _) => more,
+            Callee::TooMany(Some(more)) => more,
+            Callee::TooMany(None) | Callee::External(_) | Callee::Unresolved => return None,
+        };
+        for k in more {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+    }
+    Some(keys.into())
 }
 
 /// The targets of a call that may run what `out` resolves (the objects before, if any) or what
@@ -10921,7 +10964,7 @@ fn join_either(out: Option<Callee>, callee: Callee) -> Result<Callee, Callee> {
                 }
             }
             if keys.len() > CHA_CANDIDATE_LIMIT {
-                return Err(Callee::TooMany);
+                return Err(Callee::TooMany(Some(keys.into())));
             }
             Ok(Callee::Project(keys, binds))
         }
@@ -10983,7 +11026,10 @@ pub enum Callee {
     /// Project functions; `true` when the receiver binds to the callee's first parameter.
     Project(Vec<FuncKey>, bool),
     External(String),
-    TooMany,
+    /// More project functions than [`CHA_CANDIDATE_LIMIT`]: every one of them when heki lists
+    /// them all, `None` when a value is not one heki lists (a library function, a value it does
+    /// not resolve, a class past [`DISPATCH_CLASS_LIMIT`]).
+    TooMany(Option<Arc<[FuncKey]>>),
     Unresolved,
 }
 
@@ -11734,7 +11780,7 @@ impl<'a> TypeCtx<'a> {
         if classes.len() > DISPATCH_CLASS_LIMIT {
             return (classes.iter())
                 .any(|c| self.project.class_aliases(c, method).is_some())
-                .then_some(Callee::TooMany);
+                .then_some(Callee::TooMany(None));
         }
         let found: Vec<Option<ClassAlias<'_>>> = classes
             .iter()
@@ -11743,16 +11789,16 @@ impl<'a> TypeCtx<'a> {
         if found.iter().all(Option::is_none) {
             return None;
         }
-        let mut out: Option<Callee> = found
+        let out: Option<Callee> = found
             .iter()
             .any(|alias| alias.as_ref().is_none_or(|a| a.defined.is_some()))
             .then(|| self.defined_method_targets(Some(recv), method));
         let partials: Vec<&PartialAttr> =
             found.iter().flatten().filter_map(|a| a.partial).collect();
         let names = found.into_iter().flatten().flat_map(|alias| alias.names);
-        for (named, is_static) in names {
+        let named = names.map(|(named, is_static)| {
             let named = self.project.object_named(named);
-            let callee = match self.called_symbol(&named) {
+            match self.called_symbol(&named) {
                 Symbol::Function(key, _) if on_instance && !is_static => {
                     Callee::Project(vec![key], true)
                 }
@@ -11760,14 +11806,10 @@ impl<'a> TypeCtx<'a> {
                 // not (a builtin).
                 Symbol::External if on_instance && !is_static => Callee::Unresolved,
                 _ => self.call_targets(Some(Recv::Ref(&named))),
-            };
-            match join_either(out, callee) {
-                Ok(joined) => out = Some(joined),
-                Err(targets) => return Some(targets),
             }
-        }
-        for partial in partials {
-            let callee = match self.partial_attr_callable(partial, on_instance) {
+        });
+        let partial = partials.into_iter().map(|partial| {
+            match self.partial_attr_callable(partial, on_instance) {
                 Some(callable) => match self.call_targets(Some(Recv::Ref(&callable))) {
                     // The keywords it holds may decide what a library call does, which the
                     // catalog reads from the arguments the call shows.
@@ -11775,13 +11817,9 @@ impl<'a> TypeCtx<'a> {
                     callee => callee,
                 },
                 None => Callee::Unresolved,
-            };
-            match join_either(out, callee) {
-                Ok(joined) => out = Some(joined),
-                Err(targets) => return Some(targets),
             }
-        }
-        out
+        });
+        join_all(out, named.chain(partial))
     }
 
     /// The classes whose bodies may bind `method` for a call on `recv`, and whether the call is

@@ -3272,7 +3272,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         let targets = cx
             .project
             .method_targets(&o.class, op.in_place_method(), false, cx.kb);
-        matches!(targets, Callee::Project(..) | Callee::TooMany)
+        matches!(targets, Callee::Project(..) | Callee::TooMany(_))
     }
 
     /// What the operator `op` gives on the operands `lhs` and `rhs`, when the catalog types the

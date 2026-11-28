@@ -150,7 +150,7 @@ impl TypeCtx<'_> {
             let symbol = match callee {
                 Callee::External(symbol) => symbol,
                 Callee::Project(keys, _) => return project_items(&keys, returned),
-                Callee::TooMany | Callee::Unresolved => return Err(NoItems::NotFollowed),
+                Callee::TooMany(_) | Callee::Unresolved => return Err(NoItems::NotFollowed),
             };
             let entry = self.catalog(&symbol).ok_or(NoItems::Unsized)?;
             let Some(of) = entry.result_of else {

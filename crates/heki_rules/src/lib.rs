@@ -1006,6 +1006,8 @@ pub enum RuleConfigError {
     },
     #[error("effect-boundaries `{0}` sets `allow-writes` but no `write-universe`")]
     AllowWritesWithoutUniverse(String),
+    #[error("effect-boundaries `{0}` sets `allow-reads` but no `read-universe`")]
+    AllowReadsWithoutUniverse(String),
     #[error(
         "effect-boundaries `{0}` sets `import-probes = \"report\"` but does not forbid `reads-environment`"
     )]
@@ -1138,6 +1140,10 @@ impl Explain for RuleConfigError {
             Self::AllowWritesWithoutUniverse(name) => (
                 problem.help("add `write-universe`, the attributes whose writes the boundary judges; `allow-writes` lists the ones of them it allows"),
                 boundary(name, "allow-writes", None),
+            ),
+            Self::AllowReadsWithoutUniverse(name) => (
+                problem.help("add `read-universe`, the attributes whose reads the boundary judges; `allow-reads` lists the ones of them it allows"),
+                boundary(name, "allow-reads", None),
             ),
             Self::ImportProbesWithoutEnvironment(name) => (
                 problem.help("add `reads-environment` to `forbid`, or remove `import-probes`"),

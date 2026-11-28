@@ -382,6 +382,16 @@ fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key
                 Attribute,
             ),
             (
+                "effect-boundaries.read-universe",
+                &r.read_universe[..],
+                Attribute,
+            ),
+            (
+                "effect-boundaries.allow-reads",
+                &r.allow_reads[..],
+                Attribute,
+            ),
+            (
                 "effect-boundaries.read-targets",
                 &r.read_targets[..],
                 Attribute,

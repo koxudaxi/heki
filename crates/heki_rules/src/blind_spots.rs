@@ -133,7 +133,7 @@ impl<'i> BlindSpots<'i> {
                             calls.counts.add(counts);
                             calls.sites.push(site);
                         }
-                        Blind::Unresolved { name, reason } => {
+                        Blind::Unresolved { name, reason, .. } => {
                             let group = by_reason.entry(reason).or_insert(UnresolvedCalls {
                                 function,
                                 path: &file.path,

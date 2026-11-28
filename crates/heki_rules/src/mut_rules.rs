@@ -3634,6 +3634,7 @@ pub(crate) fn mut201(
 // ==================================================================================== MUT205
 
 mod unresolved;
+pub(crate) use unresolved::GlobFamilies;
 
 // ==================================================================================== MUT202
 
@@ -4373,7 +4374,7 @@ impl<'a> Mut202Fn<'a> {
             }),
             Callee::External(sym) => (self.returns.producers.protecting(sym, sym))
                 .and_then(|c| Ro::produced(sym.clone(), c, vec![])),
-            Callee::TooMany | Callee::Unresolved => None,
+            Callee::TooMany(_) | Callee::Unresolved => None,
         }
     }
 

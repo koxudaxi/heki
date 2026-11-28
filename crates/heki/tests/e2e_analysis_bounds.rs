@@ -18,7 +18,8 @@
 //! for many parameters, or from many implementations of one call, and the type expressions aliases
 //! and casts spell, the names a module `__getattr__` serves, and the parameters functions return
 //! through calls of each other, down a long chain, around a cycle, or across many modules, and
-//! the instance a model's `save` hands `super()` through the copies a loop carries.
+//! the instance a model's `save` hands `super()` through the copies a loop carries, and the calls
+//! through hundreds of values an effect boundary allows.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -8186,6 +8187,38 @@ fn class_aliases_past_the_dispatch_limit_run_unknown_code() {
     let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
     assert_eq!(blocking(check(&shape(63))), 2);
     assert_eq!(blocking(check_linear(512, shape)), 0);
+}
+
+/// `n` functions, a dict of them, and a function picking one of them through a chain of `n`
+/// branches before calling it.
+fn allowed_values(n: usize) -> String {
+    let mut out = vec!["class Knob:\n    pass\n".to_owned()];
+    out.extend((0..n).map(|k| format!("\ndef f{k}(knob):\n    return None\n")));
+    let entries: Vec<String> = (0..n).map(|k| format!("\"f{k}\": f{k}")).collect();
+    out.push(format!("\nTABLE = {{{}}}\n", entries.join(", ")));
+    out.push("\ndef run(knob, kind):\n    TABLE[kind](knob)\n".to_owned());
+    out.push("\ndef pick(knob, c):\n    g = f0".to_owned());
+    out.extend((1..n).map(|k| format!("    if c == {k}:\n        g = f{k}")));
+    out.push("    g(knob)\n".to_owned());
+    out.join("\n")
+}
+
+/// A call through a table of `n` functions, and through a name a chain of `n` branches binds to
+/// one of them, under a boundary reporting what it cannot judge with `allowed-callees` naming
+/// every one: a value keeps each function it may be, the call lists them past the cap
+/// (`resolver::CHA_CANDIDATE_LIMIT`), and the walk judges it without entering them.
+#[test]
+fn calls_through_hundreds_of_allowed_values_are_judged() {
+    let found = check_linear(512, |n| {
+        let p = Project::new(&format!("bounds_allowed_values_{n}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"glue\"\nscopes = [\"m:run\", \"m:pick\"]\nread-universe = [\"Knob.*\"]\nallowed-callees = [\"m:f*\"]\nunresolved = \"report\"\n",
+        )
+        .write("m.py", &allowed_values(n));
+        p
+    });
+    assert!(found.is_empty(), "{found:#?}");
 }
 
 /// `n` module lists of a function that does not block, a function choosing one of them through a

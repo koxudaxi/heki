@@ -98,7 +98,7 @@ fn callee(c: &Callee) -> String {
             format!("project {binds} {}", names.join(","))
         }
         Callee::External(s) => format!("external {s}"),
-        Callee::TooMany => "too many".into(),
+        Callee::TooMany(_) => "too many".into(),
         Callee::Unresolved => "unresolved".into(),
     }
 }

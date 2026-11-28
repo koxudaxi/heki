@@ -977,6 +977,22 @@ pub struct UnresolvedAccessSite {
     pub protocol: Option<String>,
 }
 
+/// A read under a name heki cannot read (`EFF201` with `unresolved = "report"`):
+/// `getattr(obj, name)`, `hasattr(obj, name)` or `object.__getattribute__(obj, name)` with a
+/// computed name, a key of `obj.__dict__` or `vars(obj)` heki cannot read, or that mapping used
+/// whole (anything but a read or write of a key, an `in` test, or iterating its keys). A local
+/// fact, never propagated.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ComputedRead {
+    /// A project class (fqn) the object may be an instance of, or the class object of, one read
+    /// per class; `None`: an object of unknown class.
+    pub class: Option<String>,
+    pub kind: ReadKind,
+    pub span: Span,
+    /// Parameters of the reading function the object may be, as itself (bit 0: `self`).
+    pub obj_params: u64,
+}
+
 /// What an [`UnresolvedAccessSite`] does with its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1415,6 +1431,11 @@ pub struct EffectSummary {
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
     /// propagated).
     pub unresolved_access_sites: BTreeSet<UnresolvedAccessSite>,
+    /// The function's own reads under a name heki cannot read, kept while an effect boundary
+    /// reports what it cannot judge of reads (`None` otherwise and for most functions; never
+    /// propagated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computed_reads: Option<Box<BTreeSet<ComputedRead>>>,
     /// The `EFF109` facts: the non-reentrant locks the function takes and the names it may
     /// bind (`None` when it does neither, as most functions; read through
     /// [`Self::lock_facts`]).
@@ -2103,6 +2124,13 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.computed_reads = out.computed_reads.map(|reads| {
+            let without = reads.into_iter().map(|read| ComputedRead {
+                span: Span { start: 0, end: 0 },
+                ..read
+            });
+            Box::new(without.collect())
+        });
         out.unmet_invalidation = out
             .unmet_invalidation
             .into_iter()
@@ -2154,6 +2182,7 @@ impl EffectSummary {
             iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
+            computed_reads: None,
             dispatch: None,
             ..s.clone()
         };

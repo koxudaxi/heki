@@ -133,9 +133,14 @@ pub trait Contracts: Debug + Send + Sync {
     /// its bases (`classes` as for [`Contracts::target_of`]).
     fn names_class(&self, classes: &[ContractClass]) -> bool;
 
-    /// Whether a `read-owners` contract with `unresolved = "report"` names attribute `attr`: a
-    /// read of it on an object of unknown class is an unresolved access (`MUT206`).
+    /// Whether a `read-owners` contract with `unresolved = "report"`, or an effect boundary with
+    /// it judging reads, names attribute `attr`: a read of it on an object of unknown class is
+    /// an unresolved access (`MUT206`, `EFF201`).
     fn unresolved_read(&self, attr: &str) -> bool;
+
+    /// Whether an effect boundary with `unresolved = "report"` judges reads: the summaries then
+    /// keep the reads under a name heki cannot read (`EffectSummary::computed_reads`).
+    fn computed_reads(&self) -> bool;
 
     /// Whether a `call-owners` contract with `unresolved = "report"` names a function, method,
     /// or class whose last name is `name`: a call of a method so named on an object of unknown

@@ -421,6 +421,11 @@ pub struct EffectBoundaryRule {
     pub allow_writes: Vec<String>,
     /// `Class.attr` entries whose writes are reported unless `allow-writes` names them.
     pub write_universe: Vec<String>,
+    /// `Class.attr` reads the boundary allows: every other reached read of `read-universe` (or
+    /// of `read-targets`) is reported.
+    pub allow_reads: Vec<String>,
+    /// `Class.attr` entries whose reads are reported unless `allow-reads` names them.
+    pub read_universe: Vec<String>,
     /// Callees (dotted patterns) whose effects are allowed: paths through them are not
     /// followed.
     pub allowed_callees: Vec<String>,
@@ -435,9 +440,10 @@ pub struct EffectBoundaryRule {
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
     pub import_probes: Option<String>,
     /// `"report"`: also report what the boundary cannot judge in its scopes' reach: a call heki
-    /// cannot resolve, a function it does not model or whose body only a stub declares, and a
-    /// write of an attribute `write-targets` or `write-universe` names on an object of unknown
-    /// class; `"ignore"` (default) does not.
+    /// cannot resolve, a function it does not model or whose body only a stub declares, a write
+    /// of an attribute `write-targets` or `write-universe` names on an object of unknown class,
+    /// and a read of one `read-targets` or `read-universe` names on such an object or under a
+    /// name computed at run time; `"ignore"` (default) does not.
     pub unresolved: Option<String>,
     /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
     /// name places or callees also names the methods of that name in the project subclasses of
@@ -1382,6 +1388,8 @@ read-targets = ["DataType.is_optional"]
 call-targets = ["FinalFacts"]
 allow-writes = ["DataModel.base_classes"]
 write-universe = ["DataModel.*"]
+allow-reads = ["DataType.is_optional"]
+read-universe = ["DataType.*"]
 allowed-callees = ["pkg.logging.*"]
 message = "render must not mutate model state"
 fresh-objects = "allow"
@@ -1466,6 +1474,8 @@ import-probes = "report"
                 call_targets: vec!["FinalFacts".into()],
                 allow_writes: vec!["DataModel.base_classes".into()],
                 write_universe: vec!["DataModel.*".into()],
+                allow_reads: vec!["DataType.is_optional".into()],
+                read_universe: vec!["DataType.*".into()],
                 allowed_callees: vec!["pkg.logging.*".into()],
                 message: Some("render must not mutate model state".into()),
                 fresh_objects: Some("allow".into()),

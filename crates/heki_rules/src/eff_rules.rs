@@ -3,9 +3,9 @@
 //! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, Overrides, References, SiteId,
-    Subclasses, allows_fresh, call_verb, contract_places, counts_references, group_texts,
-    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
+    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, GlobFamilies, Overrides,
+    References, SiteId, Subclasses, allows_fresh, call_verb, contract_places, counts_references,
+    group_texts, helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
     parse_targets, project_classes, reports_import_probes, reports_unresolved, site_callee,
     split_item, write_hits,
 };
@@ -20,10 +20,10 @@ use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::resolver::NoItems;
 use heki_effect::with_paths;
 use heki_effect::{
-    AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
-    Construction, Delivery, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey, HopGap,
-    MustGap, PerItem, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite, Unresolved,
-    anchors_call_site, boundary_reports_in, initializes_own_self,
+    Access, AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite,
+    CallTarget, Construction, Delivery, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey,
+    HopGap, MustGap, PerItem, ReadKind, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite,
+    Unresolved, anchors_call_site, boundary_reports_in, initializes_own_self,
 };
 use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
@@ -31,9 +31,11 @@ use heki_ir::walk::{self, Answer, Budget, FnShape, JoinMap, Or, Sparse, fixpoint
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
 use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
 /// The rules whose reports are split by the must-facts of execution effects
@@ -1115,6 +1117,13 @@ struct Boundary<'r> {
     read_targets: Vec<ContractTarget>,
     /// `read-targets` as names of module attributes outside the project, by the same index.
     external_reads: FunctionMatchers,
+    /// Reads reported unless `allow_reads` names them (with or without `reads-targets`).
+    read_universe: Vec<ContractTarget>,
+    allow_reads: Vec<ContractTarget>,
+    /// The names the class families of the glob read entries have, for reads on objects of
+    /// unknown class (`unresolved = "report"`), found once per entry, by boundary and entry
+    /// ([`Self::read_entries`]): one table for every boundary of the run.
+    globs: Rc<RefCell<GlobFamilies<'r>>>,
     calls: bool,
     call_targets: CallTargets,
     /// The references that count for `calls` (`references`).
@@ -1149,7 +1158,7 @@ pub(crate) fn scope_entries(
         .collect()
 }
 
-impl Boundary<'_> {
+impl<'r> Boundary<'r> {
     /// A function of the boundary's scopes, or a module body a scope names as `<module>`
     /// (`pkg.gen:<module>`): a scope naming its module (`pkg.*`, `pkg.gen:*`) does not cover it.
     fn in_scope(&self, key: &FuncKey) -> bool {
@@ -1268,6 +1277,38 @@ impl Boundary<'_> {
         self.writes_targets || !self.write_universe.is_empty()
     }
 
+    /// Whether the boundary checks reads: `reads-targets`, or a `read-universe`.
+    fn checks_reads(&self) -> bool {
+        self.reads_targets || !self.read_universe.is_empty()
+    }
+
+    /// The entries the boundary judges reads by: the `read-targets` with `reads-targets`, then
+    /// the `read-universe`; each with its list and place.
+    fn read_entries(&self) -> impl Iterator<Item = ((&'static str, usize), &ContractTarget)> {
+        let targets = (self.read_targets.iter().enumerate())
+            .filter(|_| self.reads_targets)
+            .map(|(k, t)| (("read-targets", k), t));
+        let universe =
+            (self.read_universe.iter().enumerate()).map(|(k, t)| (("read-universe", k), t));
+        targets.chain(universe)
+    }
+
+    /// The read entries a read of `attr` on an object of unknown class may be one of: a glob
+    /// names only the names its class family has from project code
+    /// ([`ContractTarget::matches_on_unknown`]).
+    fn reads_on_unknown(&self, cx: &CheckContext<'r>, attr: &str) -> Vec<&ContractTarget> {
+        let mut globs = self.globs.borrow_mut();
+        (self.read_entries().enumerate())
+            .filter(|(k, (_, t))| {
+                t.matches_on_unknown(attr, || {
+                    let family = t.classes.iter().map(String::as_str);
+                    globs.of(cx, (self.index, *k), family).has(attr)
+                })
+            })
+            .map(|(_, (_, t))| t)
+            .collect()
+    }
+
     /// Whether `reads-environment` forbids `access`: a call or a read the ecosystem catalog
     /// tags as one of the environment, an import of a module not established to be the
     /// project's, or an import probe with `import-probes = "report"`.
@@ -1302,6 +1343,7 @@ fn boundary_label(index: usize, name: &str) -> String {
 
 fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfigError> {
     let all_classes = project_classes(cx);
+    let globs = Rc::default();
     let mut out = Vec::new();
     for (index, b) in cx.config.effect_boundaries.iter().enumerate() {
         let effects = forbidden_effects(b)?;
@@ -1322,6 +1364,9 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
         }
         if !b.allow_writes.is_empty() && b.write_universe.is_empty() {
             return Err(RuleConfigError::AllowWritesWithoutUniverse(b.name.clone()));
+        }
+        if !b.allow_reads.is_empty() && b.read_universe.is_empty() {
+            return Err(RuleConfigError::AllowReadsWithoutUniverse(b.name.clone()));
         }
         let import_probes =
             reports_import_probes(b.import_probes.as_deref(), "effect-boundaries", &b.name)?;
@@ -1361,6 +1406,21 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 "effect-boundaries.read-targets",
             )?,
             external_reads,
+            read_universe: parse_read_targets(
+                cx,
+                &all_classes,
+                &b.read_universe,
+                "effect-boundaries.read-universe",
+                "effect-boundaries.read-universe",
+            )?,
+            allow_reads: parse_read_targets(
+                cx,
+                &all_classes,
+                &b.allow_reads,
+                "effect-boundaries.allow-reads",
+                "effect-boundaries.allow-reads",
+            )?,
+            globs: Rc::clone(&globs),
             calls: forbids("calls"),
             call_targets: parse_call_targets(
                 cx,
@@ -1597,6 +1657,24 @@ fn undeclared_text(entry: &str, attr: &str) -> String {
     }
 }
 
+/// A read the boundary may not judge ([`Reach::collect_unjudged_reads`]): the name read
+/// (`None`: a name heki cannot read), and the read entries it may be one of.
+struct UnjudgedRead<'t> {
+    name: Option<&'t str>,
+    entries: Vec<&'t ContractTarget>,
+    kind: ReadKind,
+    span: Span,
+    obj_params: u64,
+}
+
+/// What a forbidden read is reported as: a `read-targets` entry (by index), or, for a
+/// `read-universe` read that `allow-reads` does not name, its `undeclared_text`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ReadBucket {
+    Target(usize),
+    Undeclared(String),
+}
+
 /// What a forbidden write is reported as: a `write-targets` entry (by index), or, for a
 /// `write-universe` write that `allow-writes` does not name, its `undeclared_text`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1628,8 +1706,7 @@ struct Reach<'a> {
     /// the reached functions write, by node, parameter, and whether the write changes a container
     /// in place ([`Self::param_routes`]).
     param_routes: FxHashMap<(usize, u8, bool), Handed>,
-    /// By `read-targets` index.
-    reads: BTreeMap<usize, Found>,
+    reads: BTreeMap<ReadBucket, Found>,
     /// By the `call-targets` indices a call matches ([`called_targets`]).
     calls: BTreeMap<Vec<usize>, Found>,
     environment: EnvironmentFound,
@@ -1647,15 +1724,18 @@ enum Unjudged {
     /// A write, on an object of unknown class, of an attribute the boundary names (by name;
     /// `None`: a name computed at run time).
     Writes(Option<String>),
+    /// A read of an attribute the boundary names on an object of unknown class (by name), or
+    /// under a name computed at run time on an object that may have one (`None`).
+    Reads(Option<String>),
 }
 
 impl<'a> Reach<'a> {
     /// Search from `start` over the call sites of `sites.0`; `sites.1` holds the reference
     /// sites, which count for `calls` with `references = "calls"`.
-    fn search(
-        cx: &CheckContext<'_>,
+    fn search<'c>(
+        cx: &CheckContext<'c>,
         sites: (&SitesByCaller<'a>, &SitesByCaller<'_>),
-        b: &Boundary<'_>,
+        b: &Boundary<'c>,
         (start, start_span): (&FuncKey, Span),
     ) -> Self {
         let (sites, references) = sites;
@@ -1698,14 +1778,14 @@ impl<'a> Reach<'a> {
             bodies.push(runs_body);
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
             let held = reach.initialized_by(cx, i);
-            if b.reads_targets && runs_body {
+            if b.checks_reads() && runs_body {
                 reach.collect_reads(cx, b, i, &func);
             }
             if runs_body {
                 reach.collect_external(cx, b, i, &func);
             }
             if b.report_unresolved && runs_body {
-                reach.collect_unjudged(cx, i, &func);
+                reach.collect_unjudged(cx, b, i, &func);
             }
             for &(path, site) in own {
                 let hop = |caller: &FuncKey, callee: String| CallHop {
@@ -1783,6 +1863,9 @@ impl<'a> Reach<'a> {
             }
             if b.report_unresolved {
                 reach.collect_unjudged_writes(cx, b, i, &func);
+                if b.checks_reads() {
+                    reach.collect_unjudged_reads(cx, b, i, &func);
+                }
             }
         }
         reach.judge_keyed_writes(cx, b);
@@ -2303,8 +2386,9 @@ impl<'a> Reach<'a> {
         chain
     }
 
-    /// Reads of `read-targets` node `i` performs (read sites are local facts of every
-    /// summary); a class's own initialization reading its instance is no read.
+    /// Reads node `i` performs (read sites are local facts of every summary) of `read-targets`
+    /// (with `reads-targets`), or else of `read-universe`, that `allow-reads` does not name; a
+    /// class's own initialization reading its instance is no read.
     fn collect_reads(&mut self, cx: &CheckContext<'_>, b: &Boundary<'_>, i: usize, func: &FuncKey) {
         let reads = cx
             .index
@@ -2313,37 +2397,127 @@ impl<'a> Reach<'a> {
             .flat_map(|s| &s.typed_field_read_sites)
             .filter(|r| r.counts_for_contracts());
         for r in reads {
-            let read: Vec<usize> = (b.read_targets.iter().enumerate())
-                .filter(|(_, t)| {
-                    t.matches_read(cx.decls, r)
-                        && !self.initializes(cx, i, &t.classes, r.obj_params)
-                })
-                .map(|(ti, _)| ti)
-                .collect();
-            for ti in read {
+            if b.allow_reads.iter().any(|a| a.matches_read(cx.decls, r)) {
+                continue;
+            }
+            let own_init = |t: &ContractTarget| self.initializes(cx, i, &t.classes, r.obj_params);
+            let hits = |entries: &[ContractTarget]| -> Vec<usize> {
+                (entries.iter().enumerate())
+                    .filter(|(_, t)| t.matches_read(cx.decls, r) && !own_init(t))
+                    .map(|(k, _)| k)
+                    .collect()
+            };
+            // Each bucket, with the entry it matched when the bucket does not tell it.
+            let mut buckets: Vec<(ReadBucket, Option<(&'static str, usize)>)> = Vec::new();
+            if b.reads_targets {
+                buckets.extend(
+                    (hits(&b.read_targets).into_iter()).map(|ti| (ReadBucket::Target(ti), None)),
+                );
+            }
+            if buckets.is_empty()
+                && let Some(&ui) = hits(&b.read_universe).first()
+            {
+                let text = undeclared_text(&b.read_universe[ui].text, &r.attr);
+                buckets.push((ReadBucket::Undeclared(text), Some(("read-universe", ui))));
+            }
+            for (bucket, entry) in buckets {
                 let nodes = &self.nodes;
-                note(&mut self.reads, ti, (func.fqn(), r.span), || {
+                let found = note(&mut self.reads, bucket, (func.fqn(), r.span), || {
                     (chain_to(nodes, i), r.span, r.kind.describe())
                 });
+                found.entry = found.entry.or(entry);
             }
+        }
+    }
+
+    /// The reads the boundary cannot judge in node `i`'s own body (`unresolved = "report"`): a
+    /// read of a name its read entries name on an object of unknown class
+    /// (`EffectSummary::unresolved_access_sites`, as `MUT206` reads them), and a read under a
+    /// name heki cannot read on an object that may be of a class of the entries or of unknown
+    /// class (`EffectSummary::computed_reads`). A class's own initialization reading its
+    /// instance is none, as in `collect_reads`.
+    fn collect_unjudged_reads<'c>(
+        &mut self,
+        cx: &CheckContext<'c>,
+        b: &Boundary<'c>,
+        i: usize,
+        func: &FuncKey,
+    ) {
+        let summary = cx.index.summary(func);
+        let mut unjudged: Vec<UnjudgedRead<'_>> = Vec::new();
+        for a in summary.iter().flat_map(|s| &s.unresolved_access_sites) {
+            if let Access::Read(kind) = a.access {
+                unjudged.push(UnjudgedRead {
+                    name: Some(&a.name),
+                    entries: b.reads_on_unknown(cx, &a.name),
+                    kind,
+                    span: a.span,
+                    obj_params: a.obj_params,
+                });
+            }
+        }
+        for c in (summary.iter()).flat_map(|s| s.computed_reads.iter().flat_map(|c| c.iter())) {
+            let entries = (b.read_entries())
+                .map(|(_, t)| t)
+                .filter(|t| {
+                    c.class
+                        .as_ref()
+                        .is_none_or(|class| t.classes.contains(class))
+                })
+                .collect();
+            unjudged.push(UnjudgedRead {
+                name: None,
+                entries,
+                kind: c.kind,
+                span: c.span,
+                obj_params: c.obj_params,
+            });
+        }
+        for read in unjudged {
+            let initializes =
+                |t: &&ContractTarget| self.initializes(cx, i, &t.classes, read.obj_params);
+            if read.entries.is_empty() || read.entries.iter().any(initializes) {
+                continue;
+            }
+            let nodes = &self.nodes;
+            note(
+                &mut self.unjudged,
+                Unjudged::Reads(read.name.map(str::to_owned)),
+                (func.fqn(), read.span),
+                || (chain_to(nodes, i), read.span, read.kind.describe()),
+            );
         }
     }
 
     /// The calls the boundary cannot judge in node `i`'s own body (`unresolved = "report"`):
     /// those heki resolves to no function (the blind spots of `heki recommend`), and a body it
     /// does not model or that only a stub declares (`EffectSummary::unknown_calls` without such
-    /// a call, as `heki inspect`'s `purity.unknown_reach` lists it).
-    fn collect_unjudged(&mut self, cx: &CheckContext<'_>, i: usize, func: &FuncKey) {
+    /// a call, as `heki inspect`'s `purity.unknown_reach` lists it). A call heki lists more
+    /// functions for than it follows is judged when `allowed-callees` names each of them: the
+    /// search would not enter them.
+    fn collect_unjudged(
+        &mut self,
+        cx: &CheckContext<'_>,
+        b: &Boundary<'_>,
+        i: usize,
+        func: &FuncKey,
+    ) {
         // The node runs its body: the function has a summary, kept with its file.
         let path = cx.index.file_of(func).expect("summarized");
         let summary = cx.index.summary(func);
         let blind = cx.index.files[path].blind_calls_of(func);
         let mut unresolved = false;
         for call in blind {
-            let heki_effect::Blind::Unresolved { name, .. } = &call.blind else {
+            let heki_effect::Blind::Unresolved { name, values, .. } = &call.blind else {
                 continue;
             };
+            // Such a call is why the function has `unknown_calls`, judged or not.
             unresolved = true;
+            if values.as_deref().is_some_and(|values| {
+                (values.iter()).all(|v| names_function(&b.allowed_callees, v))
+            }) {
+                continue;
+            }
             let nodes = &self.nodes;
             note(
                 &mut self.unjudged,
@@ -2492,7 +2666,7 @@ impl<'a> Reach<'a> {
                 });
             }
             for t in reads {
-                note(&mut self.reads, t, site.clone(), || {
+                note(&mut self.reads, ReadBucket::Target(t), site.clone(), || {
                     (chain(), a.span, a.kind.describe())
                 });
             }
@@ -2727,19 +2901,30 @@ impl<'a> Reach<'a> {
         }
         // Reads and calls name their kind in the target: one boundary may forbid writing and
         // reading the same `Class.attr`, and a report of each must stay a report of its own.
-        for (ti, found) in &self.reads {
-            let target = &b.read_targets[*ti].text;
+        for (bucket, found) in &self.reads {
             let via = via_first(found);
-            let message = forbids(format!(
-                "`{}` reads `{target}` ({}{via})",
-                key.qualname, found.kind
-            ));
-            emit(
-                found,
-                format!("reads:{target}"),
-                message,
-                Some(("read-targets", *ti)),
-            );
+            match bucket {
+                ReadBucket::Target(ti) => {
+                    let target = &b.read_targets[*ti].text;
+                    let message = forbids(format!(
+                        "`{}` reads `{target}` ({}{via})",
+                        key.qualname, found.kind
+                    ));
+                    emit(
+                        found,
+                        format!("reads:{target}"),
+                        message,
+                        Some(("read-targets", *ti)),
+                    );
+                }
+                ReadBucket::Undeclared(attr) => {
+                    let message = format!(
+                        "`{}` reads `{attr}` ({}{via}), which {} does not allow",
+                        key.qualname, found.kind, b.label
+                    );
+                    emit(found, format!("reads:{attr}"), message, found.entry);
+                }
+            }
         }
         for (group, found) in &self.calls {
             let (target, called) = group_texts(&b.call_targets, group, None);
@@ -2814,6 +2999,20 @@ impl<'a> Reach<'a> {
                         via_callee(0)
                     );
                     let target = format!("unresolved-writes:{}", attr.as_deref().unwrap_or("*"));
+                    (target, message)
+                }
+                Unjudged::Reads(attr) => {
+                    let what = attr.as_deref().map_or_else(
+                        || "an attribute under a name heki cannot read".to_owned(),
+                        |a| format!("`{a}` on an object of unknown class"),
+                    );
+                    let message = format!(
+                        "`{}` reads {what} ({}{}), so {cannot}",
+                        key.qualname,
+                        found.kind,
+                        via_callee(0)
+                    );
+                    let target = format!("unresolved-reads:{}", attr.as_deref().unwrap_or("*"));
                     (target, message)
                 }
             };

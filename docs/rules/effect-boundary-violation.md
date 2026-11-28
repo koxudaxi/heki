@@ -89,6 +89,10 @@ count for a read.
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
   boundary. Without `allow-writes`, the boundary allows no write of the universe.
+- `read-universe` with `allow-reads` does the same for reads: a reached read of a `read-universe`
+  entry that no `allow-reads` entry names is reported, in every form `reads-targets` follows,
+  and `allow-reads` also exempts reads from `read-targets`. A read of an object of another class
+  is no read of the universe.
 - An entry target (`Class.attr["key"]`, in `write-targets`, `write-universe`, or `allow-writes`)
   also matches the writes a store operation makes with the key a call passes it: `set_extra(field,
   "init", v)`, where `set_extra` writes `field.extras[key]`, writes `Field.extras["init"]`,
@@ -139,9 +143,19 @@ heki resolves to no function (`HANDLERS[kind](...)` on a table something changes
 called), a function it does not model (`eval`, a body too large) or whose body only a stub
 declares, and a write of an attribute `write-targets` or `write-universe` names on an object of
 unknown class or under a name computed at run time (`thing.required = True` of an unannotated
-`thing`, `setattr(thing, name, v)`); a class's own initialization is none, so constructing an
-object whose initializer runs `setattr(self, name, v)`, itself or in a helper it hands `self` to,
-is not reported. Each kind is reported once per scope function, at the call
+`thing`, `setattr(thing, name, v)`), and a read of an attribute `read-targets` (with
+`reads-targets`) or `read-universe` names on an object of unknown class (`other.debug` of an
+unannotated `other`; a glob matches there the names its classes have from project code, as for
+`MUT206`), or under a name heki cannot read on an object that may be of one of their classes or
+of unknown class (`getattr(config, name)`, `hasattr(config, name)`, `config.__dict__[name]`, and
+the `__dict__` or `vars(config)` used whole: anything but a read or write of one key, an `in`
+test, or iterating its keys); a class's own initialization is none, so constructing an
+object whose initializer runs `setattr(self, name, v)` or `getattr(self, name)`, itself or in a
+helper it hands `self` to, is not reported. A call that may run more functions than heki follows
+(eight: the implementations of a method, the getters of a property, or the values of a table or
+a name, `for step in STEPS: step.run(state)` over a table of many steps) is judged when
+`allowed-callees` names every one of them, since the search would not enter them; one value
+outside `allowed-callees`, or a value heki cannot list, keeps the call unresolved. Each kind is reported once per scope function, at the call
 in the scope function starting the shortest chain to the first one, with the chain; calls and
 writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
 cannot see, so no report does not mean the scope stays inside the boundary.
@@ -241,11 +255,16 @@ No automatic fix.
     `allow-writes` names them; the diagnostic target is the entry, with a glob attribute replaced
     by the written one (`pass:DataModel.fields` for `DataModel.*`).
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
+  - `read-universe`: `Class.attr` entries whose reached reads are reported unless `allow-reads`
+    names them; the diagnostic target is the entry, with a glob attribute replaced by the read
+    one (`pass:reads:Config.debug` for `Config.*`).
+  - `allow-reads`: `Class.attr` reads the boundary allows (needs `read-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
   - `unresolved`: `"ignore"` (default) or `"report"`: whether what the boundary cannot judge in
     the reach is reported (diagnostic targets `checks:unresolved-calls`,
-    `checks:unresolved-writes:required`).
+    `checks:unresolved-writes:required`, `checks:unresolved-reads:debug`, and
+    `checks:unresolved-reads:*` for a name heki cannot read).
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a
     reference handing a `call-targets` entry on, with `"calls-and-bases"` a class statement
     naming one among its bases, and with `"reads"` any other use of its value, counts for

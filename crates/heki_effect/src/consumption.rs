@@ -819,7 +819,7 @@ fn source_wraps(tcx: &TypeCtx<'_>, callee: &Callee, args: &[VarId]) -> Option<Wr
                 exhausted: Vec::new(),
                 eager: false,
             }),
-        Callee::TooMany | Callee::Unresolved => None,
+        Callee::TooMany(_) | Callee::Unresolved => None,
     }
 }
 

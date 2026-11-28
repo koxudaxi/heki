@@ -919,8 +919,11 @@ calling it constructs the class or a subclass, whatever the class's name holds
 (`factory or Base`) is taken for the class object.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
-table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
-bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
+table) is one of them (`Ty::OneOf`, every one, however many): a call runs every one, which must
+bind a receiver alike. A call that may run more project functions than `CHA_CANDIDATE_LIMIT`
+(eight), through such a value, the implementations of a method, or the getters of a property,
+is not followed (`Callee::TooMany`), and keeps the functions when heki lists them all, which an
+effect boundary judges by its `allowed-callees`. A module global bound once, by the module body outside a loop, to a dict
 display with string-literal keys and no `**` entry, some value of which is a function, a class,
 a partial object, or an instance whose fields hold such objects (`types::Args::Fields`), and
 that no code changes in place (through its name or a module object,

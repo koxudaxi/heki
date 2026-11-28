@@ -9,7 +9,6 @@ use super::{
 };
 use crate::ModuleInput;
 
-use crate::types::MAX_NAMED;
 use heki_ast::Span;
 use heki_ir::walk::FnShape;
 use heki_ir::{
@@ -474,8 +473,7 @@ fn bound_on_paths(
         }
     }
     let one_name = paths.len() == 1 && !defined;
-    (!paths.is_empty() && !one_name && paths.len() + usize::from(defined) <= MAX_NAMED)
-        .then_some((paths, defined))
+    (!paths.is_empty() && !one_name).then_some((paths, defined))
 }
 
 /// The value `staticmethod(value)` wraps, when `value` holds such a call of the builtin
