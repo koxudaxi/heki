@@ -9111,6 +9111,47 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
     run_steps(s, &steps);
 }
 
+// ------------------------------------------------------------- a queue's extend argument
+
+// `list.extend` asks its argument for its length and a `deque` does not, so `OPT120` offers its
+// fix for a display and not for an instance of a class with `__len__`: the oracle compares the
+// help, which carries that verdict. A project of its own: the main one patches `builtins`, which
+// keeps the Soundness lane out of every module.
+const QUEUE_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"OPT120\", \"OPT121\"]\n";
+
+fn queue_drain(extended_by: &str) -> String {
+    format!(
+        "class Sized:\n    def __iter__(self):\n        return iter([1])\n\n    def __len__(self):\n        return 1\n\n\ndef drain(items):\n    q = list(items)\n    out = []\n    while q:\n        out.append(q.pop(0))\n        if not out[-1]:\n            q.extend({extended_by})\n    return out\n"
+    )
+}
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_as_a_queue_changes_its_extend_argument() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/drain_queue.py", queue_drain("[1, 2]")),
+    ];
+    let s = Session::start_with("lsp_oracle_queue_extend", QUEUE_CONFIG, files, false);
+    let drained: &[(&str, &str)] = &[("pkg/drain_queue.py", "OPT120")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(drained),
+        Step::new(
+            "the queue is extended by an object whose class defines __len__",
+            vec![save("pkg/drain_queue.py", &queue_drain("Sized()"))],
+        )
+        .present(drained)
+        .cutoff(),
+        Step::new(
+            "the queue is extended by a list display again",
+            vec![save("pkg/drain_queue.py", &queue_drain("[1, 2]"))],
+        )
+        .present(drained)
+        .cutoff(),
+    ];
+    run_steps(s, &steps);
+}
+
 // ------------------------------------------------ calls through bound values across modules
 
 // What a call through a value one module binds runs, decided from that module's declarations:

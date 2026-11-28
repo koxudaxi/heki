@@ -2568,12 +2568,16 @@ impl<'a, 'c> Rules<'a, 'c> {
                         method,
                         args,
                         kwargs,
+                        star_from,
                         ..
                     } if *recv == u && kwargs.is_empty() && !args.contains(&u) => {
                         // `deque.pop()` takes no index: another `q.pop(0)` stays a `TypeError`
                         // unless its own fix is applied, which overlaps this one's.
                         let ok = match (method.as_str(), args.as_slice()) {
-                            ("append" | "extend" | "count" | "index" | "remove", [_, ..]) => true,
+                            ("extend", [x]) if star_from.is_none() => {
+                                return self.length_request_observed((b, i), *x, ".extend(...)");
+                            }
+                            ("append" | "count" | "index" | "remove", [_, ..]) => true,
                             ("clear" | "reverse", []) => true,
                             ("pop", []) => true,
                             ("insert", [c, _]) => cx.shape.int_const(*c) == Some(0),
@@ -2640,7 +2644,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                         rhs,
                         in_place: true,
                         ..
-                    } if *lhs == u && *rhs != u => None,
+                    } if *lhs == u && *rhs != u => self.length_request_observed((b, i), *rhs, "+="),
                     InstKind::Convert { .. } | InstKind::Format { .. } => Some(format!(
                         "it is formatted (line {}): a `deque`'s text differs",
                         self.line(off)
@@ -2652,6 +2656,25 @@ impl<'a, 'c> Rules<'a, 'c> {
                 }
             }
         }
+    }
+
+    /// `list(v)`, `lst.extend(v)`, and `lst += v` at `at` ask `v` for its length (`__len__`,
+    /// else `__length_hint__`) before drawing its first item, and the `deque` forms never do:
+    /// the request runs no user code only for a builtin container, a string, or a `range`.
+    fn asks_length_quietly(&self, at: (BlockId, usize), v: VarId) -> bool {
+        self.state(at)
+            .is_some_and(|st| self.cx().iterates_without_user_code(&st, v))
+    }
+
+    /// Why the length request `op` at `at` makes of `x` can be observed (`None`: it cannot).
+    fn length_request_observed(&self, at: (BlockId, usize), x: VarId, op: &str) -> Option<String> {
+        (!self.asks_length_quietly(at, x)).then(|| {
+            format!(
+                "`{op}` asks {} for its length, which a `deque` does not: only a builtin container, string, or `range` answers without running code (line {})",
+                self.ck.name(x),
+                self.line(inst_at(self.f(), at).span.start)
+            )
+        })
     }
 
     /// A derived reference (a `for` loop's iterator, `iter(q)`, ...) of `allocs` that is still
@@ -3212,15 +3235,12 @@ impl<'a, 'c> Rules<'a, 'c> {
         for &s in init_sites {
             let ii = inst_at(f, s);
             let text = self.m.text(ii.span)?;
-            // `list(it)` asks `it` for its length (`__len__` / `__length_hint__`), `deque(it)`
-            // does not: an argument that is not a builtin container keeps its `list(...)`.
-            let reads_builtin = |a: VarId| {
-                self.state(s)
-                    .is_some_and(|st| self.cx().iterates_without_user_code(&st, a))
-            };
+            // An argument whose length request can be observed keeps its `list(...)`.
             let wrapped = match &ii.kind {
                 InstKind::Call { args, .. } if args.is_empty() => format!("{}()", deque.spelling),
-                InstKind::Call { args, .. } if args.iter().all(|a| reads_builtin(*a)) => {
+                InstKind::Call { args, .. }
+                    if args.iter().all(|a| self.asks_length_quietly(s, *a)) =>
+                {
                     let inner = text.trim_start().strip_prefix("list")?.trim_start();
                     format!("{}{inner}", deque.spelling)
                 }
