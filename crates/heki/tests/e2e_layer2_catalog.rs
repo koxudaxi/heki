@@ -3120,6 +3120,47 @@ fn offloaded_callables_run_on_a_worker() {
     );
 }
 
+const POOL_CALLBACKS: &str = r#"import functools
+from concurrent.futures import ThreadPoolExecutor
+
+
+@functools.cache
+def cached():
+    return [1, 2]
+
+
+def clear(xs):
+    xs.clear()
+
+
+def tp_pool_worker_mutates_a_shared_list(ex: ThreadPoolExecutor):
+    ex.submit(clear, cached())
+
+
+def tn_pool_worker_mutates_its_own_list(ex: ThreadPoolExecutor):
+    ex.submit(clear, [1, 2])
+"#;
+
+/// A thread pool's `submit` runs its callable on a worker with the arguments after it, as
+/// `asyncio.to_thread` does: a change it makes to a shared object counts.
+#[test]
+fn pool_workers_run_the_submitted_call() {
+    assert_eq!(
+        check(
+            "catalog_pool_callbacks",
+            "app/pools.py",
+            POOL_CALLBACKS,
+            "MUT114"
+        ),
+        vec![d(
+            15,
+            "MUT114",
+            "tp_pool_worker_mutates_a_shared_list",
+            "app.pools.cached"
+        )]
+    );
+}
+
 const OUT_BUFFERS: &str = r#"import numpy as np
 
 

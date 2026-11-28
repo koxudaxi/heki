@@ -96,7 +96,7 @@ pub use resolver::{
     aliases_of, detect_source_roots, func_qualname, is_source_dir, module_name_for_path,
     module_prefix, resolve_relative_module, self_aliases,
 };
-pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
+pub use summary::BLOCKING_EFFECTS;
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
@@ -2618,8 +2618,8 @@ pub struct CallSite {
     /// `sorted(xs, key=f)`). Run on a worker, the callees take the positional arguments after
     /// it; through a sync facade or per item, none of the call's.
     pub handed_callable: Option<u8>,
-    /// For a callable a builtin calls once per item (`Runner::PerItem`): the builtin and where
-    /// it takes the items from.
+    /// For a callable a builtin (`Runner::PerItem`) or a pool's worker (`Runner::Worker`:
+    /// `ex.map(f, xs)`) calls once per item: the API and where it takes the items from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_item: Option<Box<PerItem>>,
     /// What the receiver tells about the implementations the callees run (`None`: nothing).
@@ -2760,7 +2760,8 @@ pub enum Runner {
     /// Called directly, on the caller's thread.
     #[default]
     Caller,
-    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`), a function
+    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`,
+    /// `ex.submit(f, x)`, once per item with [`CallSite::per_item`]: `ex.map(f, xs)`), a function
     /// decorated with `@sync_to_async`. Everything it does happens, but its blocking effects
     /// never block the caller's thread.
     Worker,
@@ -2774,17 +2775,17 @@ pub enum Runner {
     PerItem,
 }
 
-/// A builtin calling the callees of a site once per item ([`Runner::PerItem`]): `EFF102` and
-/// `EFF103` count it as a loop as long as the items, which they size as a `for` loop's
-/// iterable.
+/// A builtin or a pool calling the callees of a site once per item ([`CallSite::per_item`]):
+/// `EFF102` and `EFF103` count it as a loop as long as the items, which they size as a `for`
+/// loop's iterable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerItem {
-    /// The builtin (`builtins.sorted`).
+    /// The API (`builtins.sorted`, `concurrent.futures.ThreadPoolExecutor.map`).
     pub api: String,
     pub items: Items,
 }
 
-/// Where a builtin takes the items it calls a callable with ([`PerItem::items`]).
+/// Where a builtin or a pool takes the items it calls a callable with ([`PerItem::items`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Items {
     /// The call's positional arguments at these positions, walked together: as many items as

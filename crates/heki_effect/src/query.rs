@@ -183,7 +183,7 @@ impl ProjectIndex {
                 }
             }
             for site in &file.call_sites {
-                if site.loop_depth > 0 || site.runner == Runner::PerItem {
+                if site.loop_depth > 0 || site.per_item.is_some() {
                     in_loops.extend(self.handed_on(site, self.own_facts(&site.caller)));
                 }
             }

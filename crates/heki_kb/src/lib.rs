@@ -383,6 +383,10 @@ pub struct EcosystemEntry {
     pub effects: Vec<ExecEffectKind>,
     pub async_safe: bool,
     pub offloads_blocking_arg: Option<u8>,
+    /// With [`Self::offloads_blocking_arg`]: the worker calls the callable once per item of the
+    /// positional arguments after it, one item of each per call, as `map` does, instead of once
+    /// with them (`Executor.map(fn, *iterables)`).
+    pub offloads_per_item: bool,
     /// The object the call returns gives, awaited or by its `result()`, what a call of a
     /// callable it is handed returns (`asyncio.to_thread(f, *args, **kwargs)`,
     /// `loop.run_in_executor(executor, f, *args)`, `executor.submit(f, *args, **kwargs)`): it is
@@ -5598,7 +5602,32 @@ mod tests {
             ),
             (
                 executors.iter().map(|e| format!("{e}.submit")).collect(),
-                returning("concurrent.futures.Future", entry(&[])),
+                returning(
+                    "concurrent.futures.Future",
+                    EcosystemEntry {
+                        offloads_blocking_arg: Some(0),
+                        ..entry(&[])
+                    },
+                ),
+            ),
+            (
+                s(&["concurrent.futures.Executor.submit"]),
+                EcosystemEntry {
+                    offloads_blocking_arg: Some(0),
+                    ..entry(&[])
+                },
+            ),
+            (
+                ["concurrent.futures.Executor"]
+                    .iter()
+                    .chain(&executors)
+                    .map(|e| format!("{e}.map"))
+                    .collect(),
+                EcosystemEntry {
+                    offloads_blocking_arg: Some(0),
+                    offloads_per_item: true,
+                    ..entry(&[])
+                },
             ),
         ]
     }
@@ -5989,10 +6018,15 @@ mod tests {
 
     /// `EFF115`: the calls of [`UNAWAITED_CALLS`] with no other fact.
     fn unawaited_calls() -> Vec<(Vec<String>, EcosystemEntry)> {
-        // Their entries carry other facts: the executors' `submit`, and the offloading APIs.
+        // Their entries carry other facts: the executors' `submit` and `map`, and the offloading
+        // APIs.
         let others = [
+            "concurrent.futures.Executor.submit",
             "concurrent.futures.ThreadPoolExecutor.submit",
             "concurrent.futures.ProcessPoolExecutor.submit",
+            "concurrent.futures.Executor.map",
+            "concurrent.futures.ThreadPoolExecutor.map",
+            "concurrent.futures.ProcessPoolExecutor.map",
             "asyncio.to_thread",
             "asyncio.AbstractEventLoop.run_in_executor",
             "asyncio.BaseEventLoop.run_in_executor",

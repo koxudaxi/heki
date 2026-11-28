@@ -1541,8 +1541,9 @@ pub fn loop_bit(lp: &NaturalLoop) -> u64 {
     1u64 << lp.depth.saturating_sub(1).min(63)
 }
 
-/// The bit of the loop a builtin runs a callable in once per item (`Runner::PerItem`), at a
-/// call inside `depth` loops: it is one level deeper than every loop around the call.
+/// The bit of the loop a builtin or a pool runs a callable in once per item
+/// (`CallSite::per_item`), at a call inside `depth` loops: it is one level deeper than every
+/// loop around the call.
 pub fn per_item_bit(depth: u16) -> u64 {
     1u64 << depth.min(63)
 }

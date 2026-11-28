@@ -12054,7 +12054,8 @@ the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... a
 variants), `pymongo`, `redis`, and DynamoDB commands, the `execute()` of a supabase-py / postgrest
 query, `pandas.read_sql`, and project functions
 that reach them, also when an offloading API runs them on a worker thread per item (`await
-asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`, a `concurrent.futures`
+pool's `executor.submit(load, i)` in a loop and `executor.map(load, ids)`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
 per item runs in a loop as long as the items (`sorted(users, key=lambda u: score(conn, u))`,
 `list(map(load, ids))`; see `EFF102` for the builtins and the items whose number the code fixes).
@@ -12114,7 +12115,9 @@ Each step is established, not assumed:
 
 Every other report the rule finds is heuristic: items whose origin heki does not establish, a
 path heki cannot decide, a call it cannot resolve to every implementation, a database call that
-sends a statement only in some state.
+sends a statement only in some state, a function an API runs for the call (a worker of
+`asyncio.to_thread` or of a pool, which may run it after the call returns, or a builtin calling
+it per item).
 
 ## What a report states
 
@@ -12583,6 +12586,13 @@ as long as the items, which are sized as a `for` loop's iterable: `map(fetch, ("
 not reported, nor is `max(a, b, key=fetch)`, which compares two values. A lambda written in the
 same function as another lambda is not followed: every lambda of a function has the same name
 (`f.<locals>.<lambda>`), and heki keeps one summary per name.
+
+A function a `concurrent.futures` pool runs counts the same way, on a `ThreadPoolExecutor`, a
+`ProcessPoolExecutor`, or a value typed with their `Executor` base: `executor.submit(fetch, url)`
+in a loop is a call of `fetch` on every iteration, and `executor.map(fetch, urls)` calls it once
+per item of its iterables, also through a `functools.partial`. So does
+`loop.run_in_executor(executor, fetch, url)` in a loop. An executor whose class heki does not
+know runs nothing heki follows.
 
 The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 16

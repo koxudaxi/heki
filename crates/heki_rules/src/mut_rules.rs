@@ -3851,7 +3851,7 @@ impl CallParts<'_> {
 /// which a resolution with the function's inferred values would not see. `worker`: instead
 /// the callable an offloading API runs on a worker thread (`asyncio.to_thread(grow, acc)` runs
 /// `grow(acc)`), which takes the positional arguments after it, keyword arguments left
-/// unbound.
+/// unbound; not one it runs once per item of them (`ex.map(grow, accs)`).
 pub(crate) fn site_call<'i>(
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
     sites: FnSites<'_, 'i>,
@@ -3865,7 +3865,10 @@ pub(crate) fn site_call<'i>(
         heki_effect::Runner::Caller
     };
     let site = sites.at(inst.span).iter().find(|s| {
-        s.role == SiteRole::Call && s.runner == runner && !s.project_callees().is_empty()
+        s.role == SiteRole::Call
+            && s.runner == runner
+            && (!worker || s.per_item.is_none())
+            && !s.project_callees().is_empty()
     })?;
     if wraps_call_at_own_span(def, inst, &call) {
         return None;

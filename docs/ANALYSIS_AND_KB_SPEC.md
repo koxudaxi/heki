@@ -1667,8 +1667,11 @@ imports and re-exports when the declarations are completed; every definition of 
 decorated so), and its body runs at the call on a worker thread: a site of its own, whose
 `CallSite::runner` is `Runner::Worker`. The callable an offloading API is given runs so too, as a call of the
 project function with the positional arguments after it (`asyncio.to_thread(f, a)` calls `f(a)`,
-`loop.run_in_executor(None, f, a)` too; keyword arguments are left unbound, since some APIs take
-their own). Every fact of such a site moves to the caller except the blocking effects, which do
+`loop.run_in_executor(None, f, a)` and a `concurrent.futures` executor's `ex.submit(f, a)` too;
+keyword arguments are left unbound, since some APIs take their own). An API whose catalog entry
+sets `offloads_per_item` runs it once per item of the positional arguments after it instead, one
+item of each per call (`ex.map(f, xs)`): the worker's site takes `CallSite::per_item` as a
+builtin's does (below), binds none of the call's arguments, and follows a `functools.partial`. Every fact of such a site moves to the caller except the blocking effects, which do
 not block the caller's thread: its queries per item (`EFF103`), its clients (`EFF102`), and its
 changes to shared objects (`MUT202`, which reads the offloading call the same way) count, and
 `EFF201` does not enter it. A callable a Layer 2 `sync_facade_arg` API runs
@@ -2478,8 +2481,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
      dict named `requests` is not mistaken for the package (type and name resolution). A builtin
-     calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`) is a loop over
-     its items, relaxed as a `for` loop over the same iterable.
+     or a pool calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`,
+     `ex.map(fetch, urls)`) is a loop over its items, relaxed as a `for` loop over the same
+     iterable.
    - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
      `executescript` call (or SQLAlchemy's `exec_driver_sql`) whose statement is DDL (`CREATE`
      / `ALTER` / `DROP` / `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so
@@ -3252,7 +3256,8 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 (`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
 `unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
-`asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
+`asgiref.sync.sync_to_async`), `offloads_per_item` (with it: the callable runs once per item of
+the arguments after it, `concurrent.futures.Executor.map`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
 `copy.deepcopy`, `BaseModel.__deepcopy__`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose
 `deep=True` copies deeply unless `update=` hands it values by reference: `MUT202`),

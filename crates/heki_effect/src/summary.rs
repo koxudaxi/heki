@@ -89,20 +89,40 @@ const MIN_ORIGIN_STEPS: usize = 4096;
 /// Execution effects `EFF101` treats as blocking the event loop.
 pub const BLOCKING_EFFECTS: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
 
-/// The callable an offloading API runs on a worker thread at a call of `symbol`, and where the
-/// positional arguments it passes start: `asyncio.to_thread(f, a, b)` runs `f(a, b)`. `None`
-/// when `*` unpacking may move the callable.
-pub fn offloaded_callable(
+/// What an offloading API runs on a worker ([`offloaded_callable`]).
+enum Offloaded {
+    /// The callable, with the positional arguments from this index on: `asyncio.to_thread(f, a,
+    /// b)` runs `f(a, b)`.
+    Call(VarId, usize),
+    /// The callable once per item of the arguments after it: `ex.map(f, xs)` runs `f(x)` for
+    /// each `x`.
+    PerItem(PerItemCall),
+}
+
+/// What an offloading API runs on a worker at a call of `symbol`. `None` when `*` unpacking may
+/// move the callable.
+fn offloaded_callable(
     kb: &EffectiveEcosystemKb,
     symbol: &str,
     args: &[VarId],
     star_from: Option<u8>,
-) -> Option<(VarId, usize)> {
-    let k = usize::from(kb.lookup(symbol)?.offloads_blocking_arg?);
+) -> Option<Offloaded> {
+    let entry = kb.lookup(symbol)?;
+    let k = usize::from(entry.offloads_blocking_arg?);
     if star_from.is_some_and(|s| usize::from(s) <= k) {
         return None;
     }
-    Some((*args.get(k)?, k + 1))
+    let callable = *args.get(k)?;
+    Some(if entry.offloads_per_item {
+        Offloaded::PerItem(crate::consumption::per_item_of_args_from(
+            callable,
+            k + 1,
+            args,
+            star_from,
+        ))
+    } else {
+        Offloaded::Call(callable, k + 1)
+    })
 }
 
 /// Summarize every function of one module (local facts only; see `ProjectIndex::build`).
@@ -8064,15 +8084,16 @@ impl<'a> Extractor<'a> {
     }
 
     /// A callable a library API runs at the call, when it is a project function (or, but for an
-    /// offloading API, a `functools.partial` of one, which passes the arguments it holds
-    /// first): an offloading
-    /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`) on a worker
-    /// thread, with the positional arguments after it (keyword arguments are left unbound: some
-    /// APIs forward them, others take their own); a sync-facade API's
+    /// offloading API that passes it the call's own arguments, a `functools.partial` of one,
+    /// which passes the arguments it holds first): an offloading
+    /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`,
+    /// `ex.submit(f, *args)`) on a worker, with the positional arguments after it (keyword
+    /// arguments are left unbound: some APIs forward them, others take their own), or once per
+    /// item of them (`ex.map(f, xs)`); a sync-facade API's
     /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and
     /// the arguments left unbound; and the one a builtin calls once per item (`map(f, xs)`,
-    /// `sorted(xs, key=f)`) on the caller's thread, with the items as its arguments
-    /// (`Self::passed_items`).
+    /// `sorted(xs, key=f)`) on the caller's thread. A callable run per item takes the items as
+    /// its arguments (`Self::passed_items`).
     fn handed_callable(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
         let facade = || {
             let k = usize::from(self.cx.catalog(symbol)?.sync_facade_arg?);
@@ -8086,7 +8107,10 @@ impl<'a> Extractor<'a> {
         };
         let (callable, passed, runner, per_item) =
             match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
-                Some((callable, first)) => (callable, &call.args[first..], Runner::Worker, None),
+                Some(Offloaded::Call(callable, first)) => {
+                    (callable, &call.args[first..], Runner::Worker, None)
+                }
+                Some(Offloaded::PerItem(p)) => (p.callable, &[][..], Runner::Worker, Some(p)),
                 None => match facade() {
                     Some(callable) => (callable, &[][..], Runner::SyncFacade, None),
                     None => match per_item_call() {
@@ -8100,17 +8124,16 @@ impl<'a> Extractor<'a> {
             .iter()
             .position(|a| *a == callable)
             .and_then(|i| u8::try_from(i).ok());
-        // A worker's site is matched again to the call's own arguments after the callable
-        // (`MUT202`, `heki_rules::mut_rules::site_call`), which the arguments a partial object
-        // holds would shift: a partial is followed for the other APIs only.
-        let partial = (runner != Runner::Worker)
-            .then(|| self.partial(callable))
-            .flatten();
+        // The site of a worker that takes the call's own arguments after the callable is matched
+        // again to them (`MUT202`, `heki_rules::mut_rules::site_call`), which the arguments a
+        // partial object holds would shift: a partial is followed for the other APIs only.
+        let takes_call_args = runner == Runner::Worker && per_item.is_none();
+        let partial = (!takes_call_args).then(|| self.partial(callable)).flatten();
         let target = partial.as_ref().map_or(callable, |p| p.callable);
-        // A class a builtin is handed is constructed once per item: what the builtin returns
-        // is not the new object, and that construction is not modeled. The facts of a lambda
-        // that shares its name are those of every lambda of the name.
-        if runner == Runner::PerItem
+        // A class run per item is constructed once per item: what the API returns is not the
+        // new object, and that construction is not modeled. The facts of a lambda that shares
+        // its name are those of every lambda of the name.
+        if per_item.is_some()
             && (self.class_called(target).is_some() || self.shares_its_name(target))
         {
             return;
@@ -8145,12 +8168,12 @@ impl<'a> Extractor<'a> {
         // the API passes the facade or items of a size not known.
         let star_from = match runner {
             _ if open => Some(held.len()),
-            Runner::Worker => call
+            _ if takes_call_args => call
                 .star_from
                 .filter(|_| !passed.is_empty())
                 .map(|s| usize::from(s) - after + held.len()),
             Runner::SyncFacade if held.is_empty() => None,
-            Runner::PerItem if items.as_ref().is_some_and(|i| i.positions.is_some()) => None,
+            _ if items.as_ref().is_some_and(|i| i.positions.is_some()) => None,
             _ => Some(held.len()),
         }
         .map(|s| u8::try_from(s).unwrap_or(u8::MAX));
@@ -8169,7 +8192,7 @@ impl<'a> Extractor<'a> {
             star_from,
             // A worker's arguments are the call's own after the callable; the others are the
             // arguments a partial holds.
-            args_at: (runner == Runner::Worker).then_some(after),
+            args_at: takes_call_args.then_some(after),
             is_awaited: false,
             recv_is_self,
             constructs: None,
@@ -8251,8 +8274,8 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// What a builtin passes the callable it calls once per item (`Runner::PerItem`): items
-    /// of the iterables, which it does not construct. After a partial object's `*` unpacking,
+    /// What a builtin or a pool passes the callable it calls once per item (`CallSite::per_item`):
+    /// items of the iterables, which it does not construct. After a partial object's `*` unpacking,
     /// where they land is not known.
     fn passed_items(
         &self,
@@ -9610,8 +9633,8 @@ struct Call<'c> {
     recv_is_self: bool,
     /// The project class the call constructs (`CallSite::constructs`).
     constructs: Option<String>,
-    /// A builtin calls the callees once per item (`Runner::PerItem`), passing them these
-    /// items: `dst` holds what the builtin returns, never what they return.
+    /// A builtin or a pool calls the callees once per item (`CallSite::per_item`), passing them
+    /// these items: `dst` holds what the API returns, never what they return.
     per_item: Option<&'c PassedItems>,
     /// The call passes keywords the code does not show, which may bind any parameter: those a
     /// `functools.partial` object of a class attribute holds
@@ -9719,9 +9742,10 @@ fn params_without_elements(params: &[ArgOrigin]) -> u64 {
         .fold(0, |mask, (k, _)| mask | 1u64 << k)
 }
 
-/// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).
+/// What a builtin or a pool calling a callable once per item passes it
+/// ([`Extractor::passed_items`]).
 struct PassedItems {
-    /// The builtin's loop over the items (`guards::per_item_bit`).
+    /// The API's loop over the items (`guards::per_item_bit`).
     bit: u64,
     passed: ItemArgs,
     /// How many positional arguments each call passes after the held ones, when the builtin

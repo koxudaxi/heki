@@ -2155,6 +2155,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ThreadPoolExecutor.submit"
+offloads_blocking_arg = 0
 result_of = { arg = 0, keywords = true }
 return_type = "concurrent.futures.Future"
 opaque_to_layer3 = true
@@ -2169,6 +2170,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ProcessPoolExecutor.submit"
+offloads_blocking_arg = 0
 result_of = { arg = 0, keywords = true }
 return_type = "concurrent.futures.Future"
 opaque_to_layer3 = true
@@ -2295,20 +2297,30 @@ opaque_to_layer3 = true
 symbol = "multiprocessing.Process"
 opaque_to_layer3 = true
 
+# An executor runs what `submit(fn, /, *args, **kwargs)` is handed on a worker, a thread or a
+# process of its pool (`offloads_blocking_arg`); `map(fn, *iterables)` calls `fn` there once per
+# item of the iterables, one item of each per call (`offloads_per_item`).
 [[entries]]
 symbol = "concurrent.futures.Executor.submit"
+offloads_blocking_arg = 0
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.Executor.map"
+offloads_blocking_arg = 0
+offloads_per_item = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ThreadPoolExecutor.map"
+offloads_blocking_arg = 0
+offloads_per_item = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ProcessPoolExecutor.map"
+offloads_blocking_arg = 0
+offloads_per_item = true
 opaque_to_layer3 = true
 
 [[entries]]
