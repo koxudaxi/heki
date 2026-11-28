@@ -648,3 +648,41 @@ fn files_that_cannot_be_read_or_written_stop_the_run() {
     assert!(stderr.starts_with("error: pyproject.toml: "), "{stderr}");
     assert_eq!(files(&p.dir).len(), 1);
 }
+
+#[test]
+fn each_question_needs_an_answer_or_an_option() {
+    let p = Project::new("init_open_questions");
+    p.write("app.py", BLOCKING);
+    let open = |args: &[&str]| {
+        let (code, _, stderr) = p.heki(&[&["init", "--config", "heki.toml"][..], args].concat());
+        assert_eq!(code, 2, "{stderr}");
+        stderr
+    };
+    assert_eq!(
+        open(&["--no-recommend"]),
+        format!(
+            "error: `heki init` needs an answer, and the standard input is not a terminal: heki check reports 1 diagnostic(s) now: record them in a Ratchet baseline, heki-baseline.toml?\n  = help: pass `--yes` to take the default answers, or answer this question with `--baseline` or `--no-baseline`\n  = docs: {DOCS}\n"
+        )
+    );
+    assert_eq!(
+        open(&["--no-recommend", "--no-baseline"]),
+        format!(
+            "error: `heki init` needs an answer, and the standard input is not a terminal: Set up coding agents (the Agent Skill, AGENTS.md)?\n  = help: pass `--yes` to take the default answers, or answer this question with `--skill` and `--agents-md`\n  = docs: {DOCS}\n"
+        )
+    );
+    assert_eq!(files(&p.dir).len(), 2);
+
+    // The instruction files the project has take the section, by default.
+    let p = Project::new("init_open_sections");
+    p.write("AGENTS.md", "# Agents\n");
+    p.write("CLAUDE.md", "# Claude\n");
+    let (code, _, stderr) = answered(&p, &["--no-recommend"], "\ny\nn\nn\n\n");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Codex in .agents/skills/heki? [Y/n] Add a heki section to AGENTS.md and CLAUDE.md? [Y/n] Created heki.toml\nUpdated AGENTS.md\nUpdated CLAUDE.md\n"),
+        "{stderr}"
+    );
+    for file in ["AGENTS.md", "CLAUDE.md"] {
+        assert_eq!(p.read(file).matches(BEGIN).count(), 1);
+    }
+}
