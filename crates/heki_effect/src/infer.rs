@@ -35,6 +35,7 @@ use crate::resolver::stores::Read;
 use crate::resolver::{
     self, BoundArg, CalledThrough, Callee, CopyMade, LocalNames, ProjectDecls, TypeCtx, Val,
 };
+use crate::stub_types::{self, Index};
 use crate::types::{Added, Args, Change, Container, Elem, Held, Obj, Operands, Ty};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, Sparse, fixpoint};
@@ -1727,7 +1728,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             self.store_read = own_store_reads(self.shape, &stored, &budget);
         }
-        if insts().any(|i| {
+        if !f.class_patterns.is_empty() || insts().any(|i| {
             matches!(&i.kind, InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
                 if name == "isinstance")
         }) {
@@ -2160,6 +2161,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             return joined.unwrap_or_default();
         }
+        // A class pattern tests its subject as `isinstance(subject, class)` does.
+        if let Some(p) = self.f.class_pattern(cond) {
+            self.narrow_instance(n, p.subject, p.class, truth, from, &mut out);
+            return out;
+        }
         match n.defs.get(&cond) {
             Some(InstKind::UnaryOp {
                 op: UnaryOpKind::Not,
@@ -2176,24 +2182,38 @@ impl<'e, 'a> Engine<'e, 'a> {
             }) if args.len() >= 2
                 && matches!(self.need(*c), Ok(Some(Ty::Ref(f))) if f == "builtins.isinstance") =>
             {
-                let x = n.value(args[0]);
-                let current = n.entry[from.0 as usize]
-                    .as_ref()
-                    .and_then(|at| at.get(&x))
-                    .or_else(|| self.need(args[0]).ok().flatten());
-                if let Some(classes) = self
-                    .need(args[1])
-                    .ok()
-                    .flatten()
-                    .and_then(|t| isinstance_classes(self.cx.project, t))
-                    && let Some(t) = self.narrow(current, &classes, truth)
-                {
-                    out.insert(x, t);
-                }
+                self.narrow_instance(n, args[0], args[1], truth, from, &mut out);
             }
             _ => {}
         }
         out
+    }
+
+    /// What `isinstance(value, classes)` being `truth` gives the value `value` names, where the
+    /// narrowed types at the entry of `from` hold.
+    fn narrow_instance(
+        &self,
+        n: &Narrowing<'_>,
+        value: VarId,
+        classes: VarId,
+        truth: bool,
+        from: BlockId,
+        out: &mut FxHashMap<VarId, Ty>,
+    ) {
+        let x = n.value(value);
+        let current = n.entry[from.0 as usize]
+            .as_ref()
+            .and_then(|at| at.get(&x))
+            .or_else(|| self.need(value).ok().flatten());
+        if let Some(classes) = self
+            .need(classes)
+            .ok()
+            .flatten()
+            .and_then(|t| isinstance_classes(self.cx.project, t))
+            && let Some(t) = self.narrow(current, &classes, truth)
+        {
+            out.insert(x, t);
+        }
     }
 
     /// The type of a value of type `t` once `isinstance(value, classes)` is `truth`: true keeps
@@ -2251,7 +2271,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         if o.args != Args::None {
             return o.args.item();
         }
-        self.dunder(o, "__iter__")
+        self.dunder(o, "__iter__", None)
             .and_then(|t| t.obj().map(|r| r.args.item()))
             .unwrap_or(Elem::Unknown)
     }
@@ -2263,12 +2283,16 @@ impl<'e, 'a> Engine<'e, 'a> {
 
     /// What calling special method `name` on an instance returns. The syntax calling it (`x[k]`,
     /// `for v in x`) hands no argument facts to the catalog's argument cases.
-    fn dunder(&self, o: &Obj, name: &str) -> Option<Ty> {
-        let targets = self
-            .cx
-            .project
-            .method_targets(&o.class, name, false, self.cx.kb);
-        self.cx.callee_result(&targets, |_, _| None)
+    fn dunder(&self, o: &Obj, name: &str, index: Option<Index>) -> Option<Ty> {
+        let cx = self.cx;
+        let targets = cx.project.method_targets(&o.class, name, false, cx.kb);
+        cx.callee_result(&targets, |_, _| None).or_else(|| {
+            let Callee::External(symbol) = &targets else {
+                return None;
+            };
+            let recv = Ty::Inst(o.clone());
+            stub_types::method_result(cx.kb.stubs(), symbol, &recv, true, index)
+        })
     }
 
     /// What a call passes at position `index` or by `keyword`, for the catalog's argument cases
@@ -2397,6 +2421,10 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
+                // A member of an enumeration is an instance of it.
+                Some(Ty::Ref(fqn) | Ty::Class(fqn)) if cx.project.enum_member(fqn, attr) => {
+                    Some(Ty::inst(fqn.as_str()))
+                }
                 Some(recv @ (Ty::Ref(fqn) | Ty::Class(fqn))) => {
                     let subclasses = matches!(recv, Ty::Class(_));
                     match cx
@@ -2615,7 +2643,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 | Args::TypeArgs(_),
                 false,
             ) => {
-                return Ok(self.dunder(o, "__getitem__"));
+                return Ok(self.dunder(o, "__getitem__", Some(Index::Item)));
             }
             // A slice of a builtin sequence is one of its class, whatever its items.
             (
@@ -2626,9 +2654,10 @@ impl<'e, 'a> Engine<'e, 'a> {
                 | Args::TypeArgs(_),
                 true,
             ) => {
-                return Ok(SLICED_SEQUENCES
-                    .contains(&o.class.as_str())
-                    .then(|| Ty::inst(o.class.as_str())));
+                if SLICED_SEQUENCES.contains(&o.class.as_str()) {
+                    return Ok(Some(Ty::inst(o.class.as_str())));
+                }
+                return Ok(self.dunder(o, "__getitem__", Some(Index::Slice)));
             }
             (Args::Map(_, v), _) => (**v).clone(),
             // A slice keeps the container type (a tuple's length is lost).
@@ -3252,17 +3281,27 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .declared_ty(&t)
                 .and_then(|t| t.bind_self(Some(&self_ty))));
         }
-        Ok(match recv {
-            // A row typing the read `Self` gives the instance's own class (`Path.parent`).
-            Ty::Inst(_) => cx.project.catalog_attribute(class, attr, cx.kb).map(|row| {
-                match heki_kb::split_receiver_items(&row) {
-                    (heki_kb::SELF_RETURN_TYPE, _) => self_ty,
-                    (container, true) => Ty::container(container, Args::items(Elem::Of(self_ty))),
-                    (class, false) => Ty::inst(class),
-                }
-            }),
-            _ => None,
-        })
+        let Ty::Inst(_) = recv else {
+            return Ok(None);
+        };
+        // A row typing the read `Self` gives the instance's own class (`Path.parent`).
+        if let Some(row) = cx.project.catalog_attribute(class, attr, cx.kb) {
+            return Ok(Some(match heki_kb::split_receiver_items(&row) {
+                (heki_kb::SELF_RETURN_TYPE, _) => self_ty,
+                (container, true) => Ty::container(container, Args::items(Elem::Of(self_ty))),
+                (class, false) => Ty::inst(class),
+            }));
+        }
+        if matches!(attr, "value" | "_value_")
+            && let Some(data_type) = cx.project.enum_value_class(class)
+        {
+            return Ok(Some(Ty::inst(data_type)));
+        }
+        // An instance of a library class: the attribute its stub declares. A project subclass
+        // may bind the name itself, which the project's own facts above decide.
+        Ok((!cx.project.is_project_class(class))
+            .then(|| stub_types::attribute_result(cx.kb.stubs(), class, attr, &self_ty))
+            .flatten())
     }
 
     /// Whether a project class binds the in-place method `x op= y` calls on an instance of
@@ -3424,7 +3463,15 @@ impl<'e, 'a> Engine<'e, 'a> {
                 let class = e.return_type_in(e.case_for(|i, k| self.passed(call, i, k)))?;
                 Some(Ty::container(class, Args::items(Elem::Of(self_ty))))
             }
-            _ => cx.callee_result(&callee, |i, k| self.passed(call, i, k)),
+            _ => cx
+                .callee_result(&callee, |i, k| self.passed(call, i, k))
+                .or_else(|| {
+                    let Callee::External(symbol) = &callee else {
+                        return None;
+                    };
+                    let on_instance = matches!(recv, Ty::Inst(_) | Ty::Super(_));
+                    stub_types::method_result(cx.kb.stubs(), symbol, &self_ty, on_instance, None)
+                }),
         }
     }
 

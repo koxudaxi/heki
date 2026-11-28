@@ -59,6 +59,7 @@ pub mod readonly;
 mod report;
 pub mod resolver;
 mod scc;
+mod stub_types;
 mod summary;
 pub mod types;
 mod witness;

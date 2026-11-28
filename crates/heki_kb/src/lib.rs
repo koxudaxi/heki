@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+pub mod stubs;
+pub use stubs::{StubCall, StubKind, StubMember, StubTable};
+
 /// Embedded Layer 1 files (`kb/soundness/*.toml`): `(path relative to the repository, contents)`.
 const SOUNDNESS_KB_FILES: &[(&str, &str)] = &[(
     "kb/soundness/builtins.toml",
@@ -1566,9 +1569,10 @@ impl EffectiveEcosystemKb {
         let read = serde_json::to_string(&attributes).unwrap_or_default();
         let class_read = serde_json::to_string(&class_attributes).unwrap_or_default();
         let provided = serde_json::to_string(&provides).unwrap_or_default();
+        let stubs = blake3::hash(StubTable::text().as_bytes()).to_hex();
         kb.digest = blake3::hash(
             format!(
-                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{class_read}|{provided}",
+                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{class_read}|{provided}|{stubs}",
                 kb.digest
             )
             .as_bytes(),
@@ -1775,6 +1779,12 @@ impl EffectiveEcosystemKb {
                 .rsplit_once('.')
                 .is_some_and(|(_, name)| name == attr)
         })
+    }
+
+    /// The types the standard library's stubs declare for call results and attribute reads
+    /// (Layer 2 only: the Soundness lane never reaches this table).
+    pub fn stubs(&self) -> &'static StubTable {
+        StubTable::embedded()
     }
 
     /// The class of what reading `attr` on an instance of exactly the library class `class`

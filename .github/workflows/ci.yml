@@ -557,6 +557,10 @@ jobs:
         run: python tests/sentinel/verify_soundness_kb.py
       - name: Standard library catalog sentinels
         run: python tests/sentinel/verify_stdlib_kb.py
+      # The table of declared results against typeshed's stubs at the pinned revision.
+      - name: Declared results generated from typeshed
+        if: matrix.python == '3.15'
+        run: python scripts/build_typeshed_kb.py --check
       - name: Container family table sentinels
         run: python tests/sentinel/verify_container_families.py
       - name: Adversarial counterexamples

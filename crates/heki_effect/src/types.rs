@@ -204,6 +204,39 @@ pub(crate) fn generic(class: &str) -> Option<Generic> {
     GENERICS.iter().find(|(c, _)| *c == class).map(|(_, g)| *g)
 }
 
+/// The tracked arguments of an instance of a generic class of kind `kind` written with the type
+/// arguments `args` (an annotation's, or a stub row's): `elem` types one argument, `returns`
+/// gives the arguments of a `Callable` from its result argument.
+pub(crate) fn generic_args(
+    kind: Generic,
+    args: &[&str],
+    elem: impl Fn(&str) -> Elem,
+    returns: impl Fn(&str) -> Args,
+) -> Args {
+    let at = |i: usize| args.get(i).map_or(Elem::Unknown, |a| elem(a));
+    match kind {
+        Generic::Items => Args::items(at(0)),
+        Generic::Map => Args::map(at(0), at(1)),
+        Generic::Pairs => Args::items(Elem::Of(Ty::container(
+            "builtins.tuple",
+            Args::Tuple(vec![at(0), at(1)]),
+        ))),
+        Generic::Counter => Args::map(at(0), Elem::Of(Ty::inst("builtins.int"))),
+        // `tuple[()]` is the empty tuple, `tuple[T, ...]` a tuple of any length.
+        Generic::Tuple => match args {
+            ["()"] => Args::Tuple(Vec::new()),
+            [_, "..."] => Args::items(at(0)),
+            _ => Args::Tuple((0..args.len()).map(at).collect()),
+        },
+        Generic::Held => Args::result(at(0)),
+        // `Callable[[A, B], T]`, `Callable[..., T]`.
+        Generic::Returns => match args {
+            [_, result] => returns(result),
+            _ => Args::None,
+        },
+    }
+}
+
 /// Whether `class` is a generic container class of the runtime, the builtin and `collections`
 /// classes of [`GENERICS`]: subscripting the class object with types gives an alias of it
 /// (`types.GenericAlias`: `frozenset[str]`), which constructs the class when called and reads
