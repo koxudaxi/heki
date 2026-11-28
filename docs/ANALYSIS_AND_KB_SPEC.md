@@ -2337,7 +2337,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      make no memo. A `MUT114` report is exact when the cached function carries a `CachedResult`
      (a `functools` cache resolved by import, with a `maxsize` other than `0`, a parameter
      besides `self` / `cls`, and a builtin list, dict, or set on every live return, by its return
-     annotation or by construction; or a memo named as a cache or memo whose every live return
+     annotation or by construction; or a memo typed a builtin `dict` wherever the function reads
+     or fills it and named as a cache or memo, whose every live return
      hands out, through copies and phis, a value read from or stored into it under one key, with
      a return annotation naming the kind and only the decorators a cache may stand beside), the
      changed value is that one

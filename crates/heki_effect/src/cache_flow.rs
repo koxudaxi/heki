@@ -205,9 +205,10 @@ pub struct HandMemo {
 pub(crate) struct MemoFound {
     pub memo: HandMemo,
     /// Every return a run can reach hands out, through copies and phis, the object the memo
-    /// keeps under one key (the value it reads or the value it stores there), and the
-    /// container's name says cache or memo ([`is_memo_name`]): a container of state the callers
-    /// share on purpose is rarely named so.
+    /// keeps under one key (the value it reads or the value it stores there), the container is
+    /// typed a builtin `dict` wherever the function reads or fills it, and its name says cache
+    /// or memo ([`is_memo_name`]): a container of state the callers share on purpose is rarely
+    /// named so.
     pub exact: bool,
 }
 
@@ -238,6 +239,8 @@ struct MemoRead<'f> {
     value: VarId,
     /// The block and index of the instruction reading it.
     at: (BlockId, u32),
+    /// The variable holding the container at the read.
+    container: VarId,
     held: Held<'f>,
     key: VarId,
     lookup: Lookup,
@@ -245,6 +248,8 @@ struct MemoRead<'f> {
 
 /// A store of a computed value into a container under a key derived from the arguments.
 struct MemoFill<'f> {
+    /// The variable holding the container at the store.
+    container: VarId,
     held: Held<'f>,
     key: VarId,
     value: VarId,
@@ -263,12 +268,14 @@ struct MemoFill<'f> {
 /// of state the callers share on purpose), one it rebinds other than lazily (a container made
 /// per call), a key derived from none of the arguments, and returns that only copy the kept
 /// value. `receiver` says whether the first parameter is the method's `self` / `cls`;
-/// `returned` is [`crate::readonly::returned_values`]. Past the function's budget, none.
-pub(crate) fn hand_memo(
+/// `returned` is [`crate::readonly::returned_values`], and `class_of` the class of a value's
+/// inferred type. Past the function's budget, none.
+pub(crate) fn hand_memo<'t>(
     shape: &FnShape<'_>,
     live: &crate::ownership::Live,
     receiver: bool,
     returned: &FxHashMap<VarId, ReturnStep>,
+    class_of: impl Fn(VarId) -> Option<&'t str>,
 ) -> Option<MemoFound> {
     let f = shape.f;
     // Most functions return no item of a container.
@@ -312,6 +319,7 @@ pub(crate) fn hand_memo(
             Some(MemoRead {
                 value,
                 at,
+                container,
                 held: *alias.get(&container)?,
                 key,
                 lookup,
@@ -336,15 +344,22 @@ pub(crate) fn hand_memo(
             }
             continue;
         };
-        let (key, value) = match (method, &f.block(w.block).insts[w.index as usize].kind) {
-            ("__setitem__", InstKind::SubscriptStore { index, value, .. }) => (*index, *value),
-            ("setdefault", InstKind::MethodCall { args, .. }) if args.len() == 2 => {
-                (args[0], args[1])
+        let (container, key, value) = match (method, &f.block(w.block).insts[w.index as usize].kind)
+        {
+            (
+                "__setitem__",
+                InstKind::SubscriptStore {
+                    obj, index, value, ..
+                },
+            ) => (*obj, *index, *value),
+            ("setdefault", InstKind::MethodCall { recv, args, .. }) if args.len() == 2 => {
+                (*recv, args[0], args[1])
             }
             _ => continue,
         };
         if derived.contains(&key) && computed(value) {
             fills.push(MemoFill {
+                container,
                 held,
                 key,
                 value,
@@ -397,7 +412,15 @@ pub(crate) fn hand_memo(
         RECEIVER => format!("{}.{name}", f.params.first().map_or("self", |p| &p.name)),
         n => format!("{}.{name}", globals[n as usize - 1]),
     };
-    let exact = is_memo_name(name) && every_return_kept(shape, live, &budget, &kept);
+    // A builtin dict hands out the object stored under a key; another mapping may keep a copy
+    // (a shelf pickles what it stores) or build a new object on each read.
+    let dict = |v: VarId| {
+        class_of(v).and_then(crate::readonly::ContainerFamily::level_of)
+            == Some((ContainerKind::Dict, crate::readonly::FamilyLevel::Builtin))
+    };
+    let in_dict = (hits.iter().filter(|(r, _)| r.held == held)).all(|(r, _)| dict(r.container))
+        && stored.iter().all(|w| dict(w.container));
+    let exact = is_memo_name(name) && in_dict && every_return_kept(shape, live, &budget, &kept);
     Some(MemoFound {
         memo: HandMemo { container, shared },
         exact,
@@ -491,28 +514,29 @@ fn every_return_kept(
             _ => {}
         }
     }
-    // The walk visits copy roots only: a copy hands out what its root holds.
-    let other = walk::reach(
+    // The walk visits copy roots only: a copy hands out what its root holds. A root that is
+    // neither kept nor a phi is another object.
+    let other = std::cell::Cell::new(false);
+    let walked = walk::reach(
         budget,
         returned.into_iter().map(|v| shape.copy_root(v)),
-        |v, next| {
-            if let Def::Phi(b, i) = shape.def(v) {
+        |v, next| match shape.def(v) {
+            Def::Phi(b, i) => {
                 let phi = &f.block(b).phis[i as usize];
                 let live_in = phi.incoming.iter().filter(|(from, _)| live.edge(*from, b));
                 next.extend(live_in.map(|(_, v)| shape.copy_root(*v)));
             }
+            _ => other.set(true),
         },
         |v| {
             if kept.contains(&v) {
-                Visit::Prune
-            } else if matches!(shape.def(v), Def::Phi(..)) {
-                Visit::Expand
+                Visit::<()>::Prune
             } else {
-                Visit::Stop(())
+                Visit::Expand
             }
         },
     );
-    other == Answer::Known(None)
+    walked == Answer::Known(None) && !other.get()
 }
 
 /// The values derived from `params`: they themselves, and every value an instruction or a phi

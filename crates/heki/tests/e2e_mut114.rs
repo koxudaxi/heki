@@ -560,6 +560,7 @@ def use(name):
 }
 
 const HAND_MEMOS: &str = r#"import copy
+import shelve
 from abc import abstractmethod
 from typing import Any
 
@@ -586,6 +587,7 @@ class Configs:
         self._buckets = {}
         self._kept = {}
         self._memo = None
+        self._shelf_cache = shelve.open("memo")
 
     def get(self, key):
         if key in self._cache:
@@ -709,6 +711,11 @@ class Configs:
             self._cache[key] = build(key)
         return self._cache[key]
 
+    def shelved(self, key) -> dict:
+        if key not in self._shelf_cache:
+            self._shelf_cache[key] = build(key)
+        return self._shelf_cache[key]
+
 
 def module_level(key) -> dict:
     if key not in _CACHE:
@@ -765,14 +772,15 @@ def tune(c: Configs, k):
     c.abstract(k)["x"] = 1
     c.maybe_none(k)["x"] = 1
     fresh_global(k)["x"] = 1
+    c.shelved(k)["x"] = 1
 "#;
 
 /// A function that fills a container outliving the call (an attribute of `self` or of the
 /// class, a module global) under a key from its arguments, and returns what the container keeps
 /// there, is a cache as a `functools` one is: `if k in c: return c[k]` / `c[k] = v; return v`,
 /// `if k not in c: c[k] = v` / `return c[k]`, `setdefault`, `.get(k)` then a fill. The exact
-/// claim needs every return to hand out the kept object, a container named as a cache or memo,
-/// and a return annotation naming the kind; a copy, a key not from the arguments, a container
+/// claim needs every return to hand out the kept object, a builtin dict named as a cache or
+/// memo, and a return annotation naming the kind; a copy, a key not from the arguments, a container
 /// made per call (also a module global the function rebinds), a registry slot built from none of
 /// the arguments, a store a call never finds kept, and a decorator heki does not know make no
 /// cache.
@@ -787,15 +795,16 @@ fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
             // No return annotation: the value a call finding its key kept returns was stored by
             // an earlier call or by other code.
             (6, false),
-            // Each form, an instance's, a class's (through `cls` and through its name), and a
-            // module's memo.
+            // Each form, of an instance's and of a module's memo.
             (7, true),
             (8, true),
             (9, true),
             (10, true),
-            (11, true),
-            (12, true),
-            (13, true),
+            // A memo made lazily (`None` or a dict), and a class's memo through `cls` and through
+            // the class: heki does not type the container a builtin dict there.
+            (11, false),
+            (12, false),
+            (13, false),
             (14, true),
             // A container not named as a cache or memo, a return of a new dict on one path, a
             // `.get` default, a wrapper, and an object below the result.
@@ -810,6 +819,8 @@ fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
             // A decorator a cache may not stand beside, and a return of `None`.
             (29, false),
             (30, false),
+            // A mapping that is no builtin dict: a shelf stores a copy and reads a new object.
+            (32, false),
         ],
         "{diags:#?}"
     );
@@ -825,7 +836,7 @@ fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
     assert_eq!(at(7)["help"], "change a copy (`dict(...)`) instead");
     assert_eq!(
         at(13)["message"],
-        "`tune` changes in place the dict that `Configs.by_class_name` returned; `Configs.by_class_name` keeps it in `Configs._class_cache`"
+        "`tune` mutates the shared object returned by cached function `memos.Configs.by_class_name`"
     );
     assert_eq!(
         at(14)["message"],
@@ -837,7 +848,7 @@ fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
         .filter(|d| d["rule_code"] == "MUT114" && d["certainty"] == "exact")
         .map(|d| d["line"].as_u64().unwrap())
         .collect();
-    assert_eq!(exact, (7..=14).chain([28]).collect::<Vec<_>>());
+    assert_eq!(exact, vec![7, 8, 9, 10, 14, 28]);
 }
 
 /// A memo function named as a `readonly-returns` producer reports under the contract, as before

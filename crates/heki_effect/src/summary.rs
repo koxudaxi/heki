@@ -1539,8 +1539,13 @@ impl<'a> Extractor<'a> {
             return;
         }
         let receiver = f.owner_class_qualname.is_some() && !f.has_decorator(&["staticmethod"]);
-        let Some(found) = cache_flow::hand_memo(self.shape, &self.live, receiver, &self.returned)
-        else {
+        let class_of = |v: VarId| match self.types.get(&v) {
+            Some(Val::Inst(class, _)) => Some(class.as_str()),
+            _ => None,
+        };
+        let found =
+            cache_flow::hand_memo(self.shape, &self.live, receiver, &self.returned, class_of);
+        let Some(found) = found else {
             return;
         };
         if found.exact {
