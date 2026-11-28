@@ -187,6 +187,8 @@ in its instructions, but not a contract that `heki check` enforces:
   the agent ends its turn.
 - [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
   (experimental) shows what one function reaches, changes, and returns.
+- [`heki recommend --focus types --diff`](https://heki.koxudaxi.dev/recommend/#applying-the-suggestions) (experimental) prints the exact type suggestions
+  as one patch that `git apply` takes, annotations only.
 - `--output-format json` gives every check as JSON, and the
   [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) (experimental) teaches the routine
   after an edit. [Coding agents](https://heki.koxudaxi.dev/coding-agents/) has the whole setup.
@@ -217,7 +219,7 @@ in its instructions, but not a contract that `heki check` enforces:
 
 3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and a CI step, and record
    today's findings in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only new ones fail:
-   `uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline`. The
+   `uvx heki==0.11.0 check --baseline heki-baseline.toml --update-baseline`. The
    [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups ready to copy.
 
 !!! warning "Pre-release"
@@ -903,6 +905,10 @@ One more rule runs by default only when you pass `--heuristic` (or set `lint.heu
 
 Two more rules that run the same way are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](https://heki.koxudaxi.dev/effects/#resource-and-cancellation-lifetimes).
 
+The knowledge base names the calls that wait. Besides `requests` and `httpx.Client`, it lists the synchronous clients of Xinference (`xinference_client.RESTfulClient` and the handles of its models) and of Supabase and PostgREST (`supabase.Client`, `postgrest.SyncPostgrestClient`): building a table query, including through `.not_`, sends nothing, and `execute()` waits for the server, so `EFF101` and `EFF103` report it there. Tier: exact, default ([`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/), [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/)).
+
+`DATA101` (exact, default, [`loop-carried-concat`](https://heki.koxudaxi.dev/rules/loop-carried-concat/)) also reports an array grown through `numpy.r_[...]` or `numpy.c_[...]` on every iteration (`arr = np.r_[arr, chunk]`), also when a helper returns that concatenation (`arr = grow(arr, chunk)`), as it does for `numpy.hstack`.
+
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
 
 ## 🔧 Rules to switch on
@@ -1047,7 +1053,7 @@ Work around a resource can end early. A cancelled task stops at its next checkpo
 
 ### Cleanup that stops at a cancellation checkpoint
 
-A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. Tier: heuristic, runs with `--heuristic` ([`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/)).
+A `finally` body, an `except` that takes the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint is cut short in a cancelled scope: the await raises the cancellation again and the rest of the cleanup does not run. `EFF118` reports it when no shield is on the way. A shield is a `CancelScope` with `shield=True` by the public name (`anyio.CancelScope`) or by the path that defines it (`anyio._core._tasks.CancelScope`). Tier: heuristic, runs with `--heuristic` ([`EFF118`](https://heki.koxudaxi.dev/rules/unshielded-cleanup-checkpoint/)).
 
 ```python
 # app/m.py
@@ -1425,7 +1431,8 @@ naive rewrite are run on CPython: see [Development](https://heki.koxudaxi.dev/de
 | `\n`, `\r\n`, or lone `\r` line breaks | Fixes work the same, and the lines they insert use the file's own line break. |
 
 `--diff` prints the paths every other output format prints (relative to the working directory),
-so `patch -p1` applies it where heki ran.
+so `patch -p1` applies it where heki ran. It writes the lines in the file's own encoding (a
+PEP 263 Latin-1 declaration included), as `--fix` writes the file, so the patch matches its bytes.
 
 ## Fixes keep type checkers and isort satisfied
 
@@ -1498,7 +1505,9 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
 shows every block of contracts, where the report shows the first 3 of each kind, lists up
 to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5, lists every
 suggestion group, the heuristic ones too, where the text lists the first 3 exact ones, and names
-every rule without reports.
+every rule without reports. `--focus types` prints the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions) alone, with
+every exact group, and `--focus types --diff` prints them as a patch
+([below](https://heki.koxudaxi.dev/recommend/#applying-the-suggestions)).
 
 ## What it prints
 
@@ -1514,10 +1523,11 @@ every rule without reports.
 - **Types the code already keeps**: the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions), counted exact and
   heuristic, and whether heki found a type checker's configuration (without one, half of each
   guard is missing). The first 3 exact groups by rank are listed, each on one line with its
-  place, function and parameter, the annotation now and as proposed, and its labels; `--all`
-  lists every group, the heuristic ones last with the premises they leave open. The lines under
-  them say what each group states, what reports a later change of the type it writes, and what
-  each label shown means. The edits are in the JSON object; none of it enters the block.
+  place, function and parameter, the annotation now and as proposed, and its labels;
+  `--focus types` lists every exact group, and `--all` every group, the heuristic ones last with
+  the premises they leave open. The lines under them say what each group states, what reports a
+  later change of the type it writes, what each label shown means, and the command that applies
+  the exact groups. The edits are in the JSON object; none of it enters the block.
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -1867,13 +1877,14 @@ heki recommend (experimental) on .: 4 file(s), 13 function(s)
 Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
 
 Types the code already keeps
-  2 read-only parameter group(s), exact; 2 heuristic (heki recommend --all lists them)
+  2 read-only parameter group(s), exact; 2 heuristic (heki recommend app --all lists them)
   No type checker configuration found: half of each guard is a type checker's.
     app/report.py:2  total_and_count(rows)  list[int] -> Sequence[int]  public
     app/report.py:9  average(rows)          list[int] -> Sequence[int]  public
   Each group states that the parameter itself is never changed, in its function and in every function it is handed to, and that it does not leave them. The edits of a group go together; --output-format json has them.
   After the edit, a type checker reports a change of the parameter in the function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports handing it to a function without annotations that changes it.
   public: a name without a leading underscore along it; callers, overriders, and implementers outside the checked files are not known
+  To apply the exact groups: heki recommend app --focus types --diff | git apply
 
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
@@ -1990,6 +2001,26 @@ When the claim holds and only a premise of the edit is open, the group is heuris
 (`[tool.ty]`, `ty.toml`, `[tool.mypy]`, `mypy.ini`, `[tool.pyright]`, `pyrightconfig.json`,
 `[tool.pyrefly]`): half of each guard is the type checker's, the other half `MUT110`.
 
+### Applying the suggestions
+
+`heki recommend --focus types` prints the header and "Types the code already keeps" alone, with
+every exact group; `--all` adds the heuristic ones. The analysis is the same as without it, so
+the groups are too, and with `--output-format json` the object keeps every field, its
+`suggestions.groups` holding every exact group past the cap of 50.
+
+```console
+$ heki recommend --focus types --diff | git apply
+```
+
+`--diff` prints the exact groups as one unified diff with the paths `heki check --diff`
+prints, so `git apply` or `patch -p1` applies it from the same directory. It changes
+annotations and adds the imports they name, nothing else: the edits of the JSON object, applied
+as the annotation trial applied them. Each file keeps its line breaks and its declared encoding.
+A heuristic group is never in it, and the diff is empty when no group is exact. The command
+still writes nothing and exits with `0` (`2` when a file cannot be read or parsed); the count of
+the groups goes to standard error. Run the project's formatter and type checker afterwards, as
+after any `heki check --fix`.
+
 ## JSON output
 
 `--output-format json` prints one object, described by the JSON Schema at
@@ -2012,7 +2043,7 @@ changes meaning.
 | `contracts` | each block the configuration block declares, the first 3 of each kind (`--all`: every one): its kind, its targets (or the packages and modules of its scopes), the candidates it stands for, its entry, confidence, evidence, what the trial reported for its candidates, the class patterns tried with what the pattern trial reported and whether the block names them, and caveats |
 | `contracts_not_shown` | per kind, the blocks past the first 3 and the candidates they stand for |
 | `contract_blockers` | the sites of accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`: how many, the first 5 (`--all`: 50) with the rule, path, line, function, the report as `heki check` writes it, and the candidates and blocks each holds back, and whether the list is cut |
-| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
+| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--focus types`: every exact one; `--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
 | `rejected_contracts` | the candidates a run reported for, each alone, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
 | `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, the names a `{...}` group of it lists that name nothing (`alternatives`, when it lists several), and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
@@ -2333,7 +2364,7 @@ against them. Replace `app` with your package.
               fetch-depth: 0   # the base branch is compared below
           - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
           - name: Walls
-            run: uvx heki==0.10.0 check
+            run: uvx heki==0.11.0 check
           - name: Compare with the base branch
             shell: bash
             env:
@@ -2342,12 +2373,12 @@ against them. Replace `app` with your package.
             run: |
               git worktree add ../base "origin/$BASE"
               keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
-              uvx heki==0.10.0 check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
-              (cd ../base && uvx heki==0.10.0 check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
+              uvx heki==0.11.0 check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
+              (cd ../base && uvx heki==0.11.0 check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
               new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
               test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
-              (cd ../base && uvx heki==0.10.0 snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
-              uvx heki==0.10.0 check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
+              (cd ../base && uvx heki==0.11.0 snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
+              uvx heki==0.11.0 check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
                 --report-suppressed "$RUNNER_TEMP/mut103.json"
               hidden=$(keys "$RUNNER_TEMP/mut103.json")
               test -z "$hidden" || { echo "Effect changes hidden by inline suppressions:"; echo "$hidden"; exit 1; }
@@ -3056,7 +3087,7 @@ allowed-writers = ["@store"]
 
 ### Where a contract is defined
 
-Every contract report points at the contract it is of and at the entry its target names (JSON
+Every contract report points at the contract it is of and at the entry its access matched (JSON
 `contract_locations`, SARIF related locations, and the language server's related information:
 [Output formats](https://heki.koxudaxi.dev/output-formats/#where-a-contract-report-points)), and every
 [entry that matches nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing) is warned about with its place and its
@@ -3295,7 +3326,9 @@ class implements. A protocol whose implementations heki cannot list (more than e
 access to `unresolved = "report"` (`MUT206`, `MUT207`). An access matching `Impl._m` and a
 `Host._m` target of the same contract is one report, named by the target configured first, and
 `allowed-callees` naming every method a call through the protocol may run allows it, as naming
-the declaration does. A write through such a value still writes the implementations'
+the declaration does. A static or class method the protocol declares, called through such a
+value (`h.build()`), is judged the same way as an instance method: the receiver tells the
+protocol. A write through such a value still writes the implementations'
 attribute. `allowed-protocols` allows the reads, calls, and writes through the protocols it
 names, also through a class object typed `type[P]` of such a protocol (see [How contracts
 report](https://heki.koxudaxi.dev/configuration/#how-contracts-report)).
@@ -4351,7 +4384,7 @@ Record today's findings, so that only new ones fail, and commit `heki-baseline.t
 configuration, the hook, and the CI step:
 
 ```console
-$ uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline
+$ uvx heki==0.11.0 check --baseline heki-baseline.toml --update-baseline
 ```
 
 ```toml
@@ -4364,14 +4397,14 @@ baseline = "heki-baseline.toml"
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.10.0
+    rev: v0.11.0
     hooks:
       - id: heki   # heki check --touched on the staged files
 ```
 
 ```yaml
 # A step of the CI job, with uv installed
-- run: uvx heki==0.10.0 check
+- run: uvx heki==0.11.0 check
 ```
 
 The hook shows the reports in and through the staged files, and every regression of the
@@ -4500,7 +4533,7 @@ fail = true
 - `fail = true` makes the reports of that contract fail the run and leaves every other warning
   and heuristic report advisory. `fail-on = "warning"` would fail on all of them, which a project
   that wants that can still set. Record today's findings in the baseline first
-  (`uvx heki==0.10.0 check --update-baseline`), so that only new ones fail.
+  (`uvx heki==0.11.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
 - A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
   review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
@@ -4681,7 +4714,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.10.0
+    rev: v0.11.0
     hooks:
       - id: heki
 ```
@@ -4702,7 +4735,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki==0.10.0 check --touched
+            entry: uvx heki==0.11.0 check --touched
             language: system   # needs uv on PATH
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
@@ -4722,7 +4755,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: heki check --touched
             language: python
-            additional_dependencies: [heki==0.10.0]
+            additional_dependencies: [heki==0.11.0]
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
@@ -4767,14 +4800,14 @@ the run now.
 === "GitHub Actions annotations"
 
     ```yaml
-    - run: uvx heki==0.10.0 check --output-format github
+    - run: uvx heki==0.11.0 check --output-format github
     ```
 
 === "Code scanning (SARIF)"
 
     ```yaml
     # The job needs `permissions: security-events: write`.
-    - run: uvx heki==0.10.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
+    - run: uvx heki==0.11.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
     - uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: heki.sarif
@@ -4797,7 +4830,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.10.0 check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.11.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
@@ -5512,6 +5545,14 @@ Options:
       --all
           Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones), and every rule without reports by name
 
+      --focus <FOCUS>
+          Print one section in full, alone: `types`, the suggestions with every exact group (with `--all`, the heuristic ones too). The JSON object keeps every field
+          
+          [possible values: types]
+
+      --diff
+          With `--focus types`, print the exact suggestion groups as one unified diff that `git apply` or `patch -p1` applies, in place of the report: annotations and the imports they need, nothing else. Writes no file
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -5559,10 +5600,14 @@ Exit codes:
 Examples:
   heki recommend
       advice for the project in the working directory
+  heki recommend --focus types
+      every standard type the code already keeps, as suggestions
 
 Output for programs:
   heki recommend --output-format json
       the advice as one object
+  heki recommend --focus types --diff | git apply
+      the exact suggestions as one unified diff of annotations
   heki recommend --output-format-json-schema
       the JSON Schema of that object
 ```
@@ -5688,16 +5733,22 @@ heki does not copy.
 ## Where a contract report points
 
 A report of a contract rule gives, in `contract_locations` of the JSON diagnostics, where the
-configuration defines each contract it is of, then the entry of the contract whose text is the
-report's `target`, when there is one (a target of `write-owners`, `read-owners`, or
-`call-owners`, a producer of `readonly-returns` written without a glob). Each has a
-`path`, a 1-based `line` and byte `column`, and a `message` (``write-owners contract `fields` ``,
-``` `targets` entry `pkg.m.Model.fields` ```, with ``from group `name` `` for an entry a group
-holds). The places are where the file writes the table and the entry: in the main configuration
+configuration defines each contract it is of, then the entry of the contract the report is
+about, when there is one. For `effect-boundaries` (`EFF201`), `invalidation` (`MUT208`), and
+`import-boundaries` (`IMP201`), that is the entry the access matched, glob or module part
+included: the `call-targets`, `read-targets`, `write-targets`, or `write-universe` entry, or the
+`forbid` token, of a boundary; the `targets` entry of an invalidation contract; the
+`forbidden-imports` pattern of a forbidden import, or the `relative-imports` one of a module
+imported by its full name. A report of an access several entries match points at the first,
+the one its `target` names. For the other contracts it is the entry whose text is the report's `target` (a
+target of `write-owners`, `read-owners`, or `call-owners`, a producer of `readonly-returns`
+written without a glob). Each has a `path`, a 1-based `line` and byte `column`, and a
+`message` (``write-owners contract `fields` ``, ``` `targets` entry `pkg.m.Model.fields` ```,
+with ``from group `name` `` for an entry a group holds). The places are where the file writes the table and the entry: in the main configuration
 file, an included one, a defaults table, or a group. A table's
-[`source` and `entry-sources`](configuration.md#where-a-contract-is-defined) name other places,
+[`source` and `entry-sources`](https://heki.koxudaxi.dev/configuration/#where-a-contract-is-defined) name other places,
 which are given instead. SARIF output adds the same places to `relatedLocations`, after the
-steps of the report's chain, and the [language server](lsp.md) to its related information. The
+steps of the report's chain, and the [language server](https://heki.koxudaxi.dev/lsp/) to its related information. The
 places are no part of a baseline key.
 
 ## Versions
@@ -6767,11 +6818,11 @@ project `QuerySet` subclass binding a name a query method of `QuerySet` looks up
 behind `create` without calling `super().save(...)` on every path (`effect_through`); which
 model a manager or queryset is for is not tracked, so one such model opens every `create`. A model whose body may
 bind another manager (a call of a project function, `QuerySet.as_manager()`) has no `objects` to
-heki, nor does one whose `objects` is a manager of a class outside the project or of one
-`Manager.from_queryset()` builds. A manager of a library class bound under another name (`tree =
-TreeManager()`) is not seen: heki takes the model to have the default `objects`, which Django
-does not add. An abstract model has no `objects` either, which heki does not tell from its
-`Meta`.
+heki, nor does one whose `objects` a module stores outside the class body, or is a manager of a
+class outside the project or of one `Manager.from_queryset()` builds. A manager of a library
+class bound under another name (`tree = TreeManager()`) is not seen: heki takes the model to
+have the default `objects`, which Django does not add. An abstract model has no `objects`
+either, which heki does not tell from its `Meta`.
 
 ### Properties
 
@@ -8053,7 +8104,8 @@ A call in `async def` that always runs a network, database, subprocess, or sleep
 
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
-synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), host name lookups
+synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`, the synchronous `xinference_client.RESTfulClient`
+and its model handles, the `execute()` of a supabase-py / postgrest query), host name lookups
 (`socket.getaddrinfo` / `gethostbyname` / `getfqdn`; the event loop has `loop.getaddrinfo()`;
 `getaddrinfo` with the `AI_NUMERICHOST` flag only parses an address and is not reported),
 database drivers
@@ -9133,7 +9185,8 @@ method through the class and take its calls over). The call is one of a target `
 too when heki lists the classes implementing the protocol, there is at least one, each is
 `Model` or a subclass of it, and every method the call may run is a target, as for a call
 through a base class; a protocol that another class implements too, or that no project class
-implements, calls no target of `Model`'s.
+implements, calls no target of `Model`'s. A static or class method the protocol declares, called
+through such a value, is judged the same way.
 
 A target's last segment names the function, method, or class: a glob there matches within that
 name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
@@ -10687,6 +10740,15 @@ Checks quadratic accumulation of immutable values in a loop:
 - `self.text += piece` on an attribute that the class's methods in the module (or, for another
   receiver, the function) only ever assign a string, bytes, or tuple literal of the pieces'
   kind (`self.text = ""`): `self.values += (i,)` extends a list in place.
+  A piece of that kind is a literal, a concatenation of them, an f-string, `"".join(...)`,
+  `"...".format(...)` of a template with text beside its field (or of exact builtin operands), `"..." % scalar`, or `str`, `repr`, `ascii`, or `format` of a value of a
+  builtin type (`str(len(items))`). `str(x)`, `repr(x)`, `ascii(x)`, and `format(x)` of a value
+  of unknown type, `"{}".format(x)` (a template that is one field returns what `x.__format__`
+  returned), an f-string field, and a concatenation of such pieces are a `str` or a
+  subclass of it, not an exact `str`: another class's `__str__` / `__format__` may return a
+  `str` subclass instance that overrides `__radd__`. The report is heuristic, and its open
+  premise (`Rewrite proven safe`, cause `exact-type`) says so. A piece of any other unknown
+  type (`convert(x)`, `"%s" % x`) is not reported.
 
 Local `str` accumulation is not reported: CPython already appends in place when the string has
 no other reference. Neither are:
@@ -11818,8 +11880,8 @@ Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumul
 
 ## What it does
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
-`df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`, and
-the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
+`df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`,
+`arr = np.r_[arr, x]` (and `np.c_`), and the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
 accumulation is reported: the result feeds the next iteration and is computed from the previous
 value, also when it grows on some iterations only. An update through a project function counts
 when that function returns a reallocation of the argument carrying the previous value, directly
@@ -11906,7 +11968,8 @@ too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, 
 and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
 `list(query)`),
 the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
-variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
+variants), `pymongo`, `redis`, and DynamoDB commands, the `execute()` of a supabase-py / postgrest
+query, `pandas.read_sql`, and project functions
 that reach them, also when an offloading API runs them on a worker thread per item (`await
 asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
@@ -13604,7 +13667,12 @@ continues. The rule is opt-in: enable it with `--extend-select EFF114` or
 A function is on a call cycle when it can call itself again through calls whose bodies run on
 the caller's stack: plain calls, awaited coroutines, property getters, generators iterated
 there, generator expressions where they are written, and functions builtins call there
-(`list(map(self.depth, children))`, where the `map` is consumed in the `try`). A clause takes a `RecursionError` when it names
+(`list(map(self.depth, children))`, where the `map` is consumed in the `try`). Each call of the
+cycle has as its targets every implementation it can run: a call heki resolves, or a method of
+a class it knows whose overrides it has all. A method found only by its name, such as a member
+of a protocol a receiver is typed with, closes no cycle: a getter that reads the same attribute
+of another object (`self._backend.max_bits` in a property `max_bits`) does not call itself. The
+way down from the `try` body to the cycle may go through such a call. A clause takes a `RecursionError` when it names
 `RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (also in a tuple, or imported
 from `builtins`), or is a bare `except`, and no earlier clause of the same `try` takes it. The
 rule reports the clause, with the call in the `try` body as a related location, and, when the
@@ -13629,7 +13697,8 @@ It does not report:
   once to an integer);
 - a `try` body whose calls reach no call cycle, or reach one only through a call heki cannot
   resolve, a coroutine only created, or a function run on another thread
-  (`asyncio.to_thread`, `loop.run_in_executor`);
+  (`asyncio.to_thread`, `loop.run_in_executor`), and a cycle closed only through a method found
+  by its name;
 - `except*` clauses, and a `RecursionError` that reaches the clause only through a `finally`
   body.
 
@@ -13642,8 +13711,11 @@ that depends on the depth of the stack instead of the error.
 Its premises:
 
 - **Call cycle**: a call in the `try` body runs, through calls whose bodies run on its stack, a
-  function that can call itself again through such calls. Open through a method call: one
-  candidate implementation on the way is enough.
+  function that can call itself again through such calls, each of them a call whose targets are
+  every implementation it can run. Open through a method call on the way down: one candidate
+  implementation of it is enough. Open as well where state or an argument stops the
+  recursion after one more level (a flag set before the recursive call, a retry with an argument
+  that no longer recurses): the recursion may stop there and never raise.
 - **Catches RecursionError**: the clause's classes include `RecursionError`, as the builtins the
   module does not rebind (assumption R1), and no earlier clause of the same `try` takes it.
   Established.
@@ -15005,8 +15077,9 @@ It does not report:
 
 - a checkpoint inside a `with` over `CancelScope(shield=True)` or `move_on_after(...,
   shield=True)` (and the other `move_on_*` and `fail_*` calls) on every path to it, in the
-  cleanup or in any function on the way; a project function whose checkpoints are all shielded
-  reaches none;
+  cleanup or in any function on the way, also when the code names the scope by the module that
+  defines it (`anyio._core._tasks.CancelScope`); a project function whose checkpoints are all
+  shielded reaches none;
 - a checkpoint inside a cancel scope that may shield: one made with a `shield` argument that is
   not a constant, one whose `shield` attribute the function sets, or one made elsewhere;
 - a checkpoint on a branch the call's constant arguments never take (`await self._stop()` where

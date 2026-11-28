@@ -26,7 +26,7 @@ use heki_rules::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -642,6 +642,13 @@ fn fixes_to_apply<'d>(
     (by_path, not_touched)
 }
 
+/// Print the [`unified_diff`] of a file's text and its new text, `path` as the header names it:
+/// as bytes, so that a patch tool reads the lines in the file's own encoding.
+pub(crate) fn print_diff(path: &str, old: &str, new: &str, styles: &Stylesheet) -> Result<()> {
+    std::io::stdout().write_all(&unified_diff(path, old, new, styles))?;
+    Ok(())
+}
+
 /// The line after the summary of `--fix` and `--diff` that says how many fixes a run over
 /// touched files left in the other files, empty when it left none.
 fn not_touched_note(not_touched: usize) -> String {
@@ -692,10 +699,7 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
             touched.warn(args.output_format);
         }
         for f in &run.files {
-            print!(
-                "{}",
-                unified_diff(&shown_text(&f.path), &f.original, &f.fixed, &styles)
-            );
+            print_diff(&shown_text(&f.path), &f.original, &f.fixed, &styles)?;
         }
         eprintln!(
             "Would fix {} issue(s) in {} file(s).",
@@ -1491,6 +1495,7 @@ mod tests {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            contract_entries: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
             key_target: None,

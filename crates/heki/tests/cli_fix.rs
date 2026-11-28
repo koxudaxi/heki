@@ -429,6 +429,23 @@ fn declared_source_encodings_are_read_and_fixes_keep_them() {
     let expected = as_latin1(latin1).replace("xs = xs + [item]", "xs.append(item)");
     let fixed = std::fs::read(p.dir.join("legacy.py")).unwrap();
     assert_eq!(as_latin1(&fixed), expected, "still Latin-1");
+    // `--diff` writes the lines as the file holds them, so that a patch tool finds them.
+    std::fs::write(
+        p.dir.join("near.py"),
+        b"# coding: latin-1\ndef build(items):\n    xs = []  # caf\xe9\n    for item in items:\n        xs = xs + [item]\n    return xs\n",
+    )
+    .unwrap();
+    let out = common::heki_command()
+        .args(["check", "--diff", "near.py"])
+        .current_dir(&p.dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.stdout,
+        b"--- a/near.py\n+++ b/near.py\n@@ -2,5 +2,5 @@\n def build(items):\n     xs = []  # caf\xe9\n     for item in items:\n-        xs = xs + [item]\n+        xs.append(item)\n     return xs\n",
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 
     std::fs::write(p.dir.join("legacy.py"), b"# coding: cp1252\nx = '\x80'\n").unwrap();
     let (code, _, stderr) = p.check(&[]);

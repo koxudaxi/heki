@@ -499,6 +499,12 @@ pub struct Dispatch {
     /// the type the code calls it through, while the callees are the implementations it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared: Option<FuncKey>,
+    /// The project protocol the receiver is typed with, when it declares the method
+    /// (`pkg.Host` of `h.build()` with `h: Host`), as the receiver expression tells it: a static
+    /// method binds no receiver to a parameter, and a class method binds the class, so the
+    /// callees' parameters do not tell it. A reference keeps it too, without [`Self::declared`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
     /// Parameters of the caller the receiver may be, as itself (`cls.m()`, `self.m()`,
     /// `super().m()`: bit 0), for a call of a class method, which binds the class and no value of
     /// the caller, or of a static method, which binds no receiver at all: the first bound
@@ -2602,7 +2608,9 @@ pub struct CallSite {
     /// is no protocol, every member of a union resolves, and no project subclass's
     /// implementation is missing; for a read that runs property getters, every class the
     /// object may be finds one of them first (`TypeCtx::getter_targets_complete`). Computed
-    /// with [`Self::on_every_return`].
+    /// with [`Self::on_every_return`]. A site where the call's result is iterated or awaited has
+    /// the call's: the bodies it runs there are its targets'. A comprehension in a frame of its
+    /// own (`__comp_<id>`) and a generator expression run the code written there.
     pub complete: bool,
     /// Whether the caller has made the call whenever it returns normally (computed when an
     /// enabled rule reads [`EffectSummary::must_exec`]).
@@ -2789,6 +2797,11 @@ impl CallSite {
     /// ([`Dispatch::recv_params`]).
     pub fn recv_params(&self) -> u64 {
         self.dispatch.as_ref().map_or(0, |d| d.recv_params)
+    }
+
+    /// The project protocol the receiver is typed with ([`Dispatch::protocol`]).
+    pub fn receiver_protocol(&self) -> Option<&str> {
+        self.dispatch.as_ref()?.protocol.as_deref()
     }
 
     /// The class of the receiver ([`Dispatch::receiver`]).
@@ -3349,9 +3362,10 @@ impl OptInFacts {
         dispatch: false,
     };
 
-    /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
+    /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`]
+    /// (`EFF114` builds its cycles over complete calls).
     pub fn site_paths(self) -> bool {
-        self.must_effects || self.kept_values
+        self.must_effects || self.kept_values || self.call_cycles
     }
 }
 

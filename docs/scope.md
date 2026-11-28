@@ -390,11 +390,11 @@ project `QuerySet` subclass binding a name a query method of `QuerySet` looks up
 behind `create` without calling `super().save(...)` on every path (`effect_through`); which
 model a manager or queryset is for is not tracked, so one such model opens every `create`. A model whose body may
 bind another manager (a call of a project function, `QuerySet.as_manager()`) has no `objects` to
-heki, nor does one whose `objects` is a manager of a class outside the project or of one
-`Manager.from_queryset()` builds. A manager of a library class bound under another name (`tree =
-TreeManager()`) is not seen: heki takes the model to have the default `objects`, which Django
-does not add. An abstract model has no `objects` either, which heki does not tell from its
-`Meta`.
+heki, nor does one whose `objects` a module stores outside the class body, or is a manager of a
+class outside the project or of one `Manager.from_queryset()` builds. A manager of a library
+class bound under another name (`tree = TreeManager()`) is not seen: heki takes the model to
+have the default `objects`, which Django does not add. An abstract model has no `objects`
+either, which heki does not tell from its `Meta`.
 
 ### Properties
 

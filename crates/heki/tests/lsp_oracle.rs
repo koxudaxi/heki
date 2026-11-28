@@ -869,6 +869,8 @@ const EXACT_BASE_QUIET_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef 
 const EXACT_FETCH: &str = "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n";
 const EXACT_FETCH_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nif os.environ.get(\"QUIET\"):\n    fetch = _quiet\n";
 const EXACT_FETCH_REBOUND: &str = "import requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nfetch = _quiet\n";
+const EXACT_STAR: &str = "TIMEOUT = 1\n";
+const EXACT_STAR_REBINDING: &str = "TIMEOUT = 1\n\n\ndef fetch(url):\n    return url\n";
 const EXACT_FETCH_USE: &str =
     "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
 // A class a function binds under `global` (`ModuleDecls::made_in`): the module's name holds it
@@ -1634,7 +1636,9 @@ fn steps_kept_values() -> Vec<Step> {
 /// Exact effect reports follow every implementation of a call across modules (the targets of
 /// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
 /// (`EffectSummary::must_exec`, compared by Early Cutoff), and every binding of the name called
-/// that may be its last in the module or class body of another file.
+/// that may be its last in the module or class body of another file, a star import after the
+/// definition included, which binds what the module it imports defines
+/// (`ProjectDecls::star_rebound`).
 fn steps_exact_effects() -> Vec<Step> {
     vec![
         Step::new(
@@ -1725,6 +1729,30 @@ fn steps_exact_effects() -> Vec<Step> {
             ("pkg/exact_fetch_use.py", "EFF101"),
             ("pkg/exact_fetch_use.py", "EFF101 [heuristic]"),
         ]),
+        Step::new(
+            "the function's module star-imports a module binding no such name after the function",
+            vec![
+                save(
+                    "pkg/exact_fetch.py",
+                    &format!("{EXACT_FETCH}\n\nfrom pkg.exact_star import *\n"),
+                ),
+                Action::Create("pkg/exact_star.py", EXACT_STAR.to_owned()),
+            ],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the star-imported module starts defining the function's name",
+            vec![save("pkg/exact_star.py", EXACT_STAR_REBINDING)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101")]),
+        Step::new(
+            "the star-imported module stops defining it",
+            vec![save("pkg/exact_star.py", EXACT_STAR)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "a module binds a class under `global` in a function it runs on every path",
             vec![
@@ -7308,6 +7336,23 @@ fn steps_configuration() -> Vec<Step> {
             )],
         )
         .present(&[("pkg/shapes.py", "MUT201")]),
+        // A report whose access matches an entry by its pattern points at that entry.
+        Step::new(
+            "contracts of an included file match by the globs of a group",
+            vec![
+                Action::Write("contracts/dials.toml", DIAL_CONTRACTS.to_owned()),
+                Action::Configure(with_included("contracts/dials.toml")),
+            ],
+        )
+        .present(DIAL_CONTRACT_REPORTS),
+        Step::new(
+            "the group moves down",
+            vec![Action::Write(
+                "contracts/dials.toml",
+                format!("# dials\n\n{DIAL_CONTRACTS}"),
+            )],
+        )
+        .present(DIAL_CONTRACT_REPORTS),
         Step::new(
             "the included file is gone from the configuration",
             vec![Action::Configure(CONFIG.to_owned())],
@@ -7316,15 +7361,49 @@ fn steps_configuration() -> Vec<Step> {
     ]
 }
 
+/// An effect boundary, an invalidation contract, and an import boundary of an included file
+/// whose reports match their entries by globs ([`DIAL_CONTRACT_REPORTS`]), two of them from a
+/// group.
+const DIAL_CONTRACTS: &str = "\
+[groups]
+levels = [\"Gauge.lev*\"]
+
+[[effect-boundaries]]
+name = \"turning\"
+scopes = [\"pkg.dial_user.turn\"]
+write-universe = [\"@levels\"]
+
+[[invalidation]]
+name = \"gauges\"
+targets = [\"Node.kids\", \"@levels\"]
+invalidators = [\"pkg.dials:recalibrate\"]
+
+[[import-boundaries]]
+name = \"dial-layers\"
+importers = [\"pkg.dial_user\"]
+forbidden-imports = [\"pkg.imp_db\", \"pkg.dial_o*\"]
+";
+
+const DIAL_CONTRACT_REPORTS: &[(&str, &str)] = &[
+    ("pkg/dial_user.py", "EFF201"),
+    ("pkg/dial_user.py", "MUT208"),
+    ("pkg/dial_user.py", "IMP201"),
+];
+
+/// [`CONFIG`] including `file`.
+fn with_included(file: &str) -> String {
+    CONFIG.replace(
+        "[tool.heki.lint]\n",
+        &format!("[tool.heki]\ninclude = [\"{file}\"]\n\n[tool.heki.lint]\n"),
+    )
+}
+
 /// A write owner of an included file ([`with_boxes`]).
 const BOXES: &str = "[[write-owners]]\nname = \"boxes\"\ntargets = [\"Box.items\"]\n";
 
 /// [`CONFIG`] including `contracts/boxes.toml`.
 fn with_boxes() -> String {
-    CONFIG.replace(
-        "[tool.heki.lint]\n",
-        "[tool.heki]\ninclude = [\"contracts/boxes.toml\"]\n\n[tool.heki.lint]\n",
-    )
+    with_included("contracts/boxes.toml")
 }
 
 const MEMBER_PYPROJECT: &str = "[project]\nname = \"member\"\n";
@@ -9909,6 +9988,85 @@ fn lsp_diagnostics_equal_a_full_check_as_classes_start_and_stop_implementing_a_p
     s.lsp.stop(true);
 }
 
+const STATIC_MEMBERS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "members"
+targets = ["pkg.impl:Impl.build", "pkg.impl:Impl.make"]
+allowed-callers = ["pkg.impl:*"]
+"#;
+
+const STATIC_MEMBERS_HOST: &str = "from typing import Protocol\n\n\nclass Host(Protocol):\n    size: int\n\n    @staticmethod\n    def build() -> None: ...\n\n    @classmethod\n    def make(cls) -> None: ...\n";
+const STATIC_MEMBERS_IMPL: &str = "class Impl:\n    def __init__(self) -> None:\n        self.size = 0\n\n    @staticmethod\n    def build() -> None:\n        pass\n\n    @classmethod\n    def make(cls) -> None:\n        pass\n";
+const STATIC_MEMBERS_OTHER: &str =
+    "class Other:\n    def __init__(self) -> None:\n        self.size = 0\n";
+const STATIC_MEMBERS_USE: &str =
+    "from pkg.host import Host\n\n\ndef through(h: Host) -> None:\n    h.build()\n    h.make()\n";
+
+/// The static and class methods called through a protocol are a target's while the target's
+/// class alone implements the protocol, as the receiver tells the protocol: the calling module
+/// stays as it is while a class of another module starts implementing the protocol and stops
+/// again, and the protocol stops declaring the methods and declares them again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_static_and_class_members_through_a_protocol() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/host.py", STATIC_MEMBERS_HOST.to_owned()),
+        ("pkg/impl.py", STATIC_MEMBERS_IMPL.to_owned()),
+        ("pkg/other.py", STATIC_MEMBERS_OTHER.to_owned()),
+        ("pkg/use.py", STATIC_MEMBERS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_protocol_static_members",
+        STATIC_MEMBERS_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let other_implements = STATIC_MEMBERS_OTHER.replace(
+        "        self.size = 0\n",
+        "        self.size = 0\n\n    @staticmethod\n    def build() -> None:\n        pass\n\n    @classmethod\n    def make(cls) -> None:\n        pass\n",
+    );
+    let undeclared = STATIC_MEMBERS_HOST
+        .split("\n\n    @staticmethod")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+        + "\n";
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "a class outside the target's family starts implementing the protocol",
+            vec![save("pkg/other.py", &other_implements)],
+        )
+        .absent(reported),
+        Step::new(
+            "it stops implementing it",
+            vec![save("pkg/other.py", STATIC_MEMBERS_OTHER)],
+        )
+        .present(reported),
+        Step::new(
+            "the protocol stops declaring the static and class methods",
+            vec![save("pkg/host.py", &undeclared)],
+        ),
+        Step::new(
+            "it declares them again",
+            vec![save("pkg/host.py", STATIC_MEMBERS_HOST)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ------------------------------------- `__dict__` keys another `write-owners` contract names
 
 const LISTED_KEYS_CONFIG: &str = r#"[project]
@@ -10713,8 +10871,8 @@ const MANAGER_USE: &str = "from pkg.models import Stream\n\n\ndef fetch(ids: lis
 
 /// A model's manager is the class its body binds, which another module declares: the query per
 /// item through it goes when the manager class stops deriving from `models.Manager`, and when
-/// the model binds another value, is heuristic while the manager binds `get_queryset`, and
-/// comes back.
+/// the model binds another value or another module stores one as its `objects`, is heuristic
+/// while the manager binds `get_queryset`, and comes back.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
     let files = vec![
@@ -10769,6 +10927,19 @@ fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
         Step::new(
             "it binds the manager again",
             vec![save("pkg/models.py", MANAGER_MODELS)],
+        )
+        .present(queries),
+        Step::new(
+            "another module stores another object as the model's `objects`",
+            vec![Action::Create(
+                "pkg/patch.py",
+                "from pkg.models import Stream\n\nStream.objects = None\n".to_owned(),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "that module is deleted",
+            vec![Action::Delete("pkg/patch.py")],
         )
         .present(queries),
     ];

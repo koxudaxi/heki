@@ -3689,16 +3689,12 @@ impl<'a> Extractor<'a> {
         {
             return any;
         }
-        // A comprehension's own scope is the one function it calls.
-        let child_scope = call.method.is_none() && call.callee_var.is_none();
         let span = self.f.block(at.0).insts.get(at.1).map(|i| i.span);
         let library = |symbol: &str, recv| {
             self.library_call_runs_project_code(symbol, span, recv, args, kwargs, call.star, false)
         };
         match self.callees.get(&at)? {
-            Callee::Project(..) => {
-                (!child_scope && !self.targets_complete_at(at)).then_some(KeptRemovalKind::Any)
-            }
+            Callee::Project(..) => (!self.targets_complete_at(at)).then_some(KeptRemovalKind::Any),
             Callee::External(symbol) => {
                 // Calling an instance runs its class's `__call__`: the instance is its receiver.
                 let recv = recv.or(call.callee_var.filter(|_| symbol.ends_with(".__call__")));
@@ -4139,8 +4135,18 @@ impl<'a> Extractor<'a> {
             }
             _ => None,
         };
+        // `allowed-protocols` allows a reference by the protocol the receiver is typed with; a
+        // reference keeps no declaration of it ([`Dispatch::declared`]).
+        let protocol = self.receiver_protocol(recv, &callees);
+        let dispatch = protocol.map(|(protocol, _)| {
+            Box::new(Dispatch {
+                protocol: Some(protocol.clone()),
+                ..Dispatch::default()
+            })
+        });
         Some(CallSite {
             module_member: member,
+            dispatch,
             ..self.handed_site(span, self.f.block_loop_depth(bb), callees, constructs)
         })
     }
@@ -5556,6 +5562,7 @@ impl<'a> Extractor<'a> {
                 self.sentinel_test(*rhs, *lhs, span);
             }
             InstKind::SubscriptLoad {
+                dst,
                 obj,
                 index,
                 key_const,
@@ -5576,6 +5583,14 @@ impl<'a> Extractor<'a> {
                     && !self.key_present(bb, index_in_block, *obj, *index)
                 {
                     self.container_change(*obj, ContainerChange::Resizes, span);
+                }
+                if let Some(symbol) = self.subscript_symbol(*obj) {
+                    let passed = Passed {
+                        args: std::slice::from_ref(index),
+                        ..Passed::NOTHING
+                    };
+                    self.external_call(bb, symbol.clone(), passed, false, span);
+                    self.note_returned_realloc(&symbol, Some(*dst), std::slice::from_ref(index));
                 }
             }
             // `obj.__dict__ |= other` updates the namespace in place, whatever the result is
@@ -6107,6 +6122,24 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The catalog's `__getitem__` entry of the object `obj` names or is an instance of, when it
+    /// carries effects: subscripting is the call (`numpy.r_[acc, x]` concatenates what the
+    /// subscript lists), with the index as its one argument. An entry that only types the
+    /// looked-up value is no call.
+    fn subscript_symbol(&self, obj: VarId) -> Option<String> {
+        let (Val::Ref(named) | Val::Inst(named, _)) = self.val(obj)? else {
+            return None;
+        };
+        if named.starts_with("builtins.") || self.cx.project.is_project_class(named) {
+            return None;
+        }
+        let symbol = format!("{named}.__getitem__");
+        self.cx
+            .catalog(&symbol)
+            .is_some_and(|entry| !entry.effects.is_empty())
+            .then_some(symbol)
+    }
+
     /// The origin of a receiver bound to a method's first parameter, and whether it is the
     /// calling method's own `self`: `super()` binds the calling method's `self` (parameter 0).
     /// The receiver binds the parameter exactly (`ArgOrigin::binding`) at a call in `bb`.
@@ -6274,16 +6307,16 @@ impl<'a> Extractor<'a> {
 
     /// A returned result of the quadratic reallocation `symbol` taking a parameter, as itself or
     /// in a display (`np.append(acc, x)`, `pd.concat([df, part])`): `reallocates_params`.
-    fn note_returned_realloc(&mut self, symbol: &str, call: &Call<'_>) {
+    fn note_returned_realloc(&mut self, symbol: &str, dst: Option<VarId>, args: &[VarId]) {
         let reallocates = self
             .cx
             .kb
             .lookup(symbol)
             .is_some_and(|e| e.effects.contains(&ExecEffectKind::QuadraticRealloc));
-        if !reallocates || !call.dst.is_some_and(|d| self.returned.contains_key(&d)) {
+        if !reallocates || !dst.is_some_and(|d| self.returned.contains_key(&d)) {
             return;
         }
-        for &arg in call.args {
+        for &arg in args {
             let held: Vec<VarId> = match self.defs.get(&arg).map(|i| &i.kind) {
                 Some(InstKind::AllocBuiltin { elems, .. }) => elems.clone(),
                 _ => vec![arg],
@@ -7492,7 +7525,7 @@ impl<'a> Extractor<'a> {
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
                     self.protocol_call(bb, iterable, iteration_protocol(false), false, call.span);
                 }
-                self.note_returned_realloc(symbol, call);
+                self.note_returned_realloc(symbol, call.dst, call.args);
                 // A project class without a project `__init__` (a dataclass, a pydantic model),
                 // and a library API building an instance of its receiver's class
                 // (`Model.model_construct(...)`): the construction is still a call site, with no
@@ -7867,26 +7900,38 @@ impl<'a> Extractor<'a> {
             .clone()
     }
 
-    /// [`Dispatch::declared`]: the definition of the called method in the project protocol the
-    /// receiver is typed with, when the protocol declares it.
-    fn declared_method(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<FuncKey> {
-        let Some(Val::Inst(protocol, _)) = self.val(call.recv_var?) else {
+    /// [`Dispatch::protocol`]: the project protocol the receiver `recv` is typed with, with the
+    /// name of the member the first of `callees` is, when the protocol declares it. The receiver
+    /// tells it whatever the callees bind: a static method binds no receiver, and a class method
+    /// binds the class.
+    fn receiver_protocol<'b>(
+        &self,
+        recv: Option<VarId>,
+        callees: &'b [BoundCallee],
+    ) -> Option<(&String, Cow<'b, str>)> {
+        let Some(Val::Inst(protocol, _)) = self.val(recv?) else {
             return None;
         };
         let name = heki_semantic::mangling::member_name(&callees.first()?.callee.qualname);
-        let project = self.cx.project;
-        project
+        self.cx
+            .project
             .protocol_declares(protocol, &name)
-            .then(|| project.mro_method(protocol, &name))?
+            .then_some((protocol, name))
     }
 
     /// What the receiver of `call` tells about the implementations `callees` run
     /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
     /// class, or the class a constructor call makes) when a callee is inherited from a proper
     /// base of it, and, on a parameter of the caller as itself (`self` too), the callees that
-    /// are overrides of subclasses.
+    /// are overrides of subclasses; for a receiver typed with a project protocol declaring the
+    /// method, the protocol and, unless the callees are the protocol's own methods, the method's
+    /// definition in it.
     fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
         let project = self.cx.project;
+        let through = self.receiver_protocol(call.recv_var, callees);
+        let protocol = through.as_ref().map(|(p, _)| (*p).clone());
+        // A receiver of no project class (`class` unknown, or the `self` of a method of a class
+        // heki keeps no line of) is typed with no project protocol either.
         let own;
         let class: &str = if call.recv_is_self {
             own = self.cx.owner_fqn(self.f)?;
@@ -7911,7 +7956,13 @@ impl<'a> Extractor<'a> {
                 .is_some_and(|r| r == owner)
         };
         if callees.iter().filter_map(class_of).all(|c| is(c, class)) {
-            return None;
+            // The protocol's own methods: no definition other than them to judge the call by.
+            return protocol.map(|protocol| {
+                Box::new(Dispatch {
+                    protocol: Some(protocol),
+                    ..Dispatch::default()
+                })
+            });
         }
         let line = if call.recv_is_self {
             self.own_line()?
@@ -7939,8 +7990,8 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        let declared = self.declared_method(call, callees);
-        (receiver.is_some() || !providers.is_empty() || declared.is_some()).then(|| {
+        let declared = through.and_then(|(p, name)| project.mro_method(p, &name));
+        (receiver.is_some() || !providers.is_empty() || protocol.is_some()).then(|| {
             Box::new(Dispatch {
                 receiver,
                 receiver_param: receiver_param
@@ -7948,6 +7999,7 @@ impl<'a> Extractor<'a> {
                     .unwrap_or(0),
                 providers,
                 declared,
+                protocol,
                 recv_params: 0,
             })
         })
@@ -9696,6 +9748,7 @@ fn role_site(
     flags: Option<(bool, bool)>,
 ) -> CallSite {
     let (is_awaited, drives) = flags.unwrap_or((false, false));
+    let runs_bodies_here = matches!(role, SiteRole::Iterate | SiteRole::Call);
     CallSite {
         caller: site.caller.clone(),
         target: site.target.clone(),
@@ -9728,7 +9781,9 @@ fn role_site(
         state_tests: site.state_tests.clone(),
         locks: site.locks,
         shield: site.shield,
-        complete: false,
+        // An iterated generator or an awaited coroutine runs, there, the bodies of the call's
+        // targets: the call's targets are theirs.
+        complete: runs_bodies_here && site.complete,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
         module_member: None,

@@ -178,6 +178,8 @@ in its instructions, but not a contract that `heki check` enforces:
   the agent ends its turn.
 - [`heki inspect`](coding-agents.md#what-a-function-does-heki-inspect-experimental)
   (experimental) shows what one function reaches, changes, and returns.
+- [`heki recommend --focus types --diff`](recommend.md#applying-the-suggestions) (experimental) prints the exact type suggestions
+  as one patch that `git apply` takes, annotations only.
 - `--output-format json` gives every check as JSON, and the
   [Agent Skill](coding-agents.md#agent-skill-experimental) (experimental) teaches the routine
   after an edit. [Coding agents](coding-agents.md) has the whole setup.
@@ -208,7 +210,7 @@ in its instructions, but not a contract that `heki check` enforces:
 
 3. Keep it running with the [pre-commit hook](adoption.md#pre-commit) and a CI step, and record
    today's findings in a [Ratchet baseline](adoption.md#ratchet-baselines) so only new ones fail:
-   `uvx heki==0.10.0 check --baseline heki-baseline.toml --update-baseline`. The
+   `uvx heki==0.11.0 check --baseline heki-baseline.toml --update-baseline`. The
    [starter recipes](adoption.md#starter-recipes) have these setups ready to copy.
 
 !!! warning "Pre-release"

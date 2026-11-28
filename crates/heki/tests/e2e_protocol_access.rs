@@ -1462,3 +1462,283 @@ fn a_call_through_a_protocol_calls_a_target_only_when_each_method_it_runs_is_one
         ]
     );
 }
+
+const MEMBERS_HOST: &str = r#"from typing import Protocol
+
+
+class Host(Protocol):
+    size: int
+
+    @staticmethod
+    def build() -> None: ...
+
+    @classmethod
+    def make(cls) -> None: ...
+
+    def run(self) -> None: ...
+
+
+class Shared(Protocol):
+    @staticmethod
+    def build() -> None: ...
+
+    @classmethod
+    def make(cls) -> None: ...
+
+    def run(self) -> None: ...
+
+
+class Impl:
+    def __init__(self) -> None:
+        self.size = 0
+
+    @staticmethod
+    def build() -> None:
+        pass
+
+    @classmethod
+    def make(cls) -> None:
+        pass
+
+    def run(self) -> None:
+        pass
+
+
+class Other:
+    @staticmethod
+    def build() -> None:
+        pass
+
+    @classmethod
+    def make(cls) -> None:
+        pass
+
+    def run(self) -> None:
+        pass
+"#;
+
+const MEMBERS_USE: &str = r#"from pkg.host import Host, Shared
+
+
+def static_call(h: Host) -> None:
+    h.build()
+
+
+def class_call(h: Host) -> None:
+    h.make()
+
+
+def instance_call(h: Host) -> None:
+    h.run()
+
+
+def reads(h: Host) -> None:
+    print(h.build, h.make)
+
+
+def shared(s: Shared) -> None:
+    s.build()
+    s.make()
+    s.run()
+    print(s.build, s.make)
+
+
+def handed(h: Host):
+    return h.build
+
+
+def handed_class(h: Host):
+    return h.make
+"#;
+
+/// A project of `MEMBERS_HOST` and `MEMBERS_USE` with `contracts` (TOML tables) selecting
+/// `rules`.
+fn members_project(name: &str, rules: &str, contracts: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = {rules}\n\n{contracts}"),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/host.py", MEMBERS_HOST)
+    .write("pkg/use.py", MEMBERS_USE);
+    p
+}
+
+/// A static or class method a protocol declares, called on a value typed with the protocol, is
+/// a call of a target's when the target's family alone implements the protocol, as an instance
+/// method is: the receiver tells the protocol, whatever the method binds. Reading the member
+/// through the value reads the target too. Through `Shared`, which `Other` implements as well,
+/// nothing is a target.
+#[test]
+fn static_and_class_members_through_a_protocol_only_the_family_implements_are_targets() {
+    let owners = r#"[[tool.heki.call-owners]]
+name = "members"
+targets = ["pkg.host:Impl.build", "pkg.host:Impl.make", "pkg.host:Impl.run"]
+allowed-callers = ["pkg.host:*"]
+
+[[tool.heki.read-owners]]
+name = "members"
+targets = ["pkg.host.Impl.build", "pkg.host.Impl.make"]
+allowed-readers = ["pkg.host:*"]
+"#;
+    let p = members_project("protocol_static_members", r#"["MUT203", "MUT204"]"#, owners);
+    assert_eq!(
+        concise(&p),
+        vec![
+            "pkg/use.py:5:5: MUT204 [heuristic] `static_call` calls `pkg.host:Impl.build` outside the call owners of `members`",
+            "pkg/use.py:9:5: MUT204 [heuristic] `class_call` calls `pkg.host:Impl.make` outside the call owners of `members`",
+            "pkg/use.py:13:5: MUT204 [heuristic] `instance_call` calls `pkg.host:Impl.run` outside the call owners of `members`",
+            "pkg/use.py:17:11: MUT203 [heuristic] `reads` reads `pkg.host.Impl.build` (by attribute) outside the read owners of `members`",
+            "pkg/use.py:17:20: MUT203 [heuristic] `reads` reads `pkg.host.Impl.make` (by attribute) outside the read owners of `members`",
+            "pkg/use.py:28:12: MUT203 [heuristic] `handed` reads `pkg.host.Impl.build` (by attribute) outside the read owners of `members`",
+            "pkg/use.py:32:12: MUT203 [heuristic] `handed_class` reads `pkg.host.Impl.make` (by attribute) outside the read owners of `members`",
+        ]
+    );
+}
+
+/// An effect boundary's `call-targets` cover the static and class methods called through a
+/// protocol only the targets' family implements, as they cover its instance methods.
+#[test]
+fn a_boundary_covers_static_and_class_members_through_a_protocol_only_its_family_implements() {
+    let boundary = "[[tool.heki.effect-boundaries]]\nname = \"no-impl\"\nscopes = [\"pkg.use.*\"]\nforbid = [\"reads-targets\", \"calls\"]\nread-targets = [\"pkg.host.Impl.build\"]\ncall-targets = [\"pkg.host:Impl.*\"]\n";
+    let p = members_project(
+        "protocol_static_members_boundary",
+        r#"["EFF201"]"#,
+        boundary,
+    );
+    assert_eq!(
+        concise(&p),
+        vec![
+            "pkg/use.py:5:5: EFF201 [heuristic] `static_call` calls `pkg.host:Impl.*`, which effect boundary `no-impl` forbids",
+            "pkg/use.py:9:5: EFF201 [heuristic] `class_call` calls `pkg.host:Impl.*`, which effect boundary `no-impl` forbids",
+            "pkg/use.py:13:5: EFF201 [heuristic] `instance_call` calls `pkg.host:Impl.*`, which effect boundary `no-impl` forbids",
+            "pkg/use.py:17:11: EFF201 [heuristic] `reads` reads `pkg.host.Impl.build` (by attribute), which effect boundary `no-impl` forbids",
+            "pkg/use.py:28:12: EFF201 [heuristic] `handed` reads `pkg.host.Impl.build` (by attribute), which effect boundary `no-impl` forbids",
+        ]
+    );
+}
+
+/// `allowed-protocols` allows the calls of static and class methods through a protocol it
+/// names, and the references handing them on, as it allows an instance method's; naming another
+/// protocol allows none of them.
+#[test]
+fn allowed_protocols_allow_static_and_class_members_through_a_named_protocol() {
+    let owners = |allowed: &str| {
+        format!(
+            "[[tool.heki.call-owners]]\nname = \"members\"\ntargets = [\"pkg.host:Impl.*\"]\nallowed-callers = [\"pkg.host:*\"]\nreferences = \"calls\"\n{allowed}"
+        )
+    };
+    let reported = vec![
+        "pkg/use.py:5:5: MUT204 [heuristic] `static_call` calls `pkg.host.Host.build` outside the call owners of `members`",
+        "pkg/use.py:9:5: MUT204 [heuristic] `class_call` calls `pkg.host.Host.make` outside the call owners of `members`",
+        "pkg/use.py:13:5: MUT204 [heuristic] `instance_call` calls `pkg.host.Host.run` outside the call owners of `members`",
+        "pkg/use.py:28:12: MUT204 [heuristic] `handed` hands on `pkg.host.Impl.build` outside the call owners of `members`",
+        "pkg/use.py:32:12: MUT204 [heuristic] `handed_class` hands on `pkg.host.Impl.make` outside the call owners of `members`",
+    ];
+    let p = members_project(
+        "protocol_static_members_allowed",
+        r#"["MUT204"]"#,
+        &owners(""),
+    );
+    assert_eq!(concise(&p), reported);
+    let select = |contracts: &str| {
+        format!("[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n{contracts}")
+    };
+    p.write(
+        "pyproject.toml",
+        &select(&owners("allowed-protocols = [\"pkg.host.Shared\"]\n")),
+    );
+    assert_eq!(concise(&p), reported);
+    p.write(
+        "pyproject.toml",
+        &select(&owners("allowed-protocols = [\"pkg.host.Host\"]\n")),
+    );
+    assert_eq!(concise(&p), Vec::<String>::new());
+}
+
+/// The targets are a generic protocol's own members: with `allowed-protocols` naming the
+/// protocol, the calls of its static, class, and instance methods through a value typed with it
+/// are allowed alike, and those through a protocol the key does not name stay reported.
+#[test]
+fn allowed_protocols_allow_static_and_class_members_of_a_generic_protocol() {
+    let p = Project::new("protocol_static_members_generic");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "fields"
+targets = ["pkg.m.FieldsHost._*", "pkg.m.Rendering._*"]
+forbidden-callers = ["pkg.m:*"]
+allowed-protocols = ["*Host"]
+own-receiver = "allow"
+protocol-subclasses = false
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/m.py",
+        r#"from typing import Generic, Protocol, TypeVar
+
+_D = TypeVar("_D")
+
+
+class FieldsHost(Protocol[_D]):
+    @staticmethod
+    def _needs_extra(data_type: _D) -> bool: ...
+
+    @classmethod
+    def _kind(cls, data_type: _D) -> str: ...
+
+    def _renders_none(self, data_type: _D) -> bool: ...
+
+
+class Rendering(Protocol[_D]):
+    @staticmethod
+    def _needs_extra(data_type: _D) -> bool: ...
+
+    @classmethod
+    def _kind(cls, data_type: _D) -> str: ...
+
+    def _renders_none(self, data_type: _D) -> bool: ...
+
+
+class Field(Generic[_D]):
+    @staticmethod
+    def _needs_extra(data_type: _D) -> bool:
+        return False
+
+    @classmethod
+    def _kind(cls, data_type: _D) -> str:
+        return ""
+
+    def _renders_none(self, data_type: _D) -> bool:
+        return True
+
+
+def collect(field: FieldsHost[_D], data_type: _D) -> bool:
+    if field._needs_extra(data_type) or field._kind(data_type):
+        return False
+    return field._renders_none(data_type)
+
+
+def render(field: Rendering[_D], data_type: _D) -> bool:
+    if field._needs_extra(data_type) or field._kind(data_type):
+        return False
+    return field._renders_none(data_type)
+"#,
+    );
+    assert_eq!(
+        concise(&p),
+        vec![
+            "pkg/m.py:46:8: MUT204 [heuristic] `render` calls `pkg.m.Rendering._needs_extra` inside the forbidden callers of `fields`",
+            "pkg/m.py:46:41: MUT204 [heuristic] `render` calls `pkg.m.Rendering._kind` inside the forbidden callers of `fields`",
+            "pkg/m.py:48:12: MUT204 [heuristic] `render` calls `pkg.m.Rendering._renders_none` inside the forbidden callers of `fields`",
+        ]
+    );
+}

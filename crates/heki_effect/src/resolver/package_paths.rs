@@ -3,7 +3,7 @@
 //! a name under a package whose path may lead outside the project may load a module installed
 //! where the program runs ([`super::ProjectDecls::holds_modules_starting_with`]).
 
-use super::{ModuleDecls, PathChange, imported_fqn};
+use super::{ImportNames, ModuleDecls, PathChange, imported_fqn};
 use crate::ModuleInput;
 use heki_ir::walk::{Budget, Closure, Def, Join, Use};
 use heki_ir::{BinOpKind, FnIndex, InstKind, Terminator, VarId};
@@ -21,17 +21,20 @@ const PATH_READERS: [&str; 3] = [
 /// The list methods that leave their list as it is.
 const READING_METHODS: [&str; 3] = ["copy", "count", "index"];
 
-/// [`ModuleDecls::path_changes`] of the module `input`, whose other declarations `decls` holds:
-/// in each function, what the uses of the values holding a package's path do to it.
+/// [`ModuleDecls::path_changes`] of the module `input`, whose other declarations `decls` holds
+/// and whose imports bind `imports`: in each function, what the uses of the values holding a
+/// package's path do to it.
 pub(super) fn path_changes(
     input: &ModuleInput<'_>,
     decls: &ModuleDecls,
+    imports: &ImportNames<'_>,
 ) -> BTreeMap<String, PathChange> {
     let mut out: BTreeMap<String, PathChange> = BTreeMap::new();
     for f in &input.ir.functions {
         let paths = Paths {
             ix: FnIndex::new(f, &input.ir.constants),
             decls,
+            imports,
             own: input.is_package.then_some(input.module_name.as_str()),
         };
         let held = paths.held();
@@ -118,6 +121,7 @@ struct Held {
 struct Paths<'a> {
     ix: FnIndex<'a>,
     decls: &'a ModuleDecls,
+    imports: &'a ImportNames<'a>,
     /// The module's name when it is a package: its own `__path__` is a global of its own.
     own: Option<&'a str>,
 }
@@ -183,7 +187,9 @@ impl Paths<'_> {
                 }
                 true
             }
-            InstKind::Import { .. } => self.ix.f.var_name(dst).is_some_and(imports_path),
+            InstKind::Import { .. } => self
+                .imported(dst)
+                .is_some_and(|target| target.ends_with(".__path__")),
             InstKind::AttrLoad { attr, .. } => attr == "__path__",
             _ => false,
         };
@@ -196,7 +202,7 @@ impl Paths<'_> {
 
     /// The module `obj` names through the module's imports.
     fn imported(&self, obj: VarId) -> Option<String> {
-        imported_fqn(&self.ix, &self.decls.imports, obj, 0)
+        imported_fqn(&self.ix, self.imports, obj, 0)
     }
 
     /// The package a call of `pkg_resources.declare_namespace` declares: the module's own name

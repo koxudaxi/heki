@@ -2566,6 +2566,20 @@ impl<'i> CallInst<'i> {
         }
     }
 
+    /// Like [`Self::of`], and a subscript is the call of its object's `__getitem__` with the
+    /// index as its one argument (`numpy.r_[acc, x]`).
+    pub(crate) fn of_or_subscript(kind: &'i InstKind) -> Option<Self> {
+        match kind {
+            InstKind::SubscriptLoad { index, .. } => Some(Self {
+                callee_var: None,
+                recv: None,
+                args: std::slice::from_ref(index),
+                kwargs: &[],
+            }),
+            _ => Self::of(kind),
+        }
+    }
+
     /// The functions the call runs, with the values `types` infers.
     pub(crate) fn callee(&self, tcx: &TypeCtx<'_>, types: &FxHashMap<VarId, Val>) -> Callee {
         match self.recv {

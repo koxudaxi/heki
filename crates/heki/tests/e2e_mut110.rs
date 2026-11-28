@@ -1249,3 +1249,58 @@ def replaced_directly(xs: Sequence[int]):
     assert_eq!(found(&diags), vec![d("pkg/use.py", 12, "kept", "xs")]);
     assert_eq!(diags[0]["certainty"], "exact");
 }
+
+/// A function rebinding a function of another module through an import of its own (`from pkg
+/// import same`, `import pkg.same`, `import pkg.same as s` in the function) rebinds it as an import
+/// of the module body does: neither `forwarded`, whose callee is bound again, nor `replaced`
+/// returns its parameter. Without the rebinding both do.
+#[test]
+fn mut110_sees_a_function_rebound_through_an_import_in_a_function() {
+    let use_py = r#"from collections.abc import Sequence
+
+from pkg.same import forwarded, replaced
+
+
+def change(x):
+    if isinstance(x, list):
+        x.reverse()
+
+
+def through_forwarded(xs: Sequence[int]):
+    change(forwarded(xs))
+
+
+def through_replaced(xs: Sequence[int]):
+    change(replaced(xs))
+"#;
+    let same_py = "def identity(x):\n    return x\n\n\ndef replaced(x):\n    return x\n\n\ndef forwarded(x):\n    return identity(x)\n";
+    let both = vec![
+        d("pkg/use.py", 12, "through_forwarded", "xs"),
+        d("pkg/use.py", 16, "through_replaced", "xs"),
+    ];
+    for (other, expected) in [
+        (
+            "def replace():\n    from pkg import same\n    same.identity = list\n    same.replaced = list\n",
+            vec![],
+        ),
+        (
+            "def replace():\n    import pkg.same\n    pkg.same.identity = list\n    pkg.same.replaced = list\n",
+            vec![],
+        ),
+        (
+            "def replace():\n    import pkg.same as s\n    setattr(s, \"identity\", list)\n    setattr(s, \"replaced\", list)\n",
+            vec![],
+        ),
+        (
+            "def read():\n    import pkg.same\n    return pkg.same.identity, pkg.same.replaced\n",
+            both.clone(),
+        ),
+    ] {
+        let p = Project::new("mut110_rebound_through_a_local_import");
+        p.write("pkg/__init__.py", "")
+            .write("pkg/same.py", same_py)
+            .write("pkg/other.py", other)
+            .write("pkg/use.py", use_py);
+        assert_eq!(found(&diagnostics(&p, &[])), expected, "{other}");
+    }
+}

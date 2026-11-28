@@ -2927,6 +2927,7 @@ mod tests {
             llm_requests(),
             file_process_and_network_rows(),
             cancellation_rows(),
+            sync_clients_recall(),
         ]
         .into_iter()
         .flatten()
@@ -2975,22 +2976,289 @@ mod tests {
                     .collect(),
                 async_safe(entry(&[])),
             ),
-            (s(&["anyio.CancelScope", "trio.CancelScope"]), scope(None)),
             (
-                with_prefix(
-                    "anyio",
+                s(&[
+                    "anyio.CancelScope",
+                    "anyio._core._tasks.CancelScope",
+                    "trio.CancelScope",
+                    "trio._core.CancelScope",
+                    "trio._core._run.CancelScope",
+                ]),
+                scope(None),
+            ),
+            (
+                with_prefix_all(
+                    &["anyio", "anyio._core._tasks"],
                     &["move_on_after", "fail_after", "move_on_at", "fail_at"],
                 ),
                 scope(Some(1)),
             ),
             (
-                with_prefix(
-                    "trio",
+                with_prefix_all(
+                    &["trio", "trio._timeouts"],
                     &["move_on_after", "fail_after", "move_on_at", "fail_at"],
                 ),
                 scope(None),
             ),
         ]
+    }
+
+    /// The synchronous clients of an Xinference server and of supabase-py / postgrest: every
+    /// listed call sends a request and waits; building a request waits for nothing.
+    fn sync_clients_recall() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const XINFERENCE_CLIENTS: &[&str] = &[
+            "xinference_client.RESTfulClient",
+            "xinference_client.client.restful.restful_client.Client",
+        ];
+        const XINFERENCE_MODULE: &str = "xinference_client.client.restful.restful_client";
+        const XINFERENCE_REQUESTS: &[&str] = &[
+            "vllm_models",
+            "login",
+            "list_models",
+            "launch_model",
+            "get_autostart_config",
+            "get_autostart_model_summary",
+            "upsert_autostart_model",
+            "remove_autostart_model",
+            "reload_model",
+            "get_model_runtime_info",
+            "get_model_reload_status",
+            "get_model_reload_config",
+            "terminate_model",
+            "add_model_replica",
+            "terminate_model_replica",
+            "get_launch_model_progress",
+            "cancel_launch_model",
+            "get_instance_info",
+            "describe_model",
+            "register_model",
+            "unregister_model",
+            "list_model_registrations",
+            "list_cached_models",
+            "list_deletable_models",
+            "confirm_and_remove_model",
+            "get_model_registration",
+            "query_engine_by_model_name",
+            "abort_request",
+            "get_workers_info",
+            "check_component_update",
+            "relaunch_api",
+            "get_api_relaunch",
+            "list_api_relaunches",
+            "relaunch_supervisor",
+            "get_supervisor_relaunch",
+            "list_supervisor_relaunches",
+            "relaunch_worker",
+            "get_worker_relaunch",
+            "list_worker_relaunches",
+            "get_supervisor_info",
+            "get_progress",
+            "abort_cluster",
+        ];
+        const XINFERENCE_HANDLES: &[(&str, &[&str])] = &[
+            (
+                "RESTfulEmbeddingModelHandle",
+                &["create_embedding", "convert_ids_to_tokens"],
+            ),
+            ("RESTfulRerankModelHandle", &["rerank"]),
+            (
+                "RESTfulImageModelHandle",
+                &[
+                    "text_to_image",
+                    "image_to_image",
+                    "image_edit",
+                    "inpainting",
+                    "ocr",
+                ],
+            ),
+            (
+                "RESTfulVideoModelHandle",
+                &["text_to_video", "image_to_video", "flf_to_video"],
+            ),
+            ("RESTfulWorldModelHandle", &["generate"]),
+            ("RESTfulGenerateModelHandle", &["generate"]),
+            ("RESTfulChatModelHandle", &["chat", "generate"]),
+            (
+                "RESTfulAudioModelHandle",
+                &[
+                    "create_embedding",
+                    "transcriptions",
+                    "translations",
+                    "speech",
+                ],
+            ),
+            ("RESTfulFlexibleModelHandle", &["infer"]),
+        ];
+        const SUPABASE_CLIENTS: &[&str] = &["supabase.Client", "supabase._sync.client.Client"];
+        const POSTGREST_CLIENTS: &[&str] = &[
+            "postgrest.SyncPostgrestClient",
+            "postgrest._sync.client.SyncPostgrestClient",
+        ];
+        const POSTGREST_CLIENT: &str = "postgrest._sync.client.SyncPostgrestClient";
+        const FILTERS: &[&str] = &[
+            "filter",
+            "eq",
+            "neq",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "is_",
+            "like",
+            "like_all_of",
+            "like_any_of",
+            "ilike_all_of",
+            "ilike_any_of",
+            "ilike",
+            "or_",
+            "fts",
+            "plfts",
+            "phfts",
+            "wfts",
+            "in_",
+            "cs",
+            "cd",
+            "contains",
+            "contained_by",
+            "ov",
+            "sl",
+            "sr",
+            "nxl",
+            "nxr",
+            "adj",
+            "range_gt",
+            "range_gte",
+            "range_lt",
+            "range_lte",
+            "range_adjacent",
+            "overlaps",
+            "match",
+            "max_affected",
+            "order",
+            "limit",
+            "offset",
+            "range",
+            "strip_nulls",
+            "select",
+        ];
+        let handle = format!("{XINFERENCE_MODULE}.RESTfulModelHandle");
+        let builder = |name: &str| format!("postgrest._sync.request_builder.{name}");
+        let (select, filter, query, single, maybe_single, rpc, table) = (
+            builder("SyncSelectRequestBuilder"),
+            builder("SyncFilterRequestBuilder"),
+            builder("SyncQueryRequestBuilder"),
+            builder("SyncSingleRequestBuilder"),
+            builder("SyncMaybeSingleRequestBuilder"),
+            builder("SyncRPCFilterRequestBuilder"),
+            builder("SyncRequestBuilder"),
+        );
+        let waits = || entry(&[BlockingNet]);
+        let mut handle_methods: Vec<&str> = Vec::new();
+        for (_, methods) in XINFERENCE_HANDLES {
+            for method in *methods {
+                if !handle_methods.contains(method) {
+                    handle_methods.push(method);
+                }
+            }
+        }
+        let mut rows = vec![
+            (
+                s(XINFERENCE_CLIENTS),
+                entry(&[BlockingNet, UnpooledClientAlloc]),
+            ),
+            (
+                with_prefix_all(XINFERENCE_CLIENTS, XINFERENCE_REQUESTS),
+                waits(),
+            ),
+            (
+                with_prefix_all(XINFERENCE_CLIENTS, &["get_model"]),
+                returning(&handle, waits()),
+            ),
+            (with_prefix(&handle, &handle_methods), waits()),
+            (
+                [SUPABASE_CLIENTS, POSTGREST_CLIENTS]
+                    .concat()
+                    .iter()
+                    .map(|c| (*c).to_owned())
+                    .collect(),
+                entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                s(&[
+                    "supabase.create_client",
+                    "supabase._sync.client.create_client",
+                ]),
+                returning("supabase.Client", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                with_prefix_all(SUPABASE_CLIENTS, &["table", "from_"]),
+                returning(&table, entry(&[])),
+            ),
+            (
+                [
+                    with_prefix_all(SUPABASE_CLIENTS, &["schema"]),
+                    with_prefix_all(POSTGREST_CLIENTS, &["schema"]),
+                ]
+                .concat(),
+                returning(POSTGREST_CLIENT, entry(&[])),
+            ),
+            (
+                [
+                    with_prefix_all(SUPABASE_CLIENTS, &["rpc"]),
+                    with_prefix_all(POSTGREST_CLIENTS, &["rpc"]),
+                ]
+                .concat(),
+                returning(&rpc, entry(&[])),
+            ),
+            (
+                with_prefix_all(POSTGREST_CLIENTS, &["table", "from_", "from_table"]),
+                returning(&table, entry(&[])),
+            ),
+            (
+                with_prefix(&table, &["select", "insert", "upsert", "update", "delete"]),
+                returning(&select, entry(&[])),
+            ),
+            (
+                [&select, &filter, &rpc]
+                    .iter()
+                    .flat_map(|class| with_prefix(class, FILTERS))
+                    .collect(),
+                returning(SELF_RETURN_TYPE, entry(&[])),
+            ),
+            (
+                vec![
+                    format!("{select}.text_search"),
+                    format!("{rpc}.single"),
+                    format!("{rpc}.csv"),
+                ],
+                returning(SELF_RETURN_TYPE, entry(&[])),
+            ),
+            (
+                vec![format!("{select}.single"), format!("{select}.csv")],
+                returning(&single, entry(&[])),
+            ),
+            (
+                vec![
+                    format!("{select}.maybe_single"),
+                    format!("{rpc}.maybe_single"),
+                ],
+                returning(&maybe_single, entry(&[])),
+            ),
+            (
+                [&select, &filter, &query, &single, &maybe_single, &rpc]
+                    .iter()
+                    .map(|class| format!("{class}.execute"))
+                    .collect(),
+                entry(&[BlockingNet, DbQuery]),
+            ),
+        ];
+        for (class, methods) in XINFERENCE_HANDLES {
+            rows.push((
+                with_prefix(&format!("{XINFERENCE_MODULE}.{class}"), methods),
+                waits(),
+            ));
+        }
+        rows
     }
 
     const FAST_ACQUIRE_LOCK: &str = "anyio.Lock(fast_acquire=True)";
@@ -5060,6 +5328,8 @@ mod tests {
             (
                 [
                     s(&["pandas.concat"]),
+                    // The subscript is the call.
+                    s(&["numpy.r_.__getitem__", "numpy.c_.__getitem__"]),
                     with_prefix(
                         "numpy",
                         &[

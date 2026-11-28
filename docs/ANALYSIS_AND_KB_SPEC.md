@@ -235,7 +235,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     carries it), so a comprehension or a list filled in a fixed loop is small. A module
     constant's object gains none (every call shares it). Tuples and strings are fixed whatever
     their uses, also in other modules, unless another module rebinds or deletes the name
-    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
+    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`), through an import of
+    the module body or of a function alike.
   - The builtins these facts read (`range`, `len`, `sorted`, `min`, `enumerate`, ...) count only
     where a load of the name finds the real one (`ModuleConstants::trusts_builtin`, which
     `ModuleBindings` reads too): not in a module that stores or deletes the name, or that binds
@@ -891,7 +892,12 @@ body may not run that binding (no call, a call on a branch, a function nested in
 of the name may find it unbound, so a call through it may run another object than the definition
 (`ModuleDecls::rebound_definitions`); a later binding on some paths makes it one of the objects
 (`ModuleDecls::alias_paths`). The code of the definition's class body is that function's for
-`attribution = "lexical"`.
+`attribution = "lexical"`. A star import that runs after a definition's statement, or on a path
+where the module body leaves the name unbound, binds the name again when the module it imports
+may bind it (its `__all__`, or its public names, through its own star imports; any name for a
+module heki does not read): a call through the name may then run that module's object
+(`ModuleDecls::late_stars`, `ProjectDecls::star_rebound`), and an instance made by calling it is
+still taken for one of the definition's class.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
@@ -2208,9 +2214,9 @@ message = "write model state through GenerationStore instead"
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param`: `node.members().append(1)` and
        `node.view.append(1)` with `return self.items`; never a `cached_property`, nor a
-       function storing or deleting the attribute, or running a call or an `await` between
-       the read and the return, which may store it: `old = self.items; self.reset(); return
-       old`), when every class the receiver may be
+       function storing or deleting the attribute, or running a call, the entry or exit of a
+       `with` block, or an `await` between the read and the return, which may store it: `old =
+       self.items; self.reset(); return old`), when every class the receiver may be
        takes the name from one of those callees: along its MRO, the first class binding the
        name defines one (`ProjectDecls::function_taken`), and a function called by name or read
        on a module or a class object is no name the project may bind again
@@ -2607,12 +2613,19 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    into a value.
    - A function is on a call cycle when it is a member of a component, of more than one node or
      with a call of itself, of the propagation region's call graph restricted to the calls whose
-     callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that runs at
-     the call, not a coroutine only created or a generator only made, or a generator iterated
-     there; never a callable run on a worker thread). The components are computed once per
-     propagation; a region always holds every member of a cycle it touches (an edit's region
-     holds every function sharing a cycle with it, a caller region every caller of a changed
-     function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
+     targets are every implementation they can run (`CallSite::complete`: a target found only by
+     its name, such as a member of a protocol the receiver is typed with, closes no cycle) and
+     whose callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that
+     runs at the call, not a coroutine only created or a generator only made, or a generator
+     iterated there; never a callable run on a worker thread). A site where a call's result is
+     iterated or awaited has the call's completeness, and a generator expression's site and a
+     comprehension's frame (`__comp_<id>`, before Python 3.12) are complete (they run the code
+     written there), so a recursion through `max(f(v) for v in xs)`, `max([f(v) for v in xs])`,
+     or `pending = f(v); await pending` keeps its cycle. The
+     way down from a `try` body to a cycle (`Reaches`) still follows every candidate. The
+     components are computed once per propagation; a region always holds every member of a
+     cycle it touches (an edit's region holds every function sharing a cycle with it, a caller
+     region every caller of a changed function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
      whose delivered callee facts reach one (joined during propagation like the other facts, so
      a generator's or a returned generator's iteration counts where it runs), and takes part in
      Early Cutoff.
@@ -3320,23 +3333,24 @@ when it is handed a value not established as an instance of a library class that
 callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
 
 A table `[[class_attributes]]` (`heki_kb::ClassAttribute`) gives what reading an attribute on a
-class object deriving from a library base gives (`base = "django.db.models.Model"`,
-`attribute = "objects"`, `type = "django.db.models.Manager"`): the base keeps instances of `type`
-as class attributes of its subclasses. Where no class along a project class's MRO binds
-`attribute`, nor may bind an instance of `type` under another name in its body (a call of a
-project subclass of `type`, of a project function or method, or a value heki cannot name), the
-read gives a `type`; a name a body binds to a call of a project subclass of `type` gives that
-class (`ProjectDecls::class_object_attribute`, from `NamedAttr::body_call`). An instance read is
-not typed. An entry's `plain_attributes_except` says that a base keeps what its subclasses' code
+class object deriving from a library base gives (`base = "django.db.models.Model"`, `attribute =
+"objects"`, `type = "django.db.models.Manager"`): the base keeps instances of `type` as class
+attributes of its subclasses. Where no class along a project class's MRO binds `attribute` (in
+its body, or by a store in any module: `ProjectDecls::lookup_rebound`), nor may bind an instance
+of `type` under another name in its body (a call of a project subclass of `type`, of a project
+function or method, or a value heki cannot name), the read gives a `type`; a name a body binds
+to a call of a project subclass of `type` gives that class
+(`ProjectDecls::class_object_attribute`, from `NamedAttr::body_call`). An instance read is not
+typed. An entry's `plain_attributes_except` says that a base keeps what its subclasses' code
 stores in the instance: neither it nor its metaclass defines `__setattr__`, `__delattr__`,
 `__getattribute__`, or `__getattr__`, and it binds no data descriptor but the names listed
 (`django.db.models.Model`: `pk`). A store of another name the project's classes do not bind in
 their bodies is a plain one (`ProjectDecls::bases_store_plainly`, the `MUT101` **Plain write**
-premise, and `invokes::attribute_access_runs_project_code`).
-An entry's `delegates_to` lists the names of an instance that the class's catalogued methods
-look up on it (`django.db.models.Manager`: `get_queryset`, `_queryset_class`, `__init__`,
-`model`, `_db`, `_hints`). A method's row describes a call on an instance of a project subclass
-only when no project class before the library class along its MRO binds one of them
+premise, and `invokes::attribute_access_runs_project_code`). An entry's `delegates_to` lists the
+names of an instance that the class's catalogued methods look up on it
+(`django.db.models.Manager`: `get_queryset`, `_queryset_class`, `__init__`, `model`, `_db`,
+`_hints`). A method's row describes a call on an instance of a project subclass only when no
+project class before the library class along its MRO binds one of them
 (`ProjectDecls::replaces_delegate`): otherwise the call's targets are not every implementation
 it runs (the **Every implementation** premise), and through `super()` the same holds for every
 class the instance may be.

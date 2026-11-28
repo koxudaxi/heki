@@ -495,7 +495,7 @@ allowed-writers = ["@store"]
 
 ### Where a contract is defined
 
-Every contract report points at the contract it is of and at the entry its target names (JSON
+Every contract report points at the contract it is of and at the entry its access matched (JSON
 `contract_locations`, SARIF related locations, and the language server's related information:
 [Output formats](output-formats.md#where-a-contract-report-points)), and every
 [entry that matches nothing](#entries-that-match-nothing) is warned about with its place and its
@@ -734,7 +734,9 @@ class implements. A protocol whose implementations heki cannot list (more than e
 access to `unresolved = "report"` (`MUT206`, `MUT207`). An access matching `Impl._m` and a
 `Host._m` target of the same contract is one report, named by the target configured first, and
 `allowed-callees` naming every method a call through the protocol may run allows it, as naming
-the declaration does. A write through such a value still writes the implementations'
+the declaration does. A static or class method the protocol declares, called through such a
+value (`h.build()`), is judged the same way as an instance method: the receiver tells the
+protocol. A write through such a value still writes the implementations'
 attribute. `allowed-protocols` allows the reads, calls, and writes through the protocols it
 names, also through a class object typed `type[P]` of such a protocol (see [How contracts
 report](#how-contracts-report)).

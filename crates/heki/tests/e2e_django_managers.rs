@@ -165,8 +165,17 @@ class Rebound(models.Model):
 Rebound.objects = VendorManager()
 
 
+class ModelMeta(models.base.ModelBase):
+    pass
+
+
+class Metaclassed(models.Model, metaclass=ModelMeta):
+    pass
+
+
 def tn_unknown_managers(ids: list[int], related: list[Related]) -> None:
     for i in ids:
+        Metaclassed.objects.get(id=i)
         Vendored.objects.get(id=i)
         FromQuerySet.objects.get(id=i)
         Built.objects.get(id=i)
@@ -179,8 +188,8 @@ def tn_unknown_managers(ids: list[int], related: list[Related]) -> None:
 
 /// A manager of a class heki does not know, one `as_manager()` builds, a model whose body may
 /// declare one (through a call of a project function too), a project class after the model base,
-/// a manager stored on the class outside its body, and a related manager leave the calls
-/// unknown.
+/// a manager stored on the class outside its body, a model a metaclass of its own creates, and
+/// a related manager leave the calls unknown.
 #[test]
 fn unknown_managers_stay_unknown() {
     assert_eq!(
@@ -393,4 +402,66 @@ fn managers_binding_what_their_queries_use() {
             ),
         ]
     );
+}
+
+const REBOUND_MODELS: &str = r#"from django.db import models
+
+
+class Named(models.Manager):
+    def named(self, name):
+        return self.filter(name=name)
+
+
+class Stream(models.Model):
+    pass
+
+
+class Note(models.Model):
+    objects = Named()
+"#;
+
+const REBOUND_USE: &str = r#"from app.models import Note, Stream
+
+
+def tp_per_item(ids: list[int]) -> None:
+    for i in ids:
+        Stream.objects.count()
+        Note.objects.count()
+"#;
+
+const REBINDING_MODULE: &str = r#"from app.models import Note, Stream
+
+
+class Counted:
+    def count(self) -> int:
+        return 0
+
+
+Stream.objects = Counted()
+Note.objects = Counted()
+"#;
+
+/// A module that stores another object as `objects` on a model replaces the manager the model
+/// has, the default one or the one its body declares: the queries through it are no longer
+/// known, and come back exact without that module.
+#[test]
+fn a_manager_another_module_replaces_is_unknown() {
+    let p = Project::new("django_rebound_managers");
+    p.write("app/__init__.py", "");
+    p.write("app/models.py", REBOUND_MODELS);
+    p.write("app/use.py", REBOUND_USE);
+    let exact = |p: &Project| {
+        let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF103"]);
+        assert!(code == 0 || code == 1, "{stdout}{stderr}");
+        let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+        diags
+            .iter()
+            .map(|d| (d["line"].as_u64().unwrap(), d["certainty"].clone()))
+            .collect::<Vec<_>>()
+    };
+    let before = exact(&p);
+    assert_eq!(before.len(), 2, "{before:?}");
+    assert!(before.iter().all(|(_, c)| c != "heuristic"), "{before:?}");
+    p.write("app/patch.py", REBINDING_MODULE);
+    assert_eq!(exact(&p), vec![]);
 }

@@ -1440,6 +1440,11 @@ pub fn check_project(
             b.contracts.append(&mut a.contracts);
             b.contracts.sort_unstable();
             b.contracts.dedup();
+            // The entry of a contract both reports stand for is the kept report's.
+            let kept: Vec<u32> = b.contract_entries.iter().map(|e| e.contract).collect();
+            let added = a.contract_entries.drain(..);
+            (b.contract_entries).extend(added.filter(|e| !kept.contains(&e.contract)));
+            b.contract_entries.sort_unstable_by_key(|e| e.contract);
         }
         same
     });
@@ -1771,6 +1776,7 @@ impl<'a> CheckContext<'a> {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            contract_entries: Vec::new(),
             allowed_examples: Vec::new(),
             group: reports_groups(meta.code),
             key_target: None,
