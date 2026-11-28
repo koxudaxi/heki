@@ -839,31 +839,29 @@ impl<'a> FnIndex<'a> {
     /// resolved (a cycle through phis adds nothing). `depth`: how deep the size questions this
     /// one is part of already are.
     fn origins(&self, v: VarId, out: &mut Origins, stack: &mut Vec<VarId>, depth: u32) -> bool {
-        heki_ast::ensure_sufficient_stack(|| {
-            if stack.contains(&v) || out.resolved.contains(&v) {
-                return true;
+        if stack.contains(&v) || out.resolved.contains(&v) {
+            return true;
+        }
+        if stack.len() > 32 {
+            return false;
+        }
+        stack.push(v);
+        let ok = match self.shape.def(v) {
+            Def::Phi(b, i) => self
+                .phi_incoming(b, i)
+                .iter()
+                .all(|&(_, x)| self.origins(x, out, stack, depth)),
+            Def::Inst(b, i) => {
+                self.inst_origins(v, &self.f.block(b).insts[i as usize], out, stack, depth)
             }
-            if stack.len() > 32 {
-                return false;
-            }
-            stack.push(v);
-            let ok = match self.shape.def(v) {
-                Def::Phi(b, i) => self
-                    .phi_incoming(b, i)
-                    .iter()
-                    .all(|&(_, x)| self.origins(x, out, stack, depth)),
-                Def::Inst(b, i) => {
-                    self.inst_origins(v, &self.f.block(b).insts[i as usize], out, stack, depth)
-                }
-                Def::Param | Def::None => false,
-            };
-            stack.pop();
-            // A variable that fails fails the whole walk: only resolved ones are kept.
-            if ok {
-                out.resolved.insert(v);
-            }
-            ok
-        })
+            Def::Param | Def::None => false,
+        };
+        stack.pop();
+        // A variable that fails fails the whole walk: only resolved ones are kept.
+        if ok {
+            out.resolved.insert(v);
+        }
+        ok
     }
 
     fn inst_origins(
@@ -2326,64 +2324,60 @@ impl<'a> FnIndex<'a> {
     /// its edge (`len(x) > 5 or flag` is false only when `flag` is, after `len(x) > 5` was
     /// false).
     fn implied_caps(&self, v: VarId, holds: bool, walk: &mut CapWalk) -> Vec<(VarId, u32)> {
-        heki_ast::ensure_sufficient_stack(|| {
-            if let Some(known) = walk.values.get(&(v, holds)) {
-                return known.clone();
-            }
-            walk.values.insert((v, holds), Vec::new());
-            let caps = match self.shape.def(v) {
-                Def::Inst(..) => match self.shape.inst(v).map(|i| &i.kind) {
-                    Some(InstKind::Copy { src, .. }) => self.implied_caps(*src, holds, walk),
-                    Some(InstKind::UnaryOp {
-                        op: UnaryOpKind::Not,
-                        operand,
-                        ..
-                    }) => self.implied_caps(*operand, !holds, walk),
-                    Some(InstKind::Compare { op, lhs, rhs, .. }) => self
-                        .compared_len(*op, *lhs, *rhs, holds)
-                        .into_iter()
-                        .collect(),
-                    _ => Vec::new(),
-                },
-                Def::Phi(b, i) => {
-                    let mut common: Option<Vec<(VarId, u32)>> = None;
-                    for &(pred, x) in self.phi_incoming(b, i) {
-                        // The value `x` has on the edge from a block branching on it.
-                        let decided = match self.f.block(pred).terminator {
-                            Terminator::Branch {
-                                cond,
-                                then_bb,
-                                else_bb,
-                            } if cond == x && (then_bb == b) != (else_bb == b) => {
-                                Some(then_bb == b)
-                            }
-                            _ => None,
-                        };
-                        if decided.is_some_and(|value| value != holds) {
-                            continue;
-                        }
-                        let mut caps = self.implied_caps(x, holds, walk);
-                        caps.extend(self.caps_on_the_way(pred, walk));
-                        common = Some(match common {
-                            None => caps,
-                            Some(before) => before
-                                .into_iter()
-                                .filter_map(|(var, n)| {
-                                    caps.iter()
-                                        .find(|(w, _)| *w == var)
-                                        .map(|(_, m)| (var, n.max(*m)))
-                                })
-                                .collect(),
-                        });
+        if let Some(known) = walk.values.get(&(v, holds)) {
+            return known.clone();
+        }
+        walk.values.insert((v, holds), Vec::new());
+        let caps = match self.shape.def(v) {
+            Def::Inst(..) => match self.shape.inst(v).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => self.implied_caps(*src, holds, walk),
+                Some(InstKind::UnaryOp {
+                    op: UnaryOpKind::Not,
+                    operand,
+                    ..
+                }) => self.implied_caps(*operand, !holds, walk),
+                Some(InstKind::Compare { op, lhs, rhs, .. }) => self
+                    .compared_len(*op, *lhs, *rhs, holds)
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            },
+            Def::Phi(b, i) => {
+                let mut common: Option<Vec<(VarId, u32)>> = None;
+                for &(pred, x) in self.phi_incoming(b, i) {
+                    // The value `x` has on the edge from a block branching on it.
+                    let decided = match self.f.block(pred).terminator {
+                        Terminator::Branch {
+                            cond,
+                            then_bb,
+                            else_bb,
+                        } if cond == x && (then_bb == b) != (else_bb == b) => Some(then_bb == b),
+                        _ => None,
+                    };
+                    if decided.is_some_and(|value| value != holds) {
+                        continue;
                     }
-                    common.unwrap_or_default()
+                    let mut caps = self.implied_caps(x, holds, walk);
+                    caps.extend(self.caps_on_the_way(pred, walk));
+                    common = Some(match common {
+                        None => caps,
+                        Some(before) => before
+                            .into_iter()
+                            .filter_map(|(var, n)| {
+                                caps.iter()
+                                    .find(|(w, _)| *w == var)
+                                    .map(|(_, m)| (var, n.max(*m)))
+                            })
+                            .collect(),
+                    });
                 }
-                Def::Param | Def::None => Vec::new(),
-            };
-            let caps = tightest(caps);
-            walk.values.insert((v, holds), caps.clone());
-            caps
-        })
+                common.unwrap_or_default()
+            }
+            Def::Param | Def::None => Vec::new(),
+        };
+        let caps = tightest(caps);
+        walk.values.insert((v, holds), caps.clone());
+        caps
     }
 
     /// The caps the tests on the straight way into the end of block `b` imply: the branches
@@ -2496,47 +2490,44 @@ impl<'a> FnIndex<'a> {
     /// walk: what it did, and no if it reached such a phi, which is now seen (the answer is a
     /// conjunction: once one part says no, the whole does).
     fn lives_across_seen(&self, lp: &NaturalLoop, v: VarId, walk: &mut Lifetimes) -> (bool, bool) {
-        heki_ast::ensure_sufficient_stack(|| {
-            match self.shape.def(v) {
-                Def::Phi(b, i) if b != lp.header && self.shape.in_body(lp, b) => {
-                    let lives = walk.seen.insert(v)
-                        && self
-                            .phi_incoming(b, i)
-                            .iter()
-                            .all(|&(_, x)| self.lives_across_seen(lp, x, walk).0);
-                    (lives, true)
-                }
-                Def::Inst(b, i) if self.shape.in_body(lp, b) => {
-                    if let Some(&(lives, phi)) = walk.answered.get(&v) {
-                        return (lives && !phi, phi);
-                    }
-                    let answer = match &self.f.block(b).insts[i as usize].kind {
-                        InstKind::Copy { src: x, .. } | InstKind::AttrLoad { obj: x, .. } => {
-                            self.lives_across_seen(lp, *x, walk)
-                        }
-                        InstKind::SubscriptLoad { obj, index, .. } => {
-                            let (obj_lives, obj_phi) = self.lives_across_seen(lp, *obj, walk);
-                            if obj_lives {
-                                let (index_lives, index_phi) =
-                                    self.lives_across_seen(lp, *index, walk);
-                                (index_lives, obj_phi || index_phi)
-                            } else {
-                                (false, obj_phi)
-                            }
-                        }
-                        InstKind::LoadGlobal { .. }
-                        | InstKind::LoadDeref { .. }
-                        | InstKind::LoadName { .. }
-                        | InstKind::Const { .. } => (true, false),
-                        _ => (false, false),
-                    };
-                    walk.answered.insert(v, answer);
-                    answer
-                }
-                // A parameter, a loop-carried phi of the header, or defined before the loop.
-                _ => (true, false),
+        match self.shape.def(v) {
+            Def::Phi(b, i) if b != lp.header && self.shape.in_body(lp, b) => {
+                let lives = walk.seen.insert(v)
+                    && self
+                        .phi_incoming(b, i)
+                        .iter()
+                        .all(|&(_, x)| self.lives_across_seen(lp, x, walk).0);
+                (lives, true)
             }
-        })
+            Def::Inst(b, i) if self.shape.in_body(lp, b) => {
+                if let Some(&(lives, phi)) = walk.answered.get(&v) {
+                    return (lives && !phi, phi);
+                }
+                let answer = match &self.f.block(b).insts[i as usize].kind {
+                    InstKind::Copy { src: x, .. } | InstKind::AttrLoad { obj: x, .. } => {
+                        self.lives_across_seen(lp, *x, walk)
+                    }
+                    InstKind::SubscriptLoad { obj, index, .. } => {
+                        let (obj_lives, obj_phi) = self.lives_across_seen(lp, *obj, walk);
+                        if obj_lives {
+                            let (index_lives, index_phi) = self.lives_across_seen(lp, *index, walk);
+                            (index_lives, obj_phi || index_phi)
+                        } else {
+                            (false, obj_phi)
+                        }
+                    }
+                    InstKind::LoadGlobal { .. }
+                    | InstKind::LoadDeref { .. }
+                    | InstKind::LoadName { .. }
+                    | InstKind::Const { .. } => (true, false),
+                    _ => (false, false),
+                };
+                walk.answered.insert(v, answer);
+                answer
+            }
+            // A parameter, a loop-carried phi of the header, or defined before the loop.
+            _ => (true, false),
+        }
     }
 }
 

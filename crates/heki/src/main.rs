@@ -18,6 +18,7 @@ mod prompt;
 mod recommend;
 mod schemas;
 mod skill;
+mod stack;
 mod suppressed;
 mod version;
 mod watch;
@@ -582,7 +583,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 heuristic: args.heuristic.value(),
                 ..heki_lsp::Selectors::default()
             };
-            Ok(if heki_lsp::run_stdio(selectors)? {
+            Ok(if heki_lsp::run_stdio(selectors, stack::ANALYSIS_STACK)? {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -813,17 +814,9 @@ fn parse_cli() -> Cli {
 static ALLOC: cap::Cap<std::alloc::System> = cap::Cap::new(std::alloc::System, usize::MAX);
 
 fn main() -> ExitCode {
-    // One thread, the main one, runs the parallel work of a counting build: a second thread's
-    // timing would move the peak between runs.
-    #[cfg(feature = "count-alloc")]
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .use_current_thread()
-        .build_global()
-        .expect("the global thread pool is built before any parallel work");
     let cli = parse_cli();
     let failures = failure::Failures::of(&cli.command);
-    let code = match run(cli) {
+    let code = match stack::on_analysis_stack(|| run(cli)) {
         Ok(code) => code,
         Err(err) => {
             failures.fail(&err);

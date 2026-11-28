@@ -2419,10 +2419,6 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
     /// a result that cut none below `v` is the same on every path to `v`, and is kept (a
     /// condition reaches the same phis through many paths: `c = c or not c`).
     fn decompose_at(&self, v: VarId, holds: bool, walk: &mut Decomposing) -> (FactSet, usize) {
-        heki_ast::ensure_sufficient_stack(|| self.decompose_at_node(v, holds, walk))
-    }
-
-    fn decompose_at_node(&self, v: VarId, holds: bool, walk: &mut Decomposing) -> (FactSet, usize) {
         let mut out: FactSet = 0;
         if let Some(&a) = self.merged.get(&v) {
             out |= fact(a, holds);

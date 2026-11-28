@@ -1466,10 +1466,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn lower_stmt(&mut self, stmt: &'a Stmt) {
-        heki_ast::ensure_sufficient_stack(|| self.lower_stmt_node(stmt))
-    }
-
-    fn lower_stmt_node(&mut self, stmt: &'a Stmt) {
         if self.unmodeled {
             return;
         }
@@ -2070,46 +2066,43 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn lower_assign_target(&mut self, target: &'a Expr, value: VarId, span: Span) {
-        heki_ast::ensure_sufficient_stack(|| {
-            match target {
-                Expr::Name(n) => {
-                    self.write_var(n.id.as_str(), value, Span::from(n.range));
-                }
-                Expr::Attribute(attr) => {
-                    let obj = self.lower_expr(&attr.value);
-                    let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
-                    self.record_a1_attr_if_hazard(&attr_name, Span::from(attr.range));
-                    self.emit(
-                        InstKind::AttrStore {
-                            obj,
-                            attr: attr_name,
-                            value,
-                        },
-                        span,
-                    );
-                }
-                Expr::Subscript(sub) => {
-                    let obj = self.lower_expr(&sub.value);
-                    let (index, key_const, is_slice, _, _) = self.lower_subscript_index(&sub.slice);
-                    self.emit(
-                        InstKind::SubscriptStore {
-                            obj,
-                            index,
-                            key_const,
-                            value,
-                            is_slice,
-                        },
-                        span,
-                    );
-                }
-                Expr::Tuple(ast::ExprTuple { elts, .. })
-                | Expr::List(ast::ExprList { elts, .. }) => {
-                    self.lower_unpacking(elts, value);
-                }
-                // The parser rejects every other target (`InvalidAssignmentTarget`).
-                _ => {}
+        match target {
+            Expr::Name(n) => {
+                self.write_var(n.id.as_str(), value, Span::from(n.range));
             }
-        })
+            Expr::Attribute(attr) => {
+                let obj = self.lower_expr(&attr.value);
+                let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
+                self.record_a1_attr_if_hazard(&attr_name, Span::from(attr.range));
+                self.emit(
+                    InstKind::AttrStore {
+                        obj,
+                        attr: attr_name,
+                        value,
+                    },
+                    span,
+                );
+            }
+            Expr::Subscript(sub) => {
+                let obj = self.lower_expr(&sub.value);
+                let (index, key_const, is_slice, _, _) = self.lower_subscript_index(&sub.slice);
+                self.emit(
+                    InstKind::SubscriptStore {
+                        obj,
+                        index,
+                        key_const,
+                        value,
+                        is_slice,
+                    },
+                    span,
+                );
+            }
+            Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+                self.lower_unpacking(elts, value);
+            }
+            // The parser rejects every other target (`InvalidAssignmentTarget`).
+            _ => {}
+        }
     }
 
     /// `del name`: the name is possibly unbound until it is bound again.
@@ -2195,48 +2188,46 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn lower_delete_target(&mut self, target: &'a Expr) {
-        heki_ast::ensure_sufficient_stack(|| {
-            let span = Span::from(target.range());
-            match target {
-                Expr::Name(n) => self.lower_name_delete(n.id.as_str(), span),
-                Expr::Attribute(attr) => {
-                    let obj = self.lower_expr(&attr.value);
-                    let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
-                    self.record_a1_attr_if_hazard(&attr_name, Span::from(attr.range));
-                    self.emit(
-                        InstKind::AttrDelete {
-                            obj,
-                            attr: attr_name,
-                        },
-                        span,
-                    );
-                }
-                Expr::Subscript(sub) => {
-                    let obj = self.lower_expr(&sub.value);
-                    let (index, key_const, _, _, _) = self.lower_subscript_index(&sub.slice);
-                    self.emit(
-                        InstKind::SubscriptDelete {
-                            obj,
-                            index,
-                            key_const,
-                        },
-                        span,
-                    );
-                }
-                Expr::Tuple(t) => {
-                    for e in &t.elts {
-                        self.lower_delete_target(e);
-                    }
-                }
-                Expr::List(l) => {
-                    for e in &l.elts {
-                        self.lower_delete_target(e);
-                    }
-                }
-                // The parser rejects every other target (`InvalidDeleteTarget`).
-                _ => {}
+        let span = Span::from(target.range());
+        match target {
+            Expr::Name(n) => self.lower_name_delete(n.id.as_str(), span),
+            Expr::Attribute(attr) => {
+                let obj = self.lower_expr(&attr.value);
+                let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
+                self.record_a1_attr_if_hazard(&attr_name, Span::from(attr.range));
+                self.emit(
+                    InstKind::AttrDelete {
+                        obj,
+                        attr: attr_name,
+                    },
+                    span,
+                );
             }
-        })
+            Expr::Subscript(sub) => {
+                let obj = self.lower_expr(&sub.value);
+                let (index, key_const, _, _, _) = self.lower_subscript_index(&sub.slice);
+                self.emit(
+                    InstKind::SubscriptDelete {
+                        obj,
+                        index,
+                        key_const,
+                    },
+                    span,
+                );
+            }
+            Expr::Tuple(t) => {
+                for e in &t.elts {
+                    self.lower_delete_target(e);
+                }
+            }
+            Expr::List(l) => {
+                for e in &l.elts {
+                    self.lower_delete_target(e);
+                }
+            }
+            // The parser rejects every other target (`InvalidDeleteTarget`).
+            _ => {}
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -2769,16 +2760,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         fail: BlockId,
         captures: &mut Vec<(&'a str, VarId, Span)>,
     ) {
-        heki_ast::ensure_sufficient_stack(|| self.lower_pattern_node(pat, subject, fail, captures))
-    }
-
-    fn lower_pattern_node(
-        &mut self,
-        pat: &'a Pattern,
-        subject: VarId,
-        fail: BlockId,
-        captures: &mut Vec<(&'a str, VarId, Span)>,
-    ) {
         let span = Span::from(pat.range());
         match pat {
             Pattern::MatchValue(mv) => {
@@ -3025,10 +3006,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn lower_expr(&mut self, expr: &'a Expr) -> VarId {
-        heki_ast::ensure_sufficient_stack(|| self.lower_expr_node(expr))
-    }
-
-    fn lower_expr_node(&mut self, expr: &'a Expr) -> VarId {
         let span = Span::from(expr.range());
         match expr {
             Expr::Name(n) => {
@@ -3945,9 +3922,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.switch_to(pass_bb);
         }
 
-        heki_ast::ensure_sufficient_stack(|| {
-            self.lower_comprehension_generators(&generators[1..], None, isolate_targets, emit_leaf);
-        });
+        self.lower_comprehension_generators(&generators[1..], None, isolate_targets, emit_leaf);
 
         if isolate_targets {
             self.comp_target_renames.pop();
@@ -4075,16 +4050,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     /// The dotted target of an annotated assignment (`x`, `self.x`), each name spelled as the
     /// scope binds or the class holds it.
     fn annotated_target(&self, target: &Expr) -> Option<String> {
-        heki_ast::ensure_sufficient_stack(|| {
-            let Expr::Attribute(a) = target else {
-                return expr_dotted_name(target).map(|name| self.scope_name(&name).into_owned());
-            };
-            Some(format!(
-                "{}.{}",
-                self.annotated_target(&a.value)?,
-                self.attr_name(a.attr.as_str())
-            ))
-        })
+        let Expr::Attribute(a) = target else {
+            return expr_dotted_name(target).map(|name| self.scope_name(&name).into_owned());
+        };
+        Some(format!(
+            "{}.{}",
+            self.annotated_target(&a.value)?,
+            self.attr_name(a.attr.as_str())
+        ))
     }
 
     fn record_a1_attr_if_hazard(&mut self, attr: &str, span: Span) {
@@ -4502,7 +4475,7 @@ fn reads_target(body: &[Stmt], target: &Expr) -> bool {
             {
                 self.found = true;
             }
-            heki_ast::ensure_sufficient_stack(|| visitor::walk_expr(self, expr));
+            visitor::walk_expr(self, expr);
         }
     }
 
@@ -4521,7 +4494,7 @@ fn reads_target(body: &[Stmt], target: &Expr) -> bool {
 /// The names a `for` target binds (`i` of `for i, (a, *b) in ...` and the others), and whether
 /// it binds nothing else (no attribute or item).
 fn target_names<'t>(target: &'t Expr, out: &mut Vec<&'t str>) -> bool {
-    heki_ast::ensure_sufficient_stack(|| match target {
+    match target {
         Expr::Name(n) => {
             out.push(n.id.as_str());
             true
@@ -4531,7 +4504,7 @@ fn target_names<'t>(target: &'t Expr, out: &mut Vec<&'t str>) -> bool {
         }
         Expr::Starred(s) => target_names(&s.value, out),
         _ => false,
-    })
+    }
 }
 
 /// Whether `body` takes items out of the collection `tested` names (`while queue: item =
@@ -4556,7 +4529,7 @@ fn drains(body: &[Stmt], tested: &Expr) -> bool {
             {
                 self.found = true;
             }
-            heki_ast::ensure_sufficient_stack(|| visitor::walk_stmt(self, stmt));
+            visitor::walk_stmt(self, stmt);
         }
         fn visit_expr(&mut self, expr: &'e Expr) {
             match expr {
@@ -4574,7 +4547,7 @@ fn drains(body: &[Stmt], tested: &Expr) -> bool {
                 }
                 _ => {}
             }
-            heki_ast::ensure_sufficient_stack(|| visitor::walk_expr(self, expr));
+            visitor::walk_expr(self, expr);
         }
     }
 
@@ -4675,67 +4648,60 @@ fn is_retry_body(body: &[Stmt]) -> bool {
 }
 
 fn suite_has_return_or_break(stmts: &[Stmt]) -> bool {
-    heki_ast::ensure_sufficient_stack(|| {
-        for s in stmts {
-            match s {
-                Stmt::Return(_) | Stmt::Break(_) => return true,
-                Stmt::If(i) => {
-                    if suite_has_return_or_break(&i.body)
-                        || i.elif_else_clauses
-                            .iter()
-                            .any(|c| suite_has_return_or_break(&c.body))
-                    {
-                        return true;
-                    }
-                }
-                Stmt::With(w) if suite_has_return_or_break(&w.body) => {
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
-    })
-}
-
-fn has_sleep_call(stmts: &[Stmt]) -> bool {
-    heki_ast::ensure_sufficient_stack(|| {
-        for s in stmts {
-            match s {
-                Stmt::Expr(e) => {
-                    if expr_has_sleep(&e.value) {
-                        return true;
-                    }
-                }
-                Stmt::If(i) => {
-                    if has_sleep_call(&i.body)
-                        || i.elif_else_clauses.iter().any(|c| has_sleep_call(&c.body))
-                    {
-                        return true;
-                    }
-                }
-                Stmt::Try(t)
-                    if (has_sleep_call(&t.body)
-                        || t.handlers.iter().any(|h| {
-                            let ast::ExceptHandler::ExceptHandler(eh) = h;
-                            has_sleep_call(&eh.body)
-                        })) =>
+    for s in stmts {
+        match s {
+            Stmt::Return(_) | Stmt::Break(_) => return true,
+            Stmt::If(i) => {
+                if suite_has_return_or_break(&i.body)
+                    || i.elif_else_clauses
+                        .iter()
+                        .any(|c| suite_has_return_or_break(&c.body))
                 {
                     return true;
                 }
-                _ => {}
             }
+            Stmt::With(w) if suite_has_return_or_break(&w.body) => {
+                return true;
+            }
+            _ => {}
         }
-        false
-    })
+    }
+    false
+}
+
+fn has_sleep_call(stmts: &[Stmt]) -> bool {
+    for s in stmts {
+        match s {
+            Stmt::Expr(e) => {
+                if expr_has_sleep(&e.value) {
+                    return true;
+                }
+            }
+            Stmt::If(i) => {
+                if has_sleep_call(&i.body)
+                    || i.elif_else_clauses.iter().any(|c| has_sleep_call(&c.body))
+                {
+                    return true;
+                }
+            }
+            Stmt::Try(t)
+                if (has_sleep_call(&t.body)
+                    || t.handlers.iter().any(|h| {
+                        let ast::ExceptHandler::ExceptHandler(eh) = h;
+                        has_sleep_call(&eh.body)
+                    })) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn expr_has_sleep(expr: &Expr) -> bool {
-    let mut awaited = expr;
-    while let Expr::Await(a) = awaited {
-        awaited = &a.value;
-    }
-    match awaited {
+    match expr {
+        Expr::Await(a) => expr_has_sleep(&a.value),
         Expr::Call(c) => {
             if let Some(d) = expr_dotted_name(&c.func) {
                 d == "sleep" || d.ends_with(".sleep")
@@ -4814,7 +4780,7 @@ fn names_loaded(exprs: &[&Expr]) -> Vec<String> {
             {
                 self.0.push(n.id.to_string());
             }
-            heki_ast::ensure_sufficient_stack(|| visitor::walk_expr(self, expr));
+            visitor::walk_expr(self, expr);
         }
     }
 
@@ -4826,10 +4792,6 @@ fn names_loaded(exprs: &[&Expr]) -> Vec<String> {
 }
 
 fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
-    heki_ast::ensure_sufficient_stack(|| collect_suite_bindings_node(stmts, out))
-}
-
-fn collect_suite_bindings_node(stmts: &[Stmt], out: &mut ScopeBindings) {
     for stmt in stmts {
         match stmt {
             // Decorators, defaults, and class arguments run in this scope at the definition.
@@ -4996,7 +4958,7 @@ fn collect_suite_bindings_node(stmts: &[Stmt], out: &mut ScopeBindings) {
 /// The names an assignment target binds, and the bindings of the expressions it evaluates
 /// (`d[(k := key)] = v` binds `k`).
 fn collect_target_bindings(expr: &Expr, out: &mut ScopeBindings) {
-    heki_ast::ensure_sufficient_stack(|| match expr {
+    match expr {
         Expr::Name(n) => {
             out.locals.insert(n.id.to_string());
         }
@@ -5007,12 +4969,12 @@ fn collect_target_bindings(expr: &Expr, out: &mut ScopeBindings) {
         }
         Expr::Starred(s) => collect_target_bindings(&s.value, out),
         other => collect_expr_bindings(other, out),
-    })
+    }
 }
 
 /// The names an assignment target binds, without the expressions it evaluates.
 fn collect_target_names(expr: &Expr, names: &mut FxHashSet<String>) {
-    heki_ast::ensure_sufficient_stack(|| match expr {
+    match expr {
         Expr::Name(n) => {
             names.insert(n.id.to_string());
         }
@@ -5023,11 +4985,11 @@ fn collect_target_names(expr: &Expr, names: &mut FxHashSet<String>) {
         }
         Expr::Starred(s) => collect_target_names(&s.value, names),
         _ => {}
-    })
+    }
 }
 
 fn collect_pattern_bindings(pat: &Pattern, locals: &mut FxHashSet<String>) {
-    heki_ast::ensure_sufficient_stack(|| match pat {
+    match pat {
         Pattern::MatchSequence(ms) => {
             for p in &ms.patterns {
                 collect_pattern_bindings(p, locals);
@@ -5068,7 +5030,7 @@ fn collect_pattern_bindings(pat: &Pattern, locals: &mut FxHashSet<String>) {
             }
         }
         Pattern::MatchValue(_) | Pattern::MatchSingleton(_) => {}
-    })
+    }
 }
 
 /// The bindings of the parts of a comprehension that run in its own scope: every `for` clause
@@ -5094,10 +5056,6 @@ fn collect_comprehension_bindings(
 }
 
 fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
-    heki_ast::ensure_sufficient_stack(|| collect_expr_bindings_node(expr, out))
-}
-
-fn collect_expr_bindings_node(expr: &Expr, out: &mut ScopeBindings) {
     match expr {
         Expr::Named(n) => {
             collect_target_bindings(&n.target, out);
@@ -5261,23 +5219,12 @@ fn introspection_kind(spelling: &str, without_args: bool) -> Option<&'static str
     }
 }
 
-/// The dotted name of a name or an attribute chain of one.
 fn expr_dotted_name(expr: &Expr) -> Option<String> {
-    let mut attrs = Vec::new();
-    let mut part = expr;
-    while let Expr::Attribute(a) = part {
-        attrs.push(a.attr.as_str());
-        part = &a.value;
+    match expr {
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Attribute(a) => Some(format!("{}.{}", expr_dotted_name(&a.value)?, a.attr)),
+        _ => None,
     }
-    let Expr::Name(n) = part else {
-        return None;
-    };
-    let mut name = n.id.as_str().to_owned();
-    for attr in attrs.iter().rev() {
-        name.push('.');
-        name.push_str(attr);
-    }
-    Some(name)
 }
 
 fn extract_const_str(expr: &Expr) -> Option<String> {
@@ -5302,29 +5249,17 @@ fn literal_default(expr: &Expr) -> Option<ConstLiteral> {
     }
 }
 
-/// The integer an integer literal under any number of signs is. A literal is never negative,
-/// so negating it an even number of times gives it back.
 fn extract_const_int(expr: &Expr) -> Option<i64> {
-    let mut negated = false;
-    let mut part = expr;
-    while let Expr::UnaryOp(u) = part
-        && matches!(u.op, ast::UnaryOp::USub | ast::UnaryOp::UAdd)
-    {
-        negated ^= u.op == ast::UnaryOp::USub;
-        part = &u.operand;
-    }
-    let Expr::NumberLiteral(ast::ExprNumberLiteral {
-        value: ast::Number::Int(i),
-        ..
-    }) = part
-    else {
-        return None;
-    };
-    let value = i.as_i64()?;
-    if negated {
-        value.checked_neg()
-    } else {
-        Some(value)
+    match expr {
+        Expr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => i.as_i64(),
+            _ => None,
+        },
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::USub) => {
+            extract_const_int(&u.operand).and_then(|v| v.checked_neg())
+        }
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::UAdd) => extract_const_int(&u.operand),
+        _ => None,
     }
 }
 

@@ -2322,11 +2322,10 @@ fn lists_that_extend_each_other_are_not_fixed() {
 }
 
 /// A thousand lists, each extending the next: the size of each asks for the size of the next, a
-/// thousand questions deep, more than a worker thread's stack holds in a test build when each is
-/// decided inside the one asking it (the modules of a project of several files are analyzed on
-/// worker threads). The sizes are decided a bounded depth at a time, with the answers of the
-/// whole recursion: the chain, followed to its end, holds one item, and closed into a cycle, its
-/// sizes depend on themselves and are not fixed. The loop copying the chain's items into the
+/// thousand questions deep, a stack frame for each when each is decided inside the one asking
+/// it. The sizes are decided a bounded depth at a time, with the answers of the whole recursion:
+/// the chain, followed to its end, holds one item, and closed into a cycle, its sizes depend on
+/// themselves and are not fixed. The loop copying the chain's items into the
 /// queried list runs as many times as the chain holds: its count is asked under the waits too.
 #[test]
 fn a_chain_of_lists_extending_each_other_is_followed_to_its_end() {

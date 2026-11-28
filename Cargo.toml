@@ -60,9 +60,6 @@ schemars = "1.2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 smallvec = "1.13"
-# Grows the stack of a recursion as deep as the source (`heki_ast::ensure_sufficient_stack`), which
-# needs `unsafe`, forbidden in heki's crates (the parser's `stacker` feature builds it already).
-stacker = "0.1.25"
 # The names an error offers for a misspelled one, as similar as clap requires (clap already builds
 # this crate).
 strsim = "0.11"

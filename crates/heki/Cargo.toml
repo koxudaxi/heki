@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [features]
 # Count the heap bytes heki asks for, for the memory gate (`scripts/check_memory.py`).
-count-alloc = ["dep:cap", "dep:rayon"]
+count-alloc = ["dep:cap"]
 
 [dependencies]
 anstyle-query.workspace = true
@@ -35,7 +35,7 @@ heki_lsp.workspace = true
 heki_rules.workspace = true
 heki_semantic.workspace = true
 heki_soundness.workspace = true
-rayon = { workspace = true, optional = true }
+rayon.workspace = true
 schemars.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true

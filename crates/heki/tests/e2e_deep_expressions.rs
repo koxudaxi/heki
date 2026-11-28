@@ -1,17 +1,19 @@
-//! Expressions as deep as their source, end to end through the real binary under a 1 MiB stack
-//! for every thread: chains of ten thousand operators, unions of ten thousand classes, and calls
-//! and subscripts nested as deep are parsed, lowered, analyzed, and dropped as a short chain is,
-//! with the same report, on the main thread (a single file) and on the worker threads (the files
-//! of a project).
+//! Expressions as deep as their source, end to end through the real binary started with a 1 MiB
+//! stack for its main thread and for the threads spawned without a size: chains of ten thousand
+//! operators, unions of ten thousand classes, and calls and subscripts nested as deep are parsed,
+//! lowered, analyzed, and dropped as a short chain is, with the same report, on the thread
+//! running the command (a single file) and on the thread pool (the files of a project), whose
+//! stacks heki sizes itself.
 
 mod common;
 
 use common::Project;
-use serde_json::Value;
+use common::lsp::{Lsp, uri, uri_in};
+use serde_json::{Value, json};
 use std::process::Command;
 
-/// The stack every thread of `heki` gets: the main thread's on Windows, and less than the 2 MiB
-/// worker threads have by default.
+/// The stack `heki` starts with: the main thread's on Windows, and less than the 2 MiB threads
+/// have by default.
 const STACK: usize = 1024 * 1024;
 
 /// How deep the expressions of [`deep_module`] are.
@@ -67,9 +69,9 @@ async def union(x: {union}):
     )
 }
 
-/// `heki check --output-format json` of the project `p` with a stack of [`STACK`] for every
-/// thread: `ulimit -s` sets the main thread's where a shell runs it (a Windows program's main
-/// thread has that much), and `RUST_MIN_STACK` the worker threads'.
+/// `heki check --output-format json` of the project `p` started with a stack of [`STACK`]:
+/// `ulimit -s` sets the main thread's where a shell runs it (a Windows program's main thread has
+/// that much), and `RUST_MIN_STACK` that of the threads spawned without a size.
 fn check_on_small_stacks(p: &Project) -> Vec<Value> {
     let heki = env!("CARGO_BIN_EXE_heki");
     let args = ["check", "--output-format", "json", "."];
@@ -114,7 +116,7 @@ fn places(found: &[Value]) -> Vec<String> {
 }
 
 /// The reports on the deep module and on the same module three deep, in a project of the
-/// module alone, analyzed on the main thread.
+/// module alone, analyzed on the thread running the command.
 #[test]
 fn deep_expressions_of_a_single_file_are_reported_as_short_ones() {
     let report = |n: usize| {
@@ -127,7 +129,7 @@ fn deep_expressions_of_a_single_file_are_reported_as_short_ones() {
     assert_eq!(report(DEEP), short);
 }
 
-/// The same in a project of two such modules, analyzed on the worker threads.
+/// The same in a project of two such modules, analyzed on the thread pool.
 #[test]
 fn deep_expressions_of_a_project_are_reported_as_short_ones() {
     let report = |n: usize| {
@@ -138,5 +140,48 @@ fn deep_expressions_of_a_project_are_reported_as_short_ones() {
     };
     let short = report(3);
     assert_eq!(short.len(), 10, "{short:#?}");
+    assert_eq!(report(DEEP), short);
+}
+
+/// The same through the language server, started with a stack of [`STACK`] for the threads
+/// spawned without a size: the module is indexed from the disk and checked once opened, on the
+/// threads of the server.
+#[test]
+fn deep_expressions_in_the_language_server_are_reported_as_short_ones() {
+    let report = |n: usize| {
+        let p = Project::new(&format!("deep_expressions_server_{n}"));
+        let text = deep_module(n);
+        p.write("m.py", &text);
+        let stack = STACK.to_string();
+        let mut lsp = Lsp::start_with_env(
+            &p.dir,
+            &["server", "--stdio"],
+            &[("RUST_MIN_STACK", stack.as_str())],
+        );
+        lsp.request(
+            "initialize",
+            json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+        );
+        lsp.notify("initialized", json!({}));
+        lsp.ready();
+        let m = uri_in(&p.dir, "m.py");
+        lsp.open(&m, &text);
+        let found = lsp.diagnostics(&m, |d| !d.is_empty());
+        lsp.stop(true);
+        let mut places: Vec<String> = found
+            .iter()
+            .map(|d| {
+                let start = &d["range"]["start"];
+                format!(
+                    "{}:{} {} {}",
+                    start["line"], start["character"], d["code"], d["message"]
+                )
+            })
+            .collect();
+        places.sort();
+        places
+    };
+    let short = report(3);
+    assert_eq!(short.len(), 5, "{short:#?}");
     assert_eq!(report(DEEP), short);
 }

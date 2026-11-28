@@ -918,9 +918,11 @@ const INPUT_READ_AHEAD: usize = 8 << 20;
 /// `exit` or the end of stdin (the client closed it or went away), whatever analysis is in
 /// flight: tower-lsp's `Server::serve` would first finish every handler it has started. Returns
 /// whether the session ended as the protocol asks, after `shutdown`: the exit code is then 0,
-/// else 1.
-pub fn run_stdio(selectors: Selectors) -> std::io::Result<bool> {
+/// else 1. Every thread of the server (the handlers' and the analyses') gets a stack of
+/// `thread_stack` bytes.
+pub fn run_stdio(selectors: Selectors, thread_stack: usize) -> std::io::Result<bool> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(thread_stack)
         .enable_all()
         .build()?;
     let shut_down = runtime.block_on(async {

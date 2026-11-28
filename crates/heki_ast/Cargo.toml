@@ -11,10 +11,8 @@ workspace = true
 [dependencies]
 # ADR-009 / ADR-016: ruff_python_* dependencies are STRICTLY isolated inside heki_ast.
 ruff_python_ast.workspace = true
-# `stacker`: the parser grows its stack on expressions nested deeper than a thread's stack holds.
-ruff_python_parser = { workspace = true, features = ["stacker"] }
+ruff_python_parser.workspace = true
 ruff_text_size.workspace = true
 schemars.workspace = true
 serde.workspace = true
-stacker.workspace = true
 thiserror.workspace = true

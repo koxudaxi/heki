@@ -462,34 +462,32 @@ impl<'a> Check<'_, 'a> {
     /// The task the value `v` of frame `k` is: a coroutine a call creates, a task a factory
     /// makes of one, or a one-at-a-time call.
     fn element(&self, k: usize, v: VarId, looped: Option<BlockId>, out: &mut Vec<Sibling>) {
-        heki_ast::ensure_sufficient_stack(|| {
-            let frame = &self.frames[k];
-            let v = frame.root(v);
-            let Some(inst) = frame.def(v) else {
-                return;
-            };
-            if !matches!(
-                inst.kind,
-                InstKind::Call { .. } | InstKind::MethodCall { .. }
-            ) {
-                return;
+        let frame = &self.frames[k];
+        let v = frame.root(v);
+        let Some(inst) = frame.def(v) else {
+            return;
+        };
+        if !matches!(
+            inst.kind,
+            InstKind::Call { .. } | InstKind::MethodCall { .. }
+        ) {
+            return;
+        }
+        if let Some(symbol) = self.external(k, &inst.kind)
+            && TASK_FACTORIES.contains(&symbol.as_str())
+        {
+            if let Some(coro) = call_parts(&inst.kind).and_then(|(args, _, _)| args.first()) {
+                self.element(k, *coro, looped, out);
             }
-            if let Some(symbol) = self.external(k, &inst.kind)
-                && TASK_FACTORIES.contains(&symbol.as_str())
-            {
-                if let Some(coro) = call_parts(&inst.kind).and_then(|(args, _, _)| args.first()) {
-                    self.element(k, *coro, looped, out);
-                }
-                return;
-            }
-            out.push(Sibling {
-                frame: k,
-                start: Start::Call(v),
-                many: looped.is_some(),
-                looped,
-                span: inst.span,
-            });
-        })
+            return;
+        }
+        out.push(Sibling {
+            frame: k,
+            start: Start::Call(v),
+            many: looped.is_some(),
+            looped,
+            span: inst.span,
+        });
     }
 
     /// Report the objects two tasks of one fan-out (or one started several times) use.
@@ -639,47 +637,41 @@ impl<'a> Check<'_, 'a> {
     /// What value `v` of a sibling's frame is to the fan-out function, `None` for a value each
     /// start of the sibling makes anew (the item of its loop or comprehension).
     fn holder(&self, s: &Sibling, v: VarId) -> Option<Holder> {
-        heki_ast::ensure_sufficient_stack(|| {
-            let frame = &self.frames[s.frame];
-            let v = frame.root(v);
-            if s.frame != 0 {
-                // A generator expression's own values are per item; a variable it captures is the
-                // fan-out function's.
-                return match frame.def(v).map(|i| &i.kind) {
-                    Some(InstKind::LoadDeref { name, .. }) => self.named(name),
-                    Some(InstKind::LoadGlobal { name, .. }) => {
-                        Some(Holder::Obj(ObjRef::Global(self.tcx.global_fqn(name))))
-                    }
-                    Some(InstKind::AttrLoad { obj, attr, .. }) => self.holder(s, *obj)?.attr(attr),
-                    _ => None,
-                };
-            }
-            self.top_holder(v, s.looped)
-        })
+        let frame = &self.frames[s.frame];
+        let v = frame.root(v);
+        if s.frame != 0 {
+            // A generator expression's own values are per item; a variable it captures is the
+            // fan-out function's.
+            return match frame.def(v).map(|i| &i.kind) {
+                Some(InstKind::LoadDeref { name, .. }) => self.named(name),
+                Some(InstKind::LoadGlobal { name, .. }) => {
+                    Some(Holder::Obj(ObjRef::Global(self.tcx.global_fqn(name))))
+                }
+                Some(InstKind::AttrLoad { obj, attr, .. }) => self.holder(s, *obj)?.attr(attr),
+                _ => None,
+            };
+        }
+        self.top_holder(v, s.looped)
     }
 
     /// What value `v` of the fan-out function is, `None` when the loop around the start
     /// (`looped`) makes it anew in each iteration.
     fn top_holder(&self, v: VarId, looped: Option<BlockId>) -> Option<Holder> {
-        heki_ast::ensure_sufficient_stack(|| {
-            let top = self.top();
-            let def = |x: VarId| top.def(x);
-            if let Some(obj) = locks::obj_ref(self.tcx, top.f, &top.key, &top.types, &def, v) {
-                return Some(Holder::Obj(obj));
-            }
-            let root = top.root(v);
-            if let Some(head) = looped
-                && self.made_in_loop(root, head)
-            {
-                return None;
-            }
-            match top.def(root).map(|i| &i.kind) {
-                Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                    self.top_holder(*obj, looped)?.attr(attr)
-                }
-                _ => Some(Holder::Local { root, attr: None }),
-            }
-        })
+        let top = self.top();
+        let def = |x: VarId| top.def(x);
+        if let Some(obj) = locks::obj_ref(self.tcx, top.f, &top.key, &top.types, &def, v) {
+            return Some(Holder::Obj(obj));
+        }
+        let root = top.root(v);
+        if let Some(head) = looped
+            && self.made_in_loop(root, head)
+        {
+            return None;
+        }
+        match top.def(root).map(|i| &i.kind) {
+            Some(InstKind::AttrLoad { obj, attr, .. }) => self.top_holder(*obj, looped)?.attr(attr),
+            _ => Some(Holder::Local { root, attr: None }),
+        }
     }
 
     /// Whether the loop with header `head` defines `v` (an instruction or a phi in its body).

@@ -148,48 +148,76 @@ pub struct ParsedModule {
     parsed: ruff_python_parser::Parsed<ruff_python_ast::ModModule>,
 }
 
-/// Dropping a tree as it is recurses once per level, past any thread's stack for a chain of
-/// thousands of operators. The tree is taken apart from its leaves up instead, a level at a time
-/// on a stack that grows, and each node dropped once its children are leaves.
+/// Dropping a tree as it is recurses once per level, past a thread's stack for a chain of
+/// thousands of operators. The tree is taken apart instead: each statement, expression, and
+/// pattern is detached from its parent, and dropped once its own children are detached, so
+/// dropping a module takes the stack of one node whatever its depth.
 impl Drop for ParsedModule {
     fn drop(&mut self) {
-        use ruff_python_ast::visitor::transformer::Transformer;
+        use ruff_python_ast::visitor::transformer::{
+            Transformer, walk_expr, walk_pattern, walk_stmt,
+        };
         let empty =
             ruff_python_parser::parse_unchecked_source("", ruff_python_ast::PySourceType::Python);
         let mut module = std::mem::replace(&mut self.parsed, empty).into_syntax();
-        TakeApart.visit_body(&mut module.body);
+        let detached = Detached::default();
+        for stmt in &mut module.body {
+            detached.visit_stmt(stmt);
+            while let Some(node) = detached.pop() {
+                match node {
+                    Node::Stmt(mut stmt) => walk_stmt(&detached, &mut stmt),
+                    Node::Expr(mut expr) => walk_expr(&detached, &mut expr),
+                    Node::Pattern(mut pattern) => walk_pattern(&detached, &mut pattern),
+                }
+            }
+        }
     }
 }
 
-/// Replaces each statement, expression, and pattern of a tree by a leaf once its children are
-/// leaves ([`ParsedModule`]'s drop).
-struct TakeApart;
+/// A node [`ParsedModule`]'s drop has detached from its parent.
+enum Node {
+    Stmt(ruff_python_ast::Stmt),
+    Expr(ruff_python_ast::Expr),
+    Pattern(ruff_python_ast::Pattern),
+}
 
-impl ruff_python_ast::visitor::transformer::Transformer for TakeApart {
+/// The nodes detached and not yet taken apart: walking a node moves each of its statements,
+/// expressions, and patterns here and leaves a leaf in its place.
+#[derive(Default)]
+struct Detached(std::cell::RefCell<Vec<Node>>);
+
+impl Detached {
+    fn pop(&self) -> Option<Node> {
+        self.0.borrow_mut().pop()
+    }
+
+    fn push(&self, node: Node) {
+        self.0.borrow_mut().push(node);
+    }
+}
+
+impl ruff_python_ast::visitor::transformer::Transformer for Detached {
     fn visit_stmt(&self, stmt: &mut ruff_python_ast::Stmt) {
-        use ruff_python_ast::visitor::transformer::walk_stmt;
-        ensure_sufficient_stack(|| walk_stmt(self, stmt));
-        *stmt = ruff_python_ast::Stmt::Pass(ruff_python_ast::StmtPass {
+        let leaf = ruff_python_ast::Stmt::Pass(ruff_python_ast::StmtPass {
             node_index: Default::default(),
             range: TextRange::default(),
         });
+        self.push(Node::Stmt(std::mem::replace(stmt, leaf)));
     }
 
     fn visit_expr(&self, expr: &mut ruff_python_ast::Expr) {
-        use ruff_python_ast::visitor::transformer::walk_expr;
-        ensure_sufficient_stack(|| walk_expr(self, expr));
-        *expr = ruff_python_ast::Expr::NoneLiteral(Default::default());
+        let leaf = ruff_python_ast::Expr::NoneLiteral(Default::default());
+        self.push(Node::Expr(std::mem::replace(expr, leaf)));
     }
 
     fn visit_pattern(&self, pattern: &mut ruff_python_ast::Pattern) {
-        use ruff_python_ast::visitor::transformer::walk_pattern;
-        ensure_sufficient_stack(|| walk_pattern(self, pattern));
-        *pattern =
+        let leaf =
             ruff_python_ast::Pattern::MatchSingleton(ruff_python_ast::PatternMatchSingleton {
                 node_index: Default::default(),
                 range: TextRange::default(),
                 value: ruff_python_ast::Singleton::None,
             });
+        self.push(Node::Pattern(std::mem::replace(pattern, leaf)));
     }
 }
 
@@ -358,21 +386,6 @@ pub fn fstring_tail(expr: &ruff_python_ast::Expr) -> Option<String> {
         }
     }
     Some(pieces.into_iter().rev().collect())
-}
-
-/// The stack a level of a deep recursion may still take when [`ensure_sufficient_stack`] lets it
-/// run where it is: the frames up to the next level's check, and what they call.
-const STACK_RED_ZONE: usize = 256 * 1024;
-/// The stack segment [`ensure_sufficient_stack`] gives a recursion past the red zone.
-const STACK_SEGMENT: usize = 4 * 1024 * 1024;
-
-/// Runs `f`, one level of a recursion as deep as the source (the operands of an expression, the
-/// definitions a value is built from), on a new stack segment when the current one has less
-/// than a red zone left, as the parser does. How deep such a recursion goes then depends on the
-/// memory, not on the stack of the thread it runs on (1 MiB for the main thread on Windows,
-/// 2 MiB for worker threads).
-pub fn ensure_sufficient_stack<R>(f: impl FnOnce() -> R) -> R {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, f)
 }
 
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).

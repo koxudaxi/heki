@@ -7552,10 +7552,10 @@ $ python3 scripts/check_memory.py --heki target/release/heki
   project exceeds its budget in the script.
 - The peak heap is the most bytes heki holds at once, counted by the allocator of a
   `count-alloc` build (release builds leave the feature off). The counting build also runs its
-  parallel work on the main thread alone, what `RAYON_NUM_THREADS=1` asks without the second
-  thread whose timing would move the peak. No allocator cache, memory pressure, or thread timing
-  changes the count: every run reads the same bytes, and one run per mode suffices. The total of
-  the bytes allocated is printed next to it.
+  parallel work on the thread running the command alone, what `RAYON_NUM_THREADS=1` asks
+  without the second thread whose timing would move the peak. No allocator cache, memory
+  pressure, or thread timing changes the count: every run reads the same bytes, and one run per
+  mode suffices. The total of the bytes allocated is printed next to it.
 - Each budget is the peak on CI's Linux runner when it was set, plus 25 %, except those of
   `heki recommend`, an experimental command that runs several analyses and that no editor waits
   on: the owner set them to 100 MiB. Another machine reads a few hundred bytes more or less,
@@ -7646,18 +7646,22 @@ the call graph, or the class hierarchy goes through them:
   (the size facts: the size of a list asks for the size of each list extending it) to 64 nested
   decisions at a time. A question asked deeper waits while the decisions under way unwind, and
   is decided first with the same questions open: the answers are those of the whole recursion,
-  whose depth would otherwise follow a chain in the source past a thread's stack (2 MiB for the
-  threads analyzing the files of a project). The questions open are then decided again, so a
-  question with many deep ones below it runs once per deep one: from the first wait on, the
-  decisions take their steps from one budget of the owner, and past it the questions still open
-  are unknown.
-- A recursion whose depth follows the source and that keeps no memo `Recursion` could replay
-  (the lowering and the other walks over the syntax tree, a walk down the operands or the copies
-  of a value, the annotation readers) runs each level through `heki_ast::ensure_sufficient_stack`,
-  which moves it to a new stack segment when the thread's stack is nearly used up, as the parser
-  does. A chain of ten thousand operators or calls nested as deep is analyzed as a short one,
-  whatever the stack of the thread (1 MiB for the main thread on Windows); dropping a parsed
-  module takes the tree apart from its leaves the same way.
+  whose depth would otherwise follow a chain in the source, a stack frame for each link. The
+  questions open are then decided again, so a question with many deep ones below it runs once
+  per deep one: from the first wait on, the decisions take their steps from one budget of the
+  owner, and past it the questions still open are unknown.
+- The parser, the lowering, and the walks over the syntax tree (the semantic model, the
+  annotation readers, the walks down the operands of an expression) recurse once per level of
+  the tree, which is as deep as an expression is long: a chain of ten thousand `+` operands is
+  ten thousand levels. They run on threads whose stack holds such a chain, never on the main
+  thread (1 MiB on Windows) or a thread of the default 2 MiB: `heki check`, `inspect`,
+  `recommend`, `snapshot`, and the `--watch` engine run on one thread of
+  `heki::stack::ANALYSIS_STACK` (256 MiB), the thread pool of the parallel work and the
+  language server's threads get the same stack. A level takes under 2 KiB in a release build
+  (about 10 KiB in a debug build), so the stack holds several times the deepest chain CPython
+  compiles; the platforms map a thread's stack as it is used, so the size costs nothing until
+  a source needs it. Dropping a parsed module does not recurse: the tree is taken apart a node
+  at a time.
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
   types of one module) counts the steps of all the owner's walks, and the weight of every fact
   they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR

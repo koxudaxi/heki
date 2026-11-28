@@ -233,27 +233,25 @@ impl<'f> Flags<'f> {
         flags: &rustc_hash::FxHashSet<VarId>,
         decided: &mut FxHashMap<VarId, bool>,
     ) -> bool {
-        heki_ast::ensure_sufficient_stack(|| {
-            if let Some(&known) = decided.get(&v) {
-                return known;
+        if let Some(&known) = decided.get(&v) {
+            return known;
+        }
+        let depends = match self.defs.get(&v) {
+            _ if flags.contains(&v) => true,
+            Some(InstKind::Copy { src, .. }) => self.depends_on_flag(*src, flags, decided),
+            Some(InstKind::UnaryOp {
+                op: heki_ir::UnaryOpKind::Not,
+                operand,
+                ..
+            }) => self.depends_on_flag(*operand, flags, decided),
+            Some(InstKind::Compare { lhs, rhs, .. }) => {
+                self.depends_on_flag(*lhs, flags, decided)
+                    || self.depends_on_flag(*rhs, flags, decided)
             }
-            let depends = match self.defs.get(&v) {
-                _ if flags.contains(&v) => true,
-                Some(InstKind::Copy { src, .. }) => self.depends_on_flag(*src, flags, decided),
-                Some(InstKind::UnaryOp {
-                    op: heki_ir::UnaryOpKind::Not,
-                    operand,
-                    ..
-                }) => self.depends_on_flag(*operand, flags, decided),
-                Some(InstKind::Compare { lhs, rhs, .. }) => {
-                    self.depends_on_flag(*lhs, flags, decided)
-                        || self.depends_on_flag(*rhs, flags, decided)
-                }
-                _ => false,
-            };
-            decided.insert(v, depends);
-            depends
-        })
+            _ => false,
+        };
+        decided.insert(v, depends);
+        depends
     }
 
     /// The value of `v` on a path with `env`, if known.
@@ -268,45 +266,43 @@ impl<'f> Flags<'f> {
         env: &FlagEnv,
         decided: &mut FxHashMap<VarId, Option<bool>>,
     ) -> Option<bool> {
-        heki_ast::ensure_sufficient_stack(|| {
-            if let Some(b) = self.consts.get(&v) {
-                return Some(*b);
-            }
-            if let Ok(i) = env.binary_search_by_key(&v, |(k, _)| *k) {
-                return Some(env[i].1);
-            }
-            if let Some(&known) = decided.get(&v) {
-                return known;
-            }
-            let value = match self.defs.get(&v)? {
-                InstKind::Copy { src, .. } => self.value_in(*src, env, decided),
-                InstKind::UnaryOp {
-                    op: heki_ir::UnaryOpKind::Not,
-                    operand,
-                    ..
-                } => self.value_in(*operand, env, decided).map(|b| !b),
-                InstKind::Compare {
-                    op:
-                        op @ (heki_ir::CompareOpKind::Is
-                        | heki_ir::CompareOpKind::Eq
-                        | heki_ir::CompareOpKind::IsNot
-                        | heki_ir::CompareOpKind::NotEq),
-                    lhs,
-                    rhs,
-                    ..
-                } => self
-                    .value_in(*lhs, env, decided)
-                    .zip(self.value_in(*rhs, env, decided))
-                    .map(|(l, r)| {
-                        let positive =
-                            matches!(op, heki_ir::CompareOpKind::Is | heki_ir::CompareOpKind::Eq);
-                        (l == r) == positive
-                    }),
-                _ => None,
-            };
-            decided.insert(v, value);
-            value
-        })
+        if let Some(b) = self.consts.get(&v) {
+            return Some(*b);
+        }
+        if let Ok(i) = env.binary_search_by_key(&v, |(k, _)| *k) {
+            return Some(env[i].1);
+        }
+        if let Some(&known) = decided.get(&v) {
+            return known;
+        }
+        let value = match self.defs.get(&v)? {
+            InstKind::Copy { src, .. } => self.value_in(*src, env, decided),
+            InstKind::UnaryOp {
+                op: heki_ir::UnaryOpKind::Not,
+                operand,
+                ..
+            } => self.value_in(*operand, env, decided).map(|b| !b),
+            InstKind::Compare {
+                op:
+                    op @ (heki_ir::CompareOpKind::Is
+                    | heki_ir::CompareOpKind::Eq
+                    | heki_ir::CompareOpKind::IsNot
+                    | heki_ir::CompareOpKind::NotEq),
+                lhs,
+                rhs,
+                ..
+            } => self
+                .value_in(*lhs, env, decided)
+                .zip(self.value_in(*rhs, env, decided))
+                .map(|(l, r)| {
+                    let positive =
+                        matches!(op, heki_ir::CompareOpKind::Is | heki_ir::CompareOpKind::Eq);
+                    (l == r) == positive
+                }),
+            _ => None,
+        };
+        decided.insert(v, value);
+        value
     }
 
     /// The flags known on entering block `to` from `from`, given those known in `from`.

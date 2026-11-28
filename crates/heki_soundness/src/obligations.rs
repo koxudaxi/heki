@@ -196,20 +196,18 @@ impl<'a, 'c> Checker<'a, 'c> {
     }
 
     pub fn name(&self, v: VarId) -> String {
-        heki_ast::ensure_sufficient_stack(|| {
-            // A starred display element (`[*xs]`) is a copy of the iterable it unpacks.
-            if self.cx.f.is_unpacked(v)
-                && let Some(i) = self.cx.shape.inst(v)
-                && let InstKind::Copy { src, .. } = &i.kind
-            {
-                return self.name(*src);
-            }
-            self.cx
-                .f
-                .var_name(v)
-                .filter(|n| !n.starts_with('.'))
-                .map_or_else(|| self.describe_temp(v), |n| format!("`{n}`"))
-        })
+        // A starred display element (`[*xs]`) is a copy of the iterable it unpacks.
+        if self.cx.f.is_unpacked(v)
+            && let Some(i) = self.cx.shape.inst(v)
+            && let InstKind::Copy { src, .. } = &i.kind
+        {
+            return self.name(*src);
+        }
+        self.cx
+            .f
+            .var_name(v)
+            .filter(|n| !n.starts_with('.'))
+            .map_or_else(|| self.describe_temp(v), |n| format!("`{n}`"))
     }
 
     fn describe_temp(&self, v: VarId) -> String {
@@ -517,24 +515,22 @@ impl<'a, 'c> Checker<'a, 'c> {
     /// `v`'s value is produced inside `region`: by an instruction there, or by a phi merging
     /// such a value (`(lst := a) if c else (lst := b)`).
     fn defined_in(&self, v: VarId, region: Span, seen: &mut FxHashSet<VarId>) -> bool {
-        heki_ast::ensure_sufficient_stack(|| {
-            if !seen.insert(v) {
-                return false;
-            }
-            match self.cx.shape.def(v) {
-                Def::Inst(b, i) => within(self.cx.f.block(b).insts[i as usize].span, region),
-                Def::Phi(b, _) => self
-                    .cx
-                    .f
-                    .block(b)
-                    .phis
-                    .iter()
-                    .filter(|p| p.dst == v)
-                    .flat_map(|p| &p.incoming)
-                    .any(|&(_, w)| self.defined_in(w, region, seen)),
-                Def::Param | Def::None => false,
-            }
-        })
+        if !seen.insert(v) {
+            return false;
+        }
+        match self.cx.shape.def(v) {
+            Def::Inst(b, i) => within(self.cx.f.block(b).insts[i as usize].span, region),
+            Def::Phi(b, _) => self
+                .cx
+                .f
+                .block(b)
+                .phis
+                .iter()
+                .filter(|p| p.dst == v)
+                .flat_map(|p| &p.incoming)
+                .any(|&(_, w)| self.defined_in(w, region, seen)),
+            Def::Param | Def::None => false,
+        }
     }
 
     /// `ValueLoopInvariant(v, loop)` (spec section 4.4), checked over the loop and `region` (the
