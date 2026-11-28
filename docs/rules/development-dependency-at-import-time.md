@@ -100,6 +100,17 @@ def frozen(at: str):
 or declare `freezegun` in `[project] dependencies` (or in an extra, which [`IMP302`](optional-dependency-at-import-time.md)
 then judges), or give the import a fallback under `except ModuleNotFoundError:`.
 
+## How to fix
+Declare the distribution in `[project] dependencies`, import the module only inside the
+functions that use it, or give it a fallback under `except ModuleNotFoundError:`. When the
+import is in a module a package module loads, not a package module itself, and one import carries
+every chain from a package module to it, the help names that import instead, the one nearest the
+reported import: moved into the functions that use it, or made `lazy` on Python 3.15 and later,
+it takes the report away. heki names it only after one search of what the package modules load
+without it no longer reaches the module, and names no import whose name code running while its
+module loads may read, or another module takes while that module loads, as `IMP101` says; a
+read of another module in a function rules out the move into functions only, leaving `lazy`.
+
 ## Fix safety
 No automatic fix.
 

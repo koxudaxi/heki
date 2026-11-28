@@ -641,3 +641,62 @@ dev = ["acme[redis]", "packaging", "pytest"]
     );
     assert_eq!(reports(&p), ["acme/core.py:3 IMP301 [pytest]"]);
 }
+
+/// The help of the one report of `code` at `path`, under `args`.
+fn help_at(p: &Project, code: &str, path: &str, args: &[&str]) -> String {
+    let mut all = vec!["--select", RULES, "--output-format", "json"];
+    all.extend_from_slice(args);
+    let (status, out, err) = p.check(&all);
+    assert!((0..=1).contains(&status), "{status}: {out}\n{err}");
+    let found: Vec<Value> = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let found: Vec<&Value> = (found.iter())
+        .filter(|d| d["path"] == path && d["rule_code"] == code)
+        .collect();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    found[0]["help"].as_str().unwrap().to_owned()
+}
+
+/// The one import every chain from the judged modules goes through is named, nearest the
+/// reported import, once one search showed that no chain is left without it: moved into a
+/// function, or made lazy on Python 3.15, it takes the report away.
+#[test]
+fn the_import_every_chain_to_the_module_goes_through_is_named() {
+    let p = flat_layout();
+    assert_eq!(
+        help_at(&p, "IMP301", "helpers.py", &[]),
+        "every chain of imports from a package module to `helpers` goes through the import of \
+         `helpers` in `acme`: move it into the functions of `acme` that use it"
+    );
+    let py315 = ["--target-version", "py315"];
+    assert_eq!(
+        help_at(&p, "IMP302", "acme/store.py", &py315),
+        "every chain of imports from a top-level package or an entry point's module to \
+         `acme.store` goes through the import of `acme.store` in `acme`: move it into the \
+         functions of `acme` that use it, or make it `lazy`"
+    );
+    p.write(
+        "acme/__init__.py",
+        "lazy from acme import store\n\n\ndef helpers_path():\n    import helpers\n\n    return helpers\n",
+    );
+    assert_eq!(reports(&p), ["acme/store.py:2 IMP104 [tests.conftest]"]);
+}
+
+/// Two chains lead from the package to `acme.store`: no one import carries both, and the help
+/// stays the one of the reported import.
+#[test]
+fn a_module_loaded_through_two_chains_keeps_the_help_of_its_import() {
+    let p = flat_layout();
+    p.write("acme/__init__.py", "from acme import api, store\n")
+        .write("acme/api.py", "from acme import store\n");
+    assert_eq!(
+        help_at(
+            &p,
+            "IMP302",
+            "acme/store.py",
+            &["--target-version", "py315"]
+        ),
+        "import `redis` only inside the functions that use it, where a handler of its \
+         `ImportError` can name the extra to install, or declare `redis` in `[project] \
+         dependencies`"
+    );
+}

@@ -3,11 +3,11 @@
 //! closing a shortest cycle of the group. The groups and their cycles come from
 //! `heki_effect::imports` ([`ImportGraph::cycle_groups`]).
 
-use super::{hop_text, when_text};
+use super::{chosen_cut, cut_help, hop_text, when_text};
 use crate::{CheckContext, RuleConfigError};
 use heki_diagnostics::Diagnostic;
 use heki_effect::ProjectIndex;
-use heki_effect::imports::{CycleGroup, ImportGraph, ImportHop, ModuleRef, Timing};
+use heki_effect::imports::{CycleGroup, ImportGraph, ImportSite, ModuleRef, Timing};
 use heki_effect::resolver::ProjectDecls;
 use heki_env::HekiConfig;
 use heki_ir::walk::Answer;
@@ -34,10 +34,15 @@ fn cycle_edges(config: &HekiConfig) -> Result<Vec<Timing>, RuleConfigError> {
         .collect()
 }
 
-/// The cycle groups of `graph` through the imports of the timing classes `edges`: an import
-/// whose timing heki cannot tell is no edge.
+/// Whether `IMP101` follows `site` under the timing classes `edges`: an import whose timing heki
+/// cannot tell is no edge.
+fn counted(edges: &[Timing], site: &ImportSite) -> bool {
+    matches!(site.timing, Answer::Known(t) if edges.contains(&t))
+}
+
+/// The cycle groups of `graph` through the imports of the timing classes `edges`.
 fn groups(graph: &ImportGraph<'_>, edges: &[Timing]) -> Vec<CycleGroup> {
-    graph.cycle_groups(|site| matches!(site.timing, Answer::Known(t) if edges.contains(&t)))
+    graph.cycle_groups(|site| counted(edges, site))
 }
 
 /// `IMP101`: each group of modules importing each other, at the import closing its cycle when
@@ -52,19 +57,20 @@ pub(crate) fn imp101(
     }
     let graph = ImportGraph::build(cx.index.files.values(), cx.decls);
     for group in groups(&graph, &edges) {
-        report(cx, &graph, &group.members, &group.cycle, out);
+        report(cx, &graph, &edges, &group, out);
     }
     Ok(())
 }
 
-/// The report of the group `members` at the last hop of `cycle`, which closes it.
+/// The report of `group` at the last hop of its cycle, which closes it.
 fn report(
     cx: &CheckContext<'_>,
     graph: &ImportGraph<'_>,
-    members: &[u32],
-    cycle: &[ImportHop],
+    edges: &[Timing],
+    group: &CycleGroup,
     out: &mut Vec<Diagnostic>,
 ) {
+    let (members, cycle) = (&group.members, &group.cycle);
     let (closing, steps) = cycle.split_last().expect("a cycle has hops");
     let Some(unit) = cx.unit(graph.path(closing.from)) else {
         return;
@@ -98,8 +104,11 @@ fn report(
         .map(|&m| name(m))
         .collect::<Vec<_>>()
         .join(", ");
-    let help = "break the cycle at one of its imports: move what the modules share into a module \
-        none of them imports, or import the name only where it is used";
+    let help = cut(cx, graph, edges, group).unwrap_or_else(|| {
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+            .to_owned()
+    });
     let related = (steps.iter())
         .map(|hop| {
             let (site, message) = hop_text(
@@ -120,11 +129,43 @@ fn report(
         &site.qualname,
         target,
         message,
-        Some(help.to_owned()),
+        Some(help),
         &[],
     ) {
         d.related = related;
     }
+}
+
+/// The help naming the import on every cycle of `group`, when one search over the group finds
+/// it ([`ImportGraph::cycle_cuts`]): the import closing the reported cycle, or the first other
+/// on it in the order of the cycle.
+fn cut(
+    cx: &CheckContext<'_>,
+    graph: &ImportGraph<'_>,
+    edges: &[Timing],
+    group: &CycleGroup,
+) -> Option<String> {
+    let budget = graph.budget("import_cuts");
+    let cuts = graph
+        .cycle_cuts(
+            &group.members,
+            &group.cycle,
+            |site| counted(edges, site),
+            &budget,
+        )
+        .open_means(Vec::new());
+    let sites: Vec<(u32, usize)> = (cuts.iter())
+        .map(|&k| (group.cycle[k].from, group.cycle[k].site))
+        .collect();
+    let closing = group.cycle.last().expect("a cycle has hops");
+    let reported = (closing.from, closing.site);
+    let chosen = chosen_cut(cx, graph, &sites, Some(reported), |t| edges.contains(&t))?;
+    Some(cut_help(
+        graph,
+        chosen,
+        reported,
+        "import cycle of these modules",
+    ))
 }
 
 /// The files `IMP101` reports in under `config`: the file of the import closing the cycle of

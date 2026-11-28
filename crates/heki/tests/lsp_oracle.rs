@@ -9467,6 +9467,114 @@ fn lsp_diagnostics_equal_a_full_check_through_import_cycles() {
     run_steps(s, &steps);
 }
 
+const CUTS_CONFIG: &str = "[project]\nname = \"acme\"\ndependencies = []\n\n[project.optional-dependencies]\nplot = [\"matplotlib\"]\n\n[tool.heki.lint]\nselect = [\"IMP101\", \"IMP302\"]\n";
+
+/// The help of `IMP101` and `IMP302` names the one import every cycle or every chain goes
+/// through, which the imports of other modules decide: a second cycle, or a second chain, that
+/// an edit of another module adds takes the name away, and the edit undone brings it back. So
+/// do the reads of what the imports bind while the modules load, in the module and in another
+/// one that takes the name from it.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_import_cuts() {
+    let files = vec![
+        ("acme/__init__.py", "from acme import api\n".to_owned()),
+        ("acme/api.py", "from acme import viz\n".to_owned()),
+        ("acme/viz.py", "import matplotlib\n".to_owned()),
+        ("acme/ra.py", "import acme.rb\n".to_owned()),
+        ("acme/rb.py", "import acme.rc\n".to_owned()),
+        ("acme/rc.py", "import acme.ra\n".to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_import_cuts", CUTS_CONFIG, files, false);
+    let both = &[("acme/rc.py", "IMP101"), ("acme/viz.py", "IMP302")];
+    let steps = [
+        Step::new(
+            "one import closes every cycle and carries every chain",
+            Vec::new(),
+        )
+        .present(both),
+        Step::new(
+            "a module of the ring closes a second cycle through another module",
+            vec![
+                Action::Create("acme/rd.py", "import acme.rb\n".to_owned()),
+                save("acme/rb.py", "import acme.rc\nimport acme.rd\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "the package imports the module with the extra directly too",
+            vec![save("acme/__init__.py", "from acme import api, viz\n")],
+        )
+        .present(both),
+        Step::new(
+            "the second cycle and the second chain are gone",
+            vec![
+                save("acme/rb.py", "import acme.rc\n"),
+                save("acme/__init__.py", "from acme import api\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "two modules of the ring read what their imports bind while they load",
+            vec![
+                save("acme/rb.py", "import acme.rc\n\nOWNER = acme.rc\n"),
+                save("acme/rc.py", "import acme.ra\n\nOWNER = acme.ra\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "the third module reads it while it loads too",
+            vec![save("acme/ra.py", "import acme.rb\n\nOWNER = acme.rb\n")],
+        )
+        .present(both),
+        Step::new(
+            "the third module reads it only in a function",
+            vec![save(
+                "acme/ra.py",
+                "import acme.rb\n\n\ndef owner():\n    return acme.rb\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the third module takes a name of the second and reads it only in a function",
+            vec![save(
+                "acme/ra.py",
+                "from acme.rb import OWNER\n\n\ndef owner():\n    return OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "another module takes that name from the third while it loads",
+            vec![Action::Create(
+                "acme/rx.py",
+                "from acme.ra import OWNER\n\nCOPY = OWNER\n".to_owned(),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it takes the name only in a function",
+            vec![save(
+                "acme/rx.py",
+                "def owner():\n    from acme.ra import OWNER\n\n    return OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it reads the name off the module while it loads",
+            vec![save(
+                "acme/rx.py",
+                "import acme.ra\n\nCOPY = acme.ra.OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the module that read the name is gone",
+            vec![Action::Delete("acme/rx.py")],
+        )
+        .present(both),
+    ];
+    run_steps(s, &steps);
+}
+
 /// A baseline whose one entry records the `IMP101` group of the modules `target` lists.
 fn group_baseline(target: &str) -> String {
     format!(

@@ -22,7 +22,10 @@ use crate::mut_rules::{contract_places, mode, reports_unresolved};
 use crate::patterns::PartIndex;
 use crate::{CheckContext, GLOB_CHARACTERS, NamePart, RuleConfigError, RuleSelection};
 use heki_diagnostics::{ContractEntry, Diagnostic, RelatedLocation};
-use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Named, Target, Timing};
+use heki_effect::imports::{
+    ChainStep, ImportForm, ImportGraph, ImportSite, ModuleRef, Named, ReadTime, Target, Timing,
+    path_cuts,
+};
 use heki_env::{HekiConfig, ImportBoundaryRule};
 use heki_ir::walk::{Answer, Budget, Visit, reach_breadth_first};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -875,7 +878,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
     fn statements(&mut self, c: usize, m: u32) {
         for (_, site, target) in self.counted(c, m) {
             let verdict = self.verdict(c, m, site, target, true, false);
-            self.emit(c, m, (site, target), &[], verdict);
+            self.emit(c, m, (site, target), &[], verdict, None);
         }
     }
 
@@ -1036,35 +1039,16 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         // The step into each module from the first module listing it: the nearest one.
         let mut into: FxHashMap<ModuleRef, Hop> = FxHashMap::default();
         let mut reached: Vec<ModuleRef> = Vec::new();
+        let mut steps = Vec::new();
         let walked = reach_breadth_first::<_, ()>(
             budget,
             [ModuleRef::Project(m)],
             |k, next| {
-                let ModuleRef::Project(from) = k else {
-                    return;
-                };
-                let from_name = graph.name(k);
-                for (j, (site, target)) in graph.sites(from).into_iter().flatten().enumerate() {
-                    let Some(t) = target.certain().filter(|_| contract.counts(site.timing)) else {
-                        continue;
-                    };
-                    let imported = Imported::of(graph, t).at(site);
-                    if contracts.ignores(c, from_name, imported)
-                        || contracts.names_taken(c, from_name, imported)
-                    {
-                        continue;
-                    }
-                    for w in graph.parents(t).into_iter().chain([t]) {
-                        if graph.holds(w, m) {
-                            continue;
-                        }
-                        into.entry(w).or_insert(Hop {
-                            from,
-                            site: j,
-                            parent: w != t,
-                        });
-                        next.push(w);
-                    }
+                steps.clear();
+                self.steps(c, m, k, &mut steps);
+                for &(hop, w) in &steps {
+                    into.entry(w).or_insert(hop);
+                    next.push(w);
                 }
             },
             |k| {
@@ -1075,22 +1059,32 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         if walked.is_open() || !report {
             return;
         }
-        let chain_to = |module: ModuleRef| {
+        // The hops from `m` to `module`, each with the module it enters.
+        let hops_to = |module: ModuleRef| {
             let mut hops = Vec::new();
             let mut at = module;
             while at != ModuleRef::Project(m) {
                 let hop = into[&at];
-                hops.push(Related::Hop(hop, at));
+                hops.push((hop, at));
                 at = ModuleRef::Project(hop.from);
             }
             hops.reverse();
             hops
         };
+        let chain_of = |hops: &[(Hop, ModuleRef)]| -> Vec<Related<'_>> {
+            (hops.iter())
+                .map(|&(hop, at)| Related::Hop(hop, at))
+                .collect()
+        };
+        let chain_to = |module: ModuleRef| chain_of(&hops_to(module));
         // A chain starts at a site of the importer.
         let first_site = |chain: &[Related<'_>]| match chain.first() {
             Some(Related::Hop(hop, _)) => graph.sites(m).map(|s| (s[hop.site].0, &s[hop.site].1)),
             _ => None,
         };
+        // One budget for the searches of the walk's reports: past it, a report has the
+        // contract's help alone.
+        let cut_budget = graph.budget("import_cuts");
         for &module in &reached[1..] {
             let imported = Imported::of(graph, module);
             // Only whether the contract allows the module: how the importer's own imports name
@@ -1099,10 +1093,12 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             else {
                 continue;
             };
-            let chain = chain_to(module);
+            let hops = hops_to(module);
+            let chain = chain_of(&hops);
             let site = first_site(&chain).expect("a module reached has a chain to it");
+            let cut = self.cut(c, m, imported.name, &hops, &cut_budget);
             let verdict = Verdict::Breaks(vec![(imported.name.to_owned(), breach)]);
-            self.emit(c, m, site, &chain[1..], verdict);
+            self.emit(c, m, site, &chain[1..], verdict, cut);
         }
         // The sites whose module a walk cannot take: judged where the chain to them ends. The
         // importer's own sites are judged also for how they name the modules they import.
@@ -1138,17 +1134,88 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 match first_site(&chain) {
                     Some(first) => {
                         chain.push(Related::Site(r, site, what));
-                        self.emit(c, m, first, &chain[1..], verdict);
+                        self.emit(c, m, first, &chain[1..], verdict, None);
                     }
-                    None => self.emit(c, m, (site, target), &[], verdict),
+                    None => self.emit(c, m, (site, target), &[], verdict, None),
                 }
             }
         }
     }
 
+    /// The steps of the walk of contract `c` from the importer `m` out of the module `k`: each
+    /// module a counted import of `k` loads anew, after its parent packages, but those holding
+    /// `m`, with the hop into it. A module outside the project has no steps.
+    fn steps(&self, c: usize, m: u32, k: ModuleRef, out: &mut Vec<(Hop, ModuleRef)>) {
+        let (contracts, graph) = (self.contracts, self.graph);
+        let contract = &contracts.contracts[c];
+        let ModuleRef::Project(from) = k else {
+            return;
+        };
+        let from_name = graph.name(k);
+        for (j, (site, target)) in graph.sites(from).into_iter().flatten().enumerate() {
+            let Some(t) = target.certain().filter(|_| contract.counts(site.timing)) else {
+                continue;
+            };
+            let imported = Imported::of(graph, t).at(site);
+            if contracts.ignores(c, from_name, imported)
+                || contracts.names_taken(c, from_name, imported)
+            {
+                continue;
+            }
+            for w in graph.parents(t).into_iter().chain([t]) {
+                if !graph.holds(w, m) {
+                    let hop = Hop {
+                        from,
+                        site: j,
+                        parent: w != t,
+                    };
+                    out.push((hop, w));
+                }
+            }
+        }
+    }
+
+    /// The help naming the import on every chain of the walk of contract `c` from the importer
+    /// `m` to the module `reached`, `hops` its chain from `m`, when one search within `budget`
+    /// finds it ([`path_cuts`]): the last such import, nearest the module. Only a contract with
+    /// `reach = "import-time"` has one: every other counts the imports in functions and the
+    /// lazy ones.
+    fn cut(
+        &self,
+        c: usize,
+        m: u32,
+        reached: &str,
+        hops: &[(Hop, ModuleRef)],
+        budget: &Budget,
+    ) -> Option<String> {
+        if self.contracts.contracts[c].reach != Reach::ImportTime {
+            return None;
+        }
+        let graph = self.graph;
+        let steps: Vec<ChainStep<ModuleRef>> = (hops.iter())
+            .map(|&(hop, to)| (ModuleRef::Project(hop.from), hop.site, to))
+            .collect();
+        let cuts = path_cuts(budget, [ModuleRef::Project(m)], &steps, |k, out| {
+            let mut listed = Vec::new();
+            self.steps(c, m, k, &mut listed);
+            out.extend(listed.into_iter().map(|(hop, w)| (hop.site, w)));
+        })
+        .open_means(Vec::new());
+        let project = |k: ModuleRef| k.project().expect("a chain steps from project modules");
+        let sites: Vec<(u32, usize)> = (cuts.iter().rev())
+            .map(|&i| (project(steps[i].0), steps[i].1))
+            .collect();
+        let reported = (m, steps.first()?.1);
+        let chosen = chosen_cut(self.cx, graph, &sites, None, |t| t == Timing::Body)?;
+        let importer = graph.name(ModuleRef::Project(m));
+        let what = format!("chain of imports from `{importer}` to `{reached}`");
+        Some(cut_help(graph, chosen, reported, &what))
+    }
+
     /// Report `verdict` of contract `c` at `site` of the importer `m`, with the rest of the
     /// chain from it as related locations: `IMP201` when the import breaks the contract,
-    /// `IMP202` when it may.
+    /// `IMP202` when it may. `cut`: the help naming the import every chain to the module goes
+    /// through ([`Self::cut`]), after the contract's note.
     fn emit(
         &mut self,
         c: usize,
@@ -1156,6 +1223,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         (site, target): (&ImportSite, &Target),
         chain: &[Related<'_>],
         verdict: Verdict,
+        cut: Option<String>,
     ) {
         let contract = &self.contracts.contracts[c];
         let graph = self.graph;
@@ -1217,7 +1285,10 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         let entries: Vec<ContractEntry> = (entry.into_iter())
             .map(|(list, position)| ContractEntry::new(c, list, position))
             .collect();
-        let help = contract.note.map(str::to_owned);
+        let help = match (contract.note, cut) {
+            (Some(note), Some(cut)) => Some(format!("{note}; {cut}")),
+            (note, cut) => note.map(str::to_owned).or(cut),
+        };
         let (span, qualname) = (site.span, site.qualname.as_str());
         let cx = self.cx;
         if let Some(d) = cx.emit(
@@ -1298,6 +1369,91 @@ fn when_text(site: &ImportSite, module: Option<&str>) -> String {
         (Answer::Open, _) => String::new(),
     };
     format!("{by_name}{when}")
+}
+
+/// How the import a help names can change so that it no longer runs while its module loads:
+/// moved into the functions that use it, or made `lazy` (PEP 810).
+#[derive(Debug, Clone, Copy)]
+struct CutChanges {
+    function: bool,
+    lazy: bool,
+}
+
+/// The changes of the import `site` that take it out of what a rule counts, `counts` telling
+/// whether the rule counts an import of a timing class: moving it into the functions that use
+/// it, and, from Python 3.15 where PEP 810 allows the keyword there, making it `lazy`. None for
+/// an import that does not run where it is written while its module loads (in a function, under
+/// `TYPE_CHECKING`, a lazy import the module body reads), a star import, a call, and an import
+/// whose binding code running while the module loads may read
+/// ([`ImportSite::read_while_loading`]): moved, the read fails, and made lazy, it loads there.
+/// `elsewhere` is the earliest time another module reads the binding
+/// ([`ImportGraph::read_elsewhere`]): moved into the functions, the module no longer has the
+/// name, so no other module may read it; made lazy, it loads at the first read, so none may
+/// while it loads.
+fn cut_changes(
+    cx: &CheckContext<'_>,
+    site: &ImportSite,
+    elsewhere: Option<ReadTime>,
+    counts: impl Fn(Timing) -> bool,
+) -> Option<CutChanges> {
+    let moves = site.timing == Answer::Known(Timing::Body)
+        && !site.lazy
+        && !site.read_while_loading
+        && matches!(site.form, ImportForm::Import | ImportForm::From(_));
+    let changes = CutChanges {
+        function: !counts(Timing::Function) && elsewhere.is_none(),
+        lazy: !counts(Timing::Lazy)
+            && site.lazy_allowed
+            && cx.runtime.pep810_lazy_imports
+            && elsewhere != Some(ReadTime::Loading),
+    };
+    (moves && (changes.function || changes.lazy)).then_some(changes)
+}
+
+/// Of `cuts`, the sites (module, index) a search verified, the one a help names and how it can
+/// change ([`cut_changes`]): `preferred` when it is one that can, else the first that can.
+fn chosen_cut(
+    cx: &CheckContext<'_>,
+    graph: &ImportGraph<'_>,
+    cuts: &[(u32, usize)],
+    preferred: Option<(u32, usize)>,
+    counts: impl Fn(Timing) -> bool,
+) -> Option<((u32, usize), CutChanges)> {
+    let changes = |&(m, j): &(u32, usize)| {
+        let (site, _) = &graph.sites(m).expect("a cut is at a site")[j];
+        let elsewhere = (site.binds.as_deref()).and_then(|name| graph.read_elsewhere(m, name));
+        cut_changes(cx, site, elsewhere, &counts).map(|c| ((m, j), c))
+    };
+    (cuts.iter().find(|&&cut| Some(cut) == preferred))
+        .and_then(changes)
+        .or_else(|| cuts.iter().find_map(changes))
+}
+
+/// The help naming the import `cut` of a report: every `what` goes through it, and how to change
+/// it. `reported` is the site of the report.
+fn cut_help(
+    graph: &ImportGraph<'_>,
+    ((m, j), changes): ((u32, usize), CutChanges),
+    reported: (u32, usize),
+    what: &str,
+) -> String {
+    let (_, target) = &graph.sites(m).expect("a cut is at a site")[j];
+    let imported = graph.name(target.certain().expect("a cut's import loads a module"));
+    let module = graph.name(ModuleRef::Project(m));
+    let (subject, functions) = if (m, j) == reported {
+        ("this import".to_owned(), "the functions".to_owned())
+    } else {
+        (
+            format!("the import of `{imported}` in `{module}`"),
+            format!("the functions of `{module}`"),
+        )
+    };
+    let change = match (changes.function, changes.lazy) {
+        (true, true) => format!("move it into {functions} that use it, or make it `lazy`"),
+        (true, false) => format!("move it into {functions} that use it"),
+        _ => "make it `lazy`".to_owned(),
+    };
+    format!("every {what} goes through {subject}: {change}")
 }
 
 /// Whether `IMP201` or `IMP202` judges the `import-boundaries` contracts of `config`: one is

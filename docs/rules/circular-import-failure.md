@@ -130,6 +130,19 @@ def uses_a() -> int:
     return helper_a()
 ```
 
+## How to fix
+When one import is on every cycle of the failure's group (the modules importing each other
+while they load), the help names it: moved into the functions that use it, or made `lazy` on
+Python 3.15 and later, it leaves the group with no cycle, so no import of the group fails.
+heki names it only after one search of the group's other imports finds no cycle without it, and
+names no import whose name code running while its module loads may read, or another module
+takes while that module loads, as `IMP101` says; a read of another module in a function rules
+out the move into functions only, leaving `lazy`. It
+is the failing import itself when that one is such an import, else one of the imports the related
+locations show. Without such an import, the help lists the ways out of this failure: import the
+name inside the function that uses it, import the module and read the name where it is used, or
+bind the name before the import of the cycle.
+
 ## Fix safety
 No automatic fix.
 

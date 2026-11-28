@@ -7687,6 +7687,12 @@ fn a_ring_of_modules_importing_each_other_is_one_report() {
     assert_eq!(reports.len(), 1, "{reports:#?}");
     assert_eq!(reports[0]["path"], "c/m9999.py");
     assert_eq!(reports[0]["related"].as_array().unwrap().len(), modules - 1);
+    // Every import of the ring is on its one cycle: one search over the ring shows it.
+    assert_eq!(
+        reports[0]["help"],
+        "every import cycle of these modules goes through this import: move it into the \
+         functions that use it"
+    );
 }
 
 /// Every module of a clique imports every other: one group, whose shortest cycle the search
@@ -7736,10 +7742,22 @@ fn failing_ring(modules: usize) -> Project {
 fn the_runs_of_the_entries_of_one_cycle_share_one_budget() {
     let modules = 10_000;
     let diags = check_past_budgets(modules, &["import_failures"], failing_ring);
-    let reports = (diags.iter())
+    let reports: Vec<&Value> = (diags.iter())
         .filter(|d| d["rule_code"] == "IMP102")
-        .count();
-    assert!(0 < reports && reports < modules, "{reports}");
+        .collect();
+    assert!(
+        !reports.is_empty() && reports.len() < modules,
+        "{}",
+        reports.len()
+    );
+    // The imports on every cycle of the ring are found by one search, shared by its reports.
+    assert!(
+        (reports.iter()).all(|d| d["help"]
+            == "every import cycle of these modules goes through this import: move it into \
+                the functions that use it"),
+        "{:#?}",
+        reports[0]
+    );
 }
 
 /// A package whose `__init__` imports thousands of submodules, each importing `json`.
@@ -7903,19 +7921,84 @@ fn what_a_long_chain_loads_from_the_package_is_walked_once() {
     );
     let extra = (diags.iter()).find(|d| d["rule_code"] == "IMP302").unwrap();
     assert_eq!(extra["related"].as_array().unwrap().len(), modules);
+    // One search over what the base module loads shows every import of the chain carries it.
+    assert_eq!(
+        extra["help"],
+        "every chain of imports from a top-level package or an entry point's module to \
+         `d.m9999` goes through the import of `d.m9999` in `d.m9998`: move it into the \
+         functions of `d.m9998` that use it"
+    );
 }
 
 /// [`import_chain`] with an `import-boundaries` contract walking what `importers` import, which
 /// forbids the module at the end of the chain.
 fn import_chain_with_contract(modules: usize, importers: &str) -> Project {
+    import_chain_reaching(modules, importers, "all")
+}
+
+/// [`import_chain_with_contract`] with `reach`.
+fn import_chain_reaching(modules: usize, importers: &str, reach: &str) -> Project {
     let p = import_chain(modules);
     p.write(
         "pyproject.toml",
         &format!(
-            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"all\"\n"
+            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"{reach}\"\n"
         ),
     );
     p
+}
+
+/// With `reach = "import-time"`, the import every chain to the forbidden module goes through is
+/// found by one search over what the importer loads.
+#[test]
+fn the_import_a_long_chain_of_a_contract_goes_through_is_found_once() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &[], |n| {
+        import_chain_reaching(n, "c.m0", "import-time")
+    });
+    let report: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .collect();
+    assert_eq!(report.len(), 1, "{report:#?}");
+    assert_eq!(
+        report[0]["help"],
+        "every chain of imports from `c.m0` to `json` goes through the import of `json` in \
+         `c.m9999`: move it into the functions of `c.m9999` that use it"
+    );
+}
+
+/// A module importing thousands of forbidden modules of the project, each a report of a
+/// contract with `reach = "import-time"`.
+fn forbidden_imports_of_one_module(modules: usize) -> Project {
+    let p = Project::new("bounds_forbidden_imports");
+    p.write("c/__init__.py", "");
+    let imports: String = (0..modules).map(|i| format!("import c.f{i}\n")).collect();
+    p.write("c/m0.py", &imports);
+    for i in 0..modules {
+        p.write(&format!("c/f{i}.py"), "");
+    }
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-f\"\nimporters = [\"c.m0\"]\nforbidden-imports = [\"c.f*\"]\nreach = \"import-time\"\n",
+    );
+    p
+}
+
+/// The searches for the import a report's chains go through share one budget per walk: each
+/// visits the importer's sites, so one per report would grow with the square of them. The
+/// reports past it keep the contract's help alone.
+#[test]
+fn the_import_searches_of_one_walk_share_one_budget() {
+    let modules = 2_000;
+    let diags = check_past_budgets(modules, &["import_cuts"], forbidden_imports_of_one_module);
+    let helps: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .map(|d| &d["help"])
+        .collect();
+    assert_eq!(helps.len(), modules);
+    let named = |help: &&Value| help.as_str().is_some_and(|h| h.contains("goes through"));
+    assert!(helps.iter().any(named), "{:#?}", helps[0]);
+    assert!(!helps.iter().all(named), "{:#?}", helps[modules - 1]);
 }
 
 /// The walk of an `import-boundaries` contract with `reach` from the head of a long chain of
@@ -9498,6 +9581,240 @@ fn exit_statuses_behind_copy_chains_are_read_from_a_table() {
         )
     };
     assert!(past_budgets(800, &[], shape, counted).is_empty());
+}
+
+/// `c.a` and `c.b` importing each other while they load and reading what the import binds:
+/// `c.a` in its body, `c.b` at the end of a chain of `names` functions its body calls. `c.b`
+/// also imports `names` names of `os.path`, all listed in its `__all__`.
+fn module_read_while_loading(names: usize) -> Project {
+    let p = Project::new("bounds_read_while_loading");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "import c.b
+
+OWNER = c.b
+",
+    );
+    let imports: String = (0..names)
+        .map(|i| format!("from os.path import join as j{i}\n"))
+        .collect();
+    let all: String = (0..names).map(|i| format!("\"j{i}\", ")).collect();
+    let chain: String = (0..names)
+        .map(|i| format!("def g{i}():\n    return g{}()\n\n\n", i + 1))
+        .collect();
+    p.write(
+        "c/b.py",
+        &format!(
+            "import c.a\n{imports}\n__all__ = [{all}]\n\n\n{chain}def g{names}():\n    return \
+             c.a\n\n\nSTART = g0()\n"
+        ),
+    );
+    selecting_import_cycles(p)
+}
+
+/// What a module reads while it loads (its `__all__`, the functions it calls) is collected once
+/// for all its imports: the end of the chain reads the import of the cycle, so no import of the
+/// cycle is named.
+#[test]
+fn the_names_a_module_reads_while_it_loads_are_collected_once() {
+    let diags = check_linear(4_000, module_read_while_loading);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+}
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which binds `m` to
+/// `names` modules one after another and reads `names` attributes off it in a function: each
+/// read may be of every one of them.
+fn attributes_off_many_imports(names: usize) -> Project {
+    let p = Project::new("bounds_attributes_off_imports");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let imports: String = (0..names).map(|i| format!("import m{i} as m\n")).collect();
+    let reads: String = (0..names).map(|i| format!("    m.y{i}\n")).collect();
+    p.write("c/d.py", &format!("{imports}\n\ndef reads():\n{reads}"));
+    selecting_import_cycles(p)
+}
+
+/// The attributes a module reads off what its imports bind are followed within the budget of
+/// the module; past it, the module may read any name of any module, so no import whose name
+/// another module may read is named.
+#[test]
+fn the_attributes_a_module_reads_off_its_imports_are_followed_within_a_budget() {
+    let diags = check_past_budgets(4_000, &["import_names_read"], attributes_off_many_imports);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+    let small = check_linear(10, attributes_off_many_imports);
+    let small: Vec<&Value> = (small.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(
+        small[0]["help"],
+        "every import cycle of these modules goes through the import of `c.b` in `c.a`: move it \
+         into the functions of `c.a` that use it"
+    );
+}
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, whose function reads
+/// a chain of `names` attributes off `c.a`, one assignment after another.
+fn attribute_chain_off_an_import(names: usize) -> Project {
+    let p = Project::new("bounds_attribute_chain_off_an_import");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let chain: String = (1..=names)
+        .map(|i| format!("    v{i} = v{}.x{i}\n", i - 1))
+        .collect();
+    p.write(
+        "c/d.py",
+        &format!("import c.a\n\n\ndef chain():\n    v0 = c.a\n{chain}    return v{names}\n"),
+    );
+    selecting_import_cycles(p)
+}
+
+/// Each step of a chain of attributes makes a name as long as the chain so far: past the budget
+/// of the module the walk stops, and the module may read any name of any module.
+#[test]
+fn the_names_a_chain_of_attributes_off_an_import_makes_stop_at_the_budget() {
+    let diags = check_past_budgets(400, &["import_names_read"], attribute_chain_off_an_import);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+    let small = check_linear(10, attribute_chain_off_an_import);
+    let small: Vec<&Value> = (small.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(
+        small[0]["help"],
+        "every import cycle of these modules goes through the import of `c.b` in `c.a`: move it \
+         into the functions of `c.a` that use it"
+    );
+}
+
+/// `c.a` importing the private `_Base` from `c.b`, which imports `c.a` back, and `c.d`, whose
+/// body reads a chain of `names` attributes off `c.a`, one assignment after another, and then
+/// `c.a._Base`.
+fn attribute_chain_then_a_private_read(names: usize) -> Project {
+    let p = Project::new("bounds_attribute_chain_then_a_private_read");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import _Base\n\n\ndef make() -> object:\n    return _Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass _Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let chain: String = (1..=names)
+        .map(|i| format!("v{i} = v{}.x{i}\n", i - 1))
+        .collect();
+    p.write(
+        "c/d.py",
+        &format!("import c.a\n\nv0 = c.a\n{chain}BASE = c.a._Base\n"),
+    );
+    selecting_import_cycles(p)
+}
+
+/// Past the budget the module may read any name of any module, a private one too: the read of
+/// `c.a._Base` after the chain is not followed, so the import binding `_Base` is not named.
+#[test]
+fn past_the_budget_a_module_may_read_any_private_name() {
+    let diags = check_past_budgets(
+        400,
+        &["import_names_read"],
+        attribute_chain_then_a_private_read,
+    );
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+}
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which merges `c.a`
+/// with an attribute of each of `names` modules, one conditional after another, and reads
+/// `attr` off the result in a function.
+fn merged_imports_read(attr: &'static str) -> impl Fn(usize) -> Project {
+    move |names| {
+        let p = Project::new("bounds_merged_imports_read");
+        p.write("c/__init__.py", "");
+        p.write(
+            "c/a.py",
+            "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+        );
+        p.write(
+            "c/b.py",
+            "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+        );
+        let imports: String = (0..names).map(|i| format!("import m{i}\n")).collect();
+        let merges: String = (0..names)
+            .map(|i| format!("    v{} = v{i} if flag else m{i}.p\n", i + 1))
+            .collect();
+        p.write(
+            "c/d.py",
+            &format!(
+                "import c.a\n{imports}\n\ndef merged(flag):\n    v0 = c.a\n{merges}    \
+                 return v{names}.{attr}\n"
+            ),
+        );
+        selecting_import_cycles(p)
+    }
+}
+
+/// A value joining what the imports bind holds one node per join, not every module joined: a
+/// read at the end of a chain of merges reaches `c.a` at its start once, so the import that
+/// binds the name read is not named, and it is where another name is read.
+#[test]
+fn a_read_through_a_chain_of_merged_imports_reaches_each_module_once() {
+    let general = "break the cycle at one of its imports: move what the modules share into a \
+                   module none of them imports, or import the name only where it is used";
+    let named = "every import cycle of these modules goes through the import of `c.b` in `c.a`: \
+                 move it into the functions of `c.a` that use it";
+    for (attr, help) in [("Base", general), ("Other", named)] {
+        let diags = check_linear(2_000, merged_imports_read(attr));
+        let reports: Vec<&Value> = (diags.iter())
+            .filter(|d| d["rule_code"] == "IMP101")
+            .collect();
+        assert_eq!(reports.len(), 1, "{reports:#?}");
+        assert_eq!(reports[0]["help"], help, "reading {attr}");
+    }
 }
 
 /// A Django model whose `save` hands `super(Chained, v0)` an instance passed back through `links`
