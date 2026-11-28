@@ -6,7 +6,7 @@
 # passes the files of the commit to `--touched`: it shows and fails on the reports in those files
 # and the reports whose call chain reaches them, and on every regression of a baseline. A
 # configuration file can change any report: the hook passes every TOML file, since a file the
-# configuration includes may have any name; naming a configuration file shows every report, and
+# configuration includes may have any name, and every stub; naming a configuration file shows every report, and
 # heki passes over the other TOML files. pre-commit appends the files after `args`, so
 # `--touched` stays the last of `args`.
 - id: heki
@@ -15,8 +15,8 @@
   entry: heki check
   args: [--touched]
   language: python
-  types_or: [python, toml]
-  files: '\.(py|toml)$'
+  types_or: [python, pyi, toml]
+  files: '\.(py|pyi|toml)$'
   pass_filenames: true
   require_serial: true
   # Warnings do not fail `heki check`, and pre-commit hides the output of a hook that passes.
