@@ -346,7 +346,15 @@ pub const PASSED_AS_ITSELF: Premise = Premise {
     decided_in: &[
         "heki_effect::summary::merge_phi",
         "heki_effect::summary::Extractor::build_same_objects",
+        "heki_effect::summary::Extractor::offload_target",
     ],
+};
+
+pub const MAY_RUN_ON_COPIES: OpenCause = OpenCause {
+    id: "may-run-on-copies",
+    premise: &PASSED_AS_ITSELF,
+    states: "a call of the chain hands the value to an executor that heki cannot tell a thread pool from a process pool (a value typed `concurrent.futures.Executor`, or one of a class heki does not know, given to `run_in_executor`): a process pool hands the function a copy made by pickling",
+    closer: Closer::Annotation,
 };
 
 pub const CHANGED_AT_THE_LINE: Premise = Premise {
@@ -1031,6 +1039,7 @@ pub const CAUSES: &[&OpenCause] = &[
     &PREVIOUS_VALUE_NOT_HELD,
     &RESET_ON_A_PATH,
     &NOT_THE_CATALOG_CALL,
+    &MAY_RUN_ON_COPIES,
     &NO_CHANGING_BODY,
     &NOT_A_BUILTIN_CONTAINER_CHANGE,
     &NOT_ESTABLISHED_CACHED,

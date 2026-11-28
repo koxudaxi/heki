@@ -142,6 +142,8 @@ struct ChainState {
     what: ParamChange,
     parent: Option<usize>,
     hop: Option<CallHop>,
+    /// The hop's call may hand the callee a copy of the object ([`CallSite::may_pass_copies`]).
+    copies: bool,
 }
 
 /// [`ProjectIndex::param_change_chain`].
@@ -155,6 +157,10 @@ pub struct ChangeChain {
     pub changed_in: Option<FuncKey>,
     /// [`ProjectIndex::param_change_chain`]: the parameter of `changed_in` whose change it is.
     pub param: Option<u8>,
+    /// [`ProjectIndex::param_change_chain`]: a call of the chain may hand on a copy of the
+    /// object, not the object itself: a worker that may run in another process
+    /// ([`CallSite::may_pass_copies`]).
+    pub may_copy: bool,
 }
 
 impl ProjectIndex {
@@ -324,6 +330,7 @@ impl ProjectIndex {
             what: what.clone(),
             parent: None,
             hop: None,
+            copies: false,
         }];
         let mut visited: FxHashSet<(FuncKey, u8, ParamChange)> = FxHashSet::default();
         visited.insert((start.clone(), param, what.clone()));
@@ -376,6 +383,7 @@ impl ProjectIndex {
                                 what: next,
                                 parent: Some(i),
                                 hop: Some(hop(&func, &c.callee, s, path)),
+                                copies: s.may_pass_copies(),
                             });
                         }
                     }
@@ -384,9 +392,11 @@ impl ProjectIndex {
             i += 1;
         }
         let mut hops = Vec::new();
+        let mut may_copy = false;
         let mut at = found;
         while let Some(i) = at {
             hops.extend(states[i].hop.clone());
+            may_copy |= states[i].copies;
             at = states[i].parent;
         }
         hops.reverse();
@@ -394,6 +404,7 @@ impl ProjectIndex {
             hops,
             changed_in: found.map(|i| states[i].func.clone()),
             param: found.map(|i| states[i].param),
+            may_copy,
         }
     }
 }
@@ -519,6 +530,7 @@ impl ProjectIndex {
                     hops,
                     changed_in: below.changed_in.or_else(|| Some(bc.callee.clone())),
                     param: below.param.or(Some(j)),
+                    may_copy: below.may_copy,
                 })
             });
         through.unwrap_or(found)
@@ -771,6 +783,7 @@ impl ProjectIndex {
                 hops,
                 changed_in: Some(func.clone()),
                 param: None,
+                may_copy: false,
             }
         };
         reached.into_iter().map(chain_to).collect()

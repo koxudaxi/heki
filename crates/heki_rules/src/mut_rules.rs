@@ -4661,10 +4661,12 @@ impl<'a> Mut202Fn<'a> {
             });
         }
         // Passing a read-only value to a project function that mutates that parameter, also
-        // through an offloading API that calls it on a worker thread.
+        // through an offloading API that calls it on a worker thread. A worker in another
+        // process changes a copy.
         let def = |v| self.ix.shape.inst(v);
         let call = site_call(&def, self.sites, inst, false)
-            .or_else(|| site_call(&def, self.sites, inst, true))?;
+            .or_else(|| site_call(&def, self.sites, inst, true))
+            .filter(|call| !call.site.is_some_and(CallSite::passes_copies))?;
         for (key, _, pos, var) in call.bound_arguments(self.cx) {
             let Some(r) = self.ro.get(&var) else {
                 continue;

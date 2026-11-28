@@ -57,7 +57,8 @@ use heki_ir::{
     Progress, Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::{
-    EffectiveEcosystemKb, EffectiveSoundnessKb, EnvironmentAccess, ExecEffectKind, LiteralValue,
+    EcosystemEntry, EffectiveEcosystemKb, EffectiveSoundnessKb, EnvironmentAccess, ExecEffectKind,
+    LiteralValue, OffloadsTo,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
@@ -123,6 +124,22 @@ fn offloaded_callable(
     } else {
         Offloaded::Call(callable, k + 1)
     })
+}
+
+/// A worker in another process ([`CallSite::passes_copies`]) gets copies of the arguments made
+/// by pickling, the receiver of a bound method among them, and hands back a copy of what it
+/// returns: nothing it changes or returns is an object of the caller.
+fn bind_pickled_copies(site: &mut CallSite) {
+    if !site.passes_copies() {
+        return;
+    }
+    site.recv_is_self = false;
+    site.returned = None;
+    for bc in site.project_callees_mut().into_iter().flatten() {
+        for param in &mut bc.params {
+            *param = param.pickled();
+        }
+    }
 }
 
 /// Summarize every function of one module (local facts only; see `ProjectIndex::build`).
@@ -1307,9 +1324,6 @@ impl<'x> CallObjects<'x> {
         }
     }
 }
-
-/// The executor class that runs what it is handed in other processes.
-const PROCESS_POOL: &str = "concurrent.futures.ProcessPoolExecutor";
 
 /// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
 /// The builtin and standard library containers whose own methods and item stores change them in
@@ -4246,6 +4260,7 @@ impl<'a> Extractor<'a> {
             once_per: None,
             once_loops: 0,
             runner: Runner::Caller,
+            offloads_to: OffloadsTo::Thread,
             binds_recv: false,
             handed_callable: None,
             per_item: None,
@@ -7609,6 +7624,7 @@ impl<'a> Extractor<'a> {
                         once_per: None,
                         once_loops: 0,
                         runner: Runner::Caller,
+                        offloads_to: OffloadsTo::Thread,
                         binds_recv: false,
                         handed_callable: None,
                         per_item: None,
@@ -8206,10 +8222,18 @@ impl<'a> Extractor<'a> {
                 items: p.items,
             })
         });
+        let offloads_to = match runner {
+            Runner::Worker => (self.cx.kb.lookup(symbol))
+                .map_or(OffloadsTo::Thread, |entry| self.offload_target(entry, call)),
+            _ => OffloadsTo::Thread,
+        };
         if let Some((site, _)) = self.call(bb, &callee, &handed) {
-            self.sites[site].runner = runner;
-            self.sites[site].handed_callable = position;
-            self.sites[site].per_item = per_item;
+            let site = &mut self.sites[site];
+            site.runner = runner;
+            site.handed_callable = position;
+            site.per_item = per_item;
+            site.offloads_to = offloads_to;
+            bind_pickled_copies(site);
         }
     }
 
@@ -8245,33 +8269,55 @@ impl<'a> Extractor<'a> {
             callees,
             tests_result: slot.tests_result,
             hands_back: slot.hands_back,
-            runs_on: slot
-                .runs_on
-                .filter(|_| !self.runs_in_process_pool(call, &slot)),
+            runs_on: slot.runs_on.filter(|_| {
+                catalog.is_none_or(|entry| self.offload_target(entry, call) != OffloadsTo::Process)
+            }),
             complete,
         });
     }
 
-    /// Whether the executor the call `call` names (`UnawaitedCall::executor_arg`) is a process
-    /// pool: it runs the callable in another process, not on a thread of this one.
-    fn runs_in_process_pool(&self, call: &Call<'_>, slot: &heki_kb::UnawaitedCall) -> bool {
-        let Some(executor) = slot.executor_arg.and_then(|arg| {
-            resolver::passed_var(call.args, call.kwargs, call.star_from, (Some(arg), None))
-        }) else {
-            return false;
+    /// Where the worker of the offloading API `entry` runs the callable it is handed at `call`:
+    /// where the entry says, or, for an API naming its executor, where that executor runs it
+    /// ([`Self::executor_target`]).
+    fn offload_target(&self, entry: &EcosystemEntry, call: &Call<'_>) -> OffloadsTo {
+        let Some(arg) = entry.offloads_executor_arg else {
+            return entry.offloads_to;
         };
-        match self.val(executor) {
-            Some(Val::Inst(class, _)) => {
-                class == PROCESS_POOL
-                    || self
-                        .cx
-                        .project
-                        .mro_of(class)
-                        .iter()
-                        .any(|c| c == PROCESS_POOL)
-            }
-            _ => false,
+        let executor =
+            resolver::passed_var(call.args, call.kwargs, call.star_from, (Some(arg), None));
+        executor.map_or(OffloadsTo::ThreadOrProcess, |e| self.executor_target(e))
+    }
+
+    /// Where the executor `executor` runs what it is handed: `None` is the loop's default
+    /// executor, a thread pool; an executor of a class runs it as [`Self::pool_target`] says, an
+    /// executor that may be of several classes as each of them does, and one of a class heki does
+    /// not know on a thread or in a process.
+    fn executor_target(&self, executor: VarId) -> OffloadsTo {
+        if self.constant(executor) == Some(&ConstLiteral::None) {
+            return OffloadsTo::Thread;
         }
+        let classes: &[String] = match self.val(executor) {
+            Some(Val::Inst(class, _)) => std::slice::from_ref(class),
+            Some(Val::Union(classes)) => classes,
+            _ => &[],
+        };
+        (classes.iter())
+            .map(|class| self.pool_target(class))
+            .reduce(OffloadsTo::join)
+            .unwrap_or(OffloadsTo::ThreadOrProcess)
+    }
+
+    /// Where an executor of `class` runs what it is handed: `run_in_executor` calls the
+    /// executor's `submit`, so where the `submit` entry of the first class along its MRO with one
+    /// says; on a thread or in a process when no class has one.
+    fn pool_target(&self, class: &str) -> OffloadsTo {
+        let submit = |c: &str| {
+            let entry = self.cx.catalog(&format!("{c}.submit"))?;
+            entry.offloads_blocking_arg.map(|_| entry.offloads_to)
+        };
+        submit(class)
+            .or_else(|| (self.cx.project.mro_of(class).iter()).find_map(|c| submit(c)))
+            .unwrap_or(OffloadsTo::ThreadOrProcess)
     }
 
     /// What a builtin or a pool passes the callable it calls once per item (`CallSite::per_item`):
@@ -8480,6 +8526,7 @@ impl<'a> Extractor<'a> {
             once_per: self.guards.once_per_at(&cx, bb),
             once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
             runner: Runner::Caller,
+            offloads_to: OffloadsTo::Thread,
             binds_recv: false,
             handed_callable: None,
             per_item: None,
@@ -9835,6 +9882,7 @@ fn role_site(
         once_per: site.once_per,
         once_loops: 0,
         runner: site.runner,
+        offloads_to: site.offloads_to,
         binds_recv: site.binds_recv,
         handed_callable: site.handed_callable,
         per_item: site.per_item.clone(),

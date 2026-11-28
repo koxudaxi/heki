@@ -1115,6 +1115,24 @@ fn a_change_where_a_returned_generator_is_iterated_has_no_changing_body() {
     exact("op_mut110_generator_closed", "MUT110", &closed, "MUT110");
 }
 
+#[test]
+fn an_executor_that_may_be_a_process_pool_may_change_a_copy() {
+    let closed = "from collections.abc import Sequence\nfrom concurrent.futures import ThreadPoolExecutor\n\n\ndef append_to_lists(values):\n    if isinstance(values, list):\n        values.append(1)\n\n\ndef entry(values: Sequence[float], ex: ThreadPoolExecutor) -> None:\n    ex.submit(append_to_lists, values)\n";
+    let open = closed.replace("ThreadPoolExecutor", "Executor");
+    let report = heuristic(
+        "op_mut110_executor",
+        "MUT110",
+        &open,
+        "MUT110",
+        &[("Passed as itself", "may-run-on-copies")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("annotation".to_owned(), None, None)
+    );
+    exact("op_mut110_executor_closed", "MUT110", closed, "MUT110");
+}
+
 // ------------------------------------------------------------------------------ MUT114's claim
 
 /// A module with `table`, a cached function returning a list, `Frozen`, a list whose `append`

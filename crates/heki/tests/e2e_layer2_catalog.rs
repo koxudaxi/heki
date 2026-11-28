@@ -3161,6 +3161,172 @@ fn pool_workers_run_the_submitted_call() {
     );
 }
 
+const PROCESS_WORKERS: &str = r#"import asyncio
+import functools
+from collections.abc import Sequence
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
+
+import anyio.to_process
+import anyio.to_thread
+
+
+@functools.cache
+def cached():
+    return [1, 2]
+
+
+def clear(xs):
+    xs.clear()
+
+
+def sort_in_place(xs):
+    if isinstance(xs, list):
+        xs.sort()
+
+
+def tn_process_submit(ex: ProcessPoolExecutor):
+    ex.submit(clear, cached())
+
+
+def tp_thread_submit(ex: ThreadPoolExecutor):
+    ex.submit(clear, cached())
+
+
+def tp_executor_submit(ex: Executor):
+    ex.submit(clear, cached())
+
+
+async def tn_to_process():
+    await anyio.to_process.run_sync(clear, cached())
+
+
+async def tp_to_thread():
+    await anyio.to_thread.run_sync(clear, cached())
+
+
+async def tn_run_in_process_pool():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(ProcessPoolExecutor(), clear, cached())
+
+
+async def tp_run_in_default_executor():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, clear, cached())
+
+
+async def tp_run_in_unknown_executor(executor):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, clear, cached())
+
+
+def tp_thread_pool_sorts(items: Sequence[int], ex: ThreadPoolExecutor):
+    ex.submit(sort_in_place, items)
+
+
+def tp_any_pool_sorts(items: Sequence[int], ex: Executor):
+    ex.submit(sort_in_place, items)
+
+
+def sort_on(ex: Executor, xs):
+    ex.submit(sort_in_place, xs)
+
+
+def tp_any_pool_sorts_below(items: Sequence[int], ex: Executor):
+    sort_on(ex, items)
+
+
+def tn_process_pool_sorts(items: Sequence[int], ex: ProcessPoolExecutor):
+    ex.submit(sort_in_place, items)
+
+
+async def tn_process_sorts(items: Sequence[int]):
+    await anyio.to_process.run_sync(sort_in_place, items)
+
+
+class LoggingPool(ThreadPoolExecutor):
+    pass
+
+
+async def tp_run_in_one_of_two_thread_pools(items: Sequence[int], flag: bool):
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor() if flag else LoggingPool()
+    await loop.run_in_executor(pool, sort_in_place, items)
+
+
+async def tp_run_in_a_thread_or_a_process_pool(items: Sequence[int], flag: bool):
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor() if flag else ProcessPoolExecutor()
+    await loop.run_in_executor(pool, sort_in_place, items)
+"#;
+
+/// `(line, rule, certainty, qualname)` of every diagnostic of `heki check` on the one-file
+/// project `rel` holding `source`.
+fn check_certainties(
+    name: &str,
+    rel: &str,
+    source: &str,
+    rules: &str,
+) -> Vec<(u64, String, String, String)> {
+    let p = Project::new(name);
+    p.write(rel, source);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", rules]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                d["certainty"].as_str().unwrap().to_owned(),
+                d["qualname"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// A process pool, `anyio.to_process.run_sync`, and `run_in_executor` with a process pool run
+/// the callable in a child process on copies of the arguments made by pickling: what it changes
+/// of them stays there. A thread pool, `anyio.to_thread.run_sync`, and the loop's default
+/// executor (`None`) share the caller's objects. An `Executor` or an executor of a class heki
+/// does not know may be either: its changes count, but no exact claim rests on them.
+#[test]
+fn process_workers_change_copies_of_their_arguments() {
+    let c = |line, rule: &str, certainty: &str, qualname: &str| {
+        (
+            line,
+            rule.to_owned(),
+            certainty.to_owned(),
+            qualname.to_owned(),
+        )
+    };
+    assert_eq!(
+        check_certainties(
+            "catalog_process_workers",
+            "app/pools.py",
+            PROCESS_WORKERS,
+            "MUT110,MUT114"
+        ),
+        vec![
+            c(29, "MUT114", "heuristic", "tp_thread_submit"),
+            c(33, "MUT114", "heuristic", "tp_executor_submit"),
+            c(41, "MUT114", "heuristic", "tp_to_thread"),
+            c(51, "MUT114", "heuristic", "tp_run_in_default_executor"),
+            c(56, "MUT114", "heuristic", "tp_run_in_unknown_executor"),
+            c(60, "MUT110", "exact", "tp_thread_pool_sorts"),
+            c(64, "MUT110", "heuristic", "tp_any_pool_sorts"),
+            c(72, "MUT110", "heuristic", "tp_any_pool_sorts_below"),
+            c(90, "MUT110", "exact", "tp_run_in_one_of_two_thread_pools"),
+            c(
+                96,
+                "MUT110",
+                "heuristic",
+                "tp_run_in_a_thread_or_a_process_pool"
+            ),
+        ]
+    );
+}
+
 const OUT_BUFFERS: &str = r#"import numpy as np
 
 

@@ -2466,6 +2466,25 @@ impl ArgOrigin {
         *self == Self::default()
     }
 
+    /// The argument as a callee run in another process gets it: a copy made by pickling, of the
+    /// argument's class and value, that nothing else holds. Nothing ties it to an object of the
+    /// caller.
+    pub fn pickled(&self) -> Self {
+        Self {
+            typed_instance: self.typed_instance.clone(),
+            implementers: self.implementers.clone(),
+            class: self.class.clone(),
+            exact: self.exact,
+            binding: self.binding.clone(),
+            fresh: true,
+            new_object: NewArg::New {
+                kind: NewKind::Copy,
+                cond: NewCond::default(),
+            },
+            ..Self::default()
+        }
+    }
+
     /// The project classes the ownership rules tie the argument to: `typed_instance`, and the
     /// implementations of the protocol it is typed with, as for a write through the object
     /// itself (a target on the protocol and one on an implementation both cover it).
@@ -2609,6 +2628,10 @@ pub struct CallSite {
     pub once_loops: u64,
     /// How the callees run when an API runs them for the caller (`Runner`).
     pub runner: Runner,
+    /// For a callable an offloading API runs (`Runner::Worker`): where its worker runs it. In
+    /// another process, the bound parameters are copies ([`ArgOrigin::pickled`]).
+    #[serde(default, skip_serializing_if = "heki_kb::OffloadsTo::is_thread")]
+    pub offloads_to: heki_kb::OffloadsTo,
     /// The callees bind the receiver of a method call (or the object a constructor makes) to
     /// their first parameter (a static method's binding aside), as the resolution of the call
     /// says (`Callee::Project`).
@@ -2832,6 +2855,19 @@ impl CallSite {
             CallTarget::Layer2 { .. } => self.on_every_return.called,
             CallTarget::Project(_) => self.on_every_return.returned,
         }
+    }
+
+    /// Whether the callees run in another process or interpreter, on copies of the arguments
+    /// made by pickling: what they change of them, and of module state, stays there; what they
+    /// run (their queries, their clients) still happens.
+    pub fn passes_copies(&self) -> bool {
+        self.offloads_to == heki_kb::OffloadsTo::Process
+    }
+
+    /// Whether the callees may run in another process ([`Self::passes_copies`]): the site cannot
+    /// tell a process pool from a thread pool.
+    pub fn may_pass_copies(&self) -> bool {
+        !self.offloads_to.is_thread()
     }
 
     /// Whether the effect `e` of the callees does not reach the caller here: blocking work on a

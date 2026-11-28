@@ -42,6 +42,8 @@ ADVISORY_FIELDS = {
     "async_safe",
     "offloads_blocking_arg",
     "offloads_per_item",
+    "offloads_to",
+    "offloads_executor_arg",
     "excluded",
     "copy_sanitizer",
     "opaque_to_layer3",
