@@ -373,7 +373,28 @@ Catalog lookups are exact. These contribute no effect until you add them with
   `sqlalchemy.engine.Engine`, `redis.StrictRedis` for `redis.Redis`;
 - a method the catalog does not list;
 - objects reached through subscripts or framework attributes, which have no known class:
-  `client["app"]["users"]`, Django's `Model.objects`.
+  `client["app"]["users"]`, Django's related managers (`question.choice_set`, a many-to-many
+  field read on an instance).
+
+Django's `Model.objects` is a `Manager` (a `[[class_attributes]]` row of the catalog): reading
+it on a model class, or on `cls` or `type(self)`, gives the manager Django adds to a model that
+declares none, and a name the model's body binds to a manager it declares (`objects =
+StreamManager()`, a project subclass of `models.Manager`) gives that manager's class. Its query
+methods (`get`, `count`, `get_or_create`, ...) send a statement on every call, and its lazy ones
+(`filter`, `exclude`, `all`) give a `QuerySet`. A manager that binds a name those methods use
+(`get_queryset`, `_queryset_class`, `__init__`: the catalog's `delegates_to` of `Manager`) runs
+its own code under them, which the rows do not describe: a query through it is heuristic, and so
+is one through a `Manager` while the project defines such a manager (R2). The same holds for a
+project `QuerySet` subclass binding a name a query method of `QuerySet` looks up (each row's
+`delegates_to`: `get` looks up `filter` and `_fetch_all`) and for a project model binding `save`
+behind `create` without calling `super().save(...)` on every path (`effect_through`); which
+model a manager or queryset is for is not tracked, so one such model opens every `create`. A model whose body may
+bind another manager (a call of a project function, `QuerySet.as_manager()`) has no `objects` to
+heki, nor does one whose `objects` a module stores outside the class body, or is a manager of a
+class outside the project or of one `Manager.from_queryset()` builds. A manager of a library
+class bound under another name (`tree = TreeManager()`) is not seen: heki takes the model to
+have the default `objects`, which Django does not add. An abstract model has no `objects`
+either, which heki does not tell from its `Meta`.
 
 ### Properties
 

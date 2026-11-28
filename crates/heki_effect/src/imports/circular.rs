@@ -11,7 +11,9 @@
 //! outside the group whose load may load one of the group, and, when some function or lazy
 //! import of the project may load one, any code a module body runs before the failing import.
 
-use super::{ImportFailure, ImportForm, ImportGraph, ImportHop, ModuleRef, Named, Target, Timing};
+use super::{
+    CycleGroup, ImportFailure, ImportForm, ImportGraph, ImportHop, ModuleRef, Named, Target, Timing,
+};
 use crate::resolver::ProjectDecls;
 use heki_ir::walk::{Answer, BitSet, Budget, Closure};
 use rustc_hash::FxHashMap;
@@ -28,6 +30,8 @@ pub struct CircularFailure {
     /// The module `M` the statement imports the name from, still loading, and the name.
     pub from: u32,
     pub name: String,
+    /// The failure's import cycle group, by its index in [`ImportGraph::loading_groups`].
+    pub group: u32,
     /// The modules whose import fails at the statement when no module of the group has loaded,
     /// ascending: modules of the group, and packages holding one whose import loads the group.
     pub entries: Vec<u32>,
@@ -61,7 +65,51 @@ fn may_run_later(site: &super::ImportSite) -> bool {
         )
 }
 
+impl CircularFailure {
+    /// The import cycle of the failure: the hops of its chain from the one leaving `from`, then
+    /// the hop of the failing import into `from`.
+    pub fn cycle(&self) -> Vec<ImportHop> {
+        let paused = (self.chain.iter())
+            .position(|hop| hop.from == self.from)
+            .expect("the chain leaves the module the name comes from");
+        let closing = ImportHop {
+            from: self.module,
+            site: self.site,
+            to: self.from,
+            parent: false,
+        };
+        self.chain[paused..]
+            .iter()
+            .copied()
+            .chain([closing])
+            .collect()
+    }
+}
+
 impl ImportGraph<'_> {
+    /// The groups of project modules importing each other through the sites that may run while
+    /// a module loads ([`Self::cycle_groups`]): the import cycle groups of `IMP102`.
+    pub fn loading_groups(&self) -> Vec<CycleGroup> {
+        self.cycle_groups(|site| may_run_while_loading(site.timing))
+    }
+
+    /// The sites (module, index) on every cycle of `group`, one of [`Self::loading_groups`]
+    /// ([`Self::cycle_cuts`]): once the import of one runs only later, the group's modules import
+    /// each other in no cycle, and no run of the group fails. Each is on the cycle of every
+    /// failure of the group ([`CircularFailure::cycle`]).
+    pub fn loading_group_cuts(
+        &self,
+        group: &CycleGroup,
+        budget: &Budget,
+    ) -> Answer<Vec<(u32, usize)>> {
+        let counts = |site: &super::ImportSite| may_run_while_loading(site.timing);
+        (self.cycle_cuts(&group.members, &group.cycle, counts, budget)).map(|cuts| {
+            (cuts.into_iter())
+                .map(|k| (group.cycle[k].from, group.cycle[k].site))
+                .collect()
+        })
+    }
+
     /// The `from M import name` statements of the project that raise `ImportError` when a
     /// module of their import cycle group (the modules importing each other through the sites
     /// that may run while a module loads) is the first of the group imported, each with the
@@ -70,7 +118,7 @@ impl ImportGraph<'_> {
     /// parent packages load first, then the module bodies run in order through their sites, as
     /// the module docs describe. All runs share `budget`; past it, no further run reports.
     pub fn circular_failures(&self, decls: &ProjectDecls, budget: &Budget) -> Vec<CircularFailure> {
-        let groups = self.cycle_groups(|site| may_run_while_loading(site.timing));
+        let groups = self.loading_groups();
         if groups.is_empty() {
             return Vec::new();
         }
@@ -119,6 +167,7 @@ impl ImportGraph<'_> {
                             site,
                             from,
                             name: name.to_owned(),
+                            group: g as u32,
                             entries: Vec::new(),
                             chain,
                         })

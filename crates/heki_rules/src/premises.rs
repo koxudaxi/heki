@@ -157,6 +157,8 @@ pub const EVERY_IMPLEMENTATION: Premise = Premise {
         "heki_effect::summary::Extractor::targets_complete",
         "heki_effect::resolver::TypeCtx::inst_targets_complete",
         "heki_effect::resolver::ProjectDecls::lookup_rebound",
+        "heki_effect::resolver::ProjectDecls::replaces_delegate",
+        "heki_effect::resolver::ProjectDecls::effect_methods_replaced",
         "heki_effect::callgraph::site_must_chain",
         "heki_effect::ProjectIndex::site_must_take",
     ],
@@ -165,7 +167,7 @@ pub const EVERY_IMPLEMENTATION: Premise = Premise {
 pub const INCOMPLETE_TARGETS: OpenCause = OpenCause {
     id: "incomplete-targets",
     premise: &EVERY_IMPLEMENTATION,
-    states: "the call's targets may not be every implementation it can run: a receiver typed by a protocol (R5), a base class heki knows nothing of that may define the method, a base another module binds only under `if TYPE_CHECKING:`, more than 64 classes to dispatch over, a member of a union that does not resolve, or a name the project binds to another object (R1: a store or `del` of the function, the class, or the method in its module or another, also through `setattr`, its `__code__`, or a class's `__bases__`)",
+    states: "the call's targets may not be every implementation it can run: a receiver typed by a protocol (R5), a base class heki knows nothing of that may define the method, a project subclass of a library class binding a name the ecosystem catalog says the library's method looks up on the instance (R3: a Django manager's `get_queryset` or `_queryset_class`, a queryset's `_fetch_all` or `get`), a project model whose `save` may return without calling `super().save(...)` behind a Django `create`, a base another module binds only under `if TYPE_CHECKING:`, more than 64 classes to dispatch over, a member of a union that does not resolve, or a name the project binds to another object (R1: a store or `del` of the function, the class, or the method in its module or another, also through `setattr`, its `__code__`, or a class's `__bases__`)",
     closer: Closer::None,
 };
 
@@ -788,9 +790,10 @@ pub const READS_ON_EVERY_PATH: Premise = Premise {
 
 pub const PLAIN_WRITE: Premise = Premise {
     name: "Plain write",
-    states: "the write rebinds or deletes the attribute with a plain store (no property, descriptor, `__setattr__`, `__delattr__`, or metaclass in a class the instance may be, none of those hooks bound on one after its body, and every base a project class or a plain one), or changes in place the builtin list, dict, or set the attribute holds by its type through a changing method or an item store that no project subclass replaces",
+    states: "the write rebinds or deletes the attribute with a plain store (no property, descriptor, `__setattr__`, `__delattr__`, or metaclass in a class the instance may be, none of those hooks bound on one after its body, and every base a project class, a plain one, or a library base the ecosystem catalog lists as defining no attribute hooks and no data descriptor of the name, R3: `django.db.models.Model`), or changes in place the builtin list, dict, or set the attribute holds by its type through a changing method or an item store that no project subclass replaces",
     decided_in: &[
         "heki_rules::mut_rules::kept_values::plain_write",
+        "heki_effect::resolver::ProjectDecls::bases_store_plainly",
         "heki_effect::cache_flow::in_place_change",
         "heki_effect::resolver::ProjectDecls::method_not_overridden",
     ],

@@ -119,6 +119,9 @@ impl Extractor<'_> {
                 .taken_at(bb),
             unconditional,
             lazy: false,
+            lazy_allowed: false,
+            read_while_loading: false,
+            binds: None,
         });
     }
 

@@ -235,7 +235,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     carries it), so a comprehension or a list filled in a fixed loop is small. A module
     constant's object gains none (every call shares it). Tuples and strings are fixed whatever
     their uses, also in other modules, unless another module rebinds or deletes the name
-    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
+    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`), through an import of
+    the module body or of a function alike.
   - The builtins these facts read (`range`, `len`, `sorted`, `min`, `enumerate`, ...) count only
     where a load of the name finds the real one (`ModuleConstants::trusts_builtin`, which
     `ModuleBindings` reads too): not in a module that stores or deletes the name, or that binds
@@ -891,7 +892,31 @@ body may not run that binding (no call, a call on a branch, a function nested in
 of the name may find it unbound, so a call through it may run another object than the definition
 (`ModuleDecls::rebound_definitions`); a later binding on some paths makes it one of the objects
 (`ModuleDecls::alias_paths`). The code of the definition's class body is that function's for
-`attribution = "lexical"`.
+`attribution = "lexical"`. A star import that runs after a definition's statement, or on a path
+where the module body leaves the name unbound, binds the name again when the module it imports
+may bind it (its `__all__`, or its public names, through its own star imports; any name for a
+module heki does not read): a call through the name may then run that module's object
+(`ModuleDecls::late_stars`, `ProjectDecls::late_star_binding`); one binding it to the definition
+itself (a module importing the name from here) leaves it.
+
+What the name of a definition holds where code reads it is one answer (`ProjectDecls::name_holds`,
+which `ProjectDecls::call_rebound` reads too): the definition; the definition or the object a
+star import after it binds the name to, when that object's own name holds nothing else; or an
+object heki cannot name, for any other binding of the name (a store or deletion in its module or
+in another, by name, through `setattr` or under a name heki cannot read, `globals()` or `exec`, a
+store of its `__code__`, a star import of a module heki does not read; a change in place of the
+object, `lib.Client.register(x)`, leaves the name bound to it). A member read on a class through
+its name (`Base.create`) is another object when the class's name is, or when the lookup along the
+MRO may find one. A call through such a name gives what calling each object gives: an instance of
+either class, what either function declares it returns, no known value for an object heki cannot
+name, never an instance of the definition's class alone; the fields a call of a frozen dataclass
+or a `NamedTuple` binds, an exact instance, and what a member called on the class through its
+name returns (`Base.create()`) follow the same answer. A member called on an instance keeps the
+definition its MRO finds, as a type checker reads it. A class object a value holds by its type
+(`cls` in a class method, a parameter or an attribute declared `type[Base]`) reads no name:
+calling it constructs the class or a subclass, whatever the class's name holds
+(`CalledThrough::ClassObject`). A value joined from such a class object and a read of the name
+(`factory or Base`) is taken for the class object.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
@@ -1087,7 +1112,9 @@ members are marked `unknown_calls`.
 EffectSummary(f) = {
     // Family 2: execution effects
     direct_exec_effects, transitive_exec_effects: Set<ExecEffect>,
-    exec_chains:              Map<ExecEffect, ShortestCallChain>,
+    exec_chains:              Map<ExecEffect, CallChain>,      // the witness: normal path before cleanup, then shortest
+    witness_ways:             Map<ExecEffect, [(IsinstanceTests, Cleanup, CallChain)]>,
+                                                           // ways a call's arguments choose the witness among
 
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
@@ -2003,7 +2030,18 @@ which module imports which.
    side, the parameter the value is on the failed side is *defaulted*, and the new objects from
    the other side are its replacements: the accumulator idiom. A test that selects no
    replacement (`if p is None: raise ...`) leaves the parameter borrowed. A new object the
-   function stores somewhere is part of where it is stored.
+   function stores somewhere is part of where it is stored. A load of a constant key (a string,
+   or an integer that is not negative) of a builtin `dict`, `list`, `defaultdict`,
+   `OrderedDict`, or `Counter` (`d["k"]`, `d.get("k")`) is the value the function stored there
+   (`d["k"] = v`, a display's `"k": v`) on the paths that reach it, as a variable is the value
+   bound to it, joined with the element the load reads where the container's earlier contents
+   may reach it (`ownership::Slots`, a `walk::fixpoint` over the blocks with the function's
+   budget, at most 64 keys per function: past the budget no load follows a key). A key is
+   opened, the earlier contents again, by a store with another key, a deletion, a changing
+   method, an in-place operator, an attribute read of the container, or a call it is handed to;
+   a container that others may hold (not made by the function, a phi's input, or one stored,
+   captured, yielded, or handed to a call) also by every call, `await`, `yield`, and `with`, and
+   by a store through any other container with the same key or an unknown one.
 4. **Reports**: a change of a container (an item stored or deleted, a container method, an
    in-place operator on a builtin container, a project callee changing the container it is
    handed, `mutated_param_paths` entry `""`) of a value that may be new and borrowed, once per
@@ -2208,9 +2246,9 @@ message = "write model state through GenerationStore instead"
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param`: `node.members().append(1)` and
        `node.view.append(1)` with `return self.items`; never a `cached_property`, nor a
-       function storing or deleting the attribute, or running a call or an `await` between
-       the read and the return, which may store it: `old = self.items; self.reset(); return
-       old`), when every class the receiver may be
+       function storing or deleting the attribute, or running a call, the entry or exit of a
+       `with` block, or an `await` between the read and the return, which may store it: `old =
+       self.items; self.reset(); return old`), when every class the receiver may be
        takes the name from one of those callees: along its MRO, the first class binding the
        name defines one (`ProjectDecls::function_taken`), and a function called by name or read
        on a module or a class object is no name the project may bind again
@@ -2470,9 +2508,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
-     shown reach the same root cause, output folds them into one representative with the count
-     (`heki_rules::fold_root_causes`). Folding comes after inline suppressions and the Ratchet
-     baseline, which see every report.
+     shown reach the same root cause (the same blocking call: the API, its effect, and, for a
+     chain through helpers, the call a helper makes, so different helpers reaching one API stay
+     apart while direct calls of the API share it), output folds
+     them into one representative with the count (`heki_rules::fold_root_causes`). Folding
+     comes after inline suppressions and the Ratchet baseline, which see every report.
+   - The chain a report shows (`related`) is its witness (`heki_effect::witness`): among the
+     ways a function reaches the effect, one the call's arguments do not rule out (an
+     `isinstance` test of a parameter that a constant, an instance of exactly a class, or an
+     argument typed with a class decides; a test of classes an ABC, a protocol, or a metaclass
+     may answer is decided only when a class is on the argument's MRO), then one whose calls
+     are on the normal path before one through an `except` handler or a `finally` body, then
+     the shortest. A summary keeps at most `WITNESS_LIMIT` ways per effect, dropping a way that
+     another behind fewer tests with no worse chain covers, and a way past
+     `PROVIDED_CHAIN_LIMIT` calls drops its tests. Each way is a path the code has; the choice
+     never changes whether the effect arrives or the tier.
 5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
    `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
    default true) are relaxed by default.
@@ -2607,12 +2657,19 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    into a value.
    - A function is on a call cycle when it is a member of a component, of more than one node or
      with a call of itself, of the propagation region's call graph restricted to the calls whose
-     callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that runs at
-     the call, not a coroutine only created or a generator only made, or a generator iterated
-     there; never a callable run on a worker thread). The components are computed once per
-     propagation; a region always holds every member of a cycle it touches (an edit's region
-     holds every function sharing a cycle with it, a caller region every caller of a changed
-     function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
+     targets are every implementation they can run (`CallSite::complete`: a target found only by
+     its name, such as a member of a protocol the receiver is typed with, closes no cycle) and
+     whose callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that
+     runs at the call, not a coroutine only created or a generator only made, or a generator
+     iterated there; never a callable run on a worker thread). A site where a call's result is
+     iterated or awaited has the call's completeness, and a generator expression's site and a
+     comprehension's frame (`__comp_<id>`, before Python 3.12) are complete (they run the code
+     written there), so a recursion through `max(f(v) for v in xs)`, `max([f(v) for v in xs])`,
+     or `pending = f(v); await pending` keeps its cycle. The
+     way down from a `try` body to a cycle (`Reaches`) still follows every candidate. The
+     components are computed once per propagation; a region always holds every member of a
+     cycle it touches (an edit's region holds every function sharing a cycle with it, a caller
+     region every caller of a changed function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
      whose delivered callee facts reach one (joined during propagation like the other facts, so
      a generator's or a returned generator's iteration counts where it runs), and takes part in
      Early Cutoff.
@@ -3321,6 +3378,43 @@ which an entry leaves out, and a builtin dict or set hands on its keys with the 
 for them. A call of a catalogued library without such an entry runs code of the project only
 when it is handed a value not established as an instance of a library class that is not
 callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
+
+A table `[[class_attributes]]` (`heki_kb::ClassAttribute`) gives what reading an attribute on a
+class object deriving from a library base gives (`base = "django.db.models.Model"`, `attribute =
+"objects"`, `type = "django.db.models.Manager"`): the base keeps instances of `type` as class
+attributes of its subclasses. Where no class along a project class's MRO binds `attribute` (in
+its body, or by a store in any module: `ProjectDecls::lookup_rebound`), nor may bind an instance
+of `type` under another name in its body (a call of a project subclass of `type`, of a project
+function or method, or a value heki cannot name), the read gives a `type`; a name a body binds
+to a call of a project subclass of `type` gives that class
+(`ProjectDecls::class_object_attribute`, from `NamedAttr::body_call`). An instance read is not
+typed. An entry's `plain_attributes_except` says that a base keeps what its subclasses' code
+stores in the instance: neither it nor its metaclass defines `__setattr__`, `__delattr__`,
+`__getattribute__`, or `__getattr__`, and it binds no data descriptor but the names listed
+(`django.db.models.Model`: `pk`). A store of another name the project's classes do not bind in
+their bodies is a plain one (`ProjectDecls::bases_store_plainly`, the `MUT101` **Plain write**
+premise, and `invokes::attribute_access_runs_project_code`). An entry's `delegates_to` lists the
+names of an instance that the class's catalogued methods look up on it
+(`django.db.models.Manager`: `get_queryset`, `_queryset_class`, `__init__`, `model`, `_db`,
+`_hints`). A method's row describes a call on an instance of a project subclass only when no
+project class before the library class along its MRO binds one of them
+(`ProjectDecls::replaces_delegate`): otherwise the call's targets are not every implementation
+it runs (the **Every implementation** premise), and through `super()` the same holds for every
+class the instance may be.
+A method's own row may list more names (`QuerySet.get` looks up `filter`, `_fetch_all`,
+`__len__`, ...; `QuerySet.acount` looks up `count` and what `count` does), which add to the
+class's. An entry's `aliases` are other names an import gives the class
+(`django.db.models.QuerySet` of `django.db.models.query.QuerySet`): a project class's base
+named so is the catalog's class, so the project class derives from it. A row's
+`effect_through` names a library base whose `effect_methods` the call runs on an instance it
+makes (`QuerySet.create` saves a new instance of the queryset's model: `Model.save`,
+`save_base`, `_save_table`, ...). The row describes the call only while every project class
+deriving from the base binds those names, if at all, as methods calling the next definition of
+their name along the MRO (`super().save(...)`, or `super(Model, self).save(...)`) on every path
+to a return (`ClassDecl::chains_to_next`), and no library class but a plain base comes before
+the base along its MRO (`ProjectDecls::effect_methods_replaced`, one walk over the base's
+project subclasses kept for the life of the indexes); otherwise the **Every implementation**
+premise is open.
 
 A fourth table, `[[attributes]]` (`heki_kb::AttributeType`), gives the class of what reading an
 attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat"`,

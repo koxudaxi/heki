@@ -188,6 +188,8 @@ in its instructions, but not a contract that `heki check` enforces:
   the agent ends its turn.
 - [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
   (experimental) shows what one function reaches, changes, and returns.
+- [`heki recommend --focus types --diff`](https://heki.koxudaxi.dev/recommend/#applying-the-suggestions) (experimental) prints the exact type suggestions
+  as one patch that `git apply` takes, annotations only.
 - `--output-format json` gives every check as JSON, and the
   [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) (experimental) teaches the routine
   after an edit. [Coding agents](https://heki.koxudaxi.dev/coding-agents/) has the whole setup.
@@ -809,6 +811,8 @@ heki reports: `Subscriptions._cycle` suspends at a `yield` while iterating `self
 | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | an in-place change of a value that is new on one path and borrowed state on another | heuristic, experimental, opt-in |
 | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/), [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | an attribute that a `@cached_property` reads, changed without invalidating the cache, and a read of such a stale property | exact, experimental, opt-in |
 
+A write is a plain store, one premise of an exact `MUT101` or `MUT111` report, only when every base of the class is a project class, a plain one, or a library base the ecosystem catalog lists as keeping what its subclasses' code stores in the instance. Django's `models.Model` is one: neither it nor its metaclass defines attribute hooks, so a write of an attribute a model's code sets (in `__init__` or a method) is a plain store, and a stale `@cached_property` over it is an exact report once the rules are switched on. A class-body field (`expires = models.DateTimeField()`, which Django replaces with a descriptor) and `pk` (a property of `Model`) keep the report heuristic.
+
 ## 🔂 Single-use values used twice or not at all
 
 An iterator or a generator gives each item once. Reading it a second time sees nothing, and a generator that nobody iterates never runs its body.
@@ -887,6 +891,13 @@ Three rules are exact and run by default, and two more are exact by default and 
 
 `EFF102` and `EFF103` also have heuristic reports, where a premise of the claim is open (a loop that can make a client or run a query on every iteration). They appear with `--heuristic`.
 
+`EFF103` knows Django's model managers from the ecosystem catalog. `Model.objects`, read on a model class or on `cls`, is the `Manager` Django adds, or the manager the model's body declares (`objects = StreamManager()`, a project subclass of `models.Manager`). Its query methods (`get`, `count`, `create`, `get_or_create`, `update`, ...) send a statement on every call, so calling one per item of a loop over data is an exact, default `EFF103` report; `filter`, `exclude`, and `all` only build a `QuerySet`. A method the manager adds is followed as project code. Some managers keep the report heuristic (with `--heuristic`) or unknown:
+
+- a manager that binds a name its query methods use (`get_queryset`, `_queryset_class`, `__init__`) runs its own code under them: heuristic. So is a model's default `objects` while the project defines such a manager, since heki takes a `Manager` to be possibly an instance of any project subclass;
+- a project `QuerySet` subclass (`models.QuerySet` is the catalog's `QuerySet`) that binds a name a query method looks up on the queryset (`get`'s `filter` and `_fetch_all`, `acount`'s `count`) runs its own code under that method: a call of it on a `QuerySet` is heuristic, since heki takes a `QuerySet` to be possibly an instance of any project subclass. A subclass that only adds methods keeps every row, on its own instances too;
+- `create` and `acreate` save a new instance of the model: while a project model binds `save` (or a method `save` reaches, `save_base`, `_save_table`, ...) otherwise than as a method calling `super().save(...)` on every path, they are heuristic. `get_or_create` and `update_or_create` query by `get` first on every call, and `QuerySet.delete` never calls the model's `delete`, so a model's overrides leave them exact;
+- a manager `from_queryset()` or `as_manager()` builds, one of a class outside the project, and related managers (`question.choice_set`, a many-to-many field read on an instance) are unknown: they add no effect.
+
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/#a-generator-that-is-never-iterated). Both are exact and run by default.
 
 Two rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code. They are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](https://heki.koxudaxi.dev/effects/#resource-and-cancellation-lifetimes).
@@ -896,6 +907,8 @@ The knowledge base names the calls that wait. Besides `requests` and `httpx.Clie
 `DATA101` (exact, default, [`loop-carried-concat`](https://heki.koxudaxi.dev/rules/loop-carried-concat/)) also reports an array grown through `numpy.r_[...]` or `numpy.c_[...]` on every iteration (`arr = np.r_[arr, chunk]`), also when a helper returns that concatenation (`arr = grow(arr, chunk)`), as it does for `numpy.hstack`.
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
+
+The chain a blocking-call report shows (`EFF101`, both tiers, and `EFF105`) is one real path to the call, chosen in this order: a path the call's arguments allow (a helper that dispatches on `isinstance(item, Response)` shows the branch an argument of known class takes), then a path on the normal flow before one through cleanup code (an `except` handler or a `finally` body), then the shortest. Which path is shown never decides whether the report exists or its tier. Output folds many reports into one (`(+N more)`) only when they reach the same blocking call through the same helper: sites that call one API directly still fold together, and sites that reach different blocking calls through different helpers stay separate groups.
 
 ## 🔧 Rules to switch on
 
@@ -1190,7 +1203,13 @@ pkg/b.py:1:19: IMP102 [heuristic] `<module>` imports `make_a` from `pkg.a` while
 Found 3 diagnostic(s) in 3 file(s).
 ```
 
-This output is from heki 0.9.0. The full format adds the source line and a `help` that names the ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the cyclic import.
+This output is from heki 0.9.0. The full format adds the source line and a `help`. When one import is on every cycle of the modules, the help names it, as here, where each of the two imports is:
+
+```text
+  = help: every import cycle of these modules goes through this import: move it into the functions that use it, or make it `lazy`
+```
+
+heki names an import only after one search of the import graph without it finds the cycle gone, and only a change that takes it out of what the rule counts: `lazy` from Python 3.15 on, where Python allows the keyword, and neither change for a class of imports `cycle-edges` counts. It names no import whose name code running while its module loads may read: the module body with its class bodies, decorators, defaults, bases, and the annotations the target version evaluates in place, the module's functions these call or apply as decorators, and its `__all__`. Moved into a function, such an import leaves that read unbound, and made `lazy`, it loads at the read, still while the module loads. Nor does it name one whose name another project module takes while that module loads: by `from m import name`, a star import of the module (for a public name), an attribute read off the module object (`import m`, then `m.name`), or the module object passed anywhere else (for any name, private ones too), also through a package that re-exports the name. A later statement of the module rebinding the name takes the import out of this only when no code runs between them (no other import, no call), so that no other module can see the import's binding. Moved, the import leaves the module without the name, so the move is offered only while no other module reads it at all; a read in a function leaves `lazy`, which loads at that read. Otherwise the help names the general ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the import of the cycle. `IMP301` and `IMP302` name the one import every chain from the package to the reported module goes through, and `IMP201` with `reach = "import-time"` the one every chain to the forbidden module goes through, each checked the same way.
 
 ## 📦 What package code loads while it loads
 
@@ -1417,7 +1436,8 @@ naive rewrite are run on CPython: see [Development](https://heki.koxudaxi.dev/de
 | `\n`, `\r\n`, or lone `\r` line breaks | Fixes work the same, and the lines they insert use the file's own line break. |
 
 `--diff` prints the paths every other output format prints (relative to the working directory),
-so `patch -p1` applies it where heki ran.
+so `patch -p1` applies it where heki ran. It writes the lines in the file's own encoding (a
+PEP 263 Latin-1 declaration included), as `--fix` writes the file, so the patch matches its bytes.
 
 ## Fixes keep type checkers and isort satisfied
 
@@ -1490,7 +1510,9 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
 shows every block of contracts, where the report shows the first 3 of each kind, lists up
 to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5, lists every
 suggestion group, the heuristic ones too, where the text lists the first 3 exact ones, and names
-every rule without reports.
+every rule without reports. `--focus types` prints the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions) alone, with
+every exact group, and `--focus types --diff` prints them as a patch
+([below](https://heki.koxudaxi.dev/recommend/#applying-the-suggestions)).
 
 ## What it prints
 
@@ -1506,10 +1528,11 @@ every rule without reports.
 - **Types the code already keeps**: the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions), counted exact and
   heuristic, and whether heki found a type checker's configuration (without one, half of each
   guard is missing). The first 3 exact groups by rank are listed, each on one line with its
-  place, function and parameter, the annotation now and as proposed, and its labels; `--all`
-  lists every group, the heuristic ones last with the premises they leave open. The lines under
-  them say what each group states, what reports a later change of the type it writes, and what
-  each label shown means. The edits are in the JSON object; none of it enters the block.
+  place, function and parameter, the annotation now and as proposed, and its labels;
+  `--focus types` lists every exact group, and `--all` every group, the heuristic ones last with
+  the premises they leave open. The lines under them say what each group states, what reports a
+  later change of the type it writes, what each label shown means, and the command that applies
+  the exact groups. The edits are in the JSON object; none of it enters the block.
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -1859,13 +1882,14 @@ heki recommend (experimental) on .: 4 file(s), 13 function(s)
 Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 4 heuristic rule(s) off
 
 Types the code already keeps
-  2 read-only parameter group(s), exact; 2 heuristic (heki recommend --all lists them)
+  2 read-only parameter group(s), exact; 2 heuristic (heki recommend app --all lists them)
   No type checker configuration found: half of each guard is a type checker's.
     app/report.py:2  total_and_count(rows)  list[int] -> Sequence[int]  public
     app/report.py:9  average(rows)          list[int] -> Sequence[int]  public
   Each group states that the parameter itself is never changed, in its function and in every function it is handed to, and that it does not leave them. The edits of a group go together; --output-format json has them.
   After the edit, a type checker reports a change of the parameter in the function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports handing it to a function without annotations that changes it.
   public: a name without a leading underscore along it; callers, overriders, and implementers outside the checked files are not known
+  To apply the exact groups: heki recommend app --focus types --diff | git apply
 
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
@@ -1982,6 +2006,26 @@ When the claim holds and only a premise of the edit is open, the group is heuris
 (`[tool.ty]`, `ty.toml`, `[tool.mypy]`, `mypy.ini`, `[tool.pyright]`, `pyrightconfig.json`,
 `[tool.pyrefly]`): half of each guard is the type checker's, the other half `MUT110`.
 
+### Applying the suggestions
+
+`heki recommend --focus types` prints the header and "Types the code already keeps" alone, with
+every exact group; `--all` adds the heuristic ones. The analysis is the same as without it, so
+the groups are too, and with `--output-format json` the object keeps every field, its
+`suggestions.groups` holding every exact group past the cap of 50.
+
+```console
+$ heki recommend --focus types --diff | git apply
+```
+
+`--diff` prints the exact groups as one unified diff with the paths `heki check --diff`
+prints, so `git apply` or `patch -p1` applies it from the same directory. It changes
+annotations and adds the imports they name, nothing else: the edits of the JSON object, applied
+as the annotation trial applied them. Each file keeps its line breaks and its declared encoding.
+A heuristic group is never in it, and the diff is empty when no group is exact. The command
+still writes nothing and exits with `0` (`2` when a file cannot be read or parsed); the count of
+the groups goes to standard error. Run the project's formatter and type checker afterwards, as
+after any `heki check --fix`.
+
 ## JSON output
 
 `--output-format json` prints one object, described by the JSON Schema at
@@ -2004,7 +2048,7 @@ changes meaning.
 | `contracts` | each block the configuration block declares, the first 3 of each kind (`--all`: every one): its kind, its targets (or the packages and modules of its scopes), the candidates it stands for, its entry, confidence, evidence, what the trial reported for its candidates, the class patterns tried with what the pattern trial reported and whether the block names them, and caveats |
 | `contracts_not_shown` | per kind, the blocks past the first 3 and the candidates they stand for |
 | `contract_blockers` | the sites of accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`: how many, the first 5 (`--all`: 50) with the rule, path, line, function, the report as `heki check` writes it, and the candidates and blocks each holds back, and whether the list is cut |
-| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
+| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--focus types`: every exact one; `--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
 | `rejected_contracts` | the candidates a run reported for, each alone, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
 | `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, the names a `{...}` group of it lists that name nothing (`alternatives`, when it lists several), and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
@@ -3287,7 +3331,9 @@ class implements. A protocol whose implementations heki cannot list (more than e
 access to `unresolved = "report"` (`MUT206`, `MUT207`). An access matching `Impl._m` and a
 `Host._m` target of the same contract is one report, named by the target configured first, and
 `allowed-callees` naming every method a call through the protocol may run allows it, as naming
-the declaration does. A write through such a value still writes the implementations'
+the declaration does. A static or class method the protocol declares, called through such a
+value (`h.build()`), is judged the same way as an instance method: the receiver tells the
+protocol. A write through such a value still writes the implementations'
 attribute. `allowed-protocols` allows the reads, calls, and writes through the protocols it
 names, also through a class object typed `type[P]` of such a protocol (see [How contracts
 report](https://heki.koxudaxi.dev/configuration/#how-contracts-report)).
@@ -5506,6 +5552,14 @@ Options:
       --all
           Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones), and every rule without reports by name
 
+      --focus <FOCUS>
+          Print one section in full, alone: `types`, the suggestions with every exact group (with `--all`, the heuristic ones too). The JSON object keeps every field
+          
+          [possible values: types]
+
+      --diff
+          With `--focus types`, print the exact suggestion groups as one unified diff that `git apply` or `patch -p1` applies, in place of the report: annotations and the imports they need, nothing else. Writes no file
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -5553,10 +5607,14 @@ Exit codes:
 Examples:
   heki recommend
       advice for the project in the working directory
+  heki recommend --focus types
+      every standard type the code already keeps, as suggestions
 
 Output for programs:
   heki recommend --output-format json
       the advice as one object
+  heki recommend --focus types --diff | git apply
+      the exact suggestions as one unified diff of annotations
   heki recommend --output-format-json-schema
       the JSON Schema of that object
 ```
@@ -6759,7 +6817,28 @@ Catalog lookups are exact. These contribute no effect until you add them with
   `sqlalchemy.engine.Engine`, `redis.StrictRedis` for `redis.Redis`;
 - a method the catalog does not list;
 - objects reached through subscripts or framework attributes, which have no known class:
-  `client["app"]["users"]`, Django's `Model.objects`.
+  `client["app"]["users"]`, Django's related managers (`question.choice_set`, a many-to-many
+  field read on an instance).
+
+Django's `Model.objects` is a `Manager` (a `[[class_attributes]]` row of the catalog): reading
+it on a model class, or on `cls` or `type(self)`, gives the manager Django adds to a model that
+declares none, and a name the model's body binds to a manager it declares (`objects =
+StreamManager()`, a project subclass of `models.Manager`) gives that manager's class. Its query
+methods (`get`, `count`, `get_or_create`, ...) send a statement on every call, and its lazy ones
+(`filter`, `exclude`, `all`) give a `QuerySet`. A manager that binds a name those methods use
+(`get_queryset`, `_queryset_class`, `__init__`: the catalog's `delegates_to` of `Manager`) runs
+its own code under them, which the rows do not describe: a query through it is heuristic, and so
+is one through a `Manager` while the project defines such a manager (R2). The same holds for a
+project `QuerySet` subclass binding a name a query method of `QuerySet` looks up (each row's
+`delegates_to`: `get` looks up `filter` and `_fetch_all`) and for a project model binding `save`
+behind `create` without calling `super().save(...)` on every path (`effect_through`); which
+model a manager or queryset is for is not tracked, so one such model opens every `create`. A model whose body may
+bind another manager (a call of a project function, `QuerySet.as_manager()`) has no `objects` to
+heki, nor does one whose `objects` a module stores outside the class body, or is a manager of a
+class outside the project or of one `Manager.from_queryset()` builds. A manager of a library
+class bound under another name (`tree = TreeManager()`) is not seen: heki takes the model to
+have the default `objects`, which Django does not add. An abstract model has no `objects`
+either, which heki does not tell from its `Meta`.
 
 ### Properties
 
@@ -9133,7 +9212,8 @@ method through the class and take its calls over). The call is one of a target `
 too when heki lists the classes implementing the protocol, there is at least one, each is
 `Model` or a subclass of it, and every method the call may run is a target, as for a call
 through a base class; a protocol that another class implements too, or that no project class
-implements, calls no target of `Model`'s.
+implements, calls no target of `Model`'s. A static or class method the protocol declares, called
+through such a value, is judged the same way.
 
 A target's last segment names the function, method, or class: a glob there matches within that
 name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
@@ -9618,6 +9698,19 @@ def uses_a() -> int:
     return helper_a()
 ```
 
+## How to fix
+When one import is on every cycle of the failure's group (the modules importing each other
+while they load), the help names it: moved into the functions that use it, or made `lazy` on
+Python 3.15 and later, it leaves the group with no cycle, so no import of the group fails.
+heki names it only after one search of the group's other imports finds no cycle without it, and
+names no import whose name code running while its module loads may read, or another module
+takes while that module loads, as `IMP101` says; a read of another module in a function rules
+out the move into functions only, leaving `lazy`. It
+is the failing import itself when that one is such an import, else one of the imports the related
+locations show. Without such an import, the help lists the ways out of this failure: import the
+name inside the function that uses it, import the module and read the name where it is used, or
+bind the name before the import of the cycle.
+
 ## Fix safety
 No automatic fix.
 
@@ -9670,6 +9763,14 @@ expression or an `if`:
 - `seen = registry.get(key, {})`, `tags = getattr(obj, "tags", [])`;
 - `x = shared`, then `if c: x = []`.
 
+A value stored at a constant key of a builtin `dict` or `list` and read back is followed as a
+variable is: `kwargs["headers"] = headers or {}`, then `kwargs["headers"]["X"] = "1"`, also
+through a display (`{"headers": headers or {}}`) or `kwargs.get("headers")`. The key is a string
+or an integer that is not negative. A store with another key, a deletion, a changing method
+(`kwargs.update(extra)`), or a call the container is handed to, between the store and the read,
+leaves the read the container's item as before; so does any call when others may hold the
+container (a parameter, or one stored elsewhere).
+
 What a project function returns is part of its summary, through any number of wrappers: a
 function that returns its argument on one path and a new object on another makes its call's
 result both when the caller passes borrowed state, also when that state is what another call
@@ -9703,7 +9804,8 @@ It does not report:
   where the instance keeps the caller's object. A test that replaces nothing (`if out is None:
   raise ...`) leaves the parameter borrowed;
 - a new object the function stores in other state before the paths meet
-  (`rows = table[key] = []`, `table.setdefault(key, rows)`): it is that state's on every path;
+  (`rows = table[key] = []`, `table.setdefault(key, rows)`, `if "s" not in opts: opts["s"] = {}`
+  before `opts["s"]["x"] = 1`): it is that state's on every path;
 - a value stored back where it borrows from, the same attribute of the same object or an item
   of the same container (`self.items = self.items or []`, `d[k] = d.get(k) or []`, but not
   `self.items = other.items or []`);
@@ -9763,6 +9865,12 @@ def collect(name: str, scopes: list[str] | None = None) -> list[str]:
 - Calls of `async def` functions and generators are not followed: their results are not what
   their bodies return.
 - A store in an attribute is followed for `self` only.
+- A key is followed only in a container whose class heki infers as a builtin `dict` or `list` (a
+  display, `dict()`, an annotation), and only in the function storing it: for its callers, what
+  a function returns from a key (`return d["k"]`) is an item of the container.
+- A new object stored at a key of a container the function makes is not followed as new when
+  read back: `d["k"] = shared` on one path and `d["k"] = {}` on another, then a change of
+  `d["k"]`, is not reported.
 
 ## Fix safety
 No automatic fix.
@@ -9982,6 +10090,17 @@ def frozen(at: str):
 
 or declare `freezegun` in `[project] dependencies` (or in an extra, which [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/)
 then judges), or give the import a fallback under `except ModuleNotFoundError:`.
+
+## How to fix
+Declare the distribution in `[project] dependencies`, import the module only inside the
+functions that use it, or give it a fallback under `except ModuleNotFoundError:`. When the
+import is in a module a package module loads, not a package module itself, and one import carries
+every chain from a package module to it, the help names that import instead, the one nearest the
+reported import: moved into the functions that use it, or made `lazy` on Python 3.15 and later,
+it takes the report away. heki names it only after one search of what the package modules load
+without it no longer reaches the module, and names no import whose name code running while its
+module loads may read, or another module takes while that module loads, as `IMP101` says; a
+read of another module in a function rules out the move into functions only, leaving `lazy`.
 
 ## Fix safety
 No automatic fix.
@@ -10687,6 +10806,15 @@ Checks quadratic accumulation of immutable values in a loop:
 - `self.text += piece` on an attribute that the class's methods in the module (or, for another
   receiver, the function) only ever assign a string, bytes, or tuple literal of the pieces'
   kind (`self.text = ""`): `self.values += (i,)` extends a list in place.
+  A piece of that kind is a literal, a concatenation of them, an f-string, `"".join(...)`,
+  `"...".format(...)` of a template with text beside its field (or of exact builtin operands), `"..." % scalar`, or `str`, `repr`, `ascii`, or `format` of a value of a
+  builtin type (`str(len(items))`). `str(x)`, `repr(x)`, `ascii(x)`, and `format(x)` of a value
+  of unknown type, `"{}".format(x)` (a template that is one field returns what `x.__format__`
+  returned), an f-string field, and a concatenation of such pieces are a `str` or a
+  subclass of it, not an exact `str`: another class's `__str__` / `__format__` may return a
+  `str` subclass instance that overrides `__radd__`. The report is heuristic, and its open
+  premise (`Rewrite proven safe`, cause `exact-type`) says so. A piece of any other unknown
+  type (`convert(x)`, `"%s" % x`) is not reported.
 
 Local `str` accumulation is not reported: CPython already appends in place when the string has
 no other reference. Neither are:
@@ -10889,6 +11017,18 @@ from app.billing import Invoice  # the package's own export: allowed
 from app.billing import invoice  # IMP201: the submodule `app.billing.invoice`
 ```
 
+## How to fix
+The help is the contract's `message`. With `reach = "import-time"`, when one import carries
+every chain from the importer to the forbidden module, the help adds it, the one nearest the
+forbidden module: moved into the functions that use it, or made `lazy` on Python 3.15 and later,
+it takes the report away. heki adds it only after one search of what the importer loads without
+it no longer reaches the module, and adds no import whose name code running while its module
+loads may read, or another module takes while that module loads, as `IMP101` says; a read of
+another module in a function rules out the move into functions only, leaving `lazy`. The
+searches for one importer share one budget, past which a report has the message alone. The
+other `reach` values count the imports in functions and the lazy ones, so they name no such
+import.
+
 ## Fix safety
 No automatic fix.
 
@@ -11011,6 +11151,30 @@ def uses_a() -> int:
 
     return helper_a()
 ```
+
+## How to fix
+When one import is on every cycle of the group, the help names it: moved into the functions that
+use it, or made `lazy` on Python 3.15 and later, it leaves the group's modules with no cycle.
+heki names it only after one search of the group's other imports finds no cycle without it, and
+offers only a change that takes it out of the classes `cycle-edges` counts: no move into a
+function when `"function"` counts, and no `lazy` when `"lazy"` counts, before Python 3.15, or
+where Python rejects the keyword (a class body, a `try` statement). Of several such imports it
+names the one closing the reported cycle, else the first on it. It names no import whose name
+code running while its module loads may read: the module body with its class bodies,
+decorators, defaults, bases, and the annotations the target version evaluates in place, the
+module's functions these call or apply as decorators, and its `__all__`, which a star import of
+the module reads. Moved into a function, such an import leaves that read unbound, and made
+`lazy`, it loads at the read, still while its module loads. Nor does it name one whose name
+another project module takes while that module loads: by `from m import name`, a star import
+of the module (for a public name), an attribute read off the module object (`import m`, then
+`m.name`), or the module object passed anywhere else (for any name, private ones too), also
+through a package that re-exports the name. A later statement of the module rebinding the name
+takes the import out of this only when no code runs between them (no other import, no call),
+so that no other module can see the import's binding. Moved, the import leaves the module
+without the name, so the move is offered only while no other module reads it at all; a read in
+a function leaves `lazy`, which loads at that read. An import in a class body binds a
+class attribute, which heki does not follow, so it is never named. Without such an import, the
+help lists the general ways out.
 
 ## Fix safety
 No automatic fix.
@@ -12804,6 +12968,19 @@ class Cache:
         self.client = redis.Redis.from_url(url)
 ```
 
+## How to fix
+Import the module only inside the functions that use it, where a handler of its `ImportError` can
+name the extra to install, as in the example; give it a fallback under `except ImportError:` that
+lets the module load; or declare the distribution in `[project] dependencies`. A handler at the
+module's import that only raises again leaves the report. When the import is in a module a base
+module loads, and one import carries every chain from a base module to it, the help names that
+import instead, the one nearest the reported import: moved into the functions that use it, or made
+`lazy` on Python 3.15 and later, it takes the report away. heki names it only after one search of
+what the base modules load without it no longer reaches the module, and names no import whose name
+code running while its module loads may read, or another module takes while that module loads, as
+`IMP101` says; a read of another module in a function rules out the move into functions only,
+leaving `lazy`.
+
 ## Fix safety
 No automatic fix.
 
@@ -13612,7 +13789,12 @@ continues. The rule is opt-in: enable it with `--extend-select EFF114` or
 A function is on a call cycle when it can call itself again through calls whose bodies run on
 the caller's stack: plain calls, awaited coroutines, property getters, generators iterated
 there, generator expressions where they are written, and functions builtins call there
-(`list(map(self.depth, children))`, where the `map` is consumed in the `try`). A clause takes a `RecursionError` when it names
+(`list(map(self.depth, children))`, where the `map` is consumed in the `try`). Each call of the
+cycle has as its targets every implementation it can run: a call heki resolves, or a method of
+a class it knows whose overrides it has all. A method found only by its name, such as a member
+of a protocol a receiver is typed with, closes no cycle: a getter that reads the same attribute
+of another object (`self._backend.max_bits` in a property `max_bits`) does not call itself. The
+way down from the `try` body to the cycle may go through such a call. A clause takes a `RecursionError` when it names
 `RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (also in a tuple, or imported
 from `builtins`), or is a bare `except`, and no earlier clause of the same `try` takes it. The
 rule reports the clause, with the call in the `try` body as a related location, and, when the
@@ -13637,7 +13819,8 @@ It does not report:
   once to an integer);
 - a `try` body whose calls reach no call cycle, or reach one only through a call heki cannot
   resolve, a coroutine only created, or a function run on another thread
-  (`asyncio.to_thread`, `loop.run_in_executor`);
+  (`asyncio.to_thread`, `loop.run_in_executor`), and a cycle closed only through a method found
+  by its name;
 - `except*` clauses, and a `RecursionError` that reaches the clause only through a `finally`
   body.
 
@@ -13650,8 +13833,11 @@ that depends on the depth of the stack instead of the error.
 Its premises:
 
 - **Call cycle**: a call in the `try` body runs, through calls whose bodies run on its stack, a
-  function that can call itself again through such calls. Open through a method call: one
-  candidate implementation on the way is enough.
+  function that can call itself again through such calls, each of them a call whose targets are
+  every implementation it can run. Open through a method call on the way down: one candidate
+  implementation of it is enough. Open as well where state or an argument stops the
+  recursion after one more level (a flag set before the recursive call, a retry with an argument
+  that no longer recurses): the recursion may stop there and never raise.
 - **Catches RecursionError**: the clause's classes include `RecursionError`, as the builtins the
   module does not rebind (assumption R1), and no earlier clause of the same `try` takes it.
   Established.

@@ -16,7 +16,10 @@
 //! constant. A local bound once to a bound method or a `functools.partial` object calls what it
 //! holds, exactly. A decorator binds the name to what it returns: `typing.final` and
 //! `typing.override` return the function or class they are handed, and any other decorator may
-//! return another object.
+//! return another object. A call through a name bound again gives what calling each object the
+//! name may hold gives, an instance of either class or no known value, so a method called on its
+//! result is no longer the definition's alone. A class object a value holds by its type (`cls`, a
+//! parameter of `type[Base]`) reads no name: calling it constructs the class or a subclass.
 //!
 //! Every fixture marks each line with the report it must get ([`MARKS`]).
 
@@ -1078,3 +1081,278 @@ async def unknown_receiver(db) -> object:
     execute = db.execute
     return execute("SELECT 1")
 "#;
+
+/// Classes and functions whose names their own module or another module binds again, after
+/// their statements: by calls (`Made = make()`, `build = by_hand(build)`), by star imports of a
+/// project module defining the name (`Base`), of one importing it from here (`Same`, the same
+/// object), and of a module heki does not read (`Open`), by `globals()` (`Swapped`), and by
+/// stores in another module (`Patched`, `Kept.stored`).
+const REBOUND_CLASSES: &str = r#"import dataclasses
+import time
+
+
+class Base:
+    def method(self):
+        time.sleep(1)
+
+    @classmethod
+    def create(cls) -> "Base":
+        return cls()
+
+
+class Kept:
+    def method(self):
+        time.sleep(1)
+
+    @classmethod
+    def create(cls) -> "Kept":
+        return cls()
+
+    @classmethod
+    def stored(cls) -> "Kept":
+        return cls()
+
+
+class Same:
+    def method(self):
+        time.sleep(1)
+
+
+class Made:
+    def method(self):
+        time.sleep(1)
+
+
+class Patched:
+    def method(self):
+        time.sleep(1)
+
+
+@dataclasses.dataclass(frozen=True)
+class Record:
+    item: Kept
+
+    def method(self):
+        time.sleep(1)
+
+
+@dataclasses.dataclass(frozen=True)
+class KeptRecord:
+    item: Kept
+
+    def method(self):
+        time.sleep(1)
+
+
+def make():
+    return object
+
+
+def build() -> Kept:
+    return Kept()
+
+
+def built() -> Kept:
+    return Kept()
+
+
+def by_hand(f):
+    return f
+
+
+Made = make()
+Record = make()
+build = by_hand(build)
+
+from pkg.compat import *
+from pkg.again import *
+"#;
+
+/// `pkg._speedups`, a compiled module heki does not read, may bind any name.
+const REBOUND_CLASSES_ACCEL: &str = r#"import time
+
+
+class Open:
+    def method(self):
+        time.sleep(1)
+
+
+try:
+    from pkg._speedups import *
+except ImportError:
+    pass
+"#;
+
+const REBOUND_CLASSES_COMPAT: &str = r#"class Base:
+    def method(self):
+        return None
+"#;
+
+const REBOUND_CLASSES_AGAIN: &str = r#"from pkg.model import Same
+
+__all__ = ["Same"]
+"#;
+
+const REBOUND_CLASSES_PATCHES: &str = r#"from pkg import model
+
+
+def fast():
+    return None
+
+
+model.Patched = fast
+model.Kept.stored = classmethod(fast)
+"#;
+
+const REBOUND_CLASSES_SWAPPED: &str = r#"import sys
+import time
+
+
+class Swapped:
+    def method(self):
+        time.sleep(1)
+
+
+globals()[sys.argv[1]] = object
+"#;
+
+const REBOUND_CLASS_CALLS: &str = r#"from pkg import accel, model, swapped
+
+
+async def star():
+    model.Base().method()  # EFF101 [heuristic] either
+
+
+async def star_created():
+    model.Base.create().method()
+
+
+async def same():
+    model.Same().method()  # EFF101
+
+
+async def made():
+    model.Made().method()
+
+
+async def patched():
+    model.Patched().method()
+
+
+async def open_star():
+    accel.Open().method()
+
+
+async def record():
+    model.Record(model.Kept()).method()
+
+
+async def kept_record():
+    model.KeptRecord(model.Kept()).method()  # EFF101
+
+
+async def built_by_hand():
+    model.build().method()
+
+
+async def kept():
+    model.Kept().method()  # EFF101
+
+
+async def kept_created():
+    model.Kept.create().method()  # EFF101
+
+
+async def stored_created():
+    model.Kept.stored().method()
+
+
+async def kept_built():
+    model.built().method()  # EFF101
+
+
+async def swapped_class():
+    swapped.Swapped().method()
+"#;
+
+/// A call of a name that may hold another object than its definition gives what calling each
+/// object it may hold gives (`ProjectDecls::name_holds`): an instance of either class where a
+/// star import binds the name to another project class (the method may run either's), and no
+/// known value where it may be an object heki cannot name, so the method called on the result
+/// is no definition's. A member call on such a class name, and on a member another module
+/// stores, gives no known value either; the names nothing binds again keep their reports.
+#[test]
+fn a_call_of_a_name_bound_again_gives_what_each_binding_gives() {
+    check_marks(
+        "rebound_class_calls",
+        &[
+            ("pkg/model.py", REBOUND_CLASSES),
+            ("pkg/accel.py", REBOUND_CLASSES_ACCEL),
+            ("pkg/compat.py", REBOUND_CLASSES_COMPAT),
+            ("pkg/again.py", REBOUND_CLASSES_AGAIN),
+            ("pkg/patches.py", REBOUND_CLASSES_PATCHES),
+            ("pkg/swapped.py", REBOUND_CLASSES_SWAPPED),
+            ("pkg/app.py", REBOUND_CLASS_CALLS),
+        ],
+    );
+}
+
+/// `Base`, which another module binds again (`model.Base = make()`), and the class objects of
+/// it that values hold by their types: `cls` in a class method and an attribute declared
+/// `type[Base]`.
+const REBOUND_CLASS_OBJECTS: &str = r#"import time
+
+
+class Base:
+    def method(self):
+        time.sleep(1)
+
+    @classmethod
+    async def spawn(cls):
+        cls().method()  # EFF101
+
+
+class Holder:
+    def __init__(self, factory: type[Base]) -> None:
+        self.factory = factory
+
+    async def run(self):
+        self.factory().method()  # EFF101
+"#;
+
+const REBOUND_CLASS_OBJECTS_PATCHES: &str = r#"from pkg import model
+
+
+def make():
+    return object
+
+
+model.Base = make()
+"#;
+
+const REBOUND_CLASS_OBJECT_CALLS: &str = r#"from pkg import model
+
+
+async def typed(factory: type[model.Base]):
+    factory().method()  # EFF101
+
+
+async def direct():
+    model.Base().method()
+"#;
+
+/// A call of a class object a value holds by its type (`cls()`, a parameter or an attribute
+/// declared `type[Base]`) reads no name, so what another module binds the class's name to
+/// leaves the instance it makes, an instance of the class or a subclass; a call through the
+/// name itself (`model.Base()`) gives what the name may hold.
+#[test]
+fn a_call_of_a_class_object_held_by_its_type_reads_no_name() {
+    check_marks(
+        "rebound_class_objects",
+        &[
+            ("pkg/model.py", REBOUND_CLASS_OBJECTS),
+            ("pkg/patches.py", REBOUND_CLASS_OBJECTS_PATCHES),
+            ("pkg/app.py", REBOUND_CLASS_OBJECT_CALLS),
+        ],
+    );
+}

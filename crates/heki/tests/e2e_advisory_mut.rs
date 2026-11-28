@@ -470,7 +470,7 @@ class Other:
 
 const READONLY: &str = r#"import copy
 from functools import lru_cache
-
+from typing import *
 
 class Schema:
     def __init__(self):
@@ -576,7 +576,7 @@ def harmless():
 import typing
 
 from settings_lib import get_settings
-from typing import *
+
 
 
 @lru_cache
@@ -626,8 +626,9 @@ fn mut202_tracks_read_only_values_through_unpacking_phis_and_calls() {
     // Not reported: mutating the top level of a shallow copy (`mutate(c)`), and passing a
     // read-only value to a function that does not mutate it (`touch`, and `scaled` with a
     // float beside it). In-place operators on values annotated `typing.List[...]` or
-    // `Dict[...]` (a star import from `typing`) mutate a mutable builtin; attribute and item
-    // stores mutate an external producer's value.
+    // `Dict[...]` (a star import from `typing`, before the definitions: one after them may bind
+    // their names) mutate a mutable builtin; attribute and item stores mutate an external
+    // producer's value.
     assert_eq!(
         found(&diags),
         vec![

@@ -181,6 +181,8 @@ can miss a rule written in its instructions, but not a contract that `heki check
   failing check back before the agent ends its turn.
 - [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
   (experimental) shows what one function reaches, changes, and returns.
+- [`heki recommend --focus types --diff`](https://heki.koxudaxi.dev/recommend/#applying-the-suggestions) (experimental) prints the exact type suggestions
+  as one patch that `git apply` takes, annotations only.
 - `--output-format json` gives every check as JSON, and the
   [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental)
   (experimental) teaches the routine after an edit.

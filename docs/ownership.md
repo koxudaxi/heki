@@ -254,6 +254,8 @@ heki reports: `Subscriptions._cycle` suspends at a `yield` while iterating `self
 | [`MUT112`](rules/conditional-ownership-mutation.md) | an in-place change of a value that is new on one path and borrowed state on another | heuristic, experimental, opt-in |
 | [`MUT101`](rules/cached-property-stale-mutation.md), [`MUT111`](rules/cached-property-stale-read.md) | an attribute that a `@cached_property` reads, changed without invalidating the cache, and a read of such a stale property | exact, experimental, opt-in |
 
+A write is a plain store, one premise of an exact `MUT101` or `MUT111` report, only when every base of the class is a project class, a plain one, or a library base the ecosystem catalog lists as keeping what its subclasses' code stores in the instance. Django's `models.Model` is one: neither it nor its metaclass defines attribute hooks, so a write of an attribute a model's code sets (in `__init__` or a method) is a plain store, and a stale `@cached_property` over it is an exact report once the rules are switched on. A class-body field (`expires = models.DateTimeField()`, which Django replaces with a descriptor) and `pk` (a property of `Model`) keep the report heuristic.
+
 ## 🔂 Single-use values used twice or not at all
 
 An iterator or a generator gives each item once. Reading it a second time sees nothing, and a generator that nobody iterates never runs its body.

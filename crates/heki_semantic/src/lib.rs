@@ -85,6 +85,10 @@ pub struct ModuleImport {
     /// `try` statement, where CPython decides by the shape of the code around it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lazy_open: bool,
+    /// PEP 810 allows `lazy` on the statement: it is in the module body, outside class bodies
+    /// and every clause of a `try` statement (CPython 3.15 rejects the keyword there).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lazy_allowed: bool,
     pub span: Span,
 }
 
@@ -648,6 +652,11 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Whether PEP 810 allows `lazy` on an import statement at the current point.
+    fn lazy_allowed_here(&self) -> bool {
+        self.cur_scope_id() == ScopeId(0) && self.try_parts.is_empty()
+    }
+
     /// What a listing in `__lazy_modules__` does to an import statement at the current point
     /// (lazy already when `is_lazy`). CPython checks the list only for imports in the module
     /// body, outside the body and the `except` clauses of a `try` statement (checked on
@@ -1010,6 +1019,7 @@ impl<'a> Analyzer<'a> {
                         in_type_checking: self.in_type_checking,
                         rebound_at: None,
                         lazy_open: false,
+                        lazy_allowed: self.lazy_allowed_here(),
                         span: Span::from(alias.range),
                     });
                     self.lazy_listing.push(self.lazy_listing_here(imp.is_lazy));
@@ -1058,6 +1068,7 @@ impl<'a> Analyzer<'a> {
                         in_type_checking: self.in_type_checking,
                         rebound_at: None,
                         lazy_open: false,
+                        lazy_allowed: self.lazy_allowed_here(),
                         span: Span::from(alias.range),
                     });
                     self.lazy_listing.push(self.lazy_listing_here(imp.is_lazy));

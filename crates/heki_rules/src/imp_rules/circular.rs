@@ -3,12 +3,14 @@
 //! modules whose import does that. The statements and their chains come from
 //! `heki_effect::imports` ([`ImportGraph::circular_failures`]).
 
-use super::hop_text;
+use super::{chosen_cut, cut_help, hop_text};
 use crate::CheckContext;
 use heki_diagnostics::Diagnostic;
 use heki_effect::ProjectIndex;
-use heki_effect::imports::{CircularFailure, ImportGraph, ModuleRef};
+use heki_effect::imports::{CircularFailure, ImportGraph, ModuleRef, Timing};
 use heki_effect::resolver::ProjectDecls;
+use rustc_hash::FxHashSet;
+use std::cell::OnceCell;
 use std::path::PathBuf;
 
 /// The most entry modules a message names; past it, it counts the others.
@@ -26,8 +28,22 @@ pub(crate) fn imp102(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         return;
     }
     let graph = ImportGraph::build(cx.index.files.values(), cx.decls);
-    for failure in failures(&graph, cx.decls) {
-        report(cx, &graph, &failure, out);
+    let failures = failures(&graph, cx.decls);
+    if failures.is_empty() {
+        return;
+    }
+    let groups = graph.loading_groups();
+    let cuts: Vec<OnceCell<FxHashSet<(u32, usize)>>> =
+        groups.iter().map(|_| OnceCell::new()).collect();
+    let group_cuts = |g: u32| -> &FxHashSet<(u32, usize)> {
+        cuts[g as usize].get_or_init(|| {
+            let budget = graph.budget("import_cuts");
+            let found = graph.loading_group_cuts(&groups[g as usize], &budget);
+            found.open_means(Vec::new()).into_iter().collect()
+        })
+    };
+    for failure in failures {
+        report(cx, &graph, &group_cuts, &failure, out);
     }
 }
 
@@ -55,9 +71,10 @@ fn entries_text(names: &[&str]) -> String {
 
 /// The report of `failure` at its import, with the hops of its first entry's load as related
 /// locations.
-fn report(
+fn report<'c>(
     cx: &CheckContext<'_>,
     graph: &ImportGraph<'_>,
+    group_cuts: &impl Fn(u32) -> &'c FxHashSet<(u32, usize)>,
     failure: &CircularFailure,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -86,11 +103,13 @@ fn report(
         site.qualname,
         entries_text(&entries),
     );
-    let help = format!(
-        "import `{name}` inside the function that uses it, import the module `{from}` and read \
-         `{from}.{name}` where it is used, or bind `{name}` in `{from}` before it imports \
-         `{paused_at}`"
-    );
+    let help = cut(cx, graph, group_cuts(failure.group), failure).unwrap_or_else(|| {
+        format!(
+            "import `{name}` inside the function that uses it, import the module `{from}` and \
+             read `{from}.{name}` where it is used, or bind `{name}` in `{from}` before it \
+             imports `{paused_at}`"
+        )
+    });
     let related = (failure.chain.iter())
         .map(|hop| {
             let (site, message) = hop_text(
@@ -116,6 +135,33 @@ fn report(
     ) {
         d.related = related;
     }
+}
+
+/// The help naming the import on every import cycle of `failure`'s group, `cuts` the sites one
+/// search over the group finds there ([`ImportGraph::loading_group_cuts`]): the failing import,
+/// or the first other on the failure's cycle from the import `from` is paused at. Both changes
+/// take it out of the imports that run while a module loads.
+fn cut(
+    cx: &CheckContext<'_>,
+    graph: &ImportGraph<'_>,
+    cuts: &FxHashSet<(u32, usize)>,
+    failure: &CircularFailure,
+) -> Option<String> {
+    if cuts.is_empty() {
+        return None;
+    }
+    let sites: Vec<(u32, usize)> = (failure.cycle().iter())
+        .map(|hop| (hop.from, hop.site))
+        .filter(|site| cuts.contains(site))
+        .collect();
+    let reported = (failure.module, failure.site);
+    let chosen = chosen_cut(cx, graph, &sites, Some(reported), |t| t == Timing::Body)?;
+    Some(cut_help(
+        graph,
+        chosen,
+        reported,
+        "import cycle of these modules",
+    ))
 }
 
 /// The files `IMP102` reports in: the file of each failing import. A change to which these are,

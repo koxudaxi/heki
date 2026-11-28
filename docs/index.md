@@ -179,6 +179,8 @@ in its instructions, but not a contract that `heki check` enforces:
   the agent ends its turn.
 - [`heki inspect`](coding-agents.md#what-a-function-does-heki-inspect-experimental)
   (experimental) shows what one function reaches, changes, and returns.
+- [`heki recommend --focus types --diff`](recommend.md#applying-the-suggestions) (experimental) prints the exact type suggestions
+  as one patch that `git apply` takes, annotations only.
 - `--output-format json` gives every check as JSON, and the
   [Agent Skill](coding-agents.md#agent-skill-experimental) (experimental) teaches the routine
   after an edit. [Coding agents](coding-agents.md) has the whole setup.

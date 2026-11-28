@@ -212,6 +212,7 @@ impl NamedAttr {
             self.body_defined = other.body_defined;
         }
         self.body_partial = self.body_partial.take().or(other.body_partial);
+        self.body_call = self.body_call.take().or(other.body_call);
         self.annotated |= other.annotated;
         self.validates_default |= other.validates_default;
         self.held.extend(other.held);
@@ -386,6 +387,15 @@ fn class_body_names(
                         };
                     let Some(partial) = partial_of(&shape, wrapped, decls, stores, is_static)
                     else {
+                        if !is_static
+                            && let Some(callee) = called_name(&shape, value, decls, stores)
+                        {
+                            let attr = NamedAttr {
+                                body_call: Some(callee),
+                                ..NamedAttr::default()
+                            };
+                            found.push((body.qualname.clone(), name.to_owned(), attr));
+                        }
                         continue;
                     };
                     let attr = NamedAttr {
@@ -530,6 +540,32 @@ fn partial_of(
         keywords: !kwargs.is_empty(),
         is_static,
     })
+}
+
+/// The module-level name whose call gives `value` (`StreamManager()`, `models.Manager()`), by
+/// the fqn its module gives it ([`named_value`]), or a name of a module it imports.
+fn called_name(
+    shape: &FnShape<'_>,
+    value: VarId,
+    decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
+) -> Option<String> {
+    match shape.inst(shape.copy_root(value)).map(|i| &i.kind) {
+        Some(InstKind::Call {
+            callee_var: Some(callee),
+            ..
+        }) => named_value(shape, *callee, decls, stores),
+        // A name of an imported module (`models.CharField(...)`).
+        Some(InstKind::MethodCall { recv, method, .. }) => {
+            match shape.inst(shape.copy_root(*recv)).map(|i| &i.kind) {
+                Some(InstKind::LoadGlobal { name, .. }) => {
+                    Some(format!("{}.{method}", decls.fixed_import(name)?))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// `(default, init)` of a field specifier `value` holds (`dataclasses.field(default=NAME)`):

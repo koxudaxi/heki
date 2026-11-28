@@ -869,8 +869,16 @@ const EXACT_BASE_QUIET_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef 
 const EXACT_FETCH: &str = "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n";
 const EXACT_FETCH_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nif os.environ.get(\"QUIET\"):\n    fetch = _quiet\n";
 const EXACT_FETCH_REBOUND: &str = "import requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nfetch = _quiet\n";
+const EXACT_STAR: &str = "TIMEOUT = 1\n";
+const EXACT_STAR_REBINDING: &str = "TIMEOUT = 1\n\n\ndef fetch(url):\n    return url\n";
 const EXACT_FETCH_USE: &str =
     "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
+// A class whose module star-imports another module after it: the import binds the class's name
+// again once that module defines it, and may bind it to anything while the project has no such
+// module; an instance made through the name is then of either class, or of none heki knows.
+const EXACT_CLIENT: &str = "import requests\n\n\nclass Client:\n    def fetch(self, url):\n        return requests.get(url)\n\n\nfrom pkg.exact_rebind import *\n";
+const EXACT_REBIND_CLIENT: &str = "class Client:\n    def fetch(self, url):\n        return url\n";
+const EXACT_CLIENT_USE: &str = "from pkg import exact_client\n\n\nasync def serve():\n    exact_client.Client().fetch(\"u\")\n";
 // A class a function binds under `global` (`ModuleDecls::made_in`): the module's name holds it
 // once the module body runs the function on every path, and may be unbound when it runs on a
 // branch; without the declaration the class is the function's own.
@@ -971,6 +979,12 @@ const WIT_FETCH_REMOTE: &str =
     "from pkg.wit_repo import Remote\n\n\ndef fetch(r: Remote, key):\n    return r.get(key)\n";
 const WIT_MID: &str =
     "from pkg.wit_fetch import fetch\n\n\ndef load(r):\n    return fetch(r, \"k\")\n";
+const WSEL_KINDS: &str = "class Request:\n    pass\n\n\nclass Response:\n    pass\n";
+const WSEL_KINDS_PROTOCOL: &str = "from typing import Protocol, runtime_checkable\n\n\nclass Request:\n    pass\n\n\n@runtime_checkable\nclass Response(Protocol):\n    def render(self) -> str: ...\n";
+const WSEL_RENDER: &str = "import time\n\nfrom pkg.wsel_kinds import Response\n\n\ndef wait(item):\n    time.sleep(1)\n\n\ndef request_segments(item):\n    wait(item)\n\n\ndef response_segments(item):\n    time.sleep(1)\n\n\ndef append(item):\n    if isinstance(item, Response):\n        return response_segments(item)\n    return request_segments(item)\n";
+const WSEL_RETRY: &str = "import time\n\n\ndef retry(send):\n    try:\n        send()\n        time.sleep(0.1)\n    except OSError:\n        time.sleep(1)\n";
+const WSEL_RETRY_IN_HANDLER: &str = "import time\n\n\ndef retry(send):\n    try:\n        send()\n    except OSError:\n        time.sleep(1)\n";
+const WSEL_SERVE: &str = "from pkg.wsel_kinds import Request\nfrom pkg.wsel_render import append\nfrom pkg.wsel_retry import retry\n\n\nasync def compact():\n    append(Request())\n\n\nasync def send():\n    retry(print)\n";
 const WIT_SERVE: &str = "from pkg.wit_mid import load\nfrom pkg.wit_repo import Repo\n\n\nasync def serve(r: Repo):\n    load(r)\n";
 
 // Queue capacities (a heuristic `EFF101` on `queue.Queue.put`, a wait on another thread): a queue one module builds and another
@@ -1440,6 +1454,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/wit_fetch.py", WIT_FETCH),
         ("pkg/wit_mid.py", WIT_MID),
         ("pkg/wit_serve.py", WIT_SERVE),
+        ("pkg/wsel_kinds.py", WSEL_KINDS),
+        ("pkg/wsel_render.py", WSEL_RENDER),
+        ("pkg/wsel_retry.py", WSEL_RETRY),
+        ("pkg/wsel_serve.py", WSEL_SERVE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -1473,6 +1491,9 @@ struct Step {
     present: &'static [(&'static str, &'static str)],
     /// `(file, code)` the CLI does not report after the step.
     absent: &'static [(&'static str, &'static str)],
+    /// `(file, [(line, code)])`: every diagnostic the CLI reports in the file after the step, by
+    /// its 1-based line and its code with the tier.
+    reported: Option<(&'static str, Reported)>,
     /// Early Cutoff: no other file is re-analyzed or re-published.
     cutoff: bool,
     /// The edit changes a fact callers read, though no diagnostic shows it: the server
@@ -1491,6 +1512,8 @@ struct Step {
 
 type Registered = &'static [(&'static str, &'static [&'static str])];
 
+type Reported = &'static [(u64, &'static str)];
+
 impl Step {
     fn new(name: &'static str, actions: Vec<Action>) -> Self {
         Self {
@@ -1498,6 +1521,7 @@ impl Step {
             actions,
             present: &[],
             absent: &[],
+            reported: None,
             cutoff: false,
             propagates: false,
             only_reads: None,
@@ -1518,6 +1542,11 @@ impl Step {
 
     fn absent(mut self, codes: &'static [(&'static str, &'static str)]) -> Self {
         self.absent = codes;
+        self
+    }
+
+    fn reported(mut self, file: &'static str, at: Reported) -> Self {
+        self.reported = Some((file, at));
         self
     }
 
@@ -1634,7 +1663,9 @@ fn steps_kept_values() -> Vec<Step> {
 /// Exact effect reports follow every implementation of a call across modules (the targets of
 /// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
 /// (`EffectSummary::must_exec`, compared by Early Cutoff), and every binding of the name called
-/// that may be its last in the module or class body of another file.
+/// that may be its last in the module or class body of another file, a star import after the
+/// definition included, which binds what the module it imports defines
+/// (`ProjectDecls::name_holds`), also for the class of an instance made through the name.
 fn steps_exact_effects() -> Vec<Step> {
     vec![
         Step::new(
@@ -1724,6 +1755,61 @@ fn steps_exact_effects() -> Vec<Step> {
         .absent(&[
             ("pkg/exact_fetch_use.py", "EFF101"),
             ("pkg/exact_fetch_use.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "the function's module star-imports a module binding no such name after the function",
+            vec![
+                save(
+                    "pkg/exact_fetch.py",
+                    &format!("{EXACT_FETCH}\n\nfrom pkg.exact_star import *\n"),
+                ),
+                Action::Create("pkg/exact_star.py", EXACT_STAR.to_owned()),
+            ],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the star-imported module starts defining the function's name",
+            vec![save("pkg/exact_star.py", EXACT_STAR_REBINDING)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101")]),
+        Step::new(
+            "the star-imported module stops defining it",
+            vec![save("pkg/exact_star.py", EXACT_STAR)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF101")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "a class's module star-imports a module the project does not have after the class",
+            vec![
+                Action::Create("pkg/exact_client.py", EXACT_CLIENT.to_owned()),
+                Action::Create("pkg/exact_client_use.py", EXACT_CLIENT_USE.to_owned()),
+            ],
+        )
+        .absent(&[
+            ("pkg/exact_client_use.py", "EFF101"),
+            ("pkg/exact_client_use.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "the star-imported module is added, binding no such name",
+            vec![Action::Create("pkg/exact_rebind.py", EXACT_STAR.to_owned())],
+        )
+        .present(&[("pkg/exact_client_use.py", "EFF101")])
+        .absent(&[("pkg/exact_client_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "it starts defining the class's name",
+            vec![save("pkg/exact_rebind.py", EXACT_REBIND_CLIENT)],
+        )
+        .present(&[("pkg/exact_client_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_client_use.py", "EFF101")]),
+        Step::new(
+            "the star-imported module is removed",
+            vec![Action::Delete("pkg/exact_rebind.py")],
+        )
+        .absent(&[
+            ("pkg/exact_client_use.py", "EFF101"),
+            ("pkg/exact_client_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "a module binds a class under `global` in a function it runs on every path",
@@ -2707,6 +2793,35 @@ fn steps_helper_witnesses() -> Vec<Step> {
         )
         .present(&[("pkg/wit_serve.py", "EFF101")])
         .absent(&[("pkg/wit_serve.py", "EFF101 [heuristic]")]),
+    ]
+}
+
+/// The chain a report shows when another module changes what it is chosen by: the class an
+/// `isinstance` dispatch names turns into a protocol (an exact instance of another class no
+/// longer rules out its branch) and back, and the normal path of a helper stops reaching the
+/// effect (the handler's call is the witness) and reaches it again.
+fn steps_witness_ways() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the dispatch class becomes a protocol",
+            vec![save("pkg/wsel_kinds.py", WSEL_KINDS_PROTOCOL)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "it is a plain class again",
+            vec![save("pkg/wsel_kinds.py", WSEL_KINDS)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the helper waits only in its handler",
+            vec![save("pkg/wsel_retry.py", WSEL_RETRY_IN_HANDLER)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "it waits on the normal path again",
+            vec![save("pkg/wsel_retry.py", WSEL_RETRY)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
     ]
 }
 
@@ -8206,6 +8321,19 @@ impl Session {
                 step.name
             );
         }
+        if let Some((file, expected)) = step.reported {
+            let mut found: Vec<(u64, &str)> = (reference.get(file).into_iter().flatten())
+                .map(|d| (d.range.1.0 + 1, d.tiered_code()))
+                .collect();
+            found.sort_unstable();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(
+                found, expected,
+                "step `{}`: the CLI's diagnostics in {file}",
+                step.name
+            );
+        }
         let mut out: Vec<String> = differences(&published(&self.lsp, &self.root), &reference)
             .into_iter()
             .map(|d| format!("step `{}`: {d}", step.name))
@@ -8402,6 +8530,7 @@ sessions!(editing, Session::start, {
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,
+    witness_ways: steps_witness_ways,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,
     exact_instances: steps_exact_instances,
@@ -9338,6 +9467,114 @@ fn lsp_diagnostics_equal_a_full_check_through_import_cycles() {
     run_steps(s, &steps);
 }
 
+const CUTS_CONFIG: &str = "[project]\nname = \"acme\"\ndependencies = []\n\n[project.optional-dependencies]\nplot = [\"matplotlib\"]\n\n[tool.heki.lint]\nselect = [\"IMP101\", \"IMP302\"]\n";
+
+/// The help of `IMP101` and `IMP302` names the one import every cycle or every chain goes
+/// through, which the imports of other modules decide: a second cycle, or a second chain, that
+/// an edit of another module adds takes the name away, and the edit undone brings it back. So
+/// do the reads of what the imports bind while the modules load, in the module and in another
+/// one that takes the name from it.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_import_cuts() {
+    let files = vec![
+        ("acme/__init__.py", "from acme import api\n".to_owned()),
+        ("acme/api.py", "from acme import viz\n".to_owned()),
+        ("acme/viz.py", "import matplotlib\n".to_owned()),
+        ("acme/ra.py", "import acme.rb\n".to_owned()),
+        ("acme/rb.py", "import acme.rc\n".to_owned()),
+        ("acme/rc.py", "import acme.ra\n".to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_import_cuts", CUTS_CONFIG, files, false);
+    let both = &[("acme/rc.py", "IMP101"), ("acme/viz.py", "IMP302")];
+    let steps = [
+        Step::new(
+            "one import closes every cycle and carries every chain",
+            Vec::new(),
+        )
+        .present(both),
+        Step::new(
+            "a module of the ring closes a second cycle through another module",
+            vec![
+                Action::Create("acme/rd.py", "import acme.rb\n".to_owned()),
+                save("acme/rb.py", "import acme.rc\nimport acme.rd\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "the package imports the module with the extra directly too",
+            vec![save("acme/__init__.py", "from acme import api, viz\n")],
+        )
+        .present(both),
+        Step::new(
+            "the second cycle and the second chain are gone",
+            vec![
+                save("acme/rb.py", "import acme.rc\n"),
+                save("acme/__init__.py", "from acme import api\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "two modules of the ring read what their imports bind while they load",
+            vec![
+                save("acme/rb.py", "import acme.rc\n\nOWNER = acme.rc\n"),
+                save("acme/rc.py", "import acme.ra\n\nOWNER = acme.ra\n"),
+            ],
+        )
+        .present(both),
+        Step::new(
+            "the third module reads it while it loads too",
+            vec![save("acme/ra.py", "import acme.rb\n\nOWNER = acme.rb\n")],
+        )
+        .present(both),
+        Step::new(
+            "the third module reads it only in a function",
+            vec![save(
+                "acme/ra.py",
+                "import acme.rb\n\n\ndef owner():\n    return acme.rb\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the third module takes a name of the second and reads it only in a function",
+            vec![save(
+                "acme/ra.py",
+                "from acme.rb import OWNER\n\n\ndef owner():\n    return OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "another module takes that name from the third while it loads",
+            vec![Action::Create(
+                "acme/rx.py",
+                "from acme.ra import OWNER\n\nCOPY = OWNER\n".to_owned(),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it takes the name only in a function",
+            vec![save(
+                "acme/rx.py",
+                "def owner():\n    from acme.ra import OWNER\n\n    return OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "it reads the name off the module while it loads",
+            vec![save(
+                "acme/rx.py",
+                "import acme.ra\n\nCOPY = acme.ra.OWNER\n",
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the module that read the name is gone",
+            vec![Action::Delete("acme/rx.py")],
+        )
+        .present(both),
+    ];
+    run_steps(s, &steps);
+}
+
 /// A baseline whose one entry records the `IMP101` group of the modules `target` lists.
 fn group_baseline(target: &str) -> String {
     format!(
@@ -9949,6 +10186,85 @@ fn lsp_diagnostics_equal_a_full_check_as_classes_start_and_stop_implementing_a_p
         Step::new(
             "it implements it again",
             vec![save("pkg/impl.py", IMPLEMENTED_IMPL)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+const STATIC_MEMBERS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "members"
+targets = ["pkg.impl:Impl.build", "pkg.impl:Impl.make"]
+allowed-callers = ["pkg.impl:*"]
+"#;
+
+const STATIC_MEMBERS_HOST: &str = "from typing import Protocol\n\n\nclass Host(Protocol):\n    size: int\n\n    @staticmethod\n    def build() -> None: ...\n\n    @classmethod\n    def make(cls) -> None: ...\n";
+const STATIC_MEMBERS_IMPL: &str = "class Impl:\n    def __init__(self) -> None:\n        self.size = 0\n\n    @staticmethod\n    def build() -> None:\n        pass\n\n    @classmethod\n    def make(cls) -> None:\n        pass\n";
+const STATIC_MEMBERS_OTHER: &str =
+    "class Other:\n    def __init__(self) -> None:\n        self.size = 0\n";
+const STATIC_MEMBERS_USE: &str =
+    "from pkg.host import Host\n\n\ndef through(h: Host) -> None:\n    h.build()\n    h.make()\n";
+
+/// The static and class methods called through a protocol are a target's while the target's
+/// class alone implements the protocol, as the receiver tells the protocol: the calling module
+/// stays as it is while a class of another module starts implementing the protocol and stops
+/// again, and the protocol stops declaring the methods and declares them again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_static_and_class_members_through_a_protocol() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/host.py", STATIC_MEMBERS_HOST.to_owned()),
+        ("pkg/impl.py", STATIC_MEMBERS_IMPL.to_owned()),
+        ("pkg/other.py", STATIC_MEMBERS_OTHER.to_owned()),
+        ("pkg/use.py", STATIC_MEMBERS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_protocol_static_members",
+        STATIC_MEMBERS_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let other_implements = STATIC_MEMBERS_OTHER.replace(
+        "        self.size = 0\n",
+        "        self.size = 0\n\n    @staticmethod\n    def build() -> None:\n        pass\n\n    @classmethod\n    def make(cls) -> None:\n        pass\n",
+    );
+    let undeclared = STATIC_MEMBERS_HOST
+        .split("\n\n    @staticmethod")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+        + "\n";
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "a class outside the target's family starts implementing the protocol",
+            vec![save("pkg/other.py", &other_implements)],
+        )
+        .absent(reported),
+        Step::new(
+            "it stops implementing it",
+            vec![save("pkg/other.py", STATIC_MEMBERS_OTHER)],
+        )
+        .present(reported),
+        Step::new(
+            "the protocol stops declaring the static and class methods",
+            vec![save("pkg/host.py", &undeclared)],
+        ),
+        Step::new(
+            "it declares them again",
+            vec![save("pkg/host.py", STATIC_MEMBERS_HOST)],
         )
         .present(reported),
     ];
@@ -10747,6 +11063,153 @@ fn lsp_diagnostics_equal_a_full_check_for_class_object_attributes_across_modules
             vec![save("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE)],
         )
         .present(constructs),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+const MANAGER_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF103\"]\n";
+const MANAGER_MODELS: &str = "from django.db import models\n\nfrom pkg.managers import StreamManager\n\n\nclass Stream(models.Model):\n    objects = StreamManager()\n";
+const MANAGER_CLASS: &str =
+    "from django.db import models\n\n\nclass StreamManager(models.Manager):\n    pass\n";
+const MANAGER_USE: &str = "from pkg.models import Stream\n\n\ndef fetch(ids: list[int]) -> None:\n    for i in ids:\n        Stream.objects.get(id=i)\n";
+
+/// A model's manager is the class its body binds, which another module declares: the query per
+/// item through it goes when the manager class stops deriving from `models.Manager`, and when
+/// the model binds another value or another module stores one as its `objects`, is heuristic
+/// while the manager binds `get_queryset`, and comes back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/managers.py", MANAGER_CLASS.to_owned()),
+        ("pkg/models.py", MANAGER_MODELS.to_owned()),
+        ("pkg/use.py", MANAGER_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_model_managers", MANAGER_CONFIG, files, false);
+    let queries: &[(&str, &str)] = &[("pkg/use.py", "EFF103")];
+    let guessed: &[(&str, &str)] = &[("pkg/use.py", "EFF103 [heuristic]")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(queries),
+        Step::new(
+            "the manager class derives from no manager",
+            vec![save(
+                "pkg/managers.py",
+                &MANAGER_CLASS.replace("(models.Manager)", ""),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "it derives from `models.Manager` again",
+            vec![save("pkg/managers.py", MANAGER_CLASS)],
+        )
+        .present(queries),
+        Step::new(
+            "the manager binds `get_queryset`, which its query methods call",
+            vec![save(
+                "pkg/managers.py",
+                &MANAGER_CLASS.replace(
+                    "    pass\n",
+                    "    def get_queryset(self):\n        return super().get_queryset()\n",
+                ),
+            )],
+        )
+        .present(guessed)
+        .absent(queries),
+        Step::new(
+            "it binds none again",
+            vec![save("pkg/managers.py", MANAGER_CLASS)],
+        )
+        .present(queries),
+        Step::new(
+            "the model binds another value",
+            vec![save(
+                "pkg/models.py",
+                &MANAGER_MODELS.replace("StreamManager()", "None"),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "it binds the manager again",
+            vec![save("pkg/models.py", MANAGER_MODELS)],
+        )
+        .present(queries),
+        Step::new(
+            "another module stores another object as the model's `objects`",
+            vec![Action::Create(
+                "pkg/patch.py",
+                "from pkg.models import Stream\n\nStream.objects = None\n".to_owned(),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "that module is deleted",
+            vec![Action::Delete("pkg/patch.py")],
+        )
+        .present(queries),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+const OVERRIDE_MODELS: &str = "from django.db import models\n\n\nclass Stream(models.Model):\n    def save(self, *args, **kwargs):\n        self.touched = True\n        super().save(*args, **kwargs)\n";
+const OVERRIDE_QUERYSETS: &str = "from django.db import models\n\n\nclass StreamQuerySet(models.QuerySet):\n    def live(self):\n        return self.filter(live=True)\n";
+const OVERRIDE_USE: &str = "from pkg.models import Stream\n\n\ndef add(ids: list[int]) -> None:\n    for i in ids:\n        Stream.objects.create(id=i)\n\n\ndef fetch(ids: list[int]) -> None:\n    for i in ids:\n        Stream.objects.filter(id=i).get()\n";
+
+/// A model's `save` behind `QuerySet.create`, and a project `QuerySet` subclass, in other
+/// modules: the insert per item is heuristic while `save` may return without calling
+/// `super().save()`, the lookup per item while the subclass binds a name `get` looks up, and
+/// both come back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_django_overrides_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/models.py", OVERRIDE_MODELS.to_owned()),
+        ("pkg/querysets.py", OVERRIDE_QUERYSETS.to_owned()),
+        ("pkg/use.py", OVERRIDE_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_django_overrides", MANAGER_CONFIG, files, false);
+    // `add()` creates on line 6, `fetch()` looks up on line 11.
+    let exact: Reported = &[(6, "EFF103"), (11, "EFF103")];
+    let steps = [
+        Step::new("initial index", Vec::new()).reported("pkg/use.py", exact),
+        Step::new(
+            "`save` returns early on one path",
+            vec![save(
+                "pkg/models.py",
+                &OVERRIDE_MODELS.replace(
+                    "        self.touched = True\n",
+                    "        if self.touched:\n            return\n",
+                ),
+            )],
+        )
+        .reported("pkg/use.py", &[(6, "EFF103 [heuristic]"), (11, "EFF103")]),
+        Step::new(
+            "it calls `super().save()` on every path again",
+            vec![save("pkg/models.py", OVERRIDE_MODELS)],
+        )
+        .reported("pkg/use.py", exact),
+        Step::new(
+            "the queryset binds `_fetch_all`",
+            vec![save(
+                "pkg/querysets.py",
+                &OVERRIDE_QUERYSETS.replace("    def live(self):", "    def _fetch_all(self):"),
+            )],
+        )
+        .reported("pkg/use.py", &[(6, "EFF103"), (11, "EFF103 [heuristic]")]),
+        Step::new(
+            "it only adds a method again",
+            vec![save("pkg/querysets.py", OVERRIDE_QUERYSETS)],
+        )
+        .reported("pkg/use.py", exact),
     ];
     let mut failures = Vec::new();
     for step in &steps {

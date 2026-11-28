@@ -47,7 +47,13 @@ pkg/b.py:1:19: IMP102 [heuristic] `<module>` imports `make_a` from `pkg.a` while
 Found 3 diagnostic(s) in 3 file(s).
 ```
 
-This output is from heki 0.9.0. The full format adds the source line and a `help` that names the ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the cyclic import.
+This output is from heki 0.9.0. The full format adds the source line and a `help`. When one import is on every cycle of the modules, the help names it, as here, where each of the two imports is:
+
+```text
+  = help: every import cycle of these modules goes through this import: move it into the functions that use it, or make it `lazy`
+```
+
+heki names an import only after one search of the import graph without it finds the cycle gone, and only a change that takes it out of what the rule counts: `lazy` from Python 3.15 on, where Python allows the keyword, and neither change for a class of imports `cycle-edges` counts. It names no import whose name code running while its module loads may read: the module body with its class bodies, decorators, defaults, bases, and the annotations the target version evaluates in place, the module's functions these call or apply as decorators, and its `__all__`. Moved into a function, such an import leaves that read unbound, and made `lazy`, it loads at the read, still while the module loads. Nor does it name one whose name another project module takes while that module loads: by `from m import name`, a star import of the module (for a public name), an attribute read off the module object (`import m`, then `m.name`), or the module object passed anywhere else (for any name, private ones too), also through a package that re-exports the name. A later statement of the module rebinding the name takes the import out of this only when no code runs between them (no other import, no call), so that no other module can see the import's binding. Moved, the import leaves the module without the name, so the move is offered only while no other module reads it at all; a read in a function leaves `lazy`, which loads at that read. Otherwise the help names the general ways out: import the name inside the function that uses it, import the module and read the name where it is used, or bind the name before the import of the cycle. `IMP301` and `IMP302` name the one import every chain from the package to the reported module goes through, and `IMP201` with `reach = "import-time"` the one every chain to the forbidden module goes through, each checked the same way.
 
 ## 📦 What package code loads while it loads
 

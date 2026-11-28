@@ -19,6 +19,7 @@ use heki_effect::{
 };
 use heki_ir::BlockId;
 use heki_ir::walk::{Budget, Facts, Sparse, fixpoint};
+use heki_kb::EffectiveEcosystemKb;
 use heki_semantic::mangling;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
@@ -45,9 +46,11 @@ pub(super) fn calls_by_span<'i>(index: &'i ProjectIndex, writer: &Method<'_>) ->
 /// Whether the write `w` to `self.<attr>`, which the `@cached_property` named `prop` reads,
 /// establishes every premise of `MUT101`'s exact claim when `writer` runs it on any instance
 /// that runs it; `kept` is the **Kept to the return** fact of its definition.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn established(
     index: &ProjectIndex,
     decls: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
     writer: &FuncKey,
     prop: &str,
     attr: &str,
@@ -68,7 +71,7 @@ pub(super) fn established(
         && !setup_step(index, decls, writer, prop, &holders)
         && holders.iter().all(|class| {
             cached_getter_reads(index, decls, class, prop, &read)
-                && plain_write(decls, class, attr, w)
+                && plain_write(decls, kb, class, attr, w)
         })
 }
 
@@ -223,9 +226,16 @@ fn cached_getter_reads(
 /// know along the MRO or in a subclass, and every base a project class or a plain one); an
 /// in-place change reads the attribute plainly and changes a builtin container it holds by its
 /// type through a method or item store that no project subclass of the container replaces.
-fn plain_write(decls: &ProjectDecls, class: &str, attr: &str, w: &SelfAttrWrite) -> bool {
+fn plain_write(
+    decls: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
+    class: &str,
+    attr: &str,
+    w: &SelfAttrWrite,
+) -> bool {
     let read = decls.attr_read(class, attr);
-    if !read.bases_known || read.custom_metaclass || !read.code_binders.is_empty() {
+    let bases_known = read.bases_known || decls.bases_store_plainly(class, attr, kb);
+    if !bases_known || read.custom_metaclass || !read.code_binders.is_empty() {
         return false;
     }
     if w.rebinds {

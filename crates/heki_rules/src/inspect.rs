@@ -1297,7 +1297,7 @@ fn effects(b: &Builder<'_, '_>, s: &EffectSummary, params: &[String]) -> Vec<Eff
                             GuardTest::Value(_) => "catalog",
                         },
                         classes: match &g.test {
-                            GuardTest::IsInstance(c) => c.clone(),
+                            GuardTest::IsInstance(t) => t.classes.clone(),
                             _ => Vec::new(),
                         },
                         has: g.test.attr().map(str::to_owned),

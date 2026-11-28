@@ -153,6 +153,10 @@ pub struct CapacityWait {
     pub wait: WhileFull,
     pub guards: EffectGuards,
     pub hop: CallHop,
+    /// The call is in cleanup code (`CallSite::cleanup`): the way it gives is ranked after the
+    /// ones on the normal path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup: bool,
 }
 
 // -------------------------------------------------------------------------------- one function
@@ -673,9 +677,8 @@ impl ParamCapacities {
             for &e in &w.wait.effects {
                 let had = !s.direct_exec_effects.insert(e);
                 guards::add_occurrence(&mut s.exec_guards, e, had, &w.guards);
-                s.exec_chains
-                    .entry(e)
-                    .or_insert_with(|| vec![Arc::new(w.hop.clone())]);
+                let needs = crate::witness::needs_of(&w.guards.inputs);
+                s.add_way(e, needs, w.cleanup, vec![Arc::new(w.hop.clone())], false);
             }
         }
     }

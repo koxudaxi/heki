@@ -895,3 +895,317 @@ fn a_group_is_unused_only_where_the_rule_runs_on_all_its_files() {
     );
     assert!(!err.contains("`pkg.a, pkg.b` matched no report"), "{err}");
 }
+
+/// The help of the one report.
+fn the_help(p: &Project, args: &[&str]) -> String {
+    let found = diagnostics(p, args);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    found[0]["help"].as_str().unwrap().to_owned()
+}
+
+/// A ring `r.a` -> ... -> `r.f` -> `r.a` with an inner cycle `r.b` -> `r.c` -> `r.d` -> `r.b`:
+/// only the imports of `r.c` in `r.b` and of `r.d` in `r.c` are on both cycles.
+fn ring_with_inner_cycle() -> Project {
+    let mut files = vec![("r/__init__.py", "")];
+    files.extend([
+        ("r/a.py", "import r.b\n"),
+        ("r/b.py", "import r.c\n"),
+        ("r/c.py", "import r.d\n"),
+        ("r/d.py", "import r.e\nimport r.b\n"),
+        ("r/e.py", "import r.f\n"),
+        ("r/f.py", "import r.a\n"),
+    ]);
+    project("import_cycles_cut", &files)
+}
+
+/// The help names the first import of the reported cycle that every cycle of the group goes
+/// through, which heki checked with one search: moved into a function, or made lazy on Python
+/// 3.15, it leaves the modules without a cycle. The import closing the reported cycle is not on
+/// the inner cycle, so it is not named.
+#[test]
+fn the_import_on_every_cycle_of_a_group_is_named() {
+    let p = ring_with_inner_cycle();
+    assert_eq!(
+        the_help(&p, &[]),
+        "every import cycle of these modules goes through the import of `r.c` in `r.b`: move it \
+         into the functions of `r.b` that use it"
+    );
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        "every import cycle of these modules goes through the import of `r.c` in `r.b`: move it \
+         into the functions of `r.b` that use it, or make it `lazy`"
+    );
+    p.write("r/b.py", "def load():\n    import r.c\n\n    return r.c\n");
+    assert!(reports(&p, &[]).is_empty());
+    p.write(
+        "r/b.py",
+        "lazy import r.c\n\n\ndef load():\n    return r.c\n",
+    );
+    assert!(reports(&p, &["--target-version", "py315"]).is_empty());
+}
+
+/// The import closing the reported cycle is named as this import when every cycle goes through
+/// it; one inside a `try` statement, where Python rejects `lazy`, is only to be moved.
+#[test]
+fn the_reported_import_on_every_cycle_is_this_import() {
+    let p = h7();
+    let py315 = ["--target-version", "py315"];
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through this import: move it into the \
+         functions that use it, or make it `lazy`"
+    );
+    p.write(
+        "pkg/b.py",
+        &format!(
+            "try:\n    from pkg.a import helper_a\nexcept ImportError:\n    raise\n{}",
+            &H7_B[26..]
+        ),
+    );
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through this import: move it into the \
+         functions that use it"
+    );
+}
+
+/// When no one import is on every cycle, or the change would make the import one that
+/// `cycle-edges` counts, the help stays the general one.
+#[test]
+fn a_group_without_one_import_on_every_cycle_keeps_the_general_help() {
+    const GENERAL: &str = "break the cycle at one of its imports: move what the modules share \
+        into a module none of them imports, or import the name only where it is used";
+    let p = project(
+        "import_cycles_no_cut",
+        &[
+            ("q/__init__.py", ""),
+            ("q/a.py", "import q.b\nimport q.c\n"),
+            ("q/b.py", "import q.a\n"),
+            ("q/c.py", "import q.a\n"),
+        ],
+    );
+    assert_eq!(the_help(&p, &["--target-version", "py315"]), GENERAL);
+    let p = project(
+        "import_cycles_counted_cut",
+        &[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", H7_A),
+            ("pkg/b.py", H7_B),
+        ],
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.imports]\ncycle-edges = [\"body\", \"function\"]\n",
+    );
+    assert_eq!(the_help(&p, &[]), GENERAL);
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        "every import cycle of these modules goes through this import: make it `lazy`"
+    );
+}
+
+/// The help of a group without an import heki can name.
+const GENERAL_CYCLE_HELP: &str = "break the cycle at one of its imports: move what the modules \
+    share into a module none of them imports, or import the name only where it is used";
+
+/// A cycle of `pkg.a` and `pkg.b` where `pkg.b` reads the module `pkg.a` while it loads: only
+/// the import of `pkg.b` in `pkg.a` can be named, and only while nothing that runs while
+/// `pkg.a` loads reads the name it binds.
+fn cycle_through(a: &str) -> Project {
+    let b = "import pkg.a\n\n\nclass Base:\n    pass\n\n\ndef route(f):\n    return f\n\n\n\
+             routes = []\nOWNER = pkg.a\n";
+    project(
+        "import_cycles_load_time_use",
+        &[("pkg/__init__.py", ""), ("pkg/a.py", a), ("pkg/b.py", b)],
+    )
+}
+
+/// An import whose name only functions read is named: moved into them, or made lazy, it no
+/// longer runs while its module loads, and the module still loads.
+#[test]
+fn an_import_only_functions_read_is_named() {
+    let p = cycle_through("from pkg.b import Base\n\n\ndef make() -> object:\n    return Base()\n");
+    let named = "every import cycle of these modules goes through the import of `pkg.b` in \
+                 `pkg.a`: move it into the functions of `pkg.a` that use it";
+    assert_eq!(the_help(&p, &[]), named);
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        format!("{named}, or make it `lazy`")
+    );
+}
+
+/// An import a class statement reads for its base is needed while the module loads: moved into
+/// a function, the base is unbound, and made lazy, it loads at the class statement. Neither
+/// change is offered, and the help is the general one. So for a generic class, whose bases its
+/// type-parameter scope reads.
+#[test]
+fn an_import_a_base_class_reads_is_not_named() {
+    let p = cycle_through("from pkg.b import Base\n\n\nclass A(Base):\n    pass\n");
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        GENERAL_CYCLE_HELP
+    );
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import Base\n\n\nclass A[T](Base):\n    kind = T\n",
+    );
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        GENERAL_CYCLE_HELP
+    );
+}
+
+/// A decorator runs while the module loads: the import of the decorator, and an import a
+/// decorator of the module reads in its body, are not named.
+#[test]
+fn an_import_a_decorator_reads_is_not_named() {
+    let p = cycle_through("from pkg.b import route\n\n\n@route\ndef index() -> None:\n    pass\n");
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import routes\n\n\ndef register(f):\n    routes.append(f)\n    return \
+         f\n\n\nclass Views:\n    @register\n    def index(self) -> None:\n        pass\n",
+    );
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+}
+
+/// On Python 3.15 a `from` import of the module body may be made lazy, but not when the module
+/// reads its name while it loads, there or in a function it calls: the import would load at
+/// that read. An annotation is such a read before Python 3.14 only, where `def` evaluates it.
+#[test]
+fn a_lazy_import_is_not_offered_for_a_name_read_while_the_module_loads() {
+    let py315 = ["--target-version", "py315"];
+    let p = cycle_through("from pkg.b import Base\n\nDEFAULT = Base()\n");
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import Base\n\n\ndef make() -> object:\n    return Base()\n\n\nDEFAULT = \
+         make()\n",
+    );
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import Base\n\n\ndef make(kind: Base) -> None:\n    pass\n",
+    );
+    assert_eq!(
+        the_help(&p, &["--target-version", "py313"]),
+        GENERAL_CYCLE_HELP
+    );
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through the import of `pkg.b` in `pkg.a`: \
+         move it into the functions of `pkg.a` that use it, or make it `lazy`"
+    );
+}
+
+/// Another module that takes the name an import binds while it loads needs the import where
+/// it is: moved into a function, the module no longer has the name, and made lazy, it loads at
+/// that read. So for a package that re-exports the name for its modules, a star import, and a
+/// read off the module object; a name of the same module that no import binds is no such read,
+/// nor is a name the module rebinds after the import with no code run in between, which other
+/// modules see only once it is rebound. Code run in between may load a module reading it.
+#[test]
+fn an_import_whose_name_another_module_takes_while_it_loads_is_not_named() {
+    let py315 = ["--target-version", "py315"];
+    let p = cycle_through("from pkg.b import Base\n\n\ndef make() -> object:\n    return Base()\n");
+    p.write("pkg/__init__.py", "from pkg.a import Base\n");
+    p.write("pkg/c.py", "from pkg import Base\n\nDEFAULT = Base()\n");
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/c.py", "from pkg.a import *\n");
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    p.write("pkg/c.py", "import pkg.a\n\nDEFAULT = pkg.a.Base()\n");
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+    let named = "every import cycle of these modules goes through the import of `pkg.b` in \
+                 `pkg.a`: move it into the functions of `pkg.a` that use it, or make it `lazy`";
+    p.write("pkg/c.py", "import pkg.a as a\n\nDEFAULT = a.make()\n");
+    assert_eq!(the_help(&p, &py315), named);
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import Base\n\n\ndef Base() -> object:\n    return object()\n",
+    );
+    p.write("pkg/c.py", "from pkg.a import Base\n\nDEFAULT = Base()\n");
+    assert_eq!(the_help(&p, &py315), named);
+}
+
+/// A later statement rebinding the name hides the import's binding from other modules only
+/// when no code runs between them: another import, a call, or a truth test there may load a
+/// module that reads the name while the module loads. A `del` binds nothing in its place.
+#[test]
+fn code_between_an_import_and_its_rebinding_leaves_the_name_to_other_modules() {
+    let py315 = ["--target-version", "py315"];
+    let rebound = |between: &str| {
+        format!("from pkg.b import Base\n{between}\n\ndef Base() -> object:\n    return object()\n")
+    };
+    let p = cycle_through(&rebound(""));
+    p.write("pkg/c.py", "from pkg.a import Base\n\nDEFAULT = Base()\n");
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through the import of `pkg.b` in `pkg.a`: \
+         move it into the functions of `pkg.a` that use it, or make it `lazy`"
+    );
+    for between in [
+        "import json\n",
+        "READY = print()\n",
+        "FLAGS = []\nif FLAGS:\n    pass\n",
+    ] {
+        p.write("pkg/a.py", &rebound(between));
+        assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP, "{between}");
+    }
+    p.write("pkg/a.py", "from pkg.b import Base\n\ndel Base\n");
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+}
+
+/// A module that takes the name only in a function leaves the import free to be made lazy: it
+/// loads at that read, after the modules have loaded. Moved into a function, the module no
+/// longer has the name, so that change is not offered. A star import takes no private name,
+/// but code the module object is passed to may.
+#[test]
+fn an_import_whose_name_another_module_takes_in_a_function_may_be_made_lazy() {
+    let py315 = ["--target-version", "py315"];
+    let lazy = "every import cycle of these modules goes through the import of `pkg.b` in \
+                `pkg.a`: make it `lazy`";
+    let p = cycle_through("from pkg.b import Base\n\n\ndef make() -> object:\n    return Base()\n");
+    p.write(
+        "pkg/__init__.py",
+        "def base() -> type:\n    from pkg.a import Base\n\n    return Base\n",
+    );
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(the_help(&p, &py315), lazy);
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/c.py",
+        "import pkg.a\n\n\ndef make() -> object:\n    return pkg.a.Base()\n",
+    );
+    assert_eq!(the_help(&p, &py315), lazy);
+    p.write(
+        "pkg/a.py",
+        "from pkg.b import Base as _Base\n\n\ndef make() -> object:\n    return _Base()\n",
+    );
+    p.write("pkg/c.py", "from pkg.a import *\n");
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through the import of `pkg.b` in `pkg.a`: \
+         move it into the functions of `pkg.a` that use it, or make it `lazy`"
+    );
+    p.write(
+        "pkg/c.py",
+        "import pkg.a\n\n\ndef base() -> object:\n    return getattr(pkg.a, \"_Base\")\n",
+    );
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(the_help(&p, &py315), lazy);
+}
+
+/// An augmented assignment of the module body reads its target while the module loads: the
+/// import binding it is not named, moved or made lazy.
+#[test]
+fn an_import_an_augmented_assignment_reads_is_not_named() {
+    let p = cycle_through("from pkg.b import routes\n\nroutes += []\n");
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        GENERAL_CYCLE_HELP
+    );
+}

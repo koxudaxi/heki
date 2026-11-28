@@ -16,6 +16,13 @@ Three rules are exact and run by default, and two more are exact by default and 
 
 `EFF102` and `EFF103` also have heuristic reports, where a premise of the claim is open (a loop that can make a client or run a query on every iteration). They appear with `--heuristic`.
 
+`EFF103` knows Django's model managers from the ecosystem catalog. `Model.objects`, read on a model class or on `cls`, is the `Manager` Django adds, or the manager the model's body declares (`objects = StreamManager()`, a project subclass of `models.Manager`). Its query methods (`get`, `count`, `create`, `get_or_create`, `update`, ...) send a statement on every call, so calling one per item of a loop over data is an exact, default `EFF103` report; `filter`, `exclude`, and `all` only build a `QuerySet`. A method the manager adds is followed as project code. Some managers keep the report heuristic (with `--heuristic`) or unknown:
+
+- a manager that binds a name its query methods use (`get_queryset`, `_queryset_class`, `__init__`) runs its own code under them: heuristic. So is a model's default `objects` while the project defines such a manager, since heki takes a `Manager` to be possibly an instance of any project subclass;
+- a project `QuerySet` subclass (`models.QuerySet` is the catalog's `QuerySet`) that binds a name a query method looks up on the queryset (`get`'s `filter` and `_fetch_all`, `acount`'s `count`) runs its own code under that method: a call of it on a `QuerySet` is heuristic, since heki takes a `QuerySet` to be possibly an instance of any project subclass. A subclass that only adds methods keeps every row, on its own instances too;
+- `create` and `acreate` save a new instance of the model: while a project model binds `save` (or a method `save` reaches, `save_base`, `_save_table`, ...) otherwise than as a method calling `super().save(...)` on every path, they are heuristic. `get_or_create` and `update_or_create` query by `get` first on every call, and `QuerySet.delete` never calls the model's `delete`, so a model's overrides leave them exact;
+- a manager `from_queryset()` or `as_manager()` builds, one of a class outside the project, and related managers (`question.choice_set`, a many-to-many field read on an instance) are unknown: they add no effect.
+
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](ownership.md#a-generator-that-is-never-iterated). Both are exact and run by default.
 
 Two rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code. They are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](#resource-and-cancellation-lifetimes).
@@ -25,6 +32,8 @@ The knowledge base names the calls that wait. Besides `requests` and `httpx.Clie
 `DATA101` (exact, default, [`loop-carried-concat`](rules/loop-carried-concat.md)) also reports an array grown through `numpy.r_[...]` or `numpy.c_[...]` on every iteration (`arr = np.r_[arr, chunk]`), also when a helper returns that concatenation (`arr = grow(arr, chunk)`), as it does for `numpy.hstack`.
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
+
+The chain a blocking-call report shows (`EFF101`, both tiers, and `EFF105`) is one real path to the call, chosen in this order: a path the call's arguments allow (a helper that dispatches on `isinstance(item, Response)` shows the branch an argument of known class takes), then a path on the normal flow before one through cleanup code (an `except` handler or a `finally` body), then the shortest. Which path is shown never decides whether the report exists or its tier. Output folds many reports into one (`(+N more)`) only when they reach the same blocking call through the same helper: sites that call one API directly still fold together, and sites that reach different blocking calls through different helpers stay separate groups.
 
 ## 🔧 Rules to switch on
 

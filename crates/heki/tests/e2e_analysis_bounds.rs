@@ -17,7 +17,8 @@
 //! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
 //! for many parameters, or from many implementations of one call, and the type expressions aliases
 //! and casts spell, the names a module `__getattr__` serves, and the parameters functions return
-//! through calls of each other, down a long chain, around a cycle, or across many modules.
+//! through calls of each other, down a long chain, around a cycle, or across many modules, and
+//! the instance a model's `save` hands `super()` through the copies a loop carries.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -1409,6 +1410,32 @@ fn branches_on_a_long_copy_chain_of_an_is_test_read_it_once() {
             .write("m.py", &(lines.join("\n") + "\n"));
         p
     });
+}
+
+/// A function storing a value new on one path and the caller's on another at each of the 64 keys
+/// of one dict it follows, over and over in branches, and changing the key after each store: the
+/// keys are a data flow over the blocks whose fact is a word per key. Each key is reported once.
+#[test]
+fn constant_keys_stored_in_many_branches_are_followed_linearly() {
+    let found = check_linear(1_024, |stores| {
+        let mut lines = vec![
+            "def build(flag, headers):".to_owned(),
+            "    kwargs = {}".to_owned(),
+        ];
+        for i in 0..stores {
+            let key = i % 64;
+            lines.push("    if flag:".to_owned());
+            lines.push(format!("        kwargs[\"k{key}\"] = headers or {{}}"));
+            lines.push(format!("    kwargs[\"k{key}\"][\"x\"] = {i}"));
+        }
+        lines.push("    return kwargs".to_owned());
+        let p = Project::new(&format!("bounds_constant_keys_{stores}"));
+        p.write("pyproject.toml", MUT112_CONFIG)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT112").count();
+    assert_eq!(reported, 64);
 }
 
 /// A function testing one value against `None` before each of many conditional expressions over
@@ -7660,6 +7687,12 @@ fn a_ring_of_modules_importing_each_other_is_one_report() {
     assert_eq!(reports.len(), 1, "{reports:#?}");
     assert_eq!(reports[0]["path"], "c/m9999.py");
     assert_eq!(reports[0]["related"].as_array().unwrap().len(), modules - 1);
+    // Every import of the ring is on its one cycle: one search over the ring shows it.
+    assert_eq!(
+        reports[0]["help"],
+        "every import cycle of these modules goes through this import: move it into the \
+         functions that use it"
+    );
 }
 
 /// Every module of a clique imports every other: one group, whose shortest cycle the search
@@ -7709,10 +7742,22 @@ fn failing_ring(modules: usize) -> Project {
 fn the_runs_of_the_entries_of_one_cycle_share_one_budget() {
     let modules = 10_000;
     let diags = check_past_budgets(modules, &["import_failures"], failing_ring);
-    let reports = (diags.iter())
+    let reports: Vec<&Value> = (diags.iter())
         .filter(|d| d["rule_code"] == "IMP102")
-        .count();
-    assert!(0 < reports && reports < modules, "{reports}");
+        .collect();
+    assert!(
+        !reports.is_empty() && reports.len() < modules,
+        "{}",
+        reports.len()
+    );
+    // The imports on every cycle of the ring are found by one search, shared by its reports.
+    assert!(
+        (reports.iter()).all(|d| d["help"]
+            == "every import cycle of these modules goes through this import: move it into \
+                the functions that use it"),
+        "{:#?}",
+        reports[0]
+    );
 }
 
 /// A package whose `__init__` imports thousands of submodules, each importing `json`.
@@ -7876,19 +7921,84 @@ fn what_a_long_chain_loads_from_the_package_is_walked_once() {
     );
     let extra = (diags.iter()).find(|d| d["rule_code"] == "IMP302").unwrap();
     assert_eq!(extra["related"].as_array().unwrap().len(), modules);
+    // One search over what the base module loads shows every import of the chain carries it.
+    assert_eq!(
+        extra["help"],
+        "every chain of imports from a top-level package or an entry point's module to \
+         `d.m9999` goes through the import of `d.m9999` in `d.m9998`: move it into the \
+         functions of `d.m9998` that use it"
+    );
 }
 
 /// [`import_chain`] with an `import-boundaries` contract walking what `importers` import, which
 /// forbids the module at the end of the chain.
 fn import_chain_with_contract(modules: usize, importers: &str) -> Project {
+    import_chain_reaching(modules, importers, "all")
+}
+
+/// [`import_chain_with_contract`] with `reach`.
+fn import_chain_reaching(modules: usize, importers: &str, reach: &str) -> Project {
     let p = import_chain(modules);
     p.write(
         "pyproject.toml",
         &format!(
-            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"all\"\n"
+            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"{reach}\"\n"
         ),
     );
     p
+}
+
+/// With `reach = "import-time"`, the import every chain to the forbidden module goes through is
+/// found by one search over what the importer loads.
+#[test]
+fn the_import_a_long_chain_of_a_contract_goes_through_is_found_once() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &[], |n| {
+        import_chain_reaching(n, "c.m0", "import-time")
+    });
+    let report: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .collect();
+    assert_eq!(report.len(), 1, "{report:#?}");
+    assert_eq!(
+        report[0]["help"],
+        "every chain of imports from `c.m0` to `json` goes through the import of `json` in \
+         `c.m9999`: move it into the functions of `c.m9999` that use it"
+    );
+}
+
+/// A module importing thousands of forbidden modules of the project, each a report of a
+/// contract with `reach = "import-time"`.
+fn forbidden_imports_of_one_module(modules: usize) -> Project {
+    let p = Project::new("bounds_forbidden_imports");
+    p.write("c/__init__.py", "");
+    let imports: String = (0..modules).map(|i| format!("import c.f{i}\n")).collect();
+    p.write("c/m0.py", &imports);
+    for i in 0..modules {
+        p.write(&format!("c/f{i}.py"), "");
+    }
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-f\"\nimporters = [\"c.m0\"]\nforbidden-imports = [\"c.f*\"]\nreach = \"import-time\"\n",
+    );
+    p
+}
+
+/// The searches for the import a report's chains go through share one budget per walk: each
+/// visits the importer's sites, so one per report would grow with the square of them. The
+/// reports past it keep the contract's help alone.
+#[test]
+fn the_import_searches_of_one_walk_share_one_budget() {
+    let modules = 2_000;
+    let diags = check_past_budgets(modules, &["import_cuts"], forbidden_imports_of_one_module);
+    let helps: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .map(|d| &d["help"])
+        .collect();
+    assert_eq!(helps.len(), modules);
+    let named = |help: &&Value| help.as_str().is_some_and(|h| h.contains("goes through"));
+    assert!(helps.iter().any(named), "{:#?}", helps[0]);
+    assert!(!helps.iter().all(named), "{:#?}", helps[modules - 1]);
 }
 
 /// The walk of an `import-boundaries` contract with `reach` from the head of a long chain of
@@ -9304,6 +9414,68 @@ fn subclass_needs_on_two_parameters_stay_bounded_down_a_long_chain() {
     );
 }
 
+/// The ways a witness is chosen among (`EffectSummary::witness_ways`): `n` helpers, each
+/// dispatching on `isinstance` of the parameter it hands on to the one below (four classes in
+/// turn), so the sets of tests the ways are behind grow past `WITNESS_LIMIT`, the most kept per
+/// effect, and a chain past the per-way length drops its tests.
+#[test]
+fn witness_ways_behind_isinstance_tests_stay_bounded_down_a_long_chain() {
+    let shape = |n: usize| {
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class A:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class B:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class C:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class D:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "def h0(x):".to_owned(),
+            "    time.sleep(1)".to_owned(),
+        ];
+        for k in 1..n {
+            let class = ["A", "B", "C", "D"][k % 4];
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def h{k}(x):"),
+                format!("    if isinstance(x, {class}):"),
+                format!("        return h{}(x)", k - 1),
+                format!("    return h{}(x)", k - 1),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "async def top():".to_owned(),
+            format!("    h{}(A())", n - 1),
+        ]);
+        let p = Project::new(&format!("bounds_witness_ways_{n}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(2000, shape);
+    assert_eq!(
+        eff101_callers(&found),
+        [("top".to_owned(), "heuristic".to_owned())]
+    );
+}
+
 /// The values constructions bind to the read-only container fields of a frozen class
 /// (`ModuleDecls::field_values`): `n` functions, each making an instance of a frozen dataclass of
 /// eight fields with a read-only view in each, and replacing one; a function in another module
@@ -9409,4 +9581,289 @@ fn exit_statuses_behind_copy_chains_are_read_from_a_table() {
         )
     };
     assert!(past_budgets(800, &[], shape, counted).is_empty());
+}
+
+/// `c.a` and `c.b` importing each other while they load and reading what the import binds:
+/// `c.a` in its body, `c.b` at the end of a chain of `names` functions its body calls. `c.b`
+/// also imports `names` names of `os.path`, all listed in its `__all__`.
+fn module_read_while_loading(names: usize) -> Project {
+    let p = Project::new("bounds_read_while_loading");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "import c.b
+
+OWNER = c.b
+",
+    );
+    let imports: String = (0..names)
+        .map(|i| format!("from os.path import join as j{i}\n"))
+        .collect();
+    let all: String = (0..names).map(|i| format!("\"j{i}\", ")).collect();
+    let chain: String = (0..names)
+        .map(|i| format!("def g{i}():\n    return g{}()\n\n\n", i + 1))
+        .collect();
+    p.write(
+        "c/b.py",
+        &format!(
+            "import c.a\n{imports}\n__all__ = [{all}]\n\n\n{chain}def g{names}():\n    return \
+             c.a\n\n\nSTART = g0()\n"
+        ),
+    );
+    selecting_import_cycles(p)
+}
+
+/// What a module reads while it loads (its `__all__`, the functions it calls) is collected once
+/// for all its imports: the end of the chain reads the import of the cycle, so no import of the
+/// cycle is named.
+#[test]
+fn the_names_a_module_reads_while_it_loads_are_collected_once() {
+    let diags = check_linear(4_000, module_read_while_loading);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+}
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which binds `m` to
+/// `names` modules one after another and reads `names` attributes off it in a function: each
+/// read may be of every one of them.
+fn attributes_off_many_imports(names: usize) -> Project {
+    let p = Project::new("bounds_attributes_off_imports");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let imports: String = (0..names).map(|i| format!("import m{i} as m\n")).collect();
+    let reads: String = (0..names).map(|i| format!("    m.y{i}\n")).collect();
+    p.write("c/d.py", &format!("{imports}\n\ndef reads():\n{reads}"));
+    selecting_import_cycles(p)
+}
+
+/// The attributes a module reads off what its imports bind are followed within the budget of
+/// the module; past it, the module may read any name of any module, so no import whose name
+/// another module may read is named.
+#[test]
+fn the_attributes_a_module_reads_off_its_imports_are_followed_within_a_budget() {
+    let diags = check_past_budgets(4_000, &["import_names_read"], attributes_off_many_imports);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+    let small = check_linear(10, attributes_off_many_imports);
+    let small: Vec<&Value> = (small.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(
+        small[0]["help"],
+        "every import cycle of these modules goes through the import of `c.b` in `c.a`: move it \
+         into the functions of `c.a` that use it"
+    );
+}
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, whose function reads
+/// a chain of `names` attributes off `c.a`, one assignment after another.
+fn attribute_chain_off_an_import(names: usize) -> Project {
+    let p = Project::new("bounds_attribute_chain_off_an_import");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let chain: String = (1..=names)
+        .map(|i| format!("    v{i} = v{}.x{i}\n", i - 1))
+        .collect();
+    p.write(
+        "c/d.py",
+        &format!("import c.a\n\n\ndef chain():\n    v0 = c.a\n{chain}    return v{names}\n"),
+    );
+    selecting_import_cycles(p)
+}
+
+/// Each step of a chain of attributes makes a name as long as the chain so far: past the budget
+/// of the module the walk stops, and the module may read any name of any module.
+#[test]
+fn the_names_a_chain_of_attributes_off_an_import_makes_stop_at_the_budget() {
+    let diags = check_past_budgets(400, &["import_names_read"], attribute_chain_off_an_import);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+    let small = check_linear(10, attribute_chain_off_an_import);
+    let small: Vec<&Value> = (small.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(
+        small[0]["help"],
+        "every import cycle of these modules goes through the import of `c.b` in `c.a`: move it \
+         into the functions of `c.a` that use it"
+    );
+}
+
+/// `c.a` importing the private `_Base` from `c.b`, which imports `c.a` back, and `c.d`, whose
+/// body reads a chain of `names` attributes off `c.a`, one assignment after another, and then
+/// `c.a._Base`.
+fn attribute_chain_then_a_private_read(names: usize) -> Project {
+    let p = Project::new("bounds_attribute_chain_then_a_private_read");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import _Base\n\n\ndef make() -> object:\n    return _Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass _Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let chain: String = (1..=names)
+        .map(|i| format!("v{i} = v{}.x{i}\n", i - 1))
+        .collect();
+    p.write(
+        "c/d.py",
+        &format!("import c.a\n\nv0 = c.a\n{chain}BASE = c.a._Base\n"),
+    );
+    selecting_import_cycles(p)
+}
+
+/// Past the budget the module may read any name of any module, a private one too: the read of
+/// `c.a._Base` after the chain is not followed, so the import binding `_Base` is not named.
+#[test]
+fn past_the_budget_a_module_may_read_any_private_name() {
+    let diags = check_past_budgets(
+        400,
+        &["import_names_read"],
+        attribute_chain_then_a_private_read,
+    );
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+}
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which merges `c.a`
+/// with an attribute of each of `names` modules, one conditional after another, and reads
+/// `attr` off the result in a function.
+fn merged_imports_read(attr: &'static str) -> impl Fn(usize) -> Project {
+    move |names| {
+        let p = Project::new("bounds_merged_imports_read");
+        p.write("c/__init__.py", "");
+        p.write(
+            "c/a.py",
+            "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+        );
+        p.write(
+            "c/b.py",
+            "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+        );
+        let imports: String = (0..names).map(|i| format!("import m{i}\n")).collect();
+        let merges: String = (0..names)
+            .map(|i| format!("    v{} = v{i} if flag else m{i}.p\n", i + 1))
+            .collect();
+        p.write(
+            "c/d.py",
+            &format!(
+                "import c.a\n{imports}\n\ndef merged(flag):\n    v0 = c.a\n{merges}    \
+                 return v{names}.{attr}\n"
+            ),
+        );
+        selecting_import_cycles(p)
+    }
+}
+
+/// A value joining what the imports bind holds one node per join, not every module joined: a
+/// read at the end of a chain of merges reaches `c.a` at its start once, so the import that
+/// binds the name read is not named, and it is where another name is read.
+#[test]
+fn a_read_through_a_chain_of_merged_imports_reaches_each_module_once() {
+    let general = "break the cycle at one of its imports: move what the modules share into a \
+                   module none of them imports, or import the name only where it is used";
+    let named = "every import cycle of these modules goes through the import of `c.b` in `c.a`: \
+                 move it into the functions of `c.a` that use it";
+    for (attr, help) in [("Base", general), ("Other", named)] {
+        let diags = check_linear(2_000, merged_imports_read(attr));
+        let reports: Vec<&Value> = (diags.iter())
+            .filter(|d| d["rule_code"] == "IMP101")
+            .collect();
+        assert_eq!(reports.len(), 1, "{reports:#?}");
+        assert_eq!(reports[0]["help"], help, "reading {attr}");
+    }
+}
+
+/// A Django model whose `save` hands `super(Chained, v0)` an instance passed back through `links`
+/// copies a loop carries, one loop phi per link, and a function creating models in a loop.
+fn save_through_loop_copies(links: usize) -> String {
+    let mut out = vec![
+        "from django.db import models".to_owned(),
+        String::new(),
+        String::new(),
+        "class Chained(models.Model):".to_owned(),
+        "    def save(self, *args, **kwargs):".to_owned(),
+    ];
+    for k in 0..=links {
+        out.push(format!("        v{k} = self"));
+    }
+    out.push("        for _ in args:".to_owned());
+    for k in 0..links {
+        out.push(format!("            v{k} = v{}", k + 1));
+    }
+    out.push(format!("            v{links} = self"));
+    out.push("        return super(Chained, v0).save(*args, **kwargs)".to_owned());
+    out.extend(
+        [
+            "",
+            "",
+            "def create_all(groups):",
+            "    for g in groups:",
+            "        Chained.objects.create(group=g)",
+        ]
+        .map(str::to_owned),
+    );
+    out.join("\n") + "\n"
+}
+
+/// Whether the instance a `save` override hands `super(Model, v)` is its own is a walk back
+/// through the copies and phis of `v`, in steps linear in the chain: the override still saves
+/// the row, so `create` in a loop stays an exact `EFF103`.
+#[test]
+fn a_save_handing_super_an_instance_through_loop_copies_takes_linear_steps() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_save_copies_{links}"));
+        p.write("app/models.py", &save_through_loop_copies(links));
+        p
+    };
+    let exact_creates = |found: Vec<Value>| {
+        (found.iter())
+            .filter(|d| d["rule_code"] == "EFF103" && d["certainty"] != "heuristic")
+            .count()
+    };
+    assert_eq!(exact_creates(check(&shape(4))), 1);
+    assert_eq!(exact_creates(check_linear(1600, shape)), 1);
 }

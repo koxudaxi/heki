@@ -1589,3 +1589,73 @@ fn a_method_named_import_module_of_a_known_class_is_no_import() {
     );
     assert_eq!(reports(&ignoring), Vec::<String>::new());
 }
+
+/// The help of each report, as `target: help`.
+fn helps(p: &Project) -> Vec<String> {
+    (diagnostics(p).iter())
+        .map(|d| format!("{}: {}", d["target"].as_str().unwrap(), d["help"]))
+        .collect()
+}
+
+/// With `reach = "import-time"`, a report whose every chain goes through one import names the
+/// one nearest the forbidden module, after the contract's message: moved into a function, it
+/// takes the report away. The contracts walking every import that runs have no such help.
+#[test]
+fn the_import_every_chain_to_a_forbidden_module_goes_through_is_named() {
+    let contract = |reach: &str| {
+        format!(
+            "[[tool.heki.import-boundaries]]\nname = \"startup\"\nimporters = [\"pkg.cli\"]\nforbidden-imports = [\"torch\", \"pkg.heavy\"]\nmessage = \"the command line starts fast\"\nreach = \"{reach}\"\n"
+        )
+    };
+    let write = |p: &Project| {
+        p.write("pkg/__init__.py", "")
+            .write("pkg/cli.py", CLI)
+            .write("pkg/models/__init__.py", "import torch.nn\n")
+            .write("pkg/models/base.py", "import pkg.heavy\n")
+            .write("pkg/heavy.py", "")
+            .write("pkg/helpers.py", "from pkg import heavy\n");
+    };
+    let p = project("imp_reach_cut", &contract("import-time"));
+    write(&p);
+    assert_eq!(
+        helps(&p),
+        [
+            "pkg.heavy: \"the command line starts fast; every chain of imports from `pkg.cli` to \
+             `pkg.heavy` goes through the import of `pkg.heavy` in `pkg.models.base`: move it \
+             into the functions of `pkg.models.base` that use it\"",
+            "torch: \"the command line starts fast; every chain of imports from `pkg.cli` to \
+             `torch` goes through the import of `torch.nn` in `pkg.models`: move it into the \
+             functions of `pkg.models` that use it\"",
+        ]
+    );
+    p.write(
+        "pkg/models/base.py",
+        "def heavy():\n    import pkg.heavy\n\n    return pkg.heavy\n",
+    );
+    assert_eq!(reports(&p), ["pkg/cli.py:1 IMP201 <module> torch"]);
+    let p = project("imp_reach_all_cut", &contract("all"));
+    write(&p);
+    assert_eq!(
+        helps(&p),
+        [
+            "pkg.heavy: \"the command line starts fast\"",
+            "torch: \"the command line starts fast\"",
+        ]
+    );
+}
+
+/// Two chains lead to the forbidden module: no one import carries both, and the help is the
+/// contract's message.
+#[test]
+fn a_forbidden_module_reached_through_two_chains_keeps_the_message() {
+    let p = project(
+        "imp_reach_no_cut",
+        "[[tool.heki.import-boundaries]]\nname = \"startup\"\nimporters = [\"pkg.cli\"]\nforbidden-imports = [\"pkg.heavy\"]\nmessage = \"the command line starts fast\"\nreach = \"import-time\"\n",
+    );
+    p.write("pkg/__init__.py", "")
+        .write("pkg/cli.py", "import pkg.a\nimport pkg.b\n")
+        .write("pkg/a.py", "import pkg.heavy\n")
+        .write("pkg/b.py", "import pkg.heavy\n")
+        .write("pkg/heavy.py", "");
+    assert_eq!(helps(&p), ["pkg.heavy: \"the command line starts fast\""]);
+}

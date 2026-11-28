@@ -6,19 +6,19 @@
 //! distributions provide a module and how the project declares them from
 //! [`Distributions::declared_only`].
 
-use super::{hop_text, when_text};
+use super::{chosen_cut, cut_help, hop_text, when_text};
 use crate::{CheckContext, ProjectLayout, RuleSelection};
 use heki_diagnostics::Diagnostic;
 use heki_effect::ProjectIndex;
 use heki_effect::code_kind::CodeKind;
 use heki_effect::imports::{
-    DeclaredOnly, Distributions, ImportFailure, ImportGraph, ImportHop, ModuleRef, Only,
+    DeclaredOnly, Distributions, ImportFailure, ImportGraph, ImportHop, ModuleRef, Only, Timing,
 };
 use heki_effect::resolver::ProjectDecls;
 use heki_env::HekiConfig;
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::FxHashMap;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::path::PathBuf;
 
 /// The two rules, and what each judges.
@@ -137,8 +137,7 @@ fn findings(
         return Vec::new();
     }
     let kinds = kinds.all();
-    let enters = |m: u32| kinds[m as usize] != CodeKind::Development;
-    let loaded = graph.loaded_from(starts(graph, config, rule, kinds), enters);
+    let loaded = graph.loaded_from(starts(graph, config, rule, kinds), enters(kinds));
     let mut out = Vec::new();
     for &m in &loaded.order {
         let Some(sites) = candidates.get(&m) else {
@@ -160,6 +159,12 @@ fn findings(
         }
     }
     out
+}
+
+/// Whether the walk of what a module's load loads enters the module `m`, `kinds` by module id:
+/// development code is no part of the installed package.
+fn enters(kinds: &[CodeKind]) -> impl Fn(u32) -> bool + '_ {
+    |m| kinds[m as usize] != CodeKind::Development
 }
 
 /// The modules whose load `rule` judges, ascending: for `IMP301` the package modules, for
@@ -207,10 +212,61 @@ pub(crate) fn imp301_imp302(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     let kind = |m: u32| cx.code_kind(graph.path(m), graph.name(ModuleRef::Project(m)));
     let kinds = Kinds::new(&graph, &kind);
     for rule in rules {
-        for finding in findings(&graph, cx.config, &declared, rule, &kinds) {
-            report(cx, &graph, rule, &finding, out);
+        let found = findings(&graph, cx.config, &declared, rule, &kinds);
+        if found.is_empty() {
+            continue;
+        }
+        let judged = Judged {
+            starts: starts(&graph, cx.config, rule, kinds.all()),
+            kinds: kinds.all(),
+            cuts: RefCell::default(),
+        };
+        for finding in found {
+            report(cx, &graph, rule, &judged, &finding, out);
         }
     }
+}
+
+/// The modules whose load a rule judges ([`starts`]), the kind of code of each module, and the
+/// help naming a cut ([`cut`]) of each module with findings, which share its chain.
+struct Judged<'k> {
+    starts: Vec<u32>,
+    kinds: &'k [CodeKind],
+    cuts: RefCell<FxHashMap<u32, Option<String>>>,
+}
+
+/// The help naming the import on every chain from the modules whose load `rule` judges to the
+/// module of `finding`, when one search finds it ([`ImportGraph::loaded_from_cuts`]): the last
+/// such import of the chain, the one nearest the reported import. None for a finding in a module
+/// the rule judges itself, which only its own import loads.
+fn cut(
+    cx: &CheckContext<'_>,
+    graph: &ImportGraph<'_>,
+    rule: Rule,
+    judged: &Judged<'_>,
+    finding: &Finding,
+) -> Option<String> {
+    if finding.chain.is_empty() {
+        return None;
+    }
+    let budget = graph.budget("import_cuts");
+    let starts = judged.starts.iter().copied();
+    let cuts = graph
+        .loaded_from_cuts(&budget, starts, enters(judged.kinds), &finding.chain)
+        .open_means(Vec::new());
+    let sites: Vec<(u32, usize)> = (cuts.iter().rev())
+        .map(|&i| (finding.chain[i].from, finding.chain[i].site))
+        .collect();
+    let reported = (finding.module, finding.site);
+    let chosen = chosen_cut(cx, graph, &sites, None, |t| t == Timing::Body)?;
+    let module = graph.name(ModuleRef::Project(finding.module));
+    let what = match rule {
+        Rule::Development => format!("chain of imports from a package module to `{module}`"),
+        Rule::Extras => format!(
+            "chain of imports from a top-level package or an entry point's module to `{module}`"
+        ),
+    };
+    Some(cut_help(graph, chosen, reported, &what))
 }
 
 /// `` `a` `` , `` `a` and `b` ``, `` `a`, `b`, and `c` ``.
@@ -259,6 +315,7 @@ fn report(
     cx: &CheckContext<'_>,
     graph: &ImportGraph<'_>,
     rule: Rule,
+    judged: &Judged<'_>,
     finding: &Finding,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -307,14 +364,18 @@ fn report(
                 ", and the project declares {declared}: `import {start}` needs {needs}"
             ));
             let help = format!(
-                "import `{imported}` only inside the functions that use it, catch its \
-                 `ImportError` and name the extra to install, or declare {} in `[project] \
+                "import `{imported}` only inside the functions that use it, where a handler of \
+                 its `ImportError` can name the extra to install, or declare {} in `[project] \
                  dependencies`",
                 listed(&names)
             );
             (message, help)
         }
     };
+    let cut = (judged.cuts.borrow_mut().entry(finding.module))
+        .or_insert_with(|| cut(cx, graph, rule, judged, finding))
+        .clone();
+    let help = cut.unwrap_or(help);
     let related = (finding.chain.iter())
         .map(|hop| {
             let (site, message) = hop_text(

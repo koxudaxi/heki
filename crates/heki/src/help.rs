@@ -198,14 +198,24 @@ pub(crate) const INSPECT: LongHelp = LongHelp {
 pub(crate) const RECOMMEND: LongHelp = LongHelp {
     reference: Some(Docs::CliRecommend),
     exit_codes: &[(0, "the advice is printed"), ERROR_EXIT],
-    examples: &[(
-        "heki recommend",
-        "advice for the project in the working directory",
-    )],
+    examples: &[
+        (
+            "heki recommend",
+            "advice for the project in the working directory",
+        ),
+        (
+            "heki recommend --focus types",
+            "every standard type the code already keeps, as suggestions",
+        ),
+    ],
     machine_output: &[
         (
             "heki recommend --output-format json",
             "the advice as one object",
+        ),
+        (
+            "heki recommend --focus types --diff | git apply",
+            "the exact suggestions as one unified diff of annotations",
         ),
         (
             "heki recommend --output-format-json-schema",

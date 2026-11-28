@@ -448,7 +448,8 @@ fn the_text_lists_the_exact_groups_first_and_the_heuristic_ones_with_all() {
                  function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, \
                  on) reports handing it to a function without annotations that changes it.\n\
                  \x20 public: a name without a leading underscore along it; callers, overriders, \
-                 and implementers outside the checked files are not known\n";
+                 and implementers outside the checked files are not known\n\
+                 \x20 To apply the exact groups: heki recommend --focus types --diff | git apply\n";
     // The first 3 exact groups by rank, the others counted.
     assert_eq!(
         types_text(&p, &[]),
@@ -458,8 +459,52 @@ fn the_text_lists_the_exact_groups_first_and_the_heuristic_ones_with_all() {
              \x20   app/core.py:39   outer(rows) and 1 more in the group  list[int] -> Sequence[int]           public\n\
              \x20   app/core.py:6    total(rows)                          list[int] -> Sequence[int]           public\n\
              \x20   app/core.py:107  lookup(table)                        dict[str, int] -> Mapping[str, int]  public\n\
-             \x20   and 4 more exact group(s) (heki recommend --all lists them)\n{claim}"
+             \x20   and 4 more exact group(s) (heki recommend --focus types lists them)\n{claim}"
         )
+    );
+    // `--focus types` prints the section alone, with every exact group.
+    let (code, focused, err) = p.heki(&["recommend", "--focus", "types"]);
+    assert_eq!(code, 0, "{err}");
+    let lines: Vec<&str> = focused.lines().collect();
+    assert!(
+        lines[0].starts_with("heki recommend (experimental) on .: ")
+            && lines[1..3] == ["", "Types the code already keeps"]
+            && !focused.contains("Reports now"),
+        "{focused}"
+    );
+    let focused = types_text(&p, &["--focus", "types"]);
+    assert!(
+        focused.starts_with(
+            "  7 read-only parameter group(s), exact; 7 heuristic (heki recommend --focus types \
+             --all lists them)\n"
+        ) && focused
+            .lines()
+            .filter(|l| l.starts_with("    app/"))
+            .count()
+            == 7
+            && !focused.contains("more exact group")
+            && !focused.contains("heuristic: a premise"),
+        "{focused}"
+    );
+    assert_eq!(
+        types_text(&p, &["--focus", "types", "--all"]).trim_end(),
+        types_text(&p, &["--all"]).trim_end()
+    );
+    // The hint names the paths and options the request gave.
+    let (_, sub, _) = p.heki(&["recommend", "app", "--focus", "types"]);
+    assert!(
+        sub.contains("heki recommend app --focus types --diff | git apply"),
+        "{sub}"
+    );
+    // What the paths leave out bounds the claims: the note says so under the section.
+    let (_, app, _) = p.heki(&["recommend", "app", "--focus", "types"]);
+    assert!(
+        app.ends_with(
+            "\nNotes\n  - 1 Python file(s) below the project root were not analyzed \
+             (tests/test_core.py): heki takes the analyzed files as the whole project, so what it \
+             says about callers, readers, and writers holds for those files only.\n"
+        ),
+        "{app}"
     );
     // Every group with `--all`, the heuristic ones last with what they leave open.
     let all = types_text(&p, &["--all"]);
@@ -497,7 +542,8 @@ fn the_text_lists_the_exact_groups_first_and_the_heuristic_ones_with_all() {
          go together; --output-format json has them.\n\
          \x20 After the edit, a type checker reports a change of the parameter in the function \
          and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports \
-         handing it to a function without annotations that changes it.\n"
+         handing it to a function without annotations that changes it.\n\
+         \x20 To apply the exact groups: heki recommend --focus types --diff | git apply\n"
     );
     // A guard the configuration does not run says so.
     assert!(
@@ -539,6 +585,13 @@ fn two_runs_print_the_same_object_and_it_follows_the_schema() {
 
 /// The exact groups' edits applied to the project's files, each file's from its end.
 fn apply_exact(p: &Project, report: &Value) {
+    for (path, text) in exact_texts(p, report) {
+        p.write(&path, &text);
+    }
+}
+
+/// The text of each file the exact groups of `report` edit, with their edits applied.
+fn exact_texts(p: &Project, report: &Value) -> BTreeMap<String, String> {
     let mut by_file: BTreeMap<String, Vec<(usize, usize, String)>> = BTreeMap::new();
     for g in report["suggestions"]["groups"].as_array().unwrap() {
         if g["certainty"] != "exact" {
@@ -556,14 +609,16 @@ fn apply_exact(p: &Project, report: &Value) {
             }
         }
     }
+    let mut texts = BTreeMap::new();
     for (path, mut edits) in by_file {
         let mut text = p.read(&path);
         edits.sort();
         for (start, end, replacement) in edits.into_iter().rev() {
             text.replace_range(start..end, &replacement);
         }
-        p.write(&path, &text);
+        texts.insert(path, text);
     }
+    texts
 }
 
 #[test]
@@ -593,6 +648,319 @@ fn applied_suggestions_give_their_guard_nothing_to_report() {
             .contains("def total(rows: Sequence[int])")
     );
     assert!(mut_110(&p).is_empty());
+}
+
+/// `heki recommend --focus types --diff <args>`: (exit code, the diff as bytes, stderr).
+fn types_diff(p: &Project, args: &[&str]) -> (i32, Vec<u8>, String) {
+    let out = common::heki_command()
+        .args(["recommend", "--focus", "types", "--diff"])
+        .args(args)
+        .current_dir(&p.dir)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        out.stdout,
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// `git apply <args>` of `diff` in the project directory: whether it applied, and what git said.
+/// Line endings are applied as the patch holds them, whatever the machine's Git configuration.
+fn git_apply(p: &Project, diff: &[u8], args: &[&str]) -> (bool, String) {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("git")
+        .args(["-c", "core.autocrlf=false", "apply"])
+        .args(args)
+        .arg("-")
+        .current_dir(&p.dir)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("git runs");
+    child.stdin.take().unwrap().write_all(diff).unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `message` with its source locations (`line 12`, `:12:5`) replaced by a placeholder: an edit
+/// moves them. Every other number stays, so a changed count differs.
+fn without_locations(message: &str) -> String {
+    let chars: Vec<char> = message.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let rest: String = chars[i..].iter().collect();
+        let skip = if rest.starts_with("line ") {
+            out.push_str("line ");
+            i += 5;
+            true
+        } else if chars[i] == ':' && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+            out.push(':');
+            i += 1;
+            true
+        } else {
+            false
+        };
+        if skip {
+            let digits = chars[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+            if digits > 0 {
+                out.push('N');
+            }
+            i += digits;
+            // `:12:5`: the column after a line.
+            if chars.get(i) == Some(&':') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+                continue;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The reports of `heki check` with every rule, without their line numbers: an import added
+/// above them moves them.
+fn every_report(p: &Project) -> Vec<String> {
+    let (code, out, err) = p.heki(&[
+        "check",
+        "--select",
+        "ALL",
+        "--heuristic",
+        "--output-format",
+        "json",
+    ]);
+    assert!(code < 2, "{out}{err}");
+    let reports: Vec<Value> = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {err}"));
+    let mut keys: Vec<String> = (reports.iter())
+        .map(|r| {
+            let message = r["message"].as_str().unwrap();
+            let message = without_locations(message);
+            let at = ["rule_code", "path", "qualname", "target", "certainty"].map(|k| &r[k]);
+            format!("{at:?} {message}")
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn the_diff_holds_every_exact_group_and_applies_to_the_checked_files() {
+    let p = project("recommend_types_diff");
+    // A report in a file the diff edits, below the import it adds.
+    p.write(
+        "app/build.py",
+        "def build(items: list[int]) -> list[int]:\n    xs = []\n    for item in items:\n        \
+         xs = xs + [item]\n    return xs\n",
+    );
+    let before = every_report(&p);
+    assert!(
+        before.iter().any(|r| r.contains("app/build.py")),
+        "{before:?}"
+    );
+    // `--focus types` lists every exact group, and only those without `--all`.
+    let (report, _) = recommend(&p, &["--focus", "types"]);
+    let listed = report["suggestions"]["groups"].as_array().unwrap();
+    assert_eq!(listed.len(), 8);
+    assert!(listed.iter().all(|g| g["certainty"] == "exact"));
+    assert_eq!(report["suggestions"]["truncated"], true);
+    let expected = exact_texts(&p, &report);
+    let originals: BTreeMap<&String, String> = expected.keys().map(|k| (k, p.read(k))).collect();
+    let (code, diff, err) = types_diff(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        err,
+        "The diff holds 8 exact suggestion group(s) in 3 file(s); the 7 heuristic one(s) are not \
+         in it (heki recommend --focus types --all lists them).\n"
+    );
+    let text = String::from_utf8(diff.clone()).unwrap();
+    let files: Vec<&str> = (text.lines())
+        .filter_map(|l| l.strip_prefix("+++ b/"))
+        .collect();
+    assert_eq!(
+        files,
+        expected.keys().map(String::as_str).collect::<Vec<_>>()
+    );
+    // The diff holds no heuristic group: `taken.py` binds `Sequence` to another class.
+    assert!(!files.contains(&"app/taken.py"), "{text}");
+    let (applies, why) = git_apply(&p, &diff, &["--check"]);
+    assert!(applies, "{why}\n{text}");
+    let (applied, why) = git_apply(&p, &diff, &[]);
+    assert!(applied, "{why}");
+    for (path, text) in &expected {
+        assert_eq!(&p.read(path), text, "{path}");
+    }
+    let core = p.read("app/core.py");
+    assert!(
+        core.contains("def total(rows: Sequence[int])")
+            && core.contains("def rebound(rows: list[int])")
+            && core.contains("def named(rows: list[str])"),
+        "{core}"
+    );
+    // What the suggestions promise: no report of heki changes, and their guard has nothing to
+    // report.
+    assert_eq!(every_report(&p), before);
+    let (_, out, _) = p.heki(&["check", "--select", "MUT110", "--output-format", "json"]);
+    assert_eq!(out.trim(), "[]");
+    // Nothing exact is left: the diff is empty.
+    let (code, diff, err) = types_diff(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(diff.is_empty(), "{}", String::from_utf8_lossy(&diff));
+    assert!(
+        err.starts_with("The diff holds 0 exact suggestion group(s) in 0 file(s); the "),
+        "{err}"
+    );
+    // A diff holds the exact groups, not the report: no `--all`, no other format.
+    for args in [&["--all"][..], &["--output-format", "json"]] {
+        let (code, _, err) = types_diff(&p, args);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("cannot be used with"), "{err}");
+    }
+    let (code, _, err) = p.heki(&["recommend", "--diff"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--focus <FOCUS>"), "{err}");
+    // CPython's syntax trees of each edited file and of its original are equal once annotations
+    // and the imports the edit adds are left out.
+    for (path, original) in originals {
+        p.write(&format!("before/{path}"), &original);
+    }
+    p.write("annotations_only.py", ANNOTATIONS_ONLY);
+    let differ = common::run_python(&p.dir, "annotations_only.py");
+    assert_eq!(differ, "", "the files that change more than annotations");
+}
+
+/// Prints the files under `app/` whose syntax tree differs from the one of the same file under
+/// `before/` once annotations, and the names imported only in the new file, are left out.
+const ANNOTATIONS_ONLY: &str = r#"import ast
+import pathlib
+
+
+def imported(tree):
+    return {
+        (node.module, alias.name, alias.asname)
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+
+def at_run_time(tree, keep):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg):
+            node.annotation = None
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            node.returns = None
+        elif isinstance(node, ast.AnnAssign):
+            node.annotation = ast.Constant(None)
+    body = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            node.names = [a for a in node.names if (node.module, a.name, a.asname) in keep]
+            if not node.names:
+                continue
+        body.append(node)
+    tree.body = body
+    return ast.dump(tree)
+
+
+for old in sorted(pathlib.Path("before").rglob("*.py")):
+    new = pathlib.Path(*old.parts[1:])
+    before = ast.parse(old.read_text(encoding="utf-8"))
+    after = ast.parse(new.read_text(encoding="utf-8"))
+    keep = imported(before)
+    if at_run_time(before, keep) != at_run_time(after, keep):
+        print(new.as_posix())
+"#;
+
+/// Two functions with a read-only `list` parameter, written with `line_break`, and a call of
+/// each.
+fn read_only_pair(line_break: &str) -> String {
+    [
+        "def total(rows: list[int]) -> int:",
+        "    return sum(rows)",
+        "",
+        "",
+        "def first(rows: list[int]) -> int:",
+        "    return rows[0]",
+        "",
+        "",
+        "def run() -> int:",
+        "    return total([1]) + first([1])",
+        "",
+    ]
+    .join(line_break)
+}
+
+#[test]
+fn the_diff_keeps_line_breaks_and_the_declared_encoding() {
+    let p = Project::new("recommend_types_diff_bytes");
+    p.write("app/__init__.py", "")
+        .write("app/windows.py", &read_only_pair("\r\n"));
+    // Latin-1 (PEP 263), with a character outside ASCII next to the edit.
+    let latin1 = b"# coding: latin-1\n# caf\xe9\ndef lookup(table: dict[str, int]) -> int:\n    return table['\xe9']\n\n\ndef run() -> int:\n    return lookup({'\xe9': 1})\n";
+    std::fs::write(p.dir.join("app/legacy.py"), latin1).unwrap();
+    let (code, diff, err) = types_diff(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    let (applied, why) = git_apply(&p, &diff, &[]);
+    assert!(applied, "{why}\n{}", String::from_utf8_lossy(&diff));
+    let windows = p.read("app/windows.py");
+    assert_eq!(
+        windows,
+        format!(
+            "from collections.abc import Sequence\r\n\r\n\r\n{}",
+            read_only_pair("\r\n").replace("list[int]", "Sequence[int]")
+        )
+    );
+    let legacy = std::fs::read(p.dir.join("app/legacy.py")).unwrap();
+    let as_latin1 = |bytes: &[u8]| bytes.iter().copied().map(char::from).collect::<String>();
+    assert_eq!(
+        as_latin1(&legacy),
+        as_latin1(latin1)
+            .replace(
+                "# caf\u{e9}\n",
+                "# caf\u{e9}\nfrom collections.abc import Mapping\n\n\n"
+            )
+            .replace("table: dict[", "table: Mapping[")
+    );
+}
+
+/// A module with `n` functions whose `list` parameter is only read, and a call of each.
+fn many_read_only(n: usize) -> String {
+    (0..n)
+        .map(|i| format!("def f{i}(rows: list[int]) -> bool:\n    return 1 in rows\n\n\n"))
+        .chain(std::iter::once(format!(
+            "def run() -> bool:\n    return all([{}])\n",
+            (0..n)
+                .map(|i| format!("f{i}([1])"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+        .collect()
+}
+
+#[test]
+fn focus_types_lists_every_exact_group_past_the_cap() {
+    let p = Project::new("recommend_types_focus_cap");
+    p.write("app/__init__.py", "")
+        .write("app/many.py", &many_read_only(52));
+    let exact = |report: &Value| report["suggestions"]["groups"].as_array().unwrap().len();
+    let (report, _) = recommend(&p, &[]);
+    assert_eq!(exact(&report), 50);
+    assert_eq!(report["suggestions"]["truncated"], true);
+    let (report, _) = recommend(&p, &["--focus", "types"]);
+    assert_eq!(exact(&report), 52);
+    assert_eq!(report["suggestions"]["truncated"], false);
+    let (_, diff, err) = types_diff(&p, &[]);
+    assert_eq!(
+        err,
+        "The diff holds 52 exact suggestion group(s) in 1 file(s).\n"
+    );
+    let diff = String::from_utf8(diff).unwrap();
+    assert_eq!(diff.matches("+def f").count(), 52, "{diff}");
 }
 
 /// The exact groups by id, and the withheld ones by reason.

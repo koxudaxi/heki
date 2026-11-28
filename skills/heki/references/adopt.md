@@ -20,7 +20,8 @@ user what each one found, and stop where a step says to ask.
 First propose the exact types under "Types the code already keeps": each is an annotation edit
 (`Sequence`, `Mapping`, `AbstractSet`) for a parameter the code never changes, which the type
 checker and `MUT110` then guard. The edits of a group go together (`--output-format json` has
-them); leave the heuristic groups unless the user asks for them. Then pick the first one or two
+them, and `heki recommend --focus types --diff` prints every exact group as a patch for
+`git apply`); leave the heuristic groups unless the user asks for them. Then pick the first one or two
 contracts from what `heki recommend` lists as kept by the code today, for what no annotation can
 say, and show the user the lines you would add, with the reason. Do not propose the whole list: a
 contract the team has not agreed on becomes a report nobody reads. Wait for the user's answer
