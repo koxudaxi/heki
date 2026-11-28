@@ -9,7 +9,8 @@ use heki_ir::walk::{Answer, Budget, Visit, reach};
 use heki_ir::{FunctionId, InstKind, IrFunction, ModuleIr, Terminator, VarId};
 use heki_semantic::{ModuleImport, NameResolution, Scope, ScopeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 /// The module globals that code running while the module loads may read: the module body with
 /// the class bodies, comprehensions and type-parameter scopes it runs, where its decorators,
@@ -127,22 +128,22 @@ impl LoadReads<'_> {
     }
 
     /// What the module reads of the namespaces of other modules
-    /// ([`super::ModuleImports::names_read`]; `*` alone past the budget of
-    /// [`attributes_read`]: any public name of any module), `statements` its import statements
-    /// with their sites: the name a `from` import takes, every public name a star import takes
-    /// (`m.*`), and the attributes code reads off what an import binds (`import m` then
-    /// `m.Name`, each step of `a.b.Name`), also through a module global the module body binds to
-    /// it, or, where that value goes anywhere else (an argument, a return, an element), every
-    /// public name of it.
+    /// ([`super::ModuleImports::names_read`]; `*` alone past the budget of [`HeldNames`]: any
+    /// public name of any module), `statements` its import statements with their sites: the
+    /// name a `from` import takes, every public name a star import takes (`m.*`), and the
+    /// attributes code reads off what an import binds (`import m` then `m.Name`, each step of
+    /// `a.b.Name`), also through a module global the module body binds to it, or, where that
+    /// value goes anywhere else (an argument, a return, an element), every public name of it.
     pub(super) fn names_read<'a>(
         &self,
         ir: &'a ModuleIr,
         statements: &[(Statement<'a>, &ImportSite)],
     ) -> BTreeMap<String, ReadTime> {
         let mut read = NamesRead::default();
+        let mut held = HeldNames::of(ir);
         // What each import binds, by the span of its site, and by the module global it binds.
-        let mut bases: FxHashMap<Span, String> = FxHashMap::default();
-        let mut globals: FxHashMap<&'a str, BTreeSet<String>> = FxHashMap::default();
+        let mut bases: FxHashMap<Span, Node> = FxHashMap::default();
+        let mut bound: FxHashMap<&'a str, Vec<Node>> = FxHashMap::default();
         for &(statement, site) in statements {
             let Answer::Known(named) = &site.modules else {
                 continue;
@@ -169,95 +170,92 @@ impl LoadReads<'_> {
                 _ if imp.has_alias => module.clone(),
                 _ => module.split('.').next().unwrap_or(module).to_owned(),
             };
+            let base = held.name(base);
             if Some(imp.scope) == self.module_scope {
-                (globals.entry(imp.bound_name.as_str()).or_default()).insert(base.clone());
+                bound.entry(imp.bound_name.as_str()).or_default().push(base);
             }
             bases.insert(site.span, base);
         }
         if bases.is_empty() {
             return read.0;
         }
+        let mut globals: FxHashMap<&'a str, Node> = (bound.into_iter())
+            .filter_map(|(name, nodes)| Some((name, held.any_of(nodes)?)))
+            .collect();
         // The module body first: the globals it binds to what an import binds are known when
         // the functions read them.
         let (body, functions): (Vec<&IrFunction>, Vec<&IrFunction>) =
             ir.functions.iter().partition(|f| f.is_module_body);
-        for f in body.into_iter().chain(functions) {
+        let walked = body.into_iter().chain(functions).all(|f| {
             let time = if self.loading.contains(&f.id) {
                 ReadTime::Loading
             } else {
                 ReadTime::Later
             };
-            if !attributes_read(f, time, &bases, &mut globals, &mut read) {
-                // Past the budget, the module may read any public name of any module.
-                read.add("*".to_owned(), ReadTime::Loading);
-                break;
-            }
+            attributes_read(f, time, &bases, &mut globals, &mut held)
+        });
+        if !walked || !held.spell(&mut read) {
+            // Past the budget, the module may read any public name of any module.
+            read.add("*".to_owned(), ReadTime::Loading);
         }
         read.0
     }
 }
 
-/// The attributes `f`, running at `time`, reads off what the imports bind
-/// ([`LoadReads::names_read`]): `bases` by the span of the import, `globals` by the module
-/// global bound to it, which the module body adds to. `false` past the budget of `f`, which the
-/// dotted names it makes spend (a chain of attributes makes names as long as the chain).
+/// What `f`, running at `time`, holds and reads of what the imports bind, kept in `held`:
+/// `bases` by the span of the import, `globals` by the module global bound to it, which the
+/// module body adds to. `false` past the budget of `held`.
 fn attributes_read<'a>(
     f: &'a IrFunction,
     time: ReadTime,
-    bases: &FxHashMap<Span, String>,
-    globals: &mut FxHashMap<&'a str, BTreeSet<String>>,
-    read: &mut NamesRead,
+    bases: &FxHashMap<Span, Node>,
+    globals: &mut FxHashMap<&'a str, Node>,
+    held: &mut HeldNames,
 ) -> bool {
-    let budget = Budget::of_functions("import_names_read", [f]);
-    // What each variable of `f` may hold of what the imports bind, by dotted name.
-    let mut held: FxHashMap<VarId, Vec<String>> = FxHashMap::default();
-    let hold = |held: &mut FxHashMap<VarId, Vec<String>>, v: VarId, names: Vec<String>| {
-        let size: usize = names.iter().map(String::len).sum();
-        held.insert(v, names);
-        budget.take(size)
-    };
-    let escape = |held: &FxHashMap<VarId, Vec<String>>, read: &mut NamesRead, v: VarId| {
-        for base in held.get(&v).into_iter().flatten() {
-            read.add(format!("{base}.*"), time);
+    // What each value of `f` holds.
+    let mut values: FxHashMap<VarId, Node> = FxHashMap::default();
+    let escape = |held: &mut HeldNames, values: &FxHashMap<VarId, Node>, v: VarId| {
+        if let Some(&of) = values.get(&v) {
+            let every = held.attr(of, "*");
+            held.read(every, time);
         }
     };
     for block in &f.blocks {
-        let joins_kept = block.phis.iter().all(|phi| {
-            let mut joined: Vec<String> = (phi.incoming.iter())
-                .flat_map(|(_, v)| held.get(v).into_iter().flatten())
-                .cloned()
+        for phi in &block.phis {
+            let joined = (phi.incoming.iter())
+                .filter_map(|(_, v)| values.get(v).copied())
                 .collect();
-            joined.sort_unstable();
-            joined.dedup();
-            joined.is_empty() || hold(&mut held, phi.dst, joined)
-        });
-        let kept = joins_kept
-            && block.insts.iter().all(|inst| match &inst.kind {
-                InstKind::Import { dst, .. } => match bases.get(&inst.span) {
-                    Some(base) => hold(&mut held, *dst, vec![base.clone()]),
-                    None => true,
-                },
-                InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
-                    match globals.get(name.as_str()) {
-                        Some(bound) => hold(&mut held, *dst, bound.iter().cloned().collect()),
-                        None => true,
+            if let Some(node) = held.any_of(joined) {
+                values.insert(phi.dst, node);
+            }
+        }
+        for inst in &block.insts {
+            if held.budget.spent() {
+                return false;
+            }
+            match &inst.kind {
+                InstKind::Import { dst, .. } => {
+                    if let Some(&node) = bases.get(&inst.span) {
+                        values.insert(*dst, node);
                     }
                 }
-                InstKind::Copy { dst, src } => match held.get(src).cloned() {
-                    Some(bound) => hold(&mut held, *dst, bound),
-                    None => true,
-                },
-                InstKind::AttrLoad { dst, obj, attr } => match held.get(obj) {
-                    Some(bound) => {
-                        let attrs: Vec<String> =
-                            bound.iter().map(|b| format!("{b}.{attr}")).collect();
-                        for a in &attrs {
-                            read.add(a.clone(), time);
-                        }
-                        hold(&mut held, *dst, attrs)
+                InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
+                    if let Some(&node) = globals.get(name.as_str()) {
+                        values.insert(*dst, node);
                     }
-                    None => true,
-                },
+                }
+                InstKind::Copy { dst, src } => {
+                    if let Some(&node) = values.get(src) {
+                        values.insert(*dst, node);
+                    }
+                }
+                InstKind::AttrLoad { dst, obj, attr } => {
+                    if let Some(&of) = values.get(obj) {
+                        let node = held.attr(of, attr);
+                        held.read(node, time);
+                        values.insert(*dst, node);
+                    }
+                }
                 InstKind::MethodCall {
                     recv,
                     method,
@@ -265,41 +263,166 @@ fn attributes_read<'a>(
                     kwargs,
                     ..
                 } => {
-                    for base in held.get(recv).into_iter().flatten() {
-                        read.add(format!("{base}.{method}"), time);
+                    if let Some(&of) = values.get(recv) {
+                        let node = held.attr(of, method);
+                        held.read(node, time);
                     }
                     for &v in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
-                        escape(&held, read, v);
+                        escape(held, &values, v);
                     }
-                    true
                 }
-                InstKind::AttrStore { value, .. } => {
-                    escape(&held, read, *value);
-                    true
-                }
-                InstKind::AttrDelete { .. } => true,
+                InstKind::AttrStore { value, .. } => escape(held, &values, *value),
+                InstKind::AttrDelete { .. } => {}
                 InstKind::StoreGlobal { name, value } if f.is_module_body => {
-                    if let Some(bound) = held.get(value) {
-                        let names = globals.entry(name.as_str()).or_default();
-                        names.extend(bound.iter().cloned());
+                    if let Some(&node) = values.get(value) {
+                        let was = globals.get(name.as_str()).copied();
+                        if let Some(joined) = held.any_of(was.into_iter().chain([node]).collect()) {
+                            globals.insert(name.as_str(), joined);
+                        }
                     }
-                    true
                 }
                 kind => {
                     for v in kind.operands() {
-                        escape(&held, read, v);
+                        escape(held, &values, v);
                     }
-                    true
                 }
-            });
-        if !kept {
-            return false;
+            }
         }
         if let Terminator::Return(Some(v)) = &block.terminator {
-            escape(&held, read, *v);
+            escape(held, &values, *v);
         }
     }
-    true
+    !held.budget.spent()
+}
+
+/// A node of [`HeldNames`].
+type Node = u32;
+
+/// What a value may hold of what the imports bind ([`HeldNames`]).
+enum Held {
+    /// One dotted name: a module an import binds, or an attribute path off one.
+    Name(String),
+    /// What any of these nodes holds.
+    AnyOf(Vec<Node>),
+    /// The names an `AnyOf` node holds, each followed by this attribute path.
+    Path(Node, String),
+}
+
+/// What the values of a module may hold of what its imports bind, and which of them the module
+/// reads. A value joining others (a phi, a module global bound more than once) holds one node
+/// naming theirs, and an attribute off it one node naming the path: a chain of joins keeps one
+/// node per join, not every name each join may hold. The names are spelled out once per node
+/// and attribute path, for the nodes read ([`Self::spell`]). One budget for the module, which
+/// the names made and the nodes kept spend: a module global joins what its functions hold.
+struct HeldNames {
+    budget: Budget,
+    nodes: Vec<Held>,
+    names: FxHashMap<String, Node>,
+    paths: FxHashMap<(Node, String), Node>,
+    /// The nodes whose names the module reads, each with when.
+    reads: Vec<(Node, ReadTime)>,
+}
+
+impl HeldNames {
+    fn of(ir: &ModuleIr) -> Self {
+        Self {
+            budget: Budget::of_functions("import_names_read", &ir.functions),
+            nodes: Vec::new(),
+            names: FxHashMap::default(),
+            paths: FxHashMap::default(),
+            reads: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, held: Held) -> Node {
+        self.nodes.push(held);
+        (self.nodes.len() - 1) as Node
+    }
+
+    /// The node of the dotted name `name`.
+    fn name(&mut self, name: String) -> Node {
+        self.budget.take(name.len());
+        if let Some(&node) = self.names.get(&name) {
+            return node;
+        }
+        let node = self.push(Held::Name(name.clone()));
+        self.names.insert(name, node);
+        node
+    }
+
+    /// The node of the attribute `attr` off what `of` holds.
+    fn attr(&mut self, of: Node, attr: &str) -> Node {
+        let key = match &self.nodes[of as usize] {
+            Held::Name(name) => return self.name(format!("{name}.{attr}")),
+            Held::Path(any_of, path) => (*any_of, format!("{path}.{attr}")),
+            Held::AnyOf(_) => (of, attr.to_owned()),
+        };
+        self.budget.take(key.1.len());
+        if let Some(&node) = self.paths.get(&key) {
+            return node;
+        }
+        let node = self.push(Held::Path(key.0, key.1.clone()));
+        self.paths.insert(key, node);
+        node
+    }
+
+    /// The node holding what any of `nodes` holds; `None` for none.
+    fn any_of(&mut self, mut nodes: Vec<Node>) -> Option<Node> {
+        self.budget.take(nodes.len());
+        nodes.sort_unstable();
+        nodes.dedup();
+        match nodes.as_slice() {
+            [] => None,
+            &[node] => Some(node),
+            _ => Some(self.push(Held::AnyOf(nodes))),
+        }
+    }
+
+    fn read(&mut self, node: Node, time: ReadTime) {
+        self.reads.push((node, time));
+    }
+
+    /// The names the nodes read hold, each with the earliest time it is read, into `out`:
+    /// `false` past the budget. One walk from every read, so a node reached with the same
+    /// attribute path and time is visited once however many reads reach it.
+    fn spell(&self, out: &mut NamesRead) -> bool {
+        // The attribute paths the walk carries, interned: `None` for no path.
+        let paths: RefCell<(Vec<String>, FxHashMap<String, u32>)> = RefCell::default();
+        let after = |name: &str, path: Option<u32>| match path {
+            Some(path) => format!("{name}.{}", paths.borrow().0[path as usize]),
+            None => name.to_owned(),
+        };
+        let walked = reach(
+            &self.budget,
+            (self.reads.iter()).map(|&(node, time)| (node, None, time)),
+            |(node, path, time), next| match &self.nodes[node as usize] {
+                Held::Name(_) => {}
+                Held::AnyOf(nodes) => next.extend(nodes.iter().map(|&n| (n, path, time))),
+                Held::Path(any_of, first) => {
+                    let joined = after(first, path);
+                    self.budget.take(joined.len());
+                    let mut paths = paths.borrow_mut();
+                    let (spelled, ids) = &mut *paths;
+                    let id = *ids.entry(joined).or_insert_with_key(|joined| {
+                        spelled.push(joined.clone());
+                        (spelled.len() - 1) as u32
+                    });
+                    next.push((*any_of, Some(id), time));
+                }
+            },
+            |(node, path, time)| {
+                if let Held::Name(name) = &self.nodes[node as usize] {
+                    let name = after(name, path);
+                    if !self.budget.take(name.len()) {
+                        return Visit::Stop(());
+                    }
+                    out.add(name, time);
+                }
+                Visit::Expand
+            },
+        );
+        matches!(walked, Answer::Known(None)) && !self.budget.spent()
+    }
 }
 
 /// [`LoadReads::names_read`] as it is gathered: each name with the earliest time it is read.

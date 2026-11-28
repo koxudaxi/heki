@@ -9528,8 +9528,8 @@ fn attributes_off_many_imports(names: usize) -> Project {
 }
 
 /// The attributes a module reads off what its imports bind are followed within the budget of
-/// each function; past it, the module may read any name of any module, so no import whose
-/// name another module may read is named.
+/// the module; past it, the module may read any name of any module, so no import whose name
+/// another module may read is named.
 #[test]
 fn the_attributes_a_module_reads_off_its_imports_are_followed_within_a_budget() {
     let diags = check_past_budgets(4_000, &["import_names_read"], attributes_off_many_imports);
@@ -9551,4 +9551,53 @@ fn the_attributes_a_module_reads_off_its_imports_are_followed_within_a_budget() 
         "every import cycle of these modules goes through the import of `c.b` in `c.a`: move it \
          into the functions of `c.a` that use it"
     );
+}
+
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which merges `c.a`
+/// with an attribute of each of `names` modules, one conditional after another, and reads
+/// `attr` off the result in a function.
+fn merged_imports_read(attr: &'static str) -> impl Fn(usize) -> Project {
+    move |names| {
+        let p = Project::new("bounds_merged_imports_read");
+        p.write("c/__init__.py", "");
+        p.write(
+            "c/a.py",
+            "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+        );
+        p.write(
+            "c/b.py",
+            "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+        );
+        let imports: String = (0..names).map(|i| format!("import m{i}\n")).collect();
+        let merges: String = (0..names)
+            .map(|i| format!("    v{} = v{i} if flag else m{i}.p\n", i + 1))
+            .collect();
+        p.write(
+            "c/d.py",
+            &format!(
+                "import c.a\n{imports}\n\ndef merged(flag):\n    v0 = c.a\n{merges}    \
+                 return v{names}.{attr}\n"
+            ),
+        );
+        selecting_import_cycles(p)
+    }
+}
+
+/// A value joining what the imports bind holds one node per join, not every module joined: a
+/// read at the end of a chain of merges reaches `c.a` at its start once, so the import that
+/// binds the name read is not named, and it is where another name is read.
+#[test]
+fn a_read_through_a_chain_of_merged_imports_reaches_each_module_once() {
+    let general = "break the cycle at one of its imports: move what the modules share into a \
+                   module none of them imports, or import the name only where it is used";
+    let named = "every import cycle of these modules goes through the import of `c.b` in `c.a`: \
+                 move it into the functions of `c.a` that use it";
+    for (attr, help) in [("Base", general), ("Other", named)] {
+        let diags = check_linear(2_000, merged_imports_read(attr));
+        let reports: Vec<&Value> = (diags.iter())
+            .filter(|d| d["rule_code"] == "IMP101")
+            .collect();
+        assert_eq!(reports.len(), 1, "{reports:#?}");
+        assert_eq!(reports[0]["help"], help, "reading {attr}");
+    }
 }

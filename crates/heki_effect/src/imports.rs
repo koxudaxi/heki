@@ -267,7 +267,7 @@ pub struct ModuleImports {
 }
 
 /// When a module reads a name of another module's namespace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReadTime {
     /// While the reading module loads.
