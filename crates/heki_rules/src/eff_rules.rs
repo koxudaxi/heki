@@ -15,7 +15,10 @@ use crate::{
     CheckContext, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, ContractEntry, Diagnostic, OpenPremise, OpenRecord};
+use heki_diagnostics::{
+    Certainty, ContractEntry, Diagnostic, OpenPremise, OpenRecord, UnresolvedCall, UnresolvedSite,
+    UnresolvedWrite,
+};
 use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::resolver::NoItems;
 use heki_effect::with_paths;
@@ -1538,6 +1541,71 @@ struct Found {
     /// `write-universe` write, an item write under a key heki cannot tell): its list and place.
     entry: Option<(&'static str, usize)>,
     sites: BTreeSet<SiteId>,
+    /// What each of [`Self::sites`] is, for the kinds whose reports list their sites (what a
+    /// boundary cannot judge, `Diagnostic::unresolved_sites`); empty for the others.
+    listed: BTreeMap<SiteId, Listed>,
+}
+
+/// A site a report lists, at `span` of `path`: its line and column are found when the report
+/// is emitted, with the lines of each file read once ([`listed_sites`]).
+struct Listed {
+    path: std::path::PathBuf,
+    span: Span,
+    /// The function holding the site, by fully qualified name.
+    function: String,
+    what: ListedWhat,
+}
+
+enum ListedWhat {
+    Call {
+        callee: Option<String>,
+        reason: &'static str,
+        parameter: Option<String>,
+    },
+    Write {
+        attribute: Option<String>,
+        kind: &'static str,
+    },
+}
+
+/// The sites `found` lists, ordered by place ([`Diagnostic::unresolved_sites`]).
+fn listed_sites(cx: &CheckContext<'_>, found: &Found) -> Vec<UnresolvedSite> {
+    let mut lines: FxHashMap<&Path, Option<std::borrow::Cow<'_, heki_ast::LineIndex>>> =
+        FxHashMap::default();
+    let mut out: Vec<UnresolvedSite> = (found.listed.values())
+        .map(|l| {
+            let (line, column) = (lines.entry(&l.path))
+                .or_insert_with(|| cx.lines_of(&l.path))
+                .as_ref()
+                .map_or((0, 0), |index| index.line_col(l.span.start));
+            let (path, function) = (l.path.clone(), l.function.clone());
+            match &l.what {
+                ListedWhat::Call {
+                    callee,
+                    reason,
+                    parameter,
+                } => UnresolvedSite::Call(UnresolvedCall {
+                    path,
+                    line,
+                    column,
+                    function,
+                    callee: callee.clone(),
+                    reason: (*reason).to_owned(),
+                    parameter: parameter.clone(),
+                }),
+                ListedWhat::Write { attribute, kind } => UnresolvedSite::Write(UnresolvedWrite {
+                    path,
+                    line,
+                    column,
+                    function,
+                    attribute: attribute.clone(),
+                    kind: (*kind).to_owned(),
+                }),
+            }
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// Record `site` under `key`, keeping the first violation `first` builds; the record.
@@ -1555,10 +1623,23 @@ fn note<K: Ord>(
             kind,
             entry: None,
             sites: BTreeSet::new(),
+            listed: BTreeMap::new(),
         }
     });
     found.sites.insert(site);
     found
+}
+
+/// [`note`] for a site the report lists, which `listed` describes ([`Found::listed`]).
+fn note_listed<K: Ord>(
+    map: &mut BTreeMap<K, Found>,
+    key: K,
+    site: SiteId,
+    first: impl FnOnce() -> (Vec<CallHop>, Span, &'static str),
+    listed: impl FnOnce() -> Listed,
+) {
+    let found = note(map, key, site.clone(), first);
+    found.listed.entry(site).or_insert_with(listed);
 }
 
 /// The first environment read of a scope function (`reads-environment`): its kind and name, and
@@ -1579,6 +1660,7 @@ fn note_environment(
             kind: kind.describe(),
             entry: None,
             sites: BTreeSet::new(),
+            listed: BTreeMap::new(),
         };
         (found, kind, name)
     });
@@ -2340,12 +2422,12 @@ impl<'a> Reach<'a> {
         let blind = cx.index.files[path].blind_calls_of(func);
         let mut unresolved = false;
         for call in blind {
-            let heki_effect::Blind::Unresolved { name, .. } = &call.blind else {
+            let heki_effect::Blind::Unresolved { name, reason } = &call.blind else {
                 continue;
             };
             unresolved = true;
             let nodes = &self.nodes;
-            note(
+            note_listed(
                 &mut self.unjudged,
                 Unjudged::Calls,
                 (func.fqn(), call.span),
@@ -2361,6 +2443,16 @@ impl<'a> Reach<'a> {
                     });
                     (chain, call.span, "")
                 },
+                || Listed {
+                    path: path.to_path_buf(),
+                    span: call.span,
+                    function: func.fqn(),
+                    what: ListedWhat::Call {
+                        callee: name.clone(),
+                        reason: reason.as_str(),
+                        parameter: reason.parameter().map(str::to_owned),
+                    },
+                },
             );
         }
         let stub = heki_effect::is_stub(path);
@@ -2368,22 +2460,30 @@ impl<'a> Reach<'a> {
         if stub || unmodeled {
             let nodes = &self.nodes;
             // At the call reaching the function, or at the scope function itself.
-            let span = nodes[i]
-                .2
-                .as_ref()
-                .and_then(|(_, h)| h.last())
-                .map_or(self.start_span, |h| h.span);
-            note(
+            let reaching = nodes[i].2.as_ref().and_then(|(_, h)| h.last());
+            // The site is in the body of the step's first hop's caller: a `via` route adds a
+            // second hop from the function iterating the result, at the same site.
+            let holder = nodes[i].2.as_ref().and_then(|(_, h)| h.first());
+            let span = reaching.map_or(self.start_span, |h| h.span);
+            let (what, reason) = if stub {
+                ("a body only a stub declares", "stub-body")
+            } else {
+                ("a body heki does not model", "unmodeled-body")
+            };
+            note_listed(
                 &mut self.unjudged,
                 Unjudged::Calls,
                 (func.fqn(), span),
-                || {
-                    let what = if stub {
-                        "a body only a stub declares"
-                    } else {
-                        "a body heki does not model"
-                    };
-                    (chain_to(nodes, i), span, what)
+                || (chain_to(nodes, i), span, what),
+                || Listed {
+                    path: reaching.map_or(path, |h| &h.path).to_path_buf(),
+                    span,
+                    function: holder.map_or(func, |h| &h.caller).fqn(),
+                    what: ListedWhat::Call {
+                        callee: Some(func.fqn()),
+                        reason,
+                        parameter: None,
+                    },
                 },
             );
         }
@@ -2433,14 +2533,24 @@ impl<'a> Reach<'a> {
                 Unresolved::Name(_) | Unresolved::Existing(_) | Unresolved::Anything => None,
             };
             let nodes = &self.nodes;
-            note(
+            let listed = || Listed {
+                path: (cx.index.file_of(func).expect("summarized")).to_path_buf(),
+                span: w.span,
+                function: func.fqn(),
+                what: ListedWhat::Write {
+                    attribute: attr.clone(),
+                    kind: w.kind.as_str(),
+                },
+            };
+            note_listed(
                 &mut self.unjudged,
-                Unjudged::Writes(attr),
+                Unjudged::Writes(attr.clone()),
                 (func.fqn(), w.span),
                 || {
                     let chain = route.unwrap_or_else(|| chain_to(nodes, i));
                     (chain, w.span, w.kind.describe())
                 },
+                listed,
             );
         }
     }
@@ -2672,6 +2782,7 @@ impl<'a> Reach<'a> {
                 &found.chain,
             ) {
                 d.sites = u32::try_from(found.sites.len()).unwrap_or(u32::MAX);
+                d.unresolved_sites = listed_sites(cx, found);
                 of_boundary(d, entry);
             }
         };
