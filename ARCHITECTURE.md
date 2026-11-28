@@ -337,7 +337,7 @@ getters' and methods' return annotations along the MRO, as a type checker reads 
 constants (`str`, `bytes`, `int`, `float`, `bool`), displays, and f-strings, each an instance
 of its builtin class; copies; `functools.partial`; `typing.cast`, its type read as an annotation
 (`cast(list[Model], x)`); a builtin container class subscripted and called (`frozenset[str]()`);
-unions of up to three classes; `isinstance`
+unions of up to eight classes an annotation declares and up to three that stores join; `isinstance`
 narrowing; the closure cells of enclosing functions, which hold every value the function binds
 to them unless a nested scope rebinds them; `type(obj)` and a `type[C]` / `typing.Type[C]`
 annotation, a class object that may be a subclass as `cls` is; and the structural

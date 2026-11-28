@@ -172,7 +172,8 @@ heki looks for the callee in this order:
 4. the class hierarchy, up to eight overriding methods.
 
 It also follows container item types (`list[Model]`), return annotations along the MRO,
-`isinstance` narrowing, unions of up to three classes, and project `Protocol`s.
+`isinstance` narrowing, unions (up to eight classes an annotation declares, also through a type
+alias, and up to three that different assignments join), and project `Protocol`s.
 
 ## When heki cannot tell
 
@@ -280,6 +281,11 @@ Missed findings close as heki learns more:
   code of the instance's classes, the namespace is a builtin `dict`, so its methods resolve
   (`obj.__dict__.get(KEY)` is no call heki cannot resolve); a class object's namespace is a
   read-only proxy and has no class.
+- A name a loop takes from the keys of a `TypedDict` (`for name, value in td.items():
+  setattr(obj, name, value)`, `for name in td`, `vars(obj).update(td)`) is one of the keys the
+  class and its bases declare. A `TypedDict` passing a class keyword (`total=False`, `closed=`,
+  `extra_items=`) or binding a method in its body, and a plain `dict`, may hold any key: the
+  name is computed.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out

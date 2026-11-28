@@ -70,8 +70,9 @@ an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a 
 a value known as its base, and a cast to `Any` or to a base class keeps the class the value is
 known to have, as an annotated local does. A variable rebound in a loop
 (`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
-classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
-annotation or from different assignments) is each of them, and an `isinstance` check narrows it
+classes of the values reaching it; a value of several classes (`Model | Node`: up to eight an
+annotation declares, up to three from different assignments) is each of them, and an
+`isinstance` check narrows it
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
 also inside `and` / `or`), whatever class it had before and under each of its names
 (`isinstance(v := x.source, Model)` narrows `v`). An assignment expression in a comprehension binds
@@ -88,7 +89,7 @@ caller (also when other callers call it through the class and take them over). T
 of a target `Model._m` too when heki lists the classes implementing the protocol, there is at
 least one, and each is `Model` or a subclass of it; a protocol that another class implements
 too, or that no project class implements, reads no target of `Model`'s. An object whose class
-heki cannot see (an unannotated parameter or return, `Any`, a value of more than three classes,
+heki cannot see (an unannotated parameter or return, `Any`, a value of more classes than those,
 a protocol implemented by more than eight) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with

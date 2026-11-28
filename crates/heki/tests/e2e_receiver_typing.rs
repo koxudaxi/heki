@@ -571,7 +571,27 @@ def narrowed_any(value: object) -> None:
         value.fields = []
 
 
-def too_many(value: Model | Other | Ref | Node) -> None:
+def four_classes(value: Model | Other | Ref | Node) -> None:
+    value.fields = []
+
+
+class First:
+    pass
+
+
+class Second:
+    pass
+
+
+class Third:
+    pass
+
+
+class Fourth:
+    pass
+
+
+def too_many(value: Model | Other | Ref | Node | Chain | First | Second | Third | Fourth) -> None:
     value.fields = []
 "#;
 
@@ -1078,14 +1098,15 @@ fn flow_rebinding_walrus_unions_and_isinstance() {
             "narrowed_in",
             "narrowed_loop",
             "narrowed_any",
+            "four_classes",
         ] {
             assert!(
                 found.contains(name),
                 "{name} not reported for {version}: {found:?}"
             );
         }
-        // An `isinstance` check leaving only an unguarded class; more classes than a union
-        // keeps.
+        // An `isinstance` check leaving only an unguarded class; more classes than a declared
+        // union keeps (eight).
         for name in ["narrowed_out", "too_many"] {
             assert!(!found.contains(name), "{name} reported for {version}");
         }

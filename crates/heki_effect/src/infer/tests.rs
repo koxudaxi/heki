@@ -921,6 +921,7 @@ def f(
     u: A | B,
     o: Optional[Union[A, B]],
     many: A | B | Model | Field,
+    crowd: A | B | C | Holder | Model | Field | Sub | Bag | Plain,
     items: list[A | B],
     flag,
     lone: Union[A, None],
@@ -931,6 +932,7 @@ def f(
     x1 = u
     x2 = o
     x3 = many
+    x7 = crowd
     for it in items:
         x4 = it
     pick = A() if flag else B()
@@ -992,8 +994,10 @@ fn unions_of_a_few_classes_and_isinstance_narrowing() {
         for name in ["x1", "x2", "x4", "pick", "n9", "after"] {
             assert_eq!(of(&t, name), one("m.A | m.B"), "{name}");
         }
-        // More classes than a union keeps give no type, nor does `Self` outside a method.
-        assert!(of(&t, "x3").is_empty());
+        // A declared union keeps up to eight classes; more give no type, nor does `Self`
+        // outside a method.
+        assert_eq!(of(&t, "x3"), one("m.A | m.B | m.Field | m.Model"));
+        assert!(of(&t, "x7").is_empty());
         assert!(of(&t, "x6").is_empty());
         assert_eq!(of(&t, "x5"), one("m.A"));
         // A member of a union has the join of its classes' declarations.

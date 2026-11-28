@@ -12,9 +12,16 @@ use serde::{Deserialize, Serialize};
 /// arguments are dropped, so loops that build nested containers stay finite.
 pub(crate) const MAX_DEPTH: usize = 4;
 
-/// Most classes a union keeps (`Model | Field | Node`); a value of more classes has no tracked
-/// type.
+/// Most classes a union joined from stores or paths keeps (`Model | Field | Node`): a join
+/// needing more classes than this and than either of its inputs has no tracked type, so a loop
+/// storing another class each round stays finite.
 pub(crate) const MAX_UNION: usize = 3;
+
+/// Most classes a union an annotation declares keeps (`A | B | C | D`, also through a type
+/// alias): the annotation's text bounds it, and a call on it follows as many targets as a call
+/// through a class hierarchy (`resolver::CHA_CANDIDATE_LIMIT`). A declaration of more classes
+/// has no tracked type.
+pub(crate) const MAX_DECLARED_UNION: usize = crate::resolver::CHA_CANDIDATE_LIMIT;
 
 /// Most named objects a [`Ty::OneOf`] keeps: the targets a call of the value may run, as many as
 /// a call through a class hierarchy follows (`resolver::CHA_CANDIDATE_LIMIT`).
@@ -39,7 +46,8 @@ pub enum Ty {
     /// The coroutine a call of an `async def` returns: awaiting it gives the inner type, what
     /// the function's declaration says it returns.
     Coroutine(Box<Ty>),
-    /// An instance of one of two or three classes (sorted by class, one entry per class).
+    /// An instance of one of two to [`MAX_DECLARED_UNION`] classes (sorted by class, one entry
+    /// per class): more than [`MAX_UNION`] only as an annotation declares them.
     Union(Vec<Obj>),
     /// One of two to [`MAX_NAMED`] named objects, by fqn (sorted): what several paths bind, or
     /// an item of a table of functions (`HANDLERS[kind]`). Calling it calls one of them.
@@ -303,7 +311,7 @@ impl Ty {
         }
     }
 
-    /// The instances a value may be: one for an instance, two or three for a union.
+    /// The instances a value may be: one for an instance, those of a union.
     pub(crate) fn members(&self) -> &[Obj] {
         match self {
             Ty::Inst(o) => std::slice::from_ref(o),
@@ -318,9 +326,28 @@ impl Ty {
         }
     }
 
-    /// The type of a value that is one of `objs` (joined by class): an instance, a union of at
-    /// most [`MAX_UNION`] classes, or `None` for none or more.
+    /// The type of a value that is one of `objs` (joined by class) as stores or paths collect
+    /// them: an instance, a union of at most [`MAX_UNION`] classes, or `None` for none or more.
     pub(crate) fn of_members(objs: impl IntoIterator<Item = Obj>) -> Option<Ty> {
+        Ty::of_members_up_to(objs, MAX_UNION)
+    }
+
+    /// The type of a value that is one of `objs` as an annotation declares them: a union of at
+    /// most [`MAX_DECLARED_UNION`] classes.
+    pub(crate) fn of_declared(objs: impl IntoIterator<Item = Obj>) -> Option<Ty> {
+        Ty::of_members_up_to(objs, MAX_DECLARED_UNION)
+    }
+
+    /// The type of a value that is one of `objs`, some of the members `whole` of one union (what
+    /// an `isinstance` test keeps of it, or its members mapped): a part of a declared union is
+    /// bounded by it, as large as it may be.
+    pub(crate) fn of_part(objs: impl IntoIterator<Item = Obj>, whole: &[Obj]) -> Option<Ty> {
+        Ty::of_members_up_to(objs, MAX_UNION.max(whole.len()))
+    }
+
+    /// The type of a value that is one of `objs` (joined by class): an instance, a union of at
+    /// most `most` classes, or `None` for none or more.
+    fn of_members_up_to(objs: impl IntoIterator<Item = Obj>, most: usize) -> Option<Ty> {
         let mut out: Vec<Obj> = Vec::new();
         for o in objs {
             match out.binary_search_by(|x| x.class.cmp(&o.class)) {
@@ -330,7 +357,7 @@ impl Ty {
         }
         match out.len() {
             1 => out.pop().map(Ty::Inst),
-            n if (2..=MAX_UNION).contains(&n) => Some(Ty::Union(out)),
+            n if (2..=most).contains(&n) => Some(Ty::Union(out)),
             _ => None,
         }
     }
@@ -339,7 +366,7 @@ impl Ty {
     pub(crate) fn map_members(&self, f: impl Fn(&Obj) -> Option<Obj>) -> Option<Ty> {
         match self {
             Ty::Inst(o) => f(o).map(Ty::Inst),
-            Ty::Union(os) => Ty::of_members(os.iter().map(f).collect::<Option<Vec<_>>>()?),
+            Ty::Union(os) => Ty::of_part(os.iter().map(f).collect::<Option<Vec<_>>>()?, os),
             Ty::Ref(_)
             | Ty::Class(_)
             | Ty::Super(_)
@@ -460,9 +487,12 @@ impl Ty {
             (Ty::Coroutine(a), Ty::Coroutine(b)) => a.join(b).map(|t| Ty::Coroutine(Box::new(t))),
             // Catalog awaitables carry their awaited result: join by it (EFF107 only misses).
             (Ty::Coroutine(a), b) | (b, Ty::Coroutine(a)) => a.join(b),
+            // Instances of more than `MAX_UNION` classes only where one side has them all: a
+            // declared union joined with a value of one of its classes is that union.
             _ => match (self.members(), other.members()) {
                 (a, b) if !a.is_empty() && !b.is_empty() => {
-                    Ty::of_members(a.iter().chain(b).cloned())
+                    let most = MAX_UNION.max(a.len()).max(b.len());
+                    Ty::of_members_up_to(a.iter().chain(b).cloned(), most)
                 }
                 _ => None,
             },

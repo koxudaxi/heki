@@ -4881,6 +4881,58 @@ fn implementations_past_the_class_bound_are_not_complete() {
     assert_eq!(codes(check_linear(300, shape)), ["EFF101 [heuristic]"]);
 }
 
+/// A module of `members` classes whose `run` sleeps in the first, a `TypeAlias` of the union of
+/// all of them, and `calls` coroutines each calling `run` on a parameter the alias annotates.
+fn declared_union_calls(members: usize, calls: usize) -> Project {
+    let mut lines = vec![
+        "import time".to_owned(),
+        "from typing import TypeAlias".to_owned(),
+    ];
+    for i in 0..members {
+        let body = if i == 0 { "time.sleep(1)" } else { "pass" };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class C{i}:"),
+            "    def run(self):".to_owned(),
+            format!("        {body}"),
+        ]);
+    }
+    let classes: Vec<String> = (0..members).map(|i| format!("C{i}")).collect();
+    lines.extend([
+        String::new(),
+        String::new(),
+        format!("Kinds: TypeAlias = {}", classes.join(" | ")),
+    ]);
+    for k in 0..calls {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("async def handler{k}(c: Kinds):"),
+            "    c.run()".to_owned(),
+        ]);
+    }
+    let p = Project::new(&format!("bounds_declared_unions_{members}_{calls}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// A call on a union an annotation declares runs the method of each of its classes, as many as
+/// a call through a class hierarchy follows (`resolver::CHA_CANDIDATE_LIMIT`, eight): the walks
+/// grow with the calls, never with calls times classes, and a union of nine classes has no
+/// tracked type, so a call on it reaches nothing heki can name. The many coroutines reaching
+/// the one blocking call share one report.
+#[test]
+fn calls_on_a_declared_union_run_at_most_the_candidate_limit() {
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check(&declared_union_calls(9, 3))), 0);
+    assert_eq!(blocking(check(&declared_union_calls(8, 3))), 3);
+    assert_eq!(
+        blocking(check_linear(1_000, |calls| declared_union_calls(8, calls))),
+        1
+    );
+}
+
 /// A project selecting `EFF109` with the class `C` (a helper `helper` taking `self._lock`, and
 /// `count` locks of its own), then the method `body` of `C`.
 fn locked_class(name: &str, count: usize, body: Vec<String>) -> Project {

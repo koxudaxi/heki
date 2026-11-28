@@ -2044,7 +2044,7 @@ impl ModuleDecls {
     }
 
     /// The members of a union annotation other than `None`: one type, or instances of at most
-    /// [`crate::types::MAX_UNION`] classes.
+    /// [`crate::types::MAX_DECLARED_UNION`] classes.
     fn union_annotation(&self, members: &[&str], locals: &LocalNames) -> Option<Ty> {
         if let [one] = members {
             return self.resolve_annotation_ty_in(one, locals);
@@ -2057,7 +2057,7 @@ impl ModuleDecls {
             }
             objs.extend(t.members().iter().cloned());
         }
-        Ty::of_members(objs)
+        Ty::of_declared(objs)
     }
 
     /// Whether the subscripted head `head` is `type` or `typing.Type` (an unresolved `Type`
@@ -2577,6 +2577,15 @@ pub(crate) fn transform_decorator(
 /// Bases that make a class a `NamedTuple` (frozen) or a `TypedDict`.
 const NAMED_TUPLE_BASES: &[&str] = &["typing.NamedTuple", "typing_extensions.NamedTuple"];
 const TYPED_DICT_BASES: &[&str] = &["typing.TypedDict", "typing_extensions.TypedDict"];
+
+/// The bases outside the project a `TypedDict` may list: they declare no key
+/// ([`ProjectDecls::typed_dict_keys`]).
+const TYPED_DICT_KEYLESS_BASES: &[&str] = &[
+    "typing.TypedDict",
+    "typing_extensions.TypedDict",
+    "typing.Generic",
+    "typing_extensions.Generic",
+];
 
 /// Keys into the project declarations: what one analysis read of them
 /// ([`ProjectDecls::record`]), or what an update changed in them ([`DeclPasses`]). An analysis
@@ -4843,6 +4852,32 @@ impl ProjectDecls {
         self.typed_dicts.contains(class)
     }
 
+    /// The keys a value of the project `TypedDict` `class` holds, sorted: the names the class
+    /// bodies along its MRO declare ([`ClassDecl::members`]; a `TypedDict` body declares its keys
+    /// and nothing else). `None` when such a value may hold keys none of them names or heki
+    /// cannot list them: a class along the MRO passes a class keyword (`total=False`, PEP 728's
+    /// `closed=` and `extra_items=`), names a metaclass, binds a name of its body to code (a
+    /// method, a call: [`ClassDecl::code_attrs`]), or is no project `TypedDict` (besides
+    /// `TypedDict` and `Generic` themselves).
+    pub(crate) fn typed_dict_keys(&self, class: &str) -> Option<Vec<String>> {
+        if !self.is_typed_dict(class) {
+            return None;
+        }
+        let mut keys = BTreeSet::new();
+        for c in self.mro(class) {
+            if TYPED_DICT_KEYLESS_BASES.contains(&c.as_str()) {
+                continue;
+            }
+            let decl = self.class(&c).filter(|_| self.is_typed_dict(&c))?;
+            let binds_code = decl.members.iter().any(|m| decl.code_attrs.contains(m));
+            if decl.passes_keywords || decl.custom_metaclass || binds_code {
+                return None;
+            }
+            keys.extend(decl.members.iter().cloned());
+        }
+        Some(keys.into_iter().collect())
+    }
+
     /// The small display the module global `fqn` of a project module holds
     /// (`ModuleDecls::small_globals`), through re-exports ([`Self::canonical_value`]), when no
     /// other module changes it
@@ -6389,7 +6424,7 @@ impl ProjectDecls {
                 None => objs.push(canonical(o)?),
             }
         }
-        Ty::of_members(objs)
+        Ty::of_declared(objs)
     }
 
     /// The type the project name `fqn` names ([`ModuleDecls::type_names`]): that of the first
@@ -10746,7 +10781,7 @@ pub enum Val {
     Class(String),
     /// `super()` inside a method of class `fqn`.
     Super(String),
-    /// An instance of one of two or three classes (sorted).
+    /// An instance of one of the classes of a [`Ty::Union`] (sorted).
     Union(Vec<String>),
     /// One of several named objects ([`Ty::OneOf`]).
     OneOf(Vec<String>),
