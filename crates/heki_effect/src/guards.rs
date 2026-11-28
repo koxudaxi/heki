@@ -362,7 +362,7 @@ impl ConstClass {
         match test {
             GuardTest::Truthy => matches!(self, Self::StringIo | Self::BytesIo).then_some(true),
             GuardTest::IsNone => Some(self == Self::None),
-            GuardTest::IsInstance(classes) => self.is_instance(classes),
+            GuardTest::IsInstance(t) => self.is_instance(&t.classes),
             GuardTest::HasAttr(_) | GuardTest::Value(_) => self.has_attr(test.attr()?),
         }
     }
@@ -451,12 +451,12 @@ fn known_outcome(known: &[InputGuard], subject: &GuardSubject, test: &GuardTest)
             // An instance of one of `cs` is an instance of any superset of `cs`, and not an
             // instance of `cs` is not an instance of any subset.
             (GuardTest::IsInstance(cs), GuardTest::IsInstance(ds))
-                if k.holds && cs.iter().all(|c| ds.contains(c)) =>
+                if k.holds && cs.classes.iter().all(|c| ds.classes.contains(c)) =>
             {
                 Some(true)
             }
             (GuardTest::IsInstance(cs), GuardTest::IsInstance(ds))
-                if !k.holds && ds.iter().all(|d| cs.contains(d)) =>
+                if !k.holds && ds.classes.iter().all(|d| cs.classes.contains(d)) =>
             {
                 Some(false)
             }
@@ -566,6 +566,48 @@ pub(crate) fn given_at_call(given: &MayGiven, at: &CallTests) -> MayGiven {
         out.add(tests);
     }
     out
+}
+
+/// What a test a callee's way to an effect is behind comes to at a call
+/// (`witness::ways_at_call`).
+pub(crate) enum NeedAtCall {
+    /// The argument decides it against the way: the call does not take it.
+    Fails,
+    /// A test of the caller's own parameter, in its terms.
+    Caller(InputGuard),
+    /// It holds, or nothing at the call decides it.
+    Open,
+}
+
+/// [`NeedAtCall`] of the callee's test `g` at the call at `site` binding `bc`: decided by a
+/// constant, or by the class the caller types the argument with ([`instance_outcome`]).
+pub(crate) fn need_at_call(g: &InputGuard, site: &CallSite, bc: &BoundCallee) -> NeedAtCall {
+    let arg = bc.params.get(usize::from(g.subject.param));
+    let Some(b) = arg.and_then(|a| a.binding.as_ref()) else {
+        return NeedAtCall::Open;
+    };
+    let of_param = matches!(b.input, Some(GuardSubject { attr: None, .. }));
+    let outcome = (b.fact.as_deref())
+        .and_then(|f| fact_outcome(f, &g.test, of_param))
+        .or_else(|| arg.and_then(|a| instance_outcome(a, &g.test)));
+    match test_at_call(g, outcome, b.input.as_ref(), b.input_changed, &site.guards) {
+        TestAtCall::Fails => NeedAtCall::Fails,
+        TestAtCall::Caller(t) => NeedAtCall::Caller(t),
+        TestAtCall::Holds | TestAtCall::Open => NeedAtCall::Open,
+    }
+}
+
+/// The outcome of the `isinstance` test `test` on an argument of the class the caller types it
+/// with: true when a tested class is on its MRO; false when it is an instance of exactly its
+/// class and the test is decided by the MRO alone ([`crate::InstanceTest::nominal`]).
+fn instance_outcome(arg: &ArgOrigin, test: &GuardTest) -> Option<bool> {
+    let (GuardTest::IsInstance(t), Some(line)) = (test, arg.class.as_deref()) else {
+        return None;
+    };
+    if t.classes.iter().any(|c| line.mro.contains(c)) {
+        return Some(true);
+    }
+    (arg.exact && t.nominal).then_some(false)
 }
 
 /// What a callee's effect becomes in the caller at one call site.
@@ -2326,7 +2368,9 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
             } if kwargs.is_empty() && args.len() == 2 => {
                 let test = match cx.types.get(c) {
                     Some(Val::Ref(n)) if n == "builtins.isinstance" => {
-                        GuardTest::IsInstance(cx.isinstance_classes.get(&args[1])?.clone())
+                        let classes = cx.isinstance_classes.get(&args[1])?.clone();
+                        let nominal = cx.project.nominal_classes(&classes);
+                        GuardTest::IsInstance(crate::InstanceTest { classes, nominal })
                     }
                     Some(Val::Ref(n)) if n == "builtins.hasattr" => {
                         GuardTest::HasAttr(cx.shape.str_const(args[1])?.to_owned())

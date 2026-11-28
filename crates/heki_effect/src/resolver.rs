@@ -4795,6 +4795,17 @@ impl ProjectDecls {
         self.class(fqn).is_some()
     }
 
+    /// Whether an `isinstance` test of `classes` is decided by the MRO of the object's class
+    /// alone ([`crate::InstanceTest::nominal`]): each is a project class whose MRO holds only
+    /// project classes and `object`, none naming a metaclass.
+    pub(crate) fn nominal_classes(&self, classes: &[String]) -> bool {
+        classes.iter().all(|class| {
+            self.mro(class).iter().all(|c| {
+                c == "builtins.object" || self.class(c).is_some_and(|d| d.metaclass.is_none())
+            })
+        })
+    }
+
     /// Whether the module of the project class `class` may add attributes heki cannot name to
     /// its instances (`setattr(self, name, v)`, `self.__dict__.update(other)`), past the copies
     /// of the namespaces of instances of the class family ([`ClassDecl::adds_unnamed_attrs`]).

@@ -238,7 +238,24 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     r.root_cause.clone(),
                 ),
             };
-            let fold_key = format!("{target}|{}", effect_name(r.effect));
+            // The blocking call a helper makes, where the chain goes through one: sites reaching
+            // it share a fix. Each direct call of the API is a site of the API itself.
+            let blocking: Vec<&CallHop> = match &r.must {
+                _ if chain.len() < 2 => Vec::new(),
+                Some(must) if tier == Certainty::Exact && !must.witnesses.is_empty() => {
+                    must.witnesses.iter().map(|h| &**h).collect()
+                }
+                _ => chain.last().into_iter().collect(),
+            };
+            let fold_key = format!(
+                "{target}|{}|{}",
+                effect_name(r.effect),
+                blocking
+                    .iter()
+                    .map(|h| format!("{}:{}", h.path.display(), h.span.start))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
             let open_premises =
                 if cx.open_premises && code == "EFF101" && tier == Certainty::Heuristic {
                     boundary_open_premises(cx, r)

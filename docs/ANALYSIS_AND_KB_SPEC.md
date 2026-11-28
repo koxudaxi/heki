@@ -1112,7 +1112,9 @@ members are marked `unknown_calls`.
 EffectSummary(f) = {
     // Family 2: execution effects
     direct_exec_effects, transitive_exec_effects: Set<ExecEffect>,
-    exec_chains:              Map<ExecEffect, ShortestCallChain>,
+    exec_chains:              Map<ExecEffect, CallChain>,      // the witness: normal path before cleanup, then shortest
+    witness_ways:             Map<ExecEffect, [(IsinstanceTests, Cleanup, CallChain)]>,
+                                                           // ways a call's arguments choose the witness among
 
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
@@ -2506,9 +2508,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
-     shown reach the same root cause, output folds them into one representative with the count
-     (`heki_rules::fold_root_causes`). Folding comes after inline suppressions and the Ratchet
-     baseline, which see every report.
+     shown reach the same root cause (the same blocking call: the API, its effect, and, for a
+     chain through helpers, the call a helper makes, so different helpers reaching one API stay
+     apart while direct calls of the API share it), output folds
+     them into one representative with the count (`heki_rules::fold_root_causes`). Folding
+     comes after inline suppressions and the Ratchet baseline, which see every report.
+   - The chain a report shows (`related`) is its witness (`heki_effect::witness`): among the
+     ways a function reaches the effect, one the call's arguments do not rule out (an
+     `isinstance` test of a parameter that a constant, an instance of exactly a class, or an
+     argument typed with a class decides; a test of classes an ABC, a protocol, or a metaclass
+     may answer is decided only when a class is on the argument's MRO), then one whose calls
+     are on the normal path before one through an `except` handler or a `finally` body, then
+     the shortest. A summary keeps at most `WITNESS_LIMIT` ways per effect, dropping a way that
+     another behind fewer tests with no worse chain covers, and a way past
+     `PROVIDED_CHAIN_LIMIT` calls drops its tests. Each way is a path the code has; the choice
+     never changes whether the effect arrives or the tier.
 5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
    `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
    default true) are relaxed by default.

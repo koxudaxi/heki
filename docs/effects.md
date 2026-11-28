@@ -36,6 +36,8 @@ The knowledge base names the calls that wait. Besides `requests` and `httpx.Clie
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
 
+The chain a blocking-call report shows (`EFF101`, both tiers, and `EFF105`) is one real path to the call, chosen in this order: a path the call's arguments allow (a helper that dispatches on `isinstance(item, Response)` shows the branch an argument of known class takes), then a path on the normal flow before one through cleanup code (an `except` handler or a `finally` body), then the shortest. Which path is shown never decides whether the report exists or its tier. Output folds many reports into one (`(+N more)`) only when they reach the same blocking call through the same helper: sites that call one API directly still fold together, and sites that reach different blocking calls through different helpers stay separate groups.
+
 ## 🔧 Rules to switch on
 
 These rules are off by default. Name one in `extend-select` or with `--extend-select EFF105`. A prefix such as `EFF` or `ALL` never enables them.
