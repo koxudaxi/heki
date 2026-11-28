@@ -94,7 +94,7 @@ Options:
           Preview fixes as a unified diff without writing files
 
       --touched <FILE>...
-          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, a file its `include` lists, the baseline) shows every diagnostic. Another TOML file is passed over, and another path that is not an analyzed file is named in a warning
+          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, a file its `include` lists, the baseline) shows every diagnostic. Another TOML file is passed over, and another path that is not an analyzed file is named in a warning (an error with `--unmatched-paths error`)
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -125,6 +125,11 @@ Options:
 
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning. A report of a contract with `fail = true` fails the run at either
+          
+          [possible values: error, warning]
+
+      --unmatched-paths <SEVERITY>
+          What to do with a path given to report on (`--touched`, a file among PATHS) that names no analyzed file: `warning` (the default) names it and goes on, `error` stops the run with exit code 2 before it reports or rewrites anything (`lint.unmatched-paths`)
           
           [possible values: error, warning]
 

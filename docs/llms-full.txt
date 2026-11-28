@@ -2837,6 +2837,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) records or an inline [suppression](https://heki.koxudaxi.dev/configuration/#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
+| `unmatched-paths` | `"warning"` | `"warning"` or `"error"`: what `heki check` does with a path it is given to report on, in [`--touched`](https://heki.koxudaxi.dev/cli-reference/#heki-check) or as a file among PATHS, that names no analyzed file: a missing file, a directory, a file that is not Python, one outside the directories given, or an excluded one. A warning names the paths and the run goes on, and passes when nothing it shows fails it. An error stops the run with exit code 2 before it reports, prints a diff or a prompt, or rewrites a file, so that a CI job given a wrong path fails. A TOML file that is no configuration file is passed over either way, as the pre-commit hook passes every staged one. `--unmatched-paths` overrides it. |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
@@ -3986,8 +3987,11 @@ fail = true
 ```
 
 - Other warnings and heuristic reports stay advisory: `fail = true` does not change `fail-on`,
-  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF, GitHub
-  annotations) are the same with and without it.
+  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF) are the same
+  with and without it. Only the level of a GitHub annotation, which says whether its report
+  fails the run, follows it: an `error` report of a contract is an `error` annotation with
+  `fail = true` and a `warning` one without it (see
+  [Continuous integration](https://heki.koxudaxi.dev/adoption/#continuous-integration)).
 - A report that several contracts find stands for each of them, and fails the run when one of
   them has `fail = true`. A `MUT202` report is of the `readonly-returns` tables naming a producer
   the changed value may come from: all of them when the change reaches the producer's result
@@ -4819,12 +4823,19 @@ the run now.
         sarif_file: heki.sarif
     ```
 
-Each annotation is one workflow command at the reported location: its body is the message followed by one
+Each annotation is one workflow command at the reported location: its title names the rule
+(`heki EFF101`, `heki EFF101 (heuristic)` for a heuristic report), and its body is the message followed by one
 `related: <path>:<line>:<col>: <message>` line per related location (the hops of a call chain, in order).
 
-Warnings and heuristic reports become annotations without failing the step (a heuristic report
-of an `error` rule is an `error` annotation); `fail-on = "warning"` in `[tool.heki.lint]` (or
-`--fail-on warning`) makes them fail it, as in pre-commit.
+The level of an annotation says whether its report fails the run. A report that fails it keeps
+its severity, `error` or `warning`; one that does not is a `warning`, so an annotation reads as
+a failure only when the step fails on it. Warnings and heuristic reports do not fail the step:
+by default a heuristic report of an `error` rule is a `warning` annotation. `fail-on =
+"warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit,
+and the heuristic `error` is then an `error` annotation; so are the reports of a contract with
+[`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) and of a rule
+[`lint.fail`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint) names. The JSON, SARIF, and text
+formats give each report its severity.
 
 In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
@@ -4845,7 +4856,11 @@ pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 ```
 
 `--diff-filter=d` leaves out deleted files, and `xargs -r` skips the run when no Python file
-changed.
+changed. A path that names no analyzed file (a typo, a file outside the analyzed directories, an
+excluded one) is named in a warning, and the run goes on with the others. With
+`--unmatched-paths error` (or [`unmatched-paths = "error"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)
+in `[tool.heki.lint]`), it stops the run with exit code 2 instead, so a wrong path fails the job
+rather than passing it on nothing.
 
 With SARIF:
 
@@ -5138,7 +5153,7 @@ Options:
           Preview fixes as a unified diff without writing files
 
       --touched <FILE>...
-          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, a file its `include` lists, the baseline) shows every diagnostic. Another TOML file is passed over, and another path that is not an analyzed file is named in a warning
+          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, a file its `include` lists, the baseline) shows every diagnostic. Another TOML file is passed over, and another path that is not an analyzed file is named in a warning (an error with `--unmatched-paths error`)
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -5169,6 +5184,11 @@ Options:
 
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning. A report of a contract with `fail = true` fails the run at either
+          
+          [possible values: error, warning]
+
+      --unmatched-paths <SEVERITY>
+          What to do with a path given to report on (`--touched`, a file among PATHS) that names no analyzed file: `warning` (the default) names it and goes on, `error` stops the run with exit code 2 before it reports or rewrites anything (`lint.unmatched-paths`)
           
           [possible values: error, warning]
 

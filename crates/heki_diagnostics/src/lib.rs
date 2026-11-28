@@ -375,7 +375,10 @@ pub enum OutputFormat {
     Full,
     Concise,
     Json,
-    Github,
+    /// GitHub Actions workflow commands, for a run that fails on reports at `fail_on`.
+    Github {
+        fail_on: Severity,
+    },
     Sarif,
 }
 
@@ -435,7 +438,7 @@ pub fn render(
             s.push('\n');
             s
         }
-        OutputFormat::Github => render_github(diags),
+        OutputFormat::Github { fail_on } => render_github(diags, fail_on),
         OutputFormat::Sarif => {
             let mut s = serde_json::to_string_pretty(&sarif(diags, failures, source_line))
                 .expect("a `serde_json::Value` always serializes");
@@ -673,9 +676,17 @@ fn gh_escape(s: &str, property: bool) -> String {
     out
 }
 
-fn render_github(diags: &[Diagnostic]) -> String {
+/// One workflow command per report. Its level is the report's severity when the report fails the
+/// run at `fail_on` ([`Diagnostic::fails_run`]), and `warning` when it does not: GitHub shows an
+/// `error` annotation as a failure, which such a report does not cause.
+fn render_github(diags: &[Diagnostic], fail_on: Severity) -> String {
     let mut out = String::new();
     for d in diags {
+        let level = if d.fails_run(fail_on) {
+            d.severity
+        } else {
+            Severity::Warning
+        };
         let label = d.certainty.label().map(|l| format!(" ({l})"));
         let mut body = d.message.clone();
         for r in &d.related {
@@ -691,7 +702,7 @@ fn render_github(diags: &[Diagnostic]) -> String {
         let _ = writeln!(
             out,
             "::{} file={},line={},col={},title={}::{}",
-            d.severity.word(),
+            level.word(),
             gh_escape(&path_text(&d.path), true),
             d.line,
             d.column,
@@ -1467,6 +1478,11 @@ fn counted_by(
 mod tests {
     use super::*;
 
+    /// The `github` format of a run with the default `fail-on`.
+    const GITHUB: OutputFormat = OutputFormat::Github {
+        fail_on: Severity::Error,
+    };
+
     fn key(path: &str, qualname: &str, target: &str) -> BaselineKey {
         BaselineKey {
             path: path.into(),
@@ -1856,7 +1872,7 @@ mod tests {
             },
         ];
         let none = |_: &Path, _: u32| None;
-        let out = render(&[d], &[], OutputFormat::Github, &Stylesheet::plain(), &none);
+        let out = render(&[d], &[], GITHUB, &Stylesheet::plain(), &none);
         assert_eq!(
             out,
             "::error file=src/a.py,line=2,col=5,title=heki EFF101::calls `f`\
@@ -1874,7 +1890,7 @@ mod tests {
         d.path = PathBuf::from("src/x,y:z.py");
         let none = |_: &Path, _: u32| None;
         assert_eq!(
-            render(&[d], &[], OutputFormat::Github, &Stylesheet::plain(), &none),
+            render(&[d], &[], GITHUB, &Stylesheet::plain(), &none),
             "::error file=src/x%2Cy%3Az.py,line=2,col=5,title=heki EFF101::a: b, c\n"
         );
     }
@@ -1903,13 +1919,7 @@ mod tests {
             "src/a.py:2:5: MUT201 write, outside: owners\nsecond\n"
         );
         assert_eq!(
-            render(
-                &diags,
-                &[],
-                OutputFormat::Github,
-                &Stylesheet::plain(),
-                &line
-            ),
+            render(&diags, &[], GITHUB, &Stylesheet::plain(), &line),
             "::error file=src/a.py,line=2,col=5,title=heki MUT201::write, outside: owners%0Asecond%0Arelated: src/b.py:3:1: calls helper\n"
         );
         let json: Vec<Diagnostic> = serde_json::from_str(&render(
@@ -1971,16 +1981,24 @@ mod tests {
             ),
             "src/a.py:2:5: EFF102 [heuristic] m\nsrc/a.py:3:5: MUT201 m\n"
         );
+        // A heuristic report fails the run only at `fail-on = "warning"`.
         assert_eq!(
+            render(&diags, &[], GITHUB, &Stylesheet::plain(), &none),
+            "::warning file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n\
+             ::error file=src/a.py,line=3,col=5,title=heki MUT201::m\n"
+        );
+        let failing_on_warnings = OutputFormat::Github {
+            fail_on: Severity::Warning,
+        };
+        assert!(
             render(
                 &diags,
                 &[],
-                OutputFormat::Github,
+                failing_on_warnings,
                 &Stylesheet::plain(),
                 &none
-            ),
-            "::error file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n\
-             ::error file=src/a.py,line=3,col=5,title=heki MUT201::m\n"
+            )
+            .starts_with("::error file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n")
         );
         let json: serde_json::Value = serde_json::from_str(&render(
             &diags,
