@@ -7507,31 +7507,6 @@ return_type = "Self"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.order"
-return_type = "Self"
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.limit"
-return_type = "Self"
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.offset"
-return_type = "Self"
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.range"
-return_type = "Self"
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.strip_nulls"
-return_type = "Self"
-opaque_to_layer3 = true
-
-[[entries]]
 symbol = "postgrest._sync.request_builder.SyncFilterRequestBuilder.select"
 return_type = "Self"
 opaque_to_layer3 = true
