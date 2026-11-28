@@ -1103,8 +1103,8 @@ fn a_lazy_import_is_not_offered_for_a_name_read_while_the_module_loads() {
 /// it is: moved into a function, the module no longer has the name, and made lazy, it loads at
 /// that read. So for a package that re-exports the name for its modules, a star import, and a
 /// read off the module object; a name of the same module that no import binds is no such read,
-/// nor is a name the module rebinds after the import, which other modules see once it has
-/// loaded.
+/// nor is a name the module rebinds after the import with no code run in between, which other
+/// modules see only once it is rebound. Code run in between may load a module reading it.
 #[test]
 fn an_import_whose_name_another_module_takes_while_it_loads_is_not_named() {
     let py315 = ["--target-version", "py315"];
@@ -1130,9 +1130,38 @@ fn an_import_whose_name_another_module_takes_while_it_loads_is_not_named() {
     assert_eq!(the_help(&p, &py315), named);
 }
 
+/// A later statement rebinding the name hides the import's binding from other modules only
+/// when no code runs between them: another import, a call, or a truth test there may load a
+/// module that reads the name while the module loads. A `del` binds nothing in its place.
+#[test]
+fn code_between_an_import_and_its_rebinding_leaves_the_name_to_other_modules() {
+    let py315 = ["--target-version", "py315"];
+    let rebound = |between: &str| {
+        format!("from pkg.b import Base\n{between}\n\ndef Base() -> object:\n    return object()\n")
+    };
+    let p = cycle_through(&rebound(""));
+    p.write("pkg/c.py", "from pkg.a import Base\n\nDEFAULT = Base()\n");
+    assert_eq!(
+        the_help(&p, &py315),
+        "every import cycle of these modules goes through the import of `pkg.b` in `pkg.a`: \
+         move it into the functions of `pkg.a` that use it, or make it `lazy`"
+    );
+    for between in [
+        "import json\n",
+        "READY = print()\n",
+        "FLAGS = []\nif FLAGS:\n    pass\n",
+    ] {
+        p.write("pkg/a.py", &rebound(between));
+        assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP, "{between}");
+    }
+    p.write("pkg/a.py", "from pkg.b import Base\n\ndel Base\n");
+    assert_eq!(the_help(&p, &py315), GENERAL_CYCLE_HELP);
+}
+
 /// A module that takes the name only in a function leaves the import free to be made lazy: it
 /// loads at that read, after the modules have loaded. Moved into a function, the module no
-/// longer has the name, so that change is not offered. A star import takes no private name.
+/// longer has the name, so that change is not offered. A star import takes no private name,
+/// but code the module object is passed to may.
 #[test]
 fn an_import_whose_name_another_module_takes_in_a_function_may_be_made_lazy() {
     let py315 = ["--target-version", "py315"];
@@ -1160,5 +1189,23 @@ fn an_import_whose_name_another_module_takes_in_a_function_may_be_made_lazy() {
         the_help(&p, &py315),
         "every import cycle of these modules goes through the import of `pkg.b` in `pkg.a`: \
          move it into the functions of `pkg.a` that use it, or make it `lazy`"
+    );
+    p.write(
+        "pkg/c.py",
+        "import pkg.a\n\n\ndef base() -> object:\n    return getattr(pkg.a, \"_Base\")\n",
+    );
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(the_help(&p, &py315), lazy);
+}
+
+/// An augmented assignment of the module body reads its target while the module loads: the
+/// import binding it is not named, moved or made lazy.
+#[test]
+fn an_import_an_augmented_assignment_reads_is_not_named() {
+    let p = cycle_through("from pkg.b import routes\n\nroutes += []\n");
+    assert_eq!(the_help(&p, &[]), GENERAL_CYCLE_HELP);
+    assert_eq!(
+        the_help(&p, &["--target-version", "py315"]),
+        GENERAL_CYCLE_HELP
     );
 }

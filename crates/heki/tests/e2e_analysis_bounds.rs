@@ -7940,6 +7940,40 @@ fn the_import_a_long_chain_of_a_contract_goes_through_is_found_once() {
     );
 }
 
+/// A module importing thousands of forbidden modules of the project, each a report of a
+/// contract with `reach = "import-time"`.
+fn forbidden_imports_of_one_module(modules: usize) -> Project {
+    let p = Project::new("bounds_forbidden_imports");
+    p.write("c/__init__.py", "");
+    let imports: String = (0..modules).map(|i| format!("import c.f{i}\n")).collect();
+    p.write("c/m0.py", &imports);
+    for i in 0..modules {
+        p.write(&format!("c/f{i}.py"), "");
+    }
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-f\"\nimporters = [\"c.m0\"]\nforbidden-imports = [\"c.f*\"]\nreach = \"import-time\"\n",
+    );
+    p
+}
+
+/// The searches for the import a report's chains go through share one budget per walk: each
+/// visits the importer's sites, so one per report would grow with the square of them. The
+/// reports past it keep the contract's help alone.
+#[test]
+fn the_import_searches_of_one_walk_share_one_budget() {
+    let modules = 2_000;
+    let diags = check_past_budgets(modules, &["import_cuts"], forbidden_imports_of_one_module);
+    let helps: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .map(|d| &d["help"])
+        .collect();
+    assert_eq!(helps.len(), modules);
+    let named = |help: &&Value| help.as_str().is_some_and(|h| h.contains("goes through"));
+    assert!(helps.iter().any(named), "{:#?}", helps[0]);
+    assert!(!helps.iter().all(named), "{:#?}", helps[modules - 1]);
+}
+
 /// The walk of an `import-boundaries` contract with `reach` from the head of a long chain of
 /// imports visits each module once, and reports the module at its end with the whole chain.
 #[test]

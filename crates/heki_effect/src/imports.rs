@@ -191,11 +191,12 @@ pub struct ImportSite {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_while_loading: bool,
     /// The name the statement binds in its module, for one whose binding code of the module
-    /// reads only after the module has loaded and other modules see once it has: an `import`
-    /// or `from` statement the module body runs, not lazy, not [`Self::read_while_loading`],
-    /// and not rebound by a later statement that always runs (`from time import sleep`, then
-    /// `def sleep(n): ...`), after which the name no longer holds the import. Another module
-    /// may read it ([`ImportGraph::read_elsewhere`]).
+    /// reads only after the module has loaded and other modules may see: an `import` or `from`
+    /// statement the module body runs, not lazy, not [`Self::read_while_loading`], and not
+    /// rebound by a later statement that always runs with no code run in between (`from time
+    /// import sleep`, then `def sleep(n): ...`), after which the name no longer holds the
+    /// import and before which no other module runs ([`runs_code_before_rebinding`]). Another
+    /// module may read it ([`ImportGraph::read_elsewhere`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binds: Option<String>,
 }
@@ -260,15 +261,17 @@ pub struct ModuleImports {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_before: Option<u32>,
     /// What the module reads of the namespaces of the modules its statements import, by dotted
-    /// name (`m.Name`; `m.*` for every public name; [`ANY_NAME`] for any name of any module),
-    /// each with the earliest time it does ([`loading::LoadReads::names_read`]).
+    /// name (`m.Name`; `m.*` for every public name; `m.**` for any name, private ones included;
+    /// [`ANY_NAME`] for any name of any module), each with the earliest time it does
+    /// ([`loading::LoadReads::names_read`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub names_read: BTreeMap<String, ReadTime>,
 }
 
 /// The name of [`ModuleImports::names_read`] for any name of any module, private ones
 /// included: what a module past the budget of the walk may read. The only name without a
-/// module.
+/// module; after one (`m.**`), any name of that module, which code the module object reaches
+/// may read.
 pub const ANY_NAME: &str = "**";
 
 /// When a module reads a name of another module's namespace.
@@ -764,8 +767,10 @@ pub(crate) fn module_imports(
                 && !site.lazy
             {
                 site.read_while_loading = reads().reads(imp);
-                site.binds = (!site.read_while_loading && imp.rebound_at.is_none())
-                    .then(|| imp.bound_name.clone());
+                let unseen = (imp.rebound_at).is_some_and(|at| {
+                    !runs_code_before_rebinding(input.ir, span, &imp.bound_name, at)
+                });
+                site.binds = (!site.read_while_loading && !unseen).then(|| imp.bound_name.clone());
             }
             Some((statement, site))
         })
@@ -886,6 +891,40 @@ fn may_run_code(ir: &ModuleIr, kind: &InstKind) -> bool {
         InstKind::Compare { op, .. } => !matches!(op, CompareOpKind::Is | CompareOpKind::IsNot),
         _ => true,
     }
+}
+
+/// Whether the module body may run code after its import at `site` and before the statement
+/// at `rebound_at` binds `name` again (`ModuleImport::rebound_at`): another import, code
+/// [`may_run_code`] or a truth test ([`tests_truth`]), here or in the rebinding statement
+/// before it binds (a decorator, a default). Such code may load a module that reads the
+/// import's binding while the module loads. In block order, which is the order of the
+/// statements; also when the rebinding is not found.
+fn runs_code_before_rebinding(ir: &ModuleIr, site: Span, name: &str, rebound_at: u32) -> bool {
+    let body = ir.function(ir.module_fn);
+    let shape = FnShape::new(body);
+    let mut after_site = false;
+    for b in &body.blocks {
+        for inst in &b.insts {
+            if !after_site {
+                after_site = matches!(inst.kind, InstKind::Import { .. }) && inst.span == site;
+                continue;
+            }
+            match &inst.kind {
+                InstKind::StoreGlobal { name: bound, .. }
+                    if bound == name && inst.span.start >= rebound_at =>
+                {
+                    return false;
+                }
+                InstKind::Import { .. } => return true,
+                kind if may_run_code(ir, kind) => return true,
+                _ => {}
+            }
+        }
+        if after_site && tests_truth(&shape, b) {
+            return true;
+        }
+    }
+    true
 }
 
 /// Whether block `b` ends by testing the truth of a value that may run code (its `__bool__` or
@@ -1018,8 +1057,8 @@ pub enum ModuleRef {
 /// What the project modules read of each other ([`ImportGraph::read_elsewhere`]).
 #[derive(Default)]
 struct ReadIndex<'i> {
-    /// Per project module and name of it (`*`: every public name), the earliest time another
-    /// module reads it.
+    /// Per project module and name of it (`*`: every public name, [`ANY_NAME`]: any name), the
+    /// earliest time another module reads it.
     names: FxHashMap<(u32, &'i str), ReadTime>,
     /// The modules that may read any name of any module ([`ANY_NAME`]), each with the earliest
     /// time.
@@ -1462,7 +1501,8 @@ impl<'i> ImportGraph<'i> {
 
     /// The earliest time a project module other than `m` reads the name `name` of `m`: by a
     /// `from` import, a star import if the name is public, an attribute read off what an import
-    /// binds, or past the budget of that walk, any name ([`ModuleImports::names_read`]). Code
+    /// binds, any name where the module object goes elsewhere, or past the budget of that walk,
+    /// any name of any module ([`ModuleImports::names_read`]). Code
     /// of `m` itself reads its globals by name ([`ImportSite::read_while_loading`]).
     pub fn read_elsewhere(&self, m: u32, name: &str) -> Option<ReadTime> {
         let reads = self.reads.get_or_init(|| {
@@ -1492,6 +1532,7 @@ impl<'i> ImportGraph<'i> {
         let anything = (reads.anything.iter()).filter(|&&(reader, _)| reader != m);
         (of(name).into_iter())
             .chain(of("*").filter(|_| public))
+            .chain(of(ANY_NAME))
             .chain(anything.map(|&(_, time)| time))
             .min()
     }

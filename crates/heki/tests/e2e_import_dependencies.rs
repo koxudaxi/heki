@@ -695,7 +695,8 @@ fn a_module_loaded_through_two_chains_keeps_the_help_of_its_import() {
             "acme/store.py",
             &["--target-version", "py315"]
         ),
-        "import `redis` only inside the functions that use it, catch its `ImportError` and name \
-         the extra to install, or declare `redis` in `[project] dependencies`"
+        "import `redis` only inside the functions that use it, where a handler of its \
+         `ImportError` can name the extra to install, or declare `redis` in `[project] \
+         dependencies`"
     );
 }

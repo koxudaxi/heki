@@ -364,8 +364,8 @@ fn report(
                 ", and the project declares {declared}: `import {start}` needs {needs}"
             ));
             let help = format!(
-                "import `{imported}` only inside the functions that use it, catch its \
-                 `ImportError` and name the extra to install, or declare {} in `[project] \
+                "import `{imported}` only inside the functions that use it, where a handler of \
+                 its `ImportError` can name the extra to install, or declare {} in `[project] \
                  dependencies`",
                 listed(&names)
             );

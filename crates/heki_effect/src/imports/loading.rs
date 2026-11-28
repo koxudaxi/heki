@@ -15,10 +15,11 @@ use std::collections::BTreeMap;
 /// The module globals that code running while the module loads may read: the module body with
 /// the class bodies, comprehensions and type-parameter scopes it runs, where its decorators,
 /// defaults, bases, and the annotations the target version evaluates in place are read (from
-/// the semantic model); the module's functions that run meanwhile ([`called_while_loading`],
-/// from their IR); and a star import of the module, which reads what its `__all__` lists. By
-/// name, wherever the read is: a read after the module rebinds the name, or under
-/// `if TYPE_CHECKING:`, counts too.
+/// the semantic model, and the target of an augmented assignment, which the model counts as a
+/// binding only, from the IR); the module's functions that run meanwhile
+/// ([`called_while_loading`], from their IR); and a star import of the module, which reads
+/// what its `__all__` lists. By name, wherever the read is: a read after the module rebinds
+/// the name, or under `if TYPE_CHECKING:`, counts too.
 pub(super) struct LoadReads<'s> {
     names: FxHashSet<&'s str>,
     /// What the module's `__all__` lists ([`exported_names`]).
@@ -61,7 +62,8 @@ impl<'s> LoadReads<'s> {
         )
         .open_means(None);
         // A function reads a global by `LoadGlobal`, and a class body it runs reads one it
-        // does not bind by `LoadGlobal` or `LoadName`.
+        // does not bind by `LoadGlobal` or `LoadName`. `VALUE += 1` in the module body reads
+        // `VALUE` first, which the semantic model counts as a binding only.
         let ir = input.ir;
         let called = called_while_loading(ir, &input.module_name, calls);
         let mut loading = FxHashSet::default();
@@ -74,11 +76,19 @@ impl<'s> LoadReads<'s> {
             for body in bodies {
                 loading.insert(body.id);
                 let insts = (body.blocks.iter()).flat_map(|b| &b.insts);
-                for inst in insts.filter(|_| called_here) {
-                    if let InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } =
-                        &inst.kind
-                    {
-                        names.insert(name.as_str());
+                for inst in insts {
+                    match &inst.kind {
+                        InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
+                            if called_here =>
+                        {
+                            names.insert(name.as_str());
+                        }
+                        InstKind::BinOp {
+                            dst,
+                            in_place: true,
+                            ..
+                        } if body.is_module_body => names.extend(body.var_name(*dst)),
+                        _ => {}
                     }
                 }
             }
@@ -133,7 +143,8 @@ impl LoadReads<'_> {
     /// name a `from` import takes, every public name a star import takes (`m.*`), and the
     /// attributes code reads off what an import binds (`import m` then `m.Name`, each step of
     /// `a.b.Name`), also through a module global the module body binds to it, or, where that
-    /// value goes anywhere else (an argument, a return, an element), every public name of it.
+    /// value goes anywhere else (an argument, a return, an element), any name of it, private
+    /// ones included (`m.**`: `getattr(m, "_private")`, `mock.patch.object(m, "_private")`).
     pub(super) fn names_read<'a>(
         &self,
         ir: &'a ModuleIr,
@@ -216,7 +227,7 @@ fn attributes_read<'a>(
     let mut values: FxHashMap<VarId, Node> = FxHashMap::default();
     let escape = |held: &mut HeldNames, values: &FxHashMap<VarId, Node>, v: VarId| {
         if let Some(&of) = values.get(&v) {
-            let every = held.attr(of, "*");
+            let every = held.attr(of, ANY_NAME);
             held.read(every, time);
         }
     };

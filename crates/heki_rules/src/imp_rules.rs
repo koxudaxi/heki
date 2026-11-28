@@ -1082,6 +1082,9 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             Some(Related::Hop(hop, _)) => graph.sites(m).map(|s| (s[hop.site].0, &s[hop.site].1)),
             _ => None,
         };
+        // One budget for the searches of the walk's reports: past it, a report has the
+        // contract's help alone.
+        let cut_budget = graph.budget("import_cuts");
         for &module in &reached[1..] {
             let imported = Imported::of(graph, module);
             // Only whether the contract allows the module: how the importer's own imports name
@@ -1093,7 +1096,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             let hops = hops_to(module);
             let chain = chain_of(&hops);
             let site = first_site(&chain).expect("a module reached has a chain to it");
-            let cut = self.cut(c, m, imported.name, &hops);
+            let cut = self.cut(c, m, imported.name, &hops, &cut_budget);
             let verdict = Verdict::Breaks(vec![(imported.name.to_owned(), breach)]);
             self.emit(c, m, site, &chain[1..], verdict, cut);
         }
@@ -1173,10 +1176,18 @@ impl<'r, 'g> Run<'r, '_, 'g> {
     }
 
     /// The help naming the import on every chain of the walk of contract `c` from the importer
-    /// `m` to the module `reached`, `hops` its chain from `m`, when one search finds it
-    /// ([`path_cuts`]): the last such import, nearest the module. Only a contract with `reach =
-    /// "import-time"` has one: every other counts the imports in functions and the lazy ones.
-    fn cut(&self, c: usize, m: u32, reached: &str, hops: &[(Hop, ModuleRef)]) -> Option<String> {
+    /// `m` to the module `reached`, `hops` its chain from `m`, when one search within `budget`
+    /// finds it ([`path_cuts`]): the last such import, nearest the module. Only a contract with
+    /// `reach = "import-time"` has one: every other counts the imports in functions and the
+    /// lazy ones.
+    fn cut(
+        &self,
+        c: usize,
+        m: u32,
+        reached: &str,
+        hops: &[(Hop, ModuleRef)],
+        budget: &Budget,
+    ) -> Option<String> {
         if self.contracts.contracts[c].reach != Reach::ImportTime {
             return None;
         }
@@ -1184,8 +1195,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         let steps: Vec<ChainStep<ModuleRef>> = (hops.iter())
             .map(|&(hop, to)| (ModuleRef::Project(hop.from), hop.site, to))
             .collect();
-        let budget = graph.budget("import_cuts");
-        let cuts = path_cuts(&budget, [ModuleRef::Project(m)], &steps, |k, out| {
+        let cuts = path_cuts(budget, [ModuleRef::Project(m)], &steps, |k, out| {
             let mut listed = Vec::new();
             self.steps(c, m, k, &mut listed);
             out.extend(listed.into_iter().map(|(hop, w)| (hop.site, w)));
