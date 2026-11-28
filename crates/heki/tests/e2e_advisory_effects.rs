@@ -2022,3 +2022,288 @@ fn an_offloaded_project_function_hands_back_the_cursor_it_returns() {
         ]
     );
 }
+
+const CALLS_THAT_CANNOT_RUN: &str = r#"import time
+
+_IS_SYNC = False
+NAMES = ("a", "b")
+
+
+async def empty_tuple():
+    for _ in ():
+        time.sleep(1)
+
+
+async def empty_range():
+    for _ in range(0):
+        time.sleep(1)
+
+
+async def empty_local():
+    xs = ()
+    for _ in xs:
+        time.sleep(1)
+
+
+async def empty_comprehension():
+    return [time.sleep(1) for _ in ()]
+
+
+async def empty_second_clause():
+    return [time.sleep(1) for _ in (1,) for _ in ()]
+
+
+async def loop_in_an_empty_loop(rows):
+    for _ in ():
+        for _ in rows:
+            time.sleep(1)
+
+
+async def else_after_a_break():
+    for _ in (1,):
+        break
+    else:
+        time.sleep(1)
+
+
+async def else_after_a_return():
+    for x in NAMES:
+        return x
+    else:
+        time.sleep(1)
+
+
+async def decided_branch():
+    if _IS_SYNC:
+        time.sleep(1)
+
+
+async def non_empty_constant():
+    for _ in (1,):
+        time.sleep(1)
+
+
+async def else_of_an_empty_loop():
+    for _ in ():
+        break
+    else:
+        time.sleep(1)
+
+
+async def may_break(flag):
+    for _ in (1, 2):
+        if flag:
+            break
+    else:
+        time.sleep(1)
+
+
+async def may_continue(flag):
+    for _ in (1, 2):
+        if flag:
+            continue
+        break
+    else:
+        time.sleep(1)
+
+
+async def emptied_first():
+    xs = [1]
+    xs.clear()
+    for _ in xs:
+        break
+    else:
+        time.sleep(1)
+
+
+async def unsized(rows):
+    for _ in rows:
+        time.sleep(1)
+
+
+async def decided_for_it():
+    if not _IS_SYNC:
+        time.sleep(1)
+"#;
+
+/// A call no path reaches is not reported: in the body of a loop or comprehension over an
+/// iterable that yields no item whatever the input (an empty display, `range` of constants, a
+/// local bound to one, a clause inside another), in the `else` of a loop over an iterable that
+/// yields an item whatever the input and whose every iteration leaves, and behind a branch the
+/// code decides against. The `else` of an empty loop runs, and so does a loop that may not leave on
+/// its first item, or over a list emptied first, or over input heki cannot size: their reports
+/// stay exact.
+#[test]
+fn a_call_that_cannot_run_is_not_reported() {
+    let p = Project::new("calls_that_cannot_run");
+    p.write("app.py", CALLS_THAT_CANNOT_RUN);
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
+    let got: Vec<(&str, u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["line"].as_u64().unwrap(),
+                common::tiered_code(d),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("non_empty_constant", 58, "EFF101"),
+            ("else_of_an_empty_loop", 65, "EFF101"),
+            ("may_break", 73, "EFF101"),
+            ("may_continue", 82, "EFF101"),
+            ("emptied_first", 91, "EFF101"),
+            ("unsized", 96, "EFF101"),
+            ("decided_for_it", 101, "EFF101"),
+        ]
+    );
+}
+
+/// `EFF105` takes its sites from the same walk: a blocking filesystem call in a loop over an
+/// empty iterable, or in the `else` of a loop that leaves on its first item, is not reported.
+#[test]
+fn a_filesystem_call_that_cannot_run_is_not_reported() {
+    let p = Project::new("fs_calls_that_cannot_run");
+    p.write(
+        "app.py",
+        r#"import os
+
+
+async def empty_loop(path):
+    for _ in ():
+        open(path)
+
+
+async def skipped_else(path):
+    for _ in (1,):
+        break
+    else:
+        os.listdir(path)
+
+
+async def else_of_an_empty_loop(path):
+    for _ in ():
+        break
+    else:
+        os.listdir(path)
+
+
+async def non_empty_constant(path):
+    for _ in (1,):
+        os.listdir(path)
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "EFF105"]);
+    let got: Vec<(&str, u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["line"].as_u64().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("else_of_an_empty_loop", 20, "exact"),
+            ("non_empty_constant", 25, "exact"),
+        ]
+    );
+}
+
+/// The iterables that yield an item whatever the input: the `else` of a loop over one that
+/// leaves on its first item never runs, and its body runs whenever the loop is passed, so a
+/// helper sleeping there always sleeps. An item a display unpacks may be none, and `range` of
+/// constants may be empty.
+#[test]
+fn a_loop_that_leaves_on_its_first_item_runs_its_body_and_not_its_else() {
+    let p = Project::new("loops_leaving_on_the_first_item");
+    p.write(
+        "app.py",
+        r#"import time
+
+
+def nap_once():
+    for _ in (1,):
+        time.sleep(1)
+        break
+
+
+async def through_a_helper():
+    nap_once()
+
+
+async def string_constant():
+    for _ in "ab":
+        break
+    else:
+        time.sleep(1)
+
+
+async def dict_display():
+    for _ in {"k": 1}:
+        break
+    else:
+        time.sleep(1)
+
+
+async def list_display():
+    for _ in [1, 2]:
+        break
+    else:
+        time.sleep(1)
+
+
+async def constant_range():
+    for _ in range(3):
+        break
+    else:
+        time.sleep(1)
+
+
+async def one_item_besides_unpacking(rest):
+    for _ in (*rest, 1):
+        break
+    else:
+        time.sleep(1)
+
+
+async def only_unpacking(rest):
+    for _ in (*rest,):
+        break
+    else:
+        time.sleep(1)
+
+
+async def range_with_no_item():
+    for _ in range(3, 0):
+        break
+    else:
+        time.sleep(1)
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
+    let got: Vec<(&str, u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["line"].as_u64().unwrap(),
+                common::tiered_code(d),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("through_a_helper", 11, "EFF101"),
+            ("only_unpacking", 53, "EFF101"),
+            ("range_with_no_item", 60, "EFF101"),
+        ]
+    );
+}

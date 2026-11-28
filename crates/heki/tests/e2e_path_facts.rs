@@ -1,8 +1,8 @@
 //! The path and loop facts of `heki_ir::facts`, end to end through `heki dump-facts` (with the
 //! reader the rules have): whether a call runs whenever its function returns, over the edges
 //! into its handlers; whether it runs on every iteration of a loop that completes; branches the
-//! module's constants decide; the trip counts the code fixes, past 16 too; and where the items a
-//! loop steps through come from.
+//! module's constants and the sizes of loops decide; the trip counts the code fixes, past 16
+//! too; and where the items a loop steps through come from.
 
 mod common;
 
@@ -221,6 +221,43 @@ def connect(sock):
     assert_eq!(called("sock.send()"), known("dead"));
     assert_eq!(called("sock.close()"), known("dead"));
     assert_eq!(called("sock.flush()"), known("every"));
+}
+
+/// A loop's size decides its header: no iteration of a loop over an empty iterable runs its
+/// body, and the `else` of a loop whose iterable yields an item whatever the input, and whose
+/// every iteration leaves, never runs, while its body runs once whenever the function returns.
+/// The `else` of an empty loop runs; a loop that may not leave keeps both ways.
+#[test]
+fn a_loops_size_decides_its_body_and_its_else() {
+    let facts = dump_facts(
+        "paths_loop_sizes",
+        r#"def loops(db, rows):
+    for _ in ():
+        db.empty()
+    for _ in (1,):
+        db.once()
+        break
+    else:
+        db.skipped()
+    for _ in ():
+        break
+    else:
+        db.runs()
+    for row in rows:
+        if row:
+            break
+    else:
+        db.maybe()
+    db.after()
+"#,
+    );
+    let called = |text: &str| call(&facts, "loops", text)["on_every_return"]["called"].clone();
+    assert_eq!(called("db.empty()"), known("dead"));
+    assert_eq!(called("db.once()"), known("every"));
+    assert_eq!(called("db.skipped()"), known("dead"));
+    assert_eq!(called("db.runs()"), known("every"));
+    assert_eq!(called("db.maybe()"), known("not_every"));
+    assert_eq!(called("db.after()"), known("every"));
 }
 
 #[test]

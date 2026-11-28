@@ -1689,6 +1689,71 @@ impl<'a> FnIndex<'a> {
         }
     }
 
+    /// Whether the iterable `v` yields an item, when that holds whatever the input, through
+    /// copies: a tuple display or a string constant, a module's string or string-tuple constant,
+    /// `range` of constants, or a list, set, or dict display that nothing reads but the
+    /// iteration, so that nothing changes it first. A display yields none when it has no item,
+    /// and an item when one is not unpacked (`*rest`, `**more` may hold none). The upper bounds
+    /// above say neither: a container they bound may be emptied, or grown elsewhere.
+    fn yields_an_item(&self, v: VarId) -> Option<bool> {
+        let root = self.shape.copy_root(v);
+        let inst = self.shape.inst(root)?;
+        let unchanged =
+            |immutable: bool| immutable || root == v && self.shape.readers(root).len() == 1;
+        let of_display = |items: usize, plain: usize| {
+            (plain > 0)
+                .then_some(true)
+                .or((items == 0).then_some(false))
+        };
+        match &inst.kind {
+            InstKind::AllocBuiltin {
+                dst,
+                kind:
+                    kind @ (BuiltinKind::Tuple
+                    | BuiltinKind::List
+                    | BuiltinKind::Set
+                    | BuiltinKind::Dict),
+                elems,
+            } if unchanged(*kind == BuiltinKind::Tuple) => {
+                let plain = (0..elems.len())
+                    .filter(|i| !self.f.is_starred(*dst, *i))
+                    .count();
+                of_display(elems.len(), plain)
+            }
+            InstKind::DictLiteral { entries, .. } if unchanged(false) => {
+                let plain = entries
+                    .iter()
+                    .filter(|e| matches!(e, DictEntry::KeyValue { .. }))
+                    .count();
+                of_display(entries.len(), plain)
+            }
+            InstKind::Const {
+                literal: ConstLiteral::Str(s),
+                ..
+            } => Some(!s.is_empty()),
+            InstKind::LoadGlobal {
+                name,
+                is_lazy_import: false,
+                ..
+            } => self
+                .module
+                .strs
+                .get(name)
+                .map(|s| !s.is_empty())
+                .or_else(|| self.module.str_tuples.get(name).map(|t| !t.is_empty())),
+            _ => match self.item_step(inst) {
+                Some((ItemStep::Range(args), _)) => {
+                    let ints: Vec<i64> = args
+                        .iter()
+                        .map(|a| self.fixed_int(*a))
+                        .collect::<Option<_>>()?;
+                    range_len(&ints).map(|n| n > 0)
+                }
+                _ => None,
+            },
+        }
+    }
+
     /// The builtin wrapper `inst` calls on iterables, with what it takes of them: the builtin
     /// that the module does not rebind, called in a form whose items the result follows. The
     /// constructor named second builds a new container whose items stay its input's only while

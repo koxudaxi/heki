@@ -296,7 +296,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     then `report["runs"]`; a `get` default counts when the test rejects its length), with nothing
     on the way storing into the root, deleting from it, or passing it to a call.
     `LoopBound::ConstSmall` stays the view of counts up to `SMALL_MAX`. No claim rests on a size:
-    `Open` only leaves the loop data-sized to the rules that read it so.
+    `Open` only leaves the loop data-sized to the rules that read it so; which code runs does not
+    either (a loop's header is decided by its iterable alone, `Decided` below).
 - **Path facts** (`heki_ir::facts::Paths`, Advisory and Profitability only), computed on demand
   for the rules that read them, over the walk facility's `FnShape` and the owner's `Budget`:
   - `FnIndex::decided` (`Decided`): a branch whose test the code fixes never takes its other
@@ -305,7 +306,14 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     false whenever the code runs; a relative import, `from .typing import TYPE_CHECKING`, names
     the package's own module and fixes nothing), `not`, `==` / `!=` / `is` of two such values, and the phis of
     `and` / `or` along the edges that can run (one pass in reverse postorder: a phi's input along
-    a back edge leaves it undecided).
+    a back edge leaves it undecided). The header of a `for` loop or comprehension clause is
+    decided by its iterable when that yields an item or none whatever the input
+    (`FnIndex::yields_an_item`: a tuple display or a string constant, such a module constant,
+    `range` of constants, a list, set, or dict display only the loop reads; an unpacked item may
+    be none; `FnIndex::loop_header_decisions`): over none it never takes its body, and over one,
+    with no edge back to the header, it never takes its `else` (or exit). The trip counts above
+    are not read: they are upper bounds that a container grown elsewhere (a module's list)
+    escapes, and their walks ask the path facts, which ask `decided`.
   - Exception edges: an instruction raises into its block's handler unless the assumptions every
     exact claim states rule it out (`PathReader::raises`): bindings are static, imports resolve
     as configured, the catalog describes the library, and no asynchronous or resource-exhaustion
@@ -2420,7 +2428,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
      managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
      the call whenever it returns normally (`CallSite::on_every_return`: made, returned, or
-     reachable at all). A call of a class body the function runs is made or returned whenever
+     reachable at all: unreached only where the path facts place the site in a block no path
+     reaches, also a site made at an instruction that is no call, a `with` entering a catalogued
+     manager or a generator expression's creation, whose other two stay unestablished, and a
+     site where the object a call returns is used, by the block of the use). A call of a class body the function runs is made or returned whenever
      the function returns only when the body's own paths say so and the function has run the
      `class` statement to its end whenever it returns (a nested class's statement through the
      statements around it; a statement a `finally` body repeats, through one of its copies), and
@@ -2534,6 +2545,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      items whatever the steps before it found, as it always did; an explanation (when the run
      records open premises) goes on with a budget the function's explanations share.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
+   - A site no path reaches (`OnEveryReturn::unreached`: behind a branch the code decides against,
+     in a loop over an empty iterable, in the `else` of a loop that leaves on its first item) is
+     no boundary: it never runs, and neither tier claims anything about it.
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
      shown reach the same root cause (the same blocking call: the API, its effect, and, for a

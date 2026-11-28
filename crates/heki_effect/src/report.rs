@@ -39,7 +39,9 @@ pub struct BoundaryReport {
 /// (whose body runs right there) or a Layer 2 API with blocking effects left after the
 /// `is_awaited` filter; awaiting another `async def` never fires (its own boundary does).
 /// Offloads never fire: offload APIs carry no blocking effects and the offloaded callable is
-/// not called. Functions marked `sync_driven_only` are skipped.
+/// not called. Functions marked `sync_driven_only` are skipped, and so is a site no path
+/// reaches (`OnEveryReturn::unreached`): behind a branch the code decides against, in a loop
+/// over an empty iterable, or in the `else` of a loop that leaves on its first item.
 pub fn boundary_reports(index: &ProjectIndex) -> Vec<BoundaryReport> {
     boundary_reports_in(index, index.files.keys().map(PathBuf::as_path), None)
 }
@@ -66,7 +68,7 @@ pub fn boundary_reports_in<'p>(
             let reported_caller = index
                 .summary(&site.caller)
                 .is_some_and(|caller| caller.is_async && !caller.sync_driven_only);
-            if !reported_caller {
+            if !reported_caller || site.on_every_return.unreached {
                 continue;
             }
             let iterates = matches!(
@@ -136,10 +138,10 @@ fn boundary_must(
     site_must_steps(index, path, site, e, gaps).filter(|_| !open)
 }
 
-/// The steps of a boundary's call before its targets' facts: a call the code never reaches
-/// establishes nothing, and an `async def` target runs its blocking calls under its own
-/// boundary. `Continue(true)` when one does not hold and the decision goes on; `Break` when it
-/// stops there. A call that runs no target's body there is left to `site_must_steps`.
+/// The step of a boundary's call before its targets' facts: an `async def` target runs its
+/// blocking calls under its own boundary. `Continue(true)` when it does not hold and the
+/// decision goes on; `Break` when it stops there. A call that runs no target's body there is
+/// left to `site_must_steps`.
 fn boundary_steps(
     index: &ProjectIndex,
     site: &CallSite,
@@ -148,10 +150,6 @@ fn boundary_steps(
     let mut open = false;
     if !site.runs_targets_here() {
         return ControlFlow::Continue(open);
-    }
-    if !site.on_every_return.live {
-        open = true;
-        gaps(MustGap::NotReached)?;
     }
     for bc in site.project_callees() {
         if index.summary(&bc.callee).is_some_and(|c| c.is_async) {

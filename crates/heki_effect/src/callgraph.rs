@@ -671,8 +671,6 @@ fn given_chain<'m>(
 /// an effect whenever it returns, or a call of a chain to have made the next one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MustGap {
-    /// No path reaches the call: it is behind a branch the code decides against.
-    NotReached,
     /// The call never returns normally: every target is abstract or always raises.
     NeverReturns,
     /// The caller returns normally on a path on which it has not made the call
