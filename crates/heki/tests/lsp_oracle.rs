@@ -873,6 +873,12 @@ const EXACT_STAR: &str = "TIMEOUT = 1\n";
 const EXACT_STAR_REBINDING: &str = "TIMEOUT = 1\n\n\ndef fetch(url):\n    return url\n";
 const EXACT_FETCH_USE: &str =
     "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
+// A class whose module star-imports another module after it: the import binds the class's name
+// again once that module defines it, and may bind it to anything while the project has no such
+// module; an instance made through the name is then of either class, or of none heki knows.
+const EXACT_CLIENT: &str = "import requests\n\n\nclass Client:\n    def fetch(self, url):\n        return requests.get(url)\n\n\nfrom pkg.exact_rebind import *\n";
+const EXACT_REBIND_CLIENT: &str = "class Client:\n    def fetch(self, url):\n        return url\n";
+const EXACT_CLIENT_USE: &str = "from pkg import exact_client\n\n\nasync def serve():\n    exact_client.Client().fetch(\"u\")\n";
 // A class a function binds under `global` (`ModuleDecls::made_in`): the module's name holds it
 // once the module body runs the function on every path, and may be unbound when it runs on a
 // branch; without the declaration the class is the function's own.
@@ -1638,7 +1644,7 @@ fn steps_kept_values() -> Vec<Step> {
 /// (`EffectSummary::must_exec`, compared by Early Cutoff), and every binding of the name called
 /// that may be its last in the module or class body of another file, a star import after the
 /// definition included, which binds what the module it imports defines
-/// (`ProjectDecls::star_rebound`).
+/// (`ProjectDecls::name_holds`), also for the class of an instance made through the name.
 fn steps_exact_effects() -> Vec<Step> {
     vec![
         Step::new(
@@ -1753,6 +1759,37 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_fetch_use.py", "EFF101")])
         .absent(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "a class's module star-imports a module the project does not have after the class",
+            vec![
+                Action::Create("pkg/exact_client.py", EXACT_CLIENT.to_owned()),
+                Action::Create("pkg/exact_client_use.py", EXACT_CLIENT_USE.to_owned()),
+            ],
+        )
+        .absent(&[
+            ("pkg/exact_client_use.py", "EFF101"),
+            ("pkg/exact_client_use.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "the star-imported module is added, binding no such name",
+            vec![Action::Create("pkg/exact_rebind.py", EXACT_STAR.to_owned())],
+        )
+        .present(&[("pkg/exact_client_use.py", "EFF101")])
+        .absent(&[("pkg/exact_client_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "it starts defining the class's name",
+            vec![save("pkg/exact_rebind.py", EXACT_REBIND_CLIENT)],
+        )
+        .present(&[("pkg/exact_client_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_client_use.py", "EFF101")]),
+        Step::new(
+            "the star-imported module is removed",
+            vec![Action::Delete("pkg/exact_rebind.py")],
+        )
+        .absent(&[
+            ("pkg/exact_client_use.py", "EFF101"),
+            ("pkg/exact_client_use.py", "EFF101 [heuristic]"),
+        ]),
         Step::new(
             "a module binds a class under `global` in a function it runs on every path",
             vec![
