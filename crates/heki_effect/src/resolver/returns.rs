@@ -15,10 +15,12 @@ use super::{
 };
 use crate::infer::{Called, HandedArgs, Inferred, MAX_HANDED_CALLS};
 use crate::partial::Partial;
+use crate::types::{Args, Elem};
 use crate::{FuncKey, ModuleInput};
 use heki_ir::walk::{Answer, Budget, FnShape};
 use heki_ir::{
-    FunctionKind, Inst, InstKind, IrFunction, ItemOrigins, ItemSource, Terminator, VarId,
+    BuiltinKind, FunctionKind, Inst, InstKind, IrFunction, ItemOrigins, ItemSource, Terminator,
+    VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, LiteralValue, ResultItems};
 use rustc_hash::FxHashMap;
@@ -635,6 +637,11 @@ fn typed_candidates<'f>(
             (Some(t), Some(values)) if t.obj().is_some_and(|o| names_no_class(&o.class)) => {
                 returned_without_class(decls, f, values)
             }
+            (Some(t), Some(values))
+                if names_no_item_class(t) && may_return_named(decls, &FnShape::new(f), values) =>
+            {
+                Some(Returned::Named)
+            }
             _ => None,
         };
         match returned.zip(values) {
@@ -656,6 +663,31 @@ fn typed_candidates<'f>(
 /// object would not: `Any`, `object`, or any `Callable`.
 fn names_no_class(class: &str) -> bool {
     super::of_any_class(class) || super::is_any_callable(class)
+}
+
+/// Whether an annotation `t` says nothing of a tuple of named objects a function returns that
+/// the tuple would not: `tuple`, or a tuple whose items each name no class ([`names_no_class`]:
+/// `tuple[Callable[[Field], None], Callable[[Field], None]]`, `tuple[Callable[..., Any], ...]`).
+fn names_no_item_class(t: &Ty) -> bool {
+    t.obj().is_some_and(|o| {
+        let item = o.args.item();
+        o.class == "builtins.tuple"
+            && (item == Elem::Unknown
+                || matches!(&item, Elem::Of(t) if t.obj().is_some_and(|i| names_no_class(&i.class))))
+    })
+}
+
+/// Whether `t` is a named object, one of several, or a tuple of known length of them: what a
+/// [`Returned::Named`] fact keeps.
+fn names_objects(t: &Ty) -> bool {
+    if !t.named().is_empty() {
+        return true;
+    }
+    t.obj().is_some_and(|o| {
+        o.class == "builtins.tuple"
+            && matches!(&o.args, Args::Tuple(es) if !es.is_empty()
+                && es.iter().all(|e| matches!(e, Elem::Of(t) if !t.named().is_empty())))
+    })
 }
 
 /// What the values `f` returns may say where its annotation names no class: the named objects
@@ -688,10 +720,25 @@ fn returned_without_class(
         .then_some(Returned::Called)
 }
 
-/// Whether every value `f` returns may be a named object, by what makes it: a `def` or `lambda`
-/// of `f`, a name its module binds to a definition, an import, or an alias, or a name a scope
-/// enclosing it binds. Only such functions are inferred for a [`Returned::Named`] fact.
+/// Whether every value `f` returns may be a named object, or a tuple display of them (`return
+/// first, second`), by what makes it: a `def` or `lambda` of `f`, a name its module binds to a
+/// definition, an import, or an alias, or a name a scope enclosing it binds. Only such functions
+/// are inferred for a [`Returned::Named`] fact.
 fn may_return_named(decls: &ModuleDecls, shape: &FnShape<'_>, values: &[VarId]) -> bool {
+    values
+        .iter()
+        .all(|v| match shape.inst(shape.copy_root(*v)).map(|i| &i.kind) {
+            Some(InstKind::AllocBuiltin {
+                kind: BuiltinKind::Tuple,
+                elems,
+                ..
+            }) => elems.iter().all(|e| may_be_named(decls, shape, *e)),
+            _ => may_be_named(decls, shape, *v),
+        })
+}
+
+/// Whether `v` may be a named object ([`may_return_named`]).
+fn may_be_named(decls: &ModuleDecls, shape: &FnShape<'_>, v: VarId) -> bool {
     let named = |name: &str| {
         decls.functions.contains_key(name)
             || decls.classes.contains_key(name)
@@ -699,20 +746,16 @@ fn may_return_named(decls: &ModuleDecls, shape: &FnShape<'_>, values: &[VarId]) 
             || decls.aliases.contains_key(name)
             || decls.alias_paths.contains_key(name)
     };
-    values
-        .iter()
-        .all(|v| match shape.inst(shape.copy_root(*v)).map(|i| &i.kind) {
-            Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }) => {
-                named(name)
-            }
-            Some(
-                InstKind::LoadDeref { .. }
-                | InstKind::MakeClosure {
-                    func_id: Some(_), ..
-                },
-            ) => true,
-            _ => false,
-        })
+    match shape.inst(shape.copy_root(v)).map(|i| &i.kind) {
+        Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }) => named(name),
+        Some(
+            InstKind::LoadDeref { .. }
+            | InstKind::MakeClosure {
+                func_id: Some(_), ..
+            },
+        ) => true,
+        _ => false,
+    }
 }
 
 /// The value of every `return` of `f`, when calling it runs its body and gives what it returns
@@ -858,7 +901,7 @@ impl<'f> ReturnFacts<'_, 'f> {
                             .as_ref()
                             .is_some_and(|declared| project.narrower(t, declared, self.cx.kb))
                             .then(|| t.clone()),
-                        Returned::Named => (!t.named().is_empty()).then(|| t.clone()),
+                        Returned::Named => names_objects(t).then(|| t.clone()),
                         Returned::Called => matches!(t, Ty::Inst(_)).then(|| t.clone()),
                     }
                 })

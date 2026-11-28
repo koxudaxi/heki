@@ -938,7 +938,11 @@ one of its values.
 A `functools.partial` object's type keeps what the object holds besides its callable
 (`types::Held`: nothing, keywords only, or positions). A call of a value of such a type, read
 where the function does not make it (an item of a table, `POLICY[kind](x)` of
-`POLICY = {"a": partial(build), "b": partial(other, deep=True)}`, also bound to an attribute),
+`POLICY = {"a": partial(build), "b": partial(other, deep=True)}`, also bound to an attribute,
+or a module global whose stores bind one, `MARK = partial(mark, deep=True)`, which the
+declarations keep as they keep instances: `ModuleDecls::global_types`, read by name, through an
+import, or on the module, `helpers.MARK(f)`, `TypeCtx::global_partial`, which does not follow a
+partial object of another global's partial object, whose names may lead back to it),
 whose callable is one or several named objects and which holds no positions, is a call of those
 objects with the call's arguments as written (`Extractor::typed_partial`): their targets, the
 class it constructs, whether they are every implementation it can run, and what each returns,
@@ -983,8 +987,12 @@ typing, `result_of`, and the globals and attributes of pass 2. A function whose 
 no class (none, `Any`, `object`, `Callable`) returns the named object every returned value is,
 or one of them (`Ty::OneOf`): a `def` or `lambda` it makes (`make_requirer()` returning the
 `requirer` it defines, whose cells a call away from it binds to nothing), or a function or class
-a name binds; a `return` of anything else, `None` included, gives no fact. Only the functions
-every value of which a definition, a module-level name, or a cell gives are inferred for it.
+a name binds; a tuple display of such objects (`return first, second`, no `*` item) returns the
+tuple of them by position, under no annotation or one naming no class for the items (`tuple`,
+`tuple[Callable[...], ...]`), when every `return` gives the same tuple: unpacking the result
+(`first, _ = helpers()`) or a constant subscript of it calls the object at that position. A
+`return` of anything else, `None` included, gives no fact. Only the functions every value (or
+tuple item) of which a definition, a module-level name, or a cell gives are inferred for it.
 Where the annotation names no class and every returned value is what a call gives, or awaits
 one (`Path(name)`, `Store()`, `Other()` imported from another module, `sqlite3.connect(...)`),
 the function returns the instance of one class those calls give, when they agree: returns of

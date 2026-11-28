@@ -851,6 +851,14 @@ const HELD_DEFS_POSITIONED_TABLE: &str = "import time\nfrom collections.abc impo
 const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    return rest\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
 const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
 const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
+// A module constant bound to a `functools.partial` object (`ModuleDecls::global_types`) and a
+// factory returning a pair of functions it defines (`ReturnFact::ty`), called in other modules.
+const HELD_CONSTS: &str = "import time\nfrom functools import partial\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\ndef rest(seconds: float = 1.0) -> None:\n    pass\n\n\ndef pair():\n    def waiter() -> None:\n        time.sleep(1)\n\n    def idle() -> None:\n        pass\n\n    return waiter, idle\n\n\nDOZE = partial(doze, seconds=2.0)\n";
+const HELD_CONSTS_QUIET: &str = "import time\nfrom functools import partial\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\ndef rest(seconds: float = 1.0) -> None:\n    pass\n\n\ndef pair():\n    def waiter() -> None:\n        time.sleep(1)\n\n    def idle() -> None:\n        pass\n\n    return waiter, idle\n\n\nDOZE = partial(rest, seconds=2.0)\n";
+const HELD_CONSTS_SWAPPED: &str = "import time\nfrom functools import partial\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\ndef rest(seconds: float = 1.0) -> None:\n    pass\n\n\ndef pair():\n    def waiter() -> None:\n        time.sleep(1)\n\n    def idle() -> None:\n        pass\n\n    return idle, waiter\n\n\nDOZE = partial(doze, seconds=2.0)\n";
+const HELD_CONST_USE: &str =
+    "from pkg.held_consts import DOZE\n\n\nasync def through_constant() -> None:\n    DOZE()\n";
+const HELD_PAIR_USE: &str = "from pkg.held_consts import pair\n\n\nasync def through_pair() -> None:\n    first, _ = pair()\n    first()\n";
 const HELD_FACTORY: &str = "from pkg.held_defs import make_waiter\n\n\nasync def through_factory() -> None:\n    make_waiter()()\n";
 const HELD_FIELD: &str = "from pkg.held_defs import View, nap\n\n\nasync def through_field() -> None:\n    View(nap).run()\n";
 const HELD_PARTIAL: &str = "from pkg.held_defs import Holder\n\n\nasync def through_partial() -> None:\n    Holder().run()\n";
@@ -1429,6 +1437,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/held_field.py", HELD_FIELD),
         ("pkg/held_partial.py", HELD_PARTIAL),
         ("pkg/held_table.py", HELD_TABLE),
+        ("pkg/held_consts.py", HELD_CONSTS),
+        ("pkg/held_const_use.py", HELD_CONST_USE),
+        ("pkg/held_pair_use.py", HELD_PAIR_USE),
         ("pkg/st_client.py", ST_CLIENT),
         ("pkg/st_use.py", ST_USE),
         ("pkg/st_rebind.py", ST_REBIND),
@@ -2189,13 +2200,20 @@ fn steps_declared_types() -> Vec<Step> {
 
 /// The function a value holds, decided in the module defining it: a factory returning a function
 /// that does not wait, a class that is no named tuple (whose attribute holds what a parameter
-/// declares), and a partial class attribute of a function that does not wait each take the wait
-/// away from their callers in other modules, and the definitions written back bring it back.
+/// declares), a partial class attribute or module constant of a function that does not wait, and
+/// a factory's pair whose items swap each take the wait away from their callers in other
+/// modules, and the definitions written back bring it back.
 fn steps_held_functions() -> Vec<Step> {
     const FACTORY: &[(&str, &str)] = &[("pkg/held_factory.py", "EFF101")];
     const FIELD: &[(&str, &str)] = &[("pkg/held_field.py", "EFF101 [heuristic]")];
     const PARTIAL: &[(&str, &str)] = &[("pkg/held_partial.py", "EFF101")];
     const TABLE: &[(&str, &str)] = &[("pkg/held_table.py", "EFF101")];
+    const CONSTANT: &[(&str, &str)] = &[("pkg/held_const_use.py", "EFF101 [heuristic]")];
+    const PAIR: &[(&str, &str)] = &[("pkg/held_pair_use.py", "EFF101")];
+    const CONSTANT_AND_PAIR: &[(&str, &str)] = &[
+        ("pkg/held_const_use.py", "EFF101 [heuristic]"),
+        ("pkg/held_pair_use.py", "EFF101"),
+    ];
     const ALL: &[(&str, &str)] = &[
         ("pkg/held_factory.py", "EFF101"),
         ("pkg/held_field.py", "EFF101 [heuristic]"),
@@ -2245,6 +2263,23 @@ fn steps_held_functions() -> Vec<Step> {
             vec![save("pkg/held_defs.py", HELD_DEFS)],
         )
         .present(TABLE),
+        Step::new(
+            "the constant's partial object holds a function that does not wait",
+            vec![save("pkg/held_consts.py", HELD_CONSTS_QUIET)],
+        )
+        .absent(CONSTANT)
+        .present(PAIR),
+        Step::new(
+            "the factory's pair swaps its functions",
+            vec![save("pkg/held_consts.py", HELD_CONSTS_SWAPPED)],
+        )
+        .absent(PAIR)
+        .present(CONSTANT),
+        Step::new(
+            "the constant and the pair wait again",
+            vec![save("pkg/held_consts.py", HELD_CONSTS)],
+        )
+        .present(CONSTANT_AND_PAIR),
     ]
 }
 

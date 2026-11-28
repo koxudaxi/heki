@@ -18,7 +18,7 @@ use crate::decorators;
 use crate::only_read::{LiteralAnnotation, ParamAnnotation};
 use crate::ownership;
 use crate::readonly::{ContainerFamily, ContainerKind, FamilyLevel, FamilyRole};
-use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
+use crate::types::{Added, Args, Elem, Generic, Held, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
@@ -955,10 +955,10 @@ pub struct PartialAttr {
 
 impl PartialAttr {
     /// What the object holds for its callable: keywords or nothing.
-    pub(crate) fn held(&self) -> crate::types::Held {
+    pub(crate) fn held(&self) -> Held {
         match self.keywords {
-            true => crate::types::Held::Keywords,
-            false => crate::types::Held::Nothing,
+            true => Held::Keywords,
+            false => Held::Nothing,
         }
     }
 }
@@ -1332,8 +1332,9 @@ pub struct ModuleDecls {
     /// another spelling ([`Self::definition_path`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private_members: bool,
-    /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`): the
-    /// join of every store of the module (`stores::record`).
+    /// Module global `name -> type` of the instance or the `functools.partial` object it holds
+    /// (`client = httpx.Client()`, `MARK = partial(mark, deep=True)`): the join of every store
+    /// of the module (`stores::record`, [`kept_in_declarations`]).
     pub global_types: BTreeMap<String, Ty>,
     /// Module globals bound once, by the module body, to a dict display whose keys are string
     /// literals and some of whose values are functions, classes, or instances whose fields hold
@@ -10249,10 +10250,13 @@ fn complete_decls(
 /// Whether the declarations keep an inferred type of a global or a `self` attribute: an
 /// instance, a union of instances, a class object (`FACTORY: type[Model] = Model`,
 /// `self.kind = kind` of a `kind: type[Model]`), or a coroutine of one (`self.ready =
-/// self.setup()`, awaited in another method).
+/// self.setup()`, awaited in another method), or a `functools.partial` object of named objects
+/// (`MARK: Final = partial(mark, deep=True)`), which a call through the name calls
+/// ([`Ty::Partial`]). A name bound to a named object itself is an alias ([`module_aliases`]).
 fn kept_in_declarations(t: &Ty) -> bool {
     match t {
         Ty::Inst(_) | Ty::Union(_) | Ty::Class(_) => true,
+        Ty::Partial(callable, _) => !callable.named().is_empty(),
         Ty::Coroutine(result) => kept_in_declarations(result),
         _ => false,
     }
@@ -11411,6 +11415,15 @@ impl<'a> TypeCtx<'a> {
                     .or_else(|| decl.declared_return(self.project))
                     .map(|t| decl.call_type(t));
             }
+            // A partial object calls its callable, past the arguments it holds, which shift the
+            // call's: what the callable gives, its arguments not followed.
+            Symbol::Global(_) if let Some((callable, _)) = self.global_partial(fqn) => {
+                let unknown: fn(Option<u8>, Option<&str>) -> Option<ArgFact> = |_, _| None;
+                let mut results = (callable.named().iter())
+                    .map(|c| self.call_result(c, CalledThrough::Name, unknown));
+                let first = results.next()??;
+                return results.try_fold(first, |acc, t| acc.join(&t?));
+            }
             Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => return None,
             Symbol::External => {}
         }
@@ -11464,6 +11477,33 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// What calling a `functools.partial` object of `callable` holding `held` runs: what calling
+    /// the callable runs with the call's own positions. Held positions shift them past ones heki
+    /// does not know, and held keywords may decide what a library call does, which the catalog
+    /// reads from the arguments the call shows: such calls stay unresolved.
+    pub(crate) fn partial_targets(&self, callable: Option<&Val>, held: Held) -> Callee {
+        match (held, self.resolve_call(callable)) {
+            (Held::Positions, _) | (Held::Keywords, Callee::External(_)) => Callee::Unresolved,
+            (_, target) => target,
+        }
+    }
+
+    /// The callable a call of the name `fqn` calls, and what the object holds, when the name is
+    /// a module global holding a `functools.partial` object of functions or classes
+    /// ([`ModuleDecls::global_types`]). A partial object of another global, which pass 1 types
+    /// by its name (`partial(other.MARK)`), is not followed: the names may lead back to it.
+    pub(crate) fn global_partial(&self, fqn: &str) -> Option<(Ty, Held)> {
+        match self.called_symbol(fqn) {
+            Symbol::Global(Ty::Partial(callable, held))
+                if (callable.named().iter())
+                    .all(|c| !matches!(self.called_symbol(c), Symbol::Global(_))) =>
+            {
+                Some((*callable, held))
+            }
+            _ => None,
+        }
+    }
+
     /// Calling a named class constructs exactly that class: its `__init__` is the one its MRO
     /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
@@ -11475,6 +11515,10 @@ impl<'a> TypeCtx<'a> {
                     fqn,
                     self.project.class_targets(fqn, "__init__", self.kb),
                 ),
+                // `helpers.MARK(f)` of a module global `MARK = partial(mark, deep=True)`.
+                Symbol::Global(_) if let Some((callable, held)) = self.global_partial(fqn) => {
+                    self.partial_targets(callable.val().as_ref(), held)
+                }
                 Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => {
                     Callee::Unresolved
                 }
@@ -11573,9 +11617,9 @@ impl<'a> TypeCtx<'a> {
             Recv::Ref(owner) if self.project.is_project_class(owner) => !self
                 .project
                 .call_rebound(&format!("{}.{method}", self.project.canonical(owner))),
-            Recv::Ref(owner) => !self
-                .project
-                .call_rebound(&self.project.object_named(&format!("{owner}.{method}"))),
+            Recv::Ref(owner) => {
+                self.name_targets_complete(&self.project.object_named(&format!("{owner}.{method}")))
+            }
             // The library method `super()` finds looks names up on the instance, of any class
             // the value may be (R2).
             Recv::Super(owner) => {
@@ -11643,13 +11687,24 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// Whether calling the name `fqn` runs only what [`Self::call_targets`] resolves it to: the
+    /// project does not bind the name to another object ([`ProjectDecls::call_rebound`]), and
+    /// when it holds a `functools.partial` object ([`Self::global_partial`]), its callable is
+    /// one name the project does not bind again either.
+    fn name_targets_complete(&self, fqn: &str) -> bool {
+        !self.project.call_rebound(fqn)
+            && self.global_partial(fqn).is_none_or(
+                |(callable, _)| matches!(callable, Ty::Ref(c) if !self.project.call_rebound(&c)),
+            )
+    }
+
     /// Whether `callee`, what [`Self::resolve_call`] resolves calling `value` to, is every
     /// implementation the call can run: a function or class named exactly, unless the project
     /// binds the name to another object ([`ProjectDecls::call_rebound`]), or an instance's
     /// `__call__` as for a method.
     pub fn call_targets_complete(&self, value: Option<&Val>, callee: &Callee) -> bool {
         match value {
-            Some(Val::Ref(fqn)) => !self.project.call_rebound(fqn),
+            Some(Val::Ref(fqn)) => self.name_targets_complete(fqn),
             Some(Val::Inst(class, false)) => self
                 .project
                 .instance_targets_complete(class, "__call__", callee, self.kb),
@@ -11854,8 +11909,9 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// Whether `recv.method(...)` calls a `functools.partial` object of a class attribute that
-    /// holds keywords ([`PartialAttr::keywords`]) on some class `recv` may be: the call passes
-    /// the callable keywords it does not show, which may bind any parameter.
+    /// holds keywords ([`PartialAttr::keywords`]) on some class `recv` may be, or of a global of
+    /// the module `recv` ([`Self::global_partial`]): the call passes the callable keywords it
+    /// does not show, which may bind any parameter.
     pub(crate) fn calls_partial_with_keywords(&self, recv: Option<&Val>, method: &str) -> bool {
         let holds_keywords = |recv: Recv<'_>| {
             // Past the limit the call has too many targets to bind (`alias_call_targets`).
@@ -11870,9 +11926,20 @@ impl<'a> TypeCtx<'a> {
                     })
                 })
         };
+        // A module global holding one (`helpers.MARK(f)`).
+        let global_holds_keywords = |owner: &str| {
+            let member = self.project.object_named(&format!("{owner}.{method}"));
+            self.global_partial(&member)
+                .is_some_and(|(_, held)| held == Held::Keywords)
+        };
         match self.dispatch_classes(recv) {
             Some(classes) => classes.iter().any(|c| holds_keywords(Recv::Inst(c))),
-            None => recv.and_then(Val::recv).is_some_and(holds_keywords),
+            None => match recv {
+                Some(Val::Ref(owner)) if !self.project.is_project_class(owner) => {
+                    global_holds_keywords(owner)
+                }
+                _ => recv.and_then(Val::recv).is_some_and(holds_keywords),
+            },
         }
     }
 

@@ -4,10 +4,11 @@
 //! attribute or a global every store of which binds such an instance, and over a module-level
 //! table of instances bound once (one of the values its items hold). A function every `return`
 //! of which gives a function it defines, or a function or class a name binds, returns that
-//! object. A class attribute bound to a `functools.partial` object of a function, read through
-//! the class or wrapped in `staticmethod`, calls the function with the call's arguments and
-//! gives what it returns; a class held either way is constructed, and the object it gives is
-//! new.
+//! object, and one every `return` of which gives the same tuple of them returns them by
+//! position. A class attribute bound to a `functools.partial` object of a function, read through
+//! the class or wrapped in `staticmethod`, and a module global bound to one, call the function
+//! with the call's arguments and give what it returns; a class held either way is constructed,
+//! and the object it gives is new.
 //!
 //! Each premise changed leaves the call unresolved: a dataclass that is not frozen, one with a
 //! `__post_init__`, a field a method stores through `object.__setattr__`, a copy given other
@@ -1355,4 +1356,236 @@ def a_class_attribute_a_method_call_gives(field: Field) -> bool:
 #[test]
 fn a_global_and_a_class_attribute_keep_what_they_are_bound_to() {
     check_marks("function_values_globals", GLOBAL_DEFS, GLOBAL_CALLS);
+}
+
+const PARTIAL_GLOBAL_DEFS: &str = r#"from __future__ import annotations
+
+import os
+from functools import partial
+from typing import Final
+
+from pkg.model import Field, noop, require
+from pkg.more import REQUIRE
+
+
+def mark(field: Field, *, deep: bool = False) -> None:
+    field.required = True
+
+
+class Fresh(Field):
+    def __init__(self) -> None:
+        super().__init__()
+        self.required = True
+
+
+MARK: Final = partial(mark, deep=True)
+PLAIN = partial(mark)
+HELD = partial(mark, Field())
+CHOSEN = partial(require) if os.environ.get("STRICT") else partial(noop)
+MAKE = partial(Fresh)
+REBOUND = partial(mark)
+SWAPPED = partial(mark)
+AGAIN = partial(REQUIRE)
+
+
+def rebind(value) -> None:
+    global REBOUND
+    REBOUND = value
+
+
+def run_here(field: Field) -> None:
+    MARK(field)
+"#;
+
+const PARTIAL_GLOBAL_CALLS: &str = r#"from __future__ import annotations
+
+from pkg import defs
+from pkg.defs import AGAIN, CHOSEN, HELD, MAKE, MARK, PLAIN, REBOUND, SWAPPED
+from pkg.model import Field
+
+
+def through_the_name(fields: list[Field]) -> None:
+    for field in fields:
+        MARK(field)  # writes
+
+
+def through_the_module(field: Field) -> None:
+    defs.MARK(field)  # writes
+
+
+def holding_nothing(field: Field) -> None:
+    PLAIN(field)  # writes
+
+
+def holding_a_position() -> None:
+    HELD()  # unresolved
+
+
+def holding_a_position_on_the_module() -> None:
+    defs.HELD()  # unresolved
+
+
+def of_another_partial(field: Field) -> None:
+    AGAIN(field)  # writes
+
+
+def of_another_partial_on_the_module(field: Field) -> None:
+    defs.AGAIN(field)  # unresolved
+
+
+def either(field: Field) -> None:
+    CHOSEN(field)  # writes
+
+
+def constructs() -> Field:
+    made = MAKE()
+    made.required = True
+    other = defs.MAKE()
+    other.required = True
+    return made
+
+
+def rebound_in_a_function(field: Field) -> None:
+    REBOUND(field)  # unresolved
+
+
+def rebound_in_another_module(field: Field) -> None:
+    SWAPPED(field)  # unresolved
+"#;
+
+/// A module global bound to a `functools.partial` object calls its function with the call's
+/// arguments, read by name in its module or through an import, or on the module: a partial of
+/// a class constructs it, and one of either of two functions calls either. The call stays
+/// unresolved when the object holds a position, or when the module (`global` in a function) or
+/// another module binds the global to a value heki does not know, and on the module for a partial
+/// object of another module's partial object, whose names are not followed from there.
+#[test]
+fn a_module_constant_holding_a_partial_calls_its_function() {
+    let p = Project::new("function_values_partial_globals");
+    p.write("pyproject.toml", CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/model.py", MODEL);
+    p.write("pkg/defs.py", PARTIAL_GLOBAL_DEFS);
+    p.write(
+        "pkg/more.py",
+        "from functools import partial\n\nfrom pkg.model import require\n\nREQUIRE = partial(require)\n",
+    );
+    p.write(
+        "pkg/swaps.py",
+        "import mystery\n\nfrom pkg import defs\n\n\ndef swap() -> None:\n    defs.SWAPPED = mystery.make()\n",
+    );
+    p.write("pkg/passes.py", PARTIAL_GLOBAL_CALLS);
+    assert_eq!(reported(&p), marked(PARTIAL_GLOBAL_CALLS));
+}
+
+const FACTORY_TUPLE_DEFS: &str = r#"from __future__ import annotations
+
+from collections.abc import Callable
+
+from pkg.model import Field, noop, require
+
+
+def pair():
+    def first(field: Field) -> None:
+        field.required = True
+
+    def second(field: Field) -> None:
+        pass
+
+    return first, second
+
+
+def typed_pair() -> tuple[Callable[[Field], None], Callable[[Field], bool]]:
+    def first(field: Field) -> None:
+        field.required = True
+
+    return first, noop
+
+
+def named_pair():
+    return (require, noop)
+
+
+def bare_pair() -> tuple:
+    return noop, require
+
+
+def captured(strict: bool):
+    def first(field: Field) -> None:
+        if strict:
+            field.required = True
+
+    return first, noop
+
+
+def either_order(flag: bool):
+    if flag:
+        return require, noop
+    return noop, require
+
+
+def spread(fns: list):
+    return (*fns,)
+"#;
+
+const FACTORY_TUPLE_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import bare_pair, captured, either_order, named_pair, pair, spread, typed_pair
+from pkg.model import Field
+
+
+def unpacks(field: Field) -> None:
+    first, second = pair()
+    first(field)  # writes
+    second(field)
+
+
+def indexes(field: Field) -> None:
+    pair()[0](field)  # writes
+    fns = pair()
+    fns[1](field)
+
+
+def annotated(field: Field) -> None:
+    first, other = typed_pair()
+    first(field)  # writes
+    other(field)
+
+
+def module_functions(field: Field) -> None:
+    write, _ = named_pair()
+    write(field)  # writes
+
+
+def bare_annotation(field: Field) -> None:
+    _, other = bare_pair()
+    other(field)  # writes
+
+
+def closure(field: Field) -> None:
+    first, _ = captured(True)
+    first(field)  # writes
+
+
+def differs_by_return(field: Field, flag: bool) -> None:
+    a, _ = either_order(flag)
+    a(field)  # unresolved
+
+
+def unpacked_display(field: Field) -> None:
+    (a,) = spread([])
+    a(field)  # unresolved
+"#;
+
+/// A factory returning a tuple of functions it defines or names (`return first, second`, also
+/// under an annotation naming no class for the items) gives them by position: unpacking the
+/// result or indexing it calls the one at that place. Returns giving different tuples, and a
+/// display with `*`, give nothing known.
+#[test]
+fn a_tuple_of_functions_a_factory_returns_calls_each_by_position() {
+    check_marks(
+        "function_values_factory_tuples",
+        FACTORY_TUPLE_DEFS,
+        FACTORY_TUPLE_CALLS,
+    );
 }

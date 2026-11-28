@@ -3176,8 +3176,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// The project class `recv.method(...)` constructs when `method` holds it: a field of an
-    /// instance holding the class ([`TypeCtx::field_held`]), or a class attribute bound to a
-    /// `functools.partial` object of it (`ClassAlias::partial`).
+    /// instance holding the class ([`TypeCtx::field_held`]), or a class attribute or a module
+    /// global bound to a `functools.partial` object of it (`ClassAlias::partial`,
+    /// [`TypeCtx::global_partial`]).
     fn held_class(&self, recv: VarId, method: &str) -> Option<String> {
         let project = self.cx.project;
         let class = match self
@@ -3188,6 +3189,11 @@ impl<'a> Extractor<'a> {
             Some(crate::types::Elem::Of(crate::types::Ty::Ref(fqn))) => fqn.clone(),
             Some(_) => return None,
             None => match self.val(recv)? {
+                Val::Ref(owner) if !project.is_project_class(owner) => {
+                    let member = project.object_named(&format!("{owner}.{method}"));
+                    let (callable, _) = self.cx.global_partial(&member)?;
+                    callable.val()?.class_object(project)?.to_owned()
+                }
                 Val::Ref(owner) | Val::Inst(owner, _) | Val::Class(owner) => {
                     let partial = project.class_aliases(owner, method)?.partial?;
                     project.object_named(&partial.callable)
@@ -5892,22 +5898,12 @@ impl<'a> Extractor<'a> {
                     _ => None,
                 };
                 let callable = callee_val.or(partial.as_ref().map(|(c, _)| c));
-                let target = match callee_var {
-                    Some(_) => match self.cx.resolve_call(callable) {
-                        // The keywords the object holds may decide what a library call does,
-                        // which the catalog reads from the arguments the call shows.
-                        Callee::External(_)
-                            if partial
-                                .as_ref()
-                                .is_some_and(|(_, held)| *held == Held::Keywords) =>
-                        {
-                            Callee::Unresolved
-                        }
-                        target => target,
-                    },
+                let target = match (callee_var, &partial) {
+                    (Some(_), Some((c, held))) => self.cx.partial_targets(Some(c), *held),
+                    (Some(_), None) => self.cx.resolve_call(callable),
                     // Non-inlined comprehension (Python 3.11, `__comp_<function id>`) runs
                     // immediately.
-                    None => callee
+                    (None, _) => callee
                         .strip_prefix("__comp_")
                         .and_then(|n| n.parse::<u32>().ok())
                         .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
