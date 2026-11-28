@@ -148,6 +148,79 @@ pub struct ParsedModule {
     parsed: ruff_python_parser::Parsed<ruff_python_ast::ModModule>,
 }
 
+/// Dropping a tree as it is recurses once per level, past a thread's stack for a chain of
+/// thousands of operators. The tree is taken apart instead: each statement, expression, and
+/// pattern is detached from its parent, and dropped once its own children are detached, so
+/// dropping a module takes the stack of one node whatever its depth.
+impl Drop for ParsedModule {
+    fn drop(&mut self) {
+        use ruff_python_ast::visitor::transformer::{
+            Transformer, walk_expr, walk_pattern, walk_stmt,
+        };
+        let empty =
+            ruff_python_parser::parse_unchecked_source("", ruff_python_ast::PySourceType::Python);
+        let mut module = std::mem::replace(&mut self.parsed, empty).into_syntax();
+        let detached = Detached::default();
+        for stmt in &mut module.body {
+            detached.visit_stmt(stmt);
+            while let Some(node) = detached.pop() {
+                match node {
+                    Node::Stmt(mut stmt) => walk_stmt(&detached, &mut stmt),
+                    Node::Expr(mut expr) => walk_expr(&detached, &mut expr),
+                    Node::Pattern(mut pattern) => walk_pattern(&detached, &mut pattern),
+                }
+            }
+        }
+    }
+}
+
+/// A node [`ParsedModule`]'s drop has detached from its parent.
+enum Node {
+    Stmt(ruff_python_ast::Stmt),
+    Expr(ruff_python_ast::Expr),
+    Pattern(ruff_python_ast::Pattern),
+}
+
+/// The nodes detached and not yet taken apart: walking a node moves each of its statements,
+/// expressions, and patterns here and leaves a leaf in its place.
+#[derive(Default)]
+struct Detached(std::cell::RefCell<Vec<Node>>);
+
+impl Detached {
+    fn pop(&self) -> Option<Node> {
+        self.0.borrow_mut().pop()
+    }
+
+    fn push(&self, node: Node) {
+        self.0.borrow_mut().push(node);
+    }
+}
+
+impl ruff_python_ast::visitor::transformer::Transformer for Detached {
+    fn visit_stmt(&self, stmt: &mut ruff_python_ast::Stmt) {
+        let leaf = ruff_python_ast::Stmt::Pass(ruff_python_ast::StmtPass {
+            node_index: Default::default(),
+            range: TextRange::default(),
+        });
+        self.push(Node::Stmt(std::mem::replace(stmt, leaf)));
+    }
+
+    fn visit_expr(&self, expr: &mut ruff_python_ast::Expr) {
+        let leaf = ruff_python_ast::Expr::NoneLiteral(Default::default());
+        self.push(Node::Expr(std::mem::replace(expr, leaf)));
+    }
+
+    fn visit_pattern(&self, pattern: &mut ruff_python_ast::Pattern) {
+        let leaf =
+            ruff_python_ast::Pattern::MatchSingleton(ruff_python_ast::PatternMatchSingleton {
+                node_index: Default::default(),
+                range: TextRange::default(),
+                value: ruff_python_ast::Singleton::None,
+            });
+        self.push(Node::Pattern(std::mem::replace(pattern, leaf)));
+    }
+}
+
 impl ParsedModule {
     pub fn suite(&self) -> &[ruff_python_ast::Stmt] {
         &self.parsed.syntax().body

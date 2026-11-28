@@ -918,11 +918,14 @@ const INPUT_READ_AHEAD: usize = 8 << 20;
 /// `exit` or the end of stdin (the client closed it or went away), whatever analysis is in
 /// flight: tower-lsp's `Server::serve` would first finish every handler it has started. Returns
 /// whether the session ended as the protocol asks, after `shutdown`: the exit code is then 0,
-/// else 1.
-pub fn run_stdio(selectors: Selectors) -> std::io::Result<bool> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+/// else 1. Every thread of the server (the handlers' and the analyses') gets a stack of
+/// `thread_stack` bytes, or the platform's default.
+pub fn run_stdio(selectors: Selectors, thread_stack: Option<usize>) -> std::io::Result<bool> {
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    if let Some(size) = thread_stack {
+        runtime.thread_stack_size(size);
+    }
+    let runtime = runtime.enable_all().build()?;
     let shut_down = runtime.block_on(async {
         let (service, socket) = LspService::build(|client| Backend::new(client, selectors))
             .custom_method("heki/stats", Backend::stats)
