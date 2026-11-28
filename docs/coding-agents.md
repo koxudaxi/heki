@@ -146,6 +146,10 @@ Put the contracts and the baseline path in `heki.toml`, and give that file an ow
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
 
+CODEOWNERS protects the file, not the code around it. Run `heki check --report-suppressed <PATH>` in CI
+to list every inline `# heki: ignore` and `# noqa` that silences a report, so an agent cannot quietly
+go around a wall either ([review checklist](#review-a-contract-change-from-an-agent)).
+
 ```text
 # .github/CODEOWNERS
 /heki.toml           @your-org/maintainers
@@ -358,6 +362,9 @@ baseline, the workflow, the hook, or the agent instructions is a change to a pro
 When a diagnostic or a question is about one function, `heki inspect` says what it reaches,
 changes, keeps, and returns, with the call chains, without reading its callees. Run it when a
 function's effects are in question, not before every edit.
+
+The text form is the one to read in a terminal; it needs no configuration. A sample is in
+[Getting Started](getting-started.md#look-at-one-function).
 
 ```console
 $ heki inspect app.users.load_user --output-format json

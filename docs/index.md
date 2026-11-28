@@ -188,6 +188,8 @@ See [Contracts](configuration.md#contracts) for every key. A coding agent can mi
 in its instructions, but not a contract that `heki check` enforces:
 
 - List `heki.toml` and `heki-baseline.toml` in `CODEOWNERS`: moving a wall takes a review.
+- Run `heki check --report-suppressed <PATH>` in CI: it lists every inline `# heki: ignore` and `# noqa`
+  that silences a report, so a change that goes around a wall shows in review ([details](adoption.md#auditing-inline-suppressions)).
 - A contract's `message` starts the help line of its reports, so the agent reads it as the fix.
 - A [Stop hook](coding-agents.md#a-stop-hook-for-claude-code) sends a failing check back before
   the agent ends its turn.

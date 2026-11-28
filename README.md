@@ -190,6 +190,8 @@ See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every ke
 can miss a rule written in its instructions, but not a contract that `heki check` enforces:
 
 - List `heki.toml` and `heki-baseline.toml` in `CODEOWNERS`: moving a wall takes a review.
+- Run `heki check --report-suppressed <PATH>` in CI: it lists every inline `# heki: ignore` and `# noqa`
+  that silences a report, so a change that goes around a wall shows in review ([details](https://heki.koxudaxi.dev/adoption/#auditing-inline-suppressions)).
 - A contract's `message` starts the help line of its reports, so the agent reads it as the fix.
 - A [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code) sends a
   failing check back before the agent ends its turn.
