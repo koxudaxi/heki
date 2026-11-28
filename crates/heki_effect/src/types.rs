@@ -16,10 +16,6 @@ pub(crate) const MAX_DEPTH: usize = 4;
 /// type.
 pub(crate) const MAX_UNION: usize = 3;
 
-/// Most named objects a [`Ty::OneOf`] keeps: the targets a call of the value may run, as many as
-/// a call through a class hierarchy follows (`resolver::CHA_CANDIDATE_LIMIT`).
-pub(crate) const MAX_NAMED: usize = 8;
-
 /// What the Advisory lane knows about a value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Ty {
@@ -41,7 +37,7 @@ pub enum Ty {
     Coroutine(Box<Ty>),
     /// An instance of one of two or three classes (sorted by class, one entry per class).
     Union(Vec<Obj>),
-    /// One of two to [`MAX_NAMED`] named objects, by fqn (sorted): what several paths bind, or
+    /// One of two or more named objects, by fqn (sorted): what several paths bind, or
     /// an item of a table of functions (`HANDLERS[kind]`). Calling it calls one of them.
     OneOf(Vec<String>),
 }
@@ -497,16 +493,17 @@ impl Ty {
         Some(Ty::Partial(Box::new(callable), held))
     }
 
-    /// The value that is one of the named objects `fqns`: one of them, a [`Ty::OneOf`] of at
-    /// most [`MAX_NAMED`], or `None` for none or more.
+    /// The value that is one of the named objects `fqns`: one of them, a [`Ty::OneOf`] of more,
+    /// or `None` for none. A value keeps every object it may be, which the source names: how
+    /// many a call follows is the call's to decide (`resolver::CHA_CANDIDATE_LIMIT`).
     pub(crate) fn one_of(fqns: impl IntoIterator<Item = String>) -> Option<Ty> {
         let mut out: Vec<String> = fqns.into_iter().collect();
         out.sort();
         out.dedup();
         match out.len() {
             1 => out.pop().map(Ty::Ref),
-            n if (2..=MAX_NAMED).contains(&n) => Some(Ty::OneOf(out)),
-            _ => None,
+            0 => None,
+            _ => Some(Ty::OneOf(out)),
         }
     }
 }
@@ -1089,7 +1086,7 @@ mod tests {
         assert_eq!(nested.join(&partial(&g, Held::Nothing)), None);
         assert_eq!(list(Elem::Of(f.clone())).depth(), 2);
         // A value is one of the named objects it names: one, those of a choice, none for an
-        // instance. One name is that object; two to eight are a choice; none or more, nothing.
+        // instance. One name is that object; more are a choice, however many; none, nothing.
         let names = |n: usize| (0..n).map(|i| format!("m.f{i}"));
         let choice = Ty::one_of(names(2).rev()).unwrap();
         assert_eq!(choice, Ty::OneOf(names(2).collect()));
@@ -1098,7 +1095,7 @@ mod tests {
         assert!(Ty::inst("m.A").named().is_empty());
         assert_eq!(Ty::one_of(["m.f".to_owned(), "m.f".to_owned()]), Some(f));
         assert_eq!(Ty::one_of(names(0)), None);
-        assert_eq!(Ty::one_of(names(MAX_NAMED + 1)), None);
+        assert_eq!(Ty::one_of(names(100)).unwrap().named().len(), 100);
     }
 
     #[test]

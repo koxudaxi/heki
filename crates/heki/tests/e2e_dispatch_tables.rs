@@ -1693,6 +1693,145 @@ fn class_aliases_of_more_than_eight_functions_are_too_many() {
     }
 }
 
+const RUNNER_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "runner-glue"
+scopes = ["pkg.runner:*"]
+write-universe = ["Field.required"]
+allowed-callees = ["pkg.steps:*"]
+unresolved = "report"
+"#;
+
+/// `n` step functions and `n` subclasses of `Step` overriding `run` in `pkg.steps`, a class
+/// `Wrap` with a `run` of its own, each setting `Field.required`, and a class `Zero` without.
+fn steps(n: usize) -> String {
+    let mut out = vec!["from pkg.model import Field\n".to_owned()];
+    for class in ["Step", "Wrap"] {
+        out.push(format!(
+            "\nclass {class}:\n    def run(self, field: Field) -> None:\n        field.required = True\n"
+        ));
+    }
+    out.push("\nclass Zero:\n    pass\n".to_owned());
+    for k in 0..n {
+        out.push(format!(
+            "\ndef f{k}(field: Field) -> None:\n    field.required = True\n\n\nclass Step{k}(Step):\n    def run(self, field: Field) -> None:\n        field.required = True\n"
+        ));
+    }
+    out.join("\n")
+}
+
+/// A runner calling the step functions of `pkg.steps` through a dataclass field and a dict
+/// value, and the method of a `Step`, plus a table with a value it is handed (open). `outside`
+/// adds a step of another module to each table and a subclass of `Step` there.
+fn runner(n: usize, outside: bool) -> String {
+    let mark = if outside { "  # EFF201" } else { "" };
+    let mut names: Vec<String> = (0..n).map(|k| format!("steps.f{k}")).collect();
+    if outside {
+        names.push("other.extra".to_owned());
+    }
+    let entries: Vec<String> = names.iter().map(|f| format!("Entry({f})")).collect();
+    let handlers: Vec<String> = names.iter().map(|f| format!("\"{f}\": {f}")).collect();
+    let mixed: Vec<String> = (handlers.iter().cloned())
+        .chain(["\"p\": textwrap.dedent".to_owned()])
+        .collect();
+    format!(
+        r#"import textwrap
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from pkg import other, steps
+from pkg.model import Field
+from pkg.steps import Step, Wrap, Zero
+
+
+@dataclass(frozen=True)
+class Entry:
+    run: Callable[[Field], None]
+
+
+ENTRIES = [{entries}]
+HANDLERS = {{{handlers}}}
+MIXED = {{{mixed}}}
+
+
+def run_entries(field: Field) -> None:
+    for entry in ENTRIES:
+        entry.run(field){mark}
+
+
+def run_handler(field: Field, kind: str) -> None:
+    HANDLERS[kind](field){mark}
+
+
+def run_step(field: Field, step: Step) -> None:
+    step.run(field){mark}
+
+
+def run_either(field: Field, step: Step | Wrap | Zero) -> None:
+    step.run(field){mark}
+
+
+def run_mixed(field: Field, kind: str) -> None:
+    MIXED[kind](field)  # EFF201
+
+
+def run_handed(field: Field, more: Callable[[Field], None]) -> None:
+    for entry in [*ENTRIES, Entry(more)]:
+        entry.run(field)  # EFF201
+"#,
+        entries = entries.join(", "),
+        handlers = handlers.join(", "),
+        mixed = mixed.join(", "),
+    )
+}
+
+/// An effect boundary reporting what it cannot judge judges a call that may run more functions
+/// than heki follows (`resolver::CHA_CANDIDATE_LIMIT`) when `allowed-callees` names every one of
+/// them, whatever their number: through the field of a table of dataclass instances, a dict of
+/// functions, and the overrides of a method, also on a union. A value outside `allowed-callees`,
+/// or a value set heki cannot list (a value the runner is handed, a library function among the
+/// values), keeps the call unresolved.
+#[test]
+fn a_call_whose_every_value_is_an_allowed_callee_is_judged_whatever_the_count() {
+    const OTHER: &str = r#"from pkg.model import Field
+from pkg.steps import Step
+
+
+def extra(field: Field) -> None:
+    field.required = True
+
+
+class Extra(Step):
+    def run(self, field: Field) -> None:
+        field.required = True
+"#;
+    for (n, outside) in [(3, false), (12, false), (12, true)] {
+        let runner = runner(n, outside);
+        let p = Project::new(&format!("dispatch_allowed_values_{n}_{outside}"));
+        p.write("pyproject.toml", RUNNER_CONFIG);
+        p.write("pkg/__init__.py", "");
+        p.write("pkg/model.py", MODEL);
+        p.write("pkg/steps.py", &steps(n));
+        let other = if outside {
+            OTHER.to_owned()
+        } else {
+            "from pkg.model import Field\n".to_owned()
+        };
+        p.write("pkg/other.py", &other);
+        p.write("pkg/runner.py", &runner);
+        assert_eq!(
+            reported(&p),
+            marked(&[("pkg/runner.py", &runner)]),
+            "{n} {outside}"
+        );
+    }
+}
+
 /// A table whose values are `functools.partial` objects of project functions holding keywords
 /// or nothing calls those functions, with the call's positions as written, beside named
 /// functions, in a list, or bound to an attribute; a partial object holding positions keeps the

@@ -173,6 +173,8 @@ const EXAMPLES: &[(&str, &str)] = &[
         r#"["DataModel.base_classes"]"#,
     ),
     ("effect-boundaries.write-universe", r#"["DataModel.*"]"#),
+    ("effect-boundaries.allow-reads", r#"["Config.debug"]"#),
+    ("effect-boundaries.read-universe", r#"["Config.*"]"#),
     ("effect-boundaries.allowed-callees", r#"["pkg.logging.*"]"#),
     ("effect-boundaries.import-probes", r#""report""#),
     (

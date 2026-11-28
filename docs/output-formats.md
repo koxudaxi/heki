@@ -35,7 +35,8 @@ A report of a contract rule gives, in `contract_locations` of the JSON diagnosti
 configuration defines each contract it is of, then the entry of the contract the report is
 about, when there is one. For `effect-boundaries` (`EFF201`), `invalidation` (`MUT208`), and
 `import-boundaries` (`IMP201`), that is the entry the access matched, glob or module part
-included: the `call-targets`, `read-targets`, `write-targets`, or `write-universe` entry, or the
+included: the `call-targets`, `read-targets`, `write-targets`, `write-universe`, or
+`read-universe` entry, or the
 `forbid` token, of a boundary; the `targets` entry of an invalidation contract; the
 `forbidden-imports` pattern of a forbidden import, or the `relative-imports` one of a module
 imported by its full name. A report of an access several entries match points at the first,

@@ -115,8 +115,11 @@ pub(crate) struct ConfigContracts {
     /// Whether an `invalidation` or `write-owners` contract has `include-overrides`: only then
     /// may a function have [`Contracts::override_roles`].
     include_overrides: bool,
-    /// The attribute patterns of the `read-owners` targets with `unresolved = "report"`.
+    /// The attribute patterns of the `read-owners` targets with `unresolved = "report"`, and of
+    /// the read entries of the effect boundaries with it ([`Contracts::unresolved_read`]).
     unresolved_reads: Vec<MemberPattern>,
+    /// [`Contracts::computed_reads`].
+    computed_reads: bool,
     /// The last names of the `call-owners` targets with `unresolved = "report"`.
     unresolved_calls: Vec<MemberPattern>,
     /// [`Contracts::references`] and [`Contracts::reference_bases`].
@@ -301,6 +304,17 @@ impl ConfigContracts {
         let strict = |mode: &Option<String>| mode.as_deref() == Some("report");
         let reads = config.read_owners.iter().filter(|r| strict(&r.unresolved));
         let calls = config.call_owners.iter().filter(|r| strict(&r.unresolved));
+        // A bad pattern is the boundary's configuration error (`EFF201` parses its entries),
+        // left out here.
+        let boundary_reads: Vec<MemberPattern> = (config.effect_boundaries.iter())
+            .filter(|b| strict(&b.unresolved))
+            .flat_map(|b| {
+                let targets = b.forbid.iter().any(|f| f == "reads-targets");
+                (b.read_targets.iter().filter(move |_| targets)).chain(&b.read_universe)
+            })
+            .filter_map(|t| last_names(std::iter::once(t), "effect-boundaries.read-universe").ok())
+            .flatten()
+            .collect();
         let producers = ReadOnlyProducers::new(config)?;
         let class_modules = producers.names_modules()
             || invalidations
@@ -316,7 +330,11 @@ impl ConfigContracts {
             writers,
             writer_contexts: NameMasks::default(),
             include_overrides,
-            unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
+            computed_reads: !boundary_reads.is_empty(),
+            unresolved_reads: (last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?)
+                .into_iter()
+                .chain(boundary_reads)
+                .collect(),
             unresolved_calls: call_last_names(calls.flat_map(|r| &r.targets))?,
             references: counts_references(config),
             marked_params: marked_params(config),
@@ -470,6 +488,10 @@ impl Contracts for ConfigContracts {
 
     fn unresolved_read(&self, attr: &str) -> bool {
         self.unresolved_reads.iter().any(|p| p.matches(attr))
+    }
+
+    fn computed_reads(&self) -> bool {
+        self.computed_reads
     }
 
     fn unresolved_call(&self, name: &str) -> bool {
@@ -874,6 +896,8 @@ pub(crate) fn configured_names(config: &HekiConfig) -> Vec<ConfiguredName<'_>> {
             ("call-targets", &r.call_targets[..]),
             ("allow-writes", &r.allow_writes[..]),
             ("write-universe", &r.write_universe[..]),
+            ("allow-reads", &r.allow_reads[..]),
+            ("read-universe", &r.read_universe[..]),
             ("allowed-callees", &r.allowed_callees[..]),
         ];
         add(&mut out, "effect-boundaries", &r.name, &lists);

@@ -41,13 +41,13 @@ use crate::types::{Held, Ty};
 use crate::witness;
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
-    CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
-    Contracts, Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
-    Implementers, InputGuard, Items, KeptFacts, ListedCache, MayGiven, ModuleInput, MustExec,
-    NewArg, NewCond, NewFrom, NewKind, OnEveryReturn, OptInFacts, OverrideRoles, PerItem,
-    ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
-    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff, Unresolved,
-    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
+    CallSite, CallTarget, CallTests, CellChange, ComputedRead, Construction, ContainerParams,
+    ContractClass, Contracts, Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey,
+    GuardSubject, HandedState, Implementers, InputGuard, Items, KeptFacts, ListedCache, MayGiven,
+    ModuleInput, MustExec, NewArg, NewCond, NewFrom, NewKind, OnEveryReturn, OptInFacts,
+    OverrideRoles, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
+    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff,
+    Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Join, KeySet, Or, Use};
@@ -683,6 +683,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
         .extend(other.unresolved_access_sites);
+    if let Some(reads) = other.computed_reads {
+        (into.computed_reads.get_or_insert_with(Box::default)).extend(*reads);
+    }
     into.capacity_waits.extend(other.capacity_waits);
     into.absorb_lock_facts(other.locks);
     into.absorb_exclusive_uses(other.exclusive.into_iter().flat_map(|uses| *uses));
@@ -3230,6 +3233,7 @@ impl<'a> Extractor<'a> {
             self.path_facts();
         }
         let reads_external = self.contracts.is_some_and(|c| c.reads_external());
+        let computed_reads = self.contracts.is_some_and(|c| c.computed_reads());
         for bb in &f.blocks {
             for (index, inst) in bb.insts.iter().enumerate() {
                 self.pos = (bb.id, index);
@@ -3237,6 +3241,16 @@ impl<'a> Extractor<'a> {
                 if reads_external {
                     self.external_read(&inst.kind, inst.span);
                 }
+                if computed_reads {
+                    self.namespace_read(&inst.kind, inst.span);
+                }
+            }
+            // `return vars(self)` hands every attribute to the caller.
+            if computed_reads
+                && let (Terminator::Return(Some(v)), Some(span)) = (&bb.terminator, bb.term_span)
+                && let Some(owner) = self.dict_of.get(v).cloned()
+            {
+                self.computed_read(&owner, ReadKind::DictDirect, span);
             }
         }
         self.must_through_one_of();
@@ -3717,7 +3731,7 @@ impl<'a> Extractor<'a> {
                 let recv = recv.or(call.callee_var.filter(|_| symbol.ends_with(".__call__")));
                 library(symbol, recv).then_some(KeptRemovalKind::Any)
             }
-            Callee::TooMany | Callee::Unresolved => any,
+            Callee::TooMany(_) | Callee::Unresolved => any,
         }
     }
 
@@ -5587,11 +5601,12 @@ impl<'a> Extractor<'a> {
                 is_slice,
                 ..
             } => {
-                // `obj.__dict__["attr"]`, `obj.__dict__[KEY]`.
-                if let Some(owner) = self.dict_of.get(obj).cloned()
-                    && let Some(k) = self.key_of(key_const.as_deref(), *index)
-                {
-                    self.typed_read(owner, &k, ReadKind::DictDirect, span);
+                // `obj.__dict__["attr"]`, `obj.__dict__[KEY]`, or a key heki cannot read.
+                if let Some(owner) = self.dict_of.get(obj).cloned() {
+                    match self.key_of(key_const.as_deref(), *index) {
+                        Some(k) => self.typed_read(owner, &k, ReadKind::DictDirect, span),
+                        None => self.computed_read(&owner, ReadKind::DictDirect, span),
+                    }
                 }
                 // Reading a missing key of a `defaultdict` inserts it.
                 if self.opt_in.iterations
@@ -5722,12 +5737,14 @@ impl<'a> Extractor<'a> {
                 if changes_recv && let Some(change) = iterations::method_change(method) {
                     self.container_change(*recv, change, span);
                 }
-                // `obj.__dict__.get("attr"[, default])`.
+                // `obj.__dict__.get("attr"[, default])`, or with a key heki cannot read.
                 if method == "get"
                     && let Some(owner) = self.dict_of.get(recv).cloned()
-                    && let Some(k) = args.first().and_then(|a| self.resolved_str(*a))
                 {
-                    self.typed_read(owner, &k, ReadKind::DictDirect, span);
+                    match args.first().and_then(|a| self.resolved_str(*a)) {
+                        Some(k) => self.typed_read(owner, &k, ReadKind::DictDirect, span),
+                        None => self.computed_read(&owner, ReadKind::DictDirect, span),
+                    }
                 }
                 let (recv_origin, recv_is_self) = match calls_property {
                     true => (None, false),
@@ -6491,6 +6508,84 @@ impl<'a> Extractor<'a> {
                     through_protocol,
                     class_object,
                 });
+        }
+    }
+
+    /// Record a read under a name heki cannot read on `owner`'s object ([`ComputedRead`]), when
+    /// an effect boundary judges such reads: one per project class it may be an instance or the
+    /// class object of, and one for an object of unknown class. An object of another known class
+    /// has none of theirs.
+    fn computed_read(&mut self, owner: &Owner, kind: ReadKind, span: Span) {
+        if !self.contracts.is_some_and(|c| c.computed_reads()) {
+            return;
+        }
+        let class_object = (owner.var.and_then(|v| self.val(v)))
+            .and_then(|v| v.class_object(self.cx.project))
+            .map(str::to_owned);
+        let classes = (owner.typed_classes.iter().cloned())
+            .chain(class_object)
+            .map(Some)
+            .chain(owner.unknown_class.then_some(None));
+        let reads: Vec<ComputedRead> = classes
+            .map(|class| ComputedRead {
+                class,
+                kind,
+                span,
+                obj_params: owner.may_params,
+            })
+            .collect();
+        if !reads.is_empty() {
+            (self.summary.computed_reads.get_or_insert_with(Box::default)).extend(reads);
+        }
+    }
+
+    /// A read of every attribute through the namespace of an object (`obj.__dict__`,
+    /// `vars(obj)`) that `kind` uses whole: anything but a read or write of one key (judged
+    /// where it is made), an alias, an `in` test, or iterating its keys (in a loop or as the
+    /// outermost iterable of a comprehension).
+    fn namespace_read(&mut self, kind: &InstKind, span: Span) {
+        if self.dict_of.is_empty() {
+            return;
+        }
+        let keyed = match kind {
+            InstKind::Copy { .. }
+            | InstKind::MakeIter { .. }
+            | InstKind::Compare {
+                op: CompareOpKind::In | CompareOpKind::NotIn,
+                ..
+            } => return,
+            InstKind::SubscriptLoad { obj, .. }
+            | InstKind::SubscriptStore { obj, .. }
+            | InstKind::SubscriptDelete { obj, .. } => Some(*obj),
+            InstKind::MethodCall { recv, method, .. }
+                if matches!(
+                    method.as_str(),
+                    "get"
+                        | "keys"
+                        | "__contains__"
+                        | "__len__"
+                        | "__iter__"
+                        | "pop"
+                        | "setdefault"
+                        | "update"
+                        | "clear"
+                        | "popitem"
+                        | "__getitem__"
+                        | "__setitem__"
+                        | "__delitem__"
+                ) =>
+            {
+                Some(*recv)
+            }
+            _ => None,
+        };
+        for v in kind.operands() {
+            if Some(v) != keyed
+                && !kind.only_iterates(v)
+                && let Some(owner) = self.dict_of.get(&v).cloned()
+            {
+                self.computed_read(&owner, ReadKind::DictDirect, span);
+            }
         }
     }
 
@@ -7332,7 +7427,7 @@ impl<'a> Extractor<'a> {
         if self.opt_in.blind_spots {
             self.note_blind(bb, name, &callee, call);
         }
-        if self.opt_in.imports && matches!(callee, Callee::Unresolved | Callee::TooMany) {
+        if self.opt_in.imports && matches!(callee, Callee::Unresolved | Callee::TooMany(_)) {
             self.maybe_import_by_name(bb, name, call);
         }
         let sites_before = self.sites.len();
@@ -7429,7 +7524,7 @@ impl<'a> Extractor<'a> {
                     registered,
                 }
             }
-            Callee::TooMany | Callee::Unresolved => Blind::Unresolved {
+            Callee::TooMany(_) | Callee::Unresolved => Blind::Unresolved {
                 name: name(),
                 reason: call
                     .recv_var
@@ -7437,6 +7532,10 @@ impl<'a> Extractor<'a> {
                     .map_or(UnresolvedReason::UntypedValue, |subject| {
                         self.unresolved_reason(callee, subject)
                     }),
+                values: match callee {
+                    Callee::TooMany(listed) => listed.clone(),
+                    _ => None,
+                },
             },
         };
         self.blind.push(BlindCall {
@@ -7450,7 +7549,7 @@ impl<'a> Extractor<'a> {
     /// Why heki resolves a call on `subject` (its receiver, or the value it calls) to no
     /// function (`callee`).
     fn unresolved_reason(&self, callee: &Callee, subject: VarId) -> UnresolvedReason {
-        if *callee == Callee::TooMany {
+        if matches!(callee, Callee::TooMany(_)) {
             return UnresolvedReason::TooManyImplementations;
         }
         if let Some(reason) = self.opaque_target(subject) {
@@ -7926,7 +8025,7 @@ impl<'a> Extractor<'a> {
                 self.worker_site(bb, on_worker, call);
                 Some((at, bindings))
             }
-            Callee::TooMany | Callee::Unresolved => {
+            Callee::TooMany(_) | Callee::Unresolved => {
                 self.summary.unknown_calls = true;
                 None
             }
@@ -8819,7 +8918,7 @@ impl<'a> Extractor<'a> {
                 );
             }
             Callee::Project(..) => {}
-            Callee::TooMany | Callee::Unresolved => {
+            Callee::TooMany(_) | Callee::Unresolved => {
                 for v in call
                     .recv_var
                     .iter()
@@ -9038,23 +9137,16 @@ impl<'a> Extractor<'a> {
             self.write_named(owner, &name, false, WriteKind::SetAttr, span);
             return;
         }
-        if symbol == "builtins.getattr" || symbol == "builtins.object.__getattribute__" {
-            if let (Some(obj), Some(attr)) = (
-                args.first(),
-                args.get(1).and_then(|a| self.resolved_str(*a)),
-            ) {
-                let owner = self.owner_of(*obj);
-                self.typed_read(owner, &attr, ReadKind::GetAttr, span);
-            }
-            return;
-        }
-        if symbol == "builtins.hasattr" {
-            if let (Some(obj), Some(attr)) = (
-                args.first(),
-                args.get(1).and_then(|a| self.resolved_str(*a)),
-            ) {
-                let owner = self.owner_of(*obj);
-                self.typed_read(owner, &attr, ReadKind::HasAttr, span);
+        let read_kind = match symbol.as_str() {
+            "builtins.getattr" | "builtins.object.__getattribute__" => Some(ReadKind::GetAttr),
+            "builtins.hasattr" => Some(ReadKind::HasAttr),
+            _ => None,
+        };
+        if let (Some(kind), Some(obj)) = (read_kind, args.first()) {
+            let owner = self.owner_of(*obj);
+            match args.get(1).and_then(|a| self.resolved_str(*a)) {
+                Some(attr) => self.typed_read(owner, &attr, kind, span),
+                None => self.computed_read(&owner, kind, span),
             }
             return;
         }

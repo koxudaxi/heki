@@ -478,13 +478,13 @@ pub(super) fn mut207(
 /// ([`ClassMembers::of_family`]), found the first time an access on an object of unknown class
 /// needs a target's, by rule and target.
 #[derive(Default)]
-struct GlobFamilies<'a> {
+pub(crate) struct GlobFamilies<'a> {
     members: Option<ClassMembers<'a>>,
     families: FxHashMap<(usize, usize), FamilyMembers<'a>>,
 }
 
 impl<'a> GlobFamilies<'a> {
-    fn of<'f>(
+    pub(crate) fn of<'f>(
         &mut self,
         cx: &CheckContext<'a>,
         target: (usize, usize),

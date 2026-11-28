@@ -1,7 +1,8 @@
 //! What a contract cannot attribute, end to end through the real binary: with
 //! `unresolved = "report"`, an effect boundary reports the calls heki cannot resolve, the bodies
-//! it does not model, and the writes of an attribute it names on an object of unknown class in
-//! its scopes' reach, each with its chain; an owner contract judges a function some code hands
+//! it does not model, the writes of an attribute it names on an object of unknown class, and the
+//! reads of one on such an object or under a name heki cannot read in its scopes' reach, each
+//! with its chain; an owner contract judges a function some code hands
 //! on as a value (a display, a class attribute, a return, an argument) in that function, as if
 //! it had no callers. Without the key, neither is reported.
 //!
@@ -327,6 +328,167 @@ fn a_class_initializing_its_own_instance_is_no_write_the_boundary_cannot_judge()
     let found = reported(&p, "pkg/builds.py", &["EFF201"]);
     let lines: Vec<(u64, String)> = found.iter().map(|(l, r, _)| (*l, r.clone())).collect();
     assert_eq!(lines, marked(BUILDS, &["EFF201"]), "{found:#?}");
+}
+
+const READS: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "reads"
+scopes = ["pkg.reads.*"]
+read-universe = ["Config.*"]
+unresolved = "report"
+
+[[tool.heki.effect-boundaries]]
+name = "targets"
+scopes = ["pkg.targets.*"]
+forbid = ["reads-targets"]
+read-targets = ["Config.debug"]
+unresolved = "report"
+
+[[tool.heki.effect-boundaries]]
+name = "lenient"
+scopes = ["pkg.lenient.*"]
+read-universe = ["Config.*"]
+"#;
+
+const CONFIG_MODEL: &str = r#"class Config:
+    def __init__(self, **values) -> None:
+        self.debug = False
+        for key in values:
+            self._load(key)
+
+    def _load(self, key: str) -> None:
+        print(getattr(self, key))
+
+
+class Point:
+    def __init__(self) -> None:
+        self.debug = 1
+
+
+def read(thing, key: str) -> object:
+    return getattr(thing, key)
+"#;
+
+/// The reads a boundary judging reads cannot judge, and the ones it can: a read of a name the
+/// universe's class has on an object of unknown class, and a read under a name heki cannot read
+/// on an object that may be a universe class or of unknown class, are reported; a name no
+/// universe class has, an object of another class, an `in` test or iterating the keys of
+/// `__dict__`, and a class's own initialization reading its instance are not.
+const READ_SHAPES: &str = r#"from pkg.model import Config, Point, read
+
+
+def unknown(other) -> object:
+    return other.debug  # EFF201
+
+
+def not_a_member(other) -> object:
+    return other.colour
+
+
+def computed(config: Config, key: str) -> object:
+    return getattr(config, key)  # EFF201
+
+
+def computed_unknown(other, key: str) -> bool:
+    return hasattr(other, key)  # EFF201
+
+
+def computed_other(point: Point, key: str) -> object:
+    return getattr(point, key), vars(point), point.__dict__[key]
+
+
+def item(config: Config, key: str) -> object:
+    return config.__dict__[key]  # EFF201
+
+
+def item_or_none(config: Config, key: str) -> object:
+    return config.__dict__.get(key)  # EFF201
+
+
+def whole(config: Config) -> object:
+    return list(config.__dict__.items())  # EFF201
+
+
+def keys_only(config: Config) -> object:
+    return "debug" in vars(config), [k for k in config.__dict__]
+
+
+def returned(config: Config) -> dict:
+    return vars(config)  # EFF201
+
+
+def through_helper(config: Config, key: str) -> object:
+    return read(config, key)  # EFF201
+
+
+def constructs() -> Config:
+    return Config(debug=True)
+
+
+def twice(config: Config, key: str) -> object:
+    return None
+
+
+def twice(config: Config, key: str) -> object:
+    return getattr(config, key)  # EFF201
+"#;
+
+const TARGET_SHAPES: &str = r#"from pkg.model import Config
+
+
+def unknown(other) -> object:
+    return other.debug  # EFF201
+
+
+def other_name(other) -> object:
+    return other.name
+
+
+def computed(config: Config, key: str) -> object:
+    return getattr(config, key)  # EFF201
+"#;
+
+#[test]
+fn a_boundary_judging_reads_reports_the_reads_it_cannot_judge() {
+    let p = Project::new("unattributed_reads");
+    p.write("pyproject.toml", READS);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/model.py", CONFIG_MODEL);
+    p.write("pkg/reads.py", READ_SHAPES);
+    p.write("pkg/targets.py", TARGET_SHAPES);
+    p.write("pkg/lenient.py", &READ_SHAPES.replace("  # EFF201", ""));
+    let found = reported(&p, "pkg/reads.py", &["EFF201"]);
+    let lines: Vec<(u64, String)> = found.iter().map(|(l, r, _)| (*l, r.clone())).collect();
+    assert_eq!(lines, marked(READ_SHAPES, &["EFF201"]), "{found:#?}");
+    let message = |line: u64| &found.iter().find(|(l, _, _)| *l == line).unwrap().2;
+    let at = |needle: &str| {
+        READ_SHAPES
+            .lines()
+            .position(|l| l.contains(needle))
+            .unwrap() as u64
+            + 1
+    };
+    assert_eq!(
+        message(at("other.debug")),
+        "`unknown` reads `debug` on an object of unknown class (by attribute), so effect boundary `reads` cannot tell what it does there"
+    );
+    assert_eq!(
+        message(at("getattr(config, key)")),
+        "`computed` reads an attribute under a name heki cannot read (with `getattr`), so effect boundary `reads` cannot tell what it does there"
+    );
+    assert_eq!(
+        message(at("read(config, key)")),
+        "`through_helper` reads an attribute under a name heki cannot read (with `getattr` via `pkg.model.read`), so effect boundary `reads` cannot tell what it does there"
+    );
+    let found = reported(&p, "pkg/targets.py", &["EFF201"]);
+    let lines: Vec<(u64, String)> = found.iter().map(|(l, r, _)| (*l, r.clone())).collect();
+    assert_eq!(lines, marked(TARGET_SHAPES, &["EFF201"]), "{found:#?}");
+    assert!(reported(&p, "pkg/lenient.py", &["EFF201"]).is_empty());
 }
 
 const OWNERS: &str = r#"[project]

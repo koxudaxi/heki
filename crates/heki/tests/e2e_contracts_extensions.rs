@@ -588,6 +588,144 @@ fn eff201_reads_calls_and_allowed_writes() {
     );
 }
 
+const READS_CONFIG: &str = r#"[project]
+name = "t"
+
+[[tool.heki.effect-boundaries]]
+name = "no-config-reads"
+scopes = ["pkg.passes.*"]
+read-universe = ["Config.*"]
+allow-reads = ["Config.name"]
+
+[[tool.heki.effect-boundaries]]
+name = "targets"
+scopes = ["pkg.targets.*"]
+forbid = ["reads-targets"]
+read-targets = ["Config.debug", "Config.name"]
+read-universe = ["Config.*"]
+allow-reads = ["Config.name"]
+"#;
+
+const READS_MODEL: &str = r#"class Config:
+    def __init__(self) -> None:
+        self.debug = False
+        self.name = "x"
+        self.level = 0 if self.debug else 1
+
+
+class Strict(Config):
+    pass
+
+
+class Point:
+    def __init__(self) -> None:
+        self.debug = 1
+
+
+def level(config: Config) -> int:
+    return config.level
+"#;
+
+const READS_PASSES: &str = r#"from pkg.model import Config, Point, Strict, level
+
+
+def reads_debug(config: Config) -> bool:
+    return config.debug
+
+
+def reads_allowed(config: Config) -> str:
+    return config.name
+
+
+def reads_through_helper(config: Config) -> int:
+    return level(config)
+
+
+def reads_other_class(point: Point) -> int:
+    return point.debug
+
+
+def reads_subclass(config: Strict) -> bool:
+    return getattr(config, "debug")
+
+
+def constructs() -> Config:
+    return Config()
+"#;
+
+const READS_TARGETS: &str = r#"from pkg.model import Config
+
+
+def reads_target(config: Config) -> bool:
+    return config.debug
+
+
+def reads_allowed_target(config: Config) -> str:
+    return config.name
+
+
+def reads_universe(config: Config) -> int:
+    return config.level
+"#;
+
+/// `read-universe` with `allow-reads` states the reads a scope may make: a reached read of a
+/// universe entry that `allow-reads` does not name is reported once per read `Class.attr`, in
+/// every form `reads-targets` follows, on a subclass under the class the entry names, and
+/// through the helpers it calls; a read of another class, or a class's own initialization
+/// reading its instance, is none. `allow-reads` also exempts reads of `read-targets`, and a
+/// universe read that a target matches is reported as the target.
+#[test]
+fn eff201_read_universe_and_allowed_reads() {
+    let p = Project::new("ext_eff201_read_universe");
+    p.write("pyproject.toml", READS_CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/model.py", READS_MODEL);
+    p.write("pkg/passes.py", READS_PASSES);
+    p.write("pkg/targets.py", READS_TARGETS);
+    let diags = diagnostics(&p, &["--select", "EFF201"]);
+    let (passes, targets) = ("pkg/passes.py", "pkg/targets.py");
+    let universe = |attr: &str| format!("no-config-reads:reads:Config.{attr}");
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(passes, 5, "reads_debug", &universe("debug")),
+            d(passes, 13, "reads_through_helper", &universe("level")),
+            d(passes, 21, "reads_subclass", &universe("debug")),
+            d(targets, 5, "reads_target", "targets:reads:Config.debug"),
+            d(targets, 13, "reads_universe", "targets:reads:Config.level"),
+        ],
+        "{diags:#?}"
+    );
+    assert_eq!(
+        by_qualname(&diags, "reads_through_helper")["message"],
+        "`reads_through_helper` reads `Config.level` (by attribute via `pkg.model.level`), which effect boundary `no-config-reads` does not allow"
+    );
+    // `allow-reads` without the universe it allows reads of.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"b\"\nscopes = [\"pkg.passes.*\"]\nallow-reads = [\"Config.name\"]\n",
+    );
+    let (code, stdout, stderr) = p.check(&["--select", "EFF201"]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("effect-boundaries `b` sets `allow-reads` but no `read-universe`"),
+        "{stderr}"
+    );
+    // A read is of a whole attribute: an entry of its container is no read entry.
+    for keys in [
+        "read-universe = ['Config.name[\"k\"]']",
+        "read-universe = [\"Config.*\"]\nallow-reads = ['Config.name[\"k\"]']",
+    ] {
+        p.write(
+            "pyproject.toml",
+            &format!("[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"b\"\nscopes = [\"pkg.passes.*\"]\n{keys}\n"),
+        );
+        let (code, stdout, stderr) = p.check(&["--select", "EFF201"]);
+        assert_eq!(code, 2, "{stdout}{stderr}");
+        assert!(stderr.contains("reads are of `Class.attr`"), "{stderr}");
+    }
+}
+
 #[test]
 fn eff201_calls_deep_and_allowed_callees() {
     // The `calls` form of a call-owners contract: a call of a target several calls below a scope

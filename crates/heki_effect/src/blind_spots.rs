@@ -10,6 +10,7 @@ use crate::resolver::TypeCtx;
 use heki_ast::Span;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// One call heki is blind to, in its function's own body (a local fact, never propagated).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -31,6 +32,11 @@ pub enum Blind {
     Unresolved {
         name: Option<String>,
         reason: UnresolvedReason,
+        /// The project functions a call past the cap may run, when heki lists them all
+        /// ([`crate::resolver::Callee::TooMany`]): an effect boundary naming each of them in
+        /// `allowed-callees` judges the call without a summary of them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        values: Option<Arc<[FuncKey]>>,
     },
     /// A call of `symbol`, spelled as heki resolves it (the exact spelling an ecosystem entry
     /// needs: entries are looked up without inheritance or aliases), a function or class of a
