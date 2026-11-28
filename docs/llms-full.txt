@@ -13,19 +13,24 @@ Source: https://heki.koxudaxi.dev/
   <img src="assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
 </p>
 
-🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust. It tracks side
-effects and mutations across function calls, and checks a 100,000-line project in a few seconds.
+🧱 heki (壁, Japanese for "wall") checks the semantics of Python code. It does not replace Ruff or
+your type checker (mypy, Pyright, Pyrefly, or ty): it is a third layer that runs next to them.
+Ruff checks syntax and style, and the type checkers check declared types. heki follows aliases,
+helpers, and file boundaries to find which function a call really runs, which state it changes,
+and which effects it has. It is written in Rust and checks a 100,000-line project in a few
+seconds.
 
-Ruff checks syntax and style, and mypy, Pyright, Pyrefly, and ty check types. heki checks what
-your code does: which effects a call reaches and which state it changes, across functions and
-files.
+This stops a pull request that passes the syntax checks and strict type checking but changes
+what the code does. With no configuration, `heki check` reports a shared cache changed in place,
+a read-only argument changed by a helper, a database query in a loop, a lock taken again while it
+is held, and a blocking call in `async` code. The same run enforces the rules only your project
+knows: who owns a piece of state, which change must invalidate a cache, and where I/O may happen.
 
-It works on two levels. With no configuration, it catches bugs such as blocking calls in `async`
-code, database queries in loops, and in-place changes to read-only parameters. On top of that, it
-enforces the walls your project writes as [contracts](https://heki.koxudaxi.dev/configuration/#contracts): which
-functions may change a field, call a function, or reach I/O.
+You write those rules as [contracts](https://heki.koxudaxi.dev/configuration/#contracts). A contract uses the results of
+the same analysis to decide, in every pull request, whether a change, a call, or an I/O is
+allowed. The `async` checks are one use of that analysis among the others.
 
-![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def with no configuration, and MUT201 a write to Order.items through a helper outside the functions a contract allows, each with its call chain](https://heki.koxudaxi.dev/assets/example-check.svg)
+![heki check in a terminal: MUT114 reports, with no configuration, a dict that an lru_cache function returned and another file changes in place, and MUT201 a write to Order.items through a helper outside the functions a contract allows, with its call chain](https://heki.koxudaxi.dev/assets/example-check.svg)
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -45,29 +50,32 @@ functions may change a field, call a function, or reach I/O.
 
 ### A bug found with no configuration
 
-Each file looks fine on its own: the bug is in the call chain.
+Each file looks fine on its own, and the types are right: the bug is in what the cache shares.
 
 ```python
-# app/users.py
-import requests
+# app/config.py
+from functools import lru_cache
 
 
-def fetch_name(user_id: int) -> str:
-    return requests.get(f"https://api.example.com/users/{user_id}", timeout=5).text
-
-
-def load_user(user_id: int) -> dict[str, str]:
-    return {"id": str(user_id), "name": fetch_name(user_id)}
+@lru_cache(maxsize=64)
+def base_headers(region: str) -> dict[str, str]:
+    return {"Accept": "application/json", "X-Region": region}
 ```
 
 ```python
 # app/api.py
-from app.users import load_user
+from app.config import base_headers
 
 
-async def get_user(user_id: int) -> dict[str, str]:
-    return load_user(user_id)
+def request_headers(region: str, token: str) -> dict[str, str]:
+    headers = base_headers(region)
+    headers["Authorization"] = f"Bearer {token}"
+    return headers
 ```
+
+`lru_cache` hands the same dict to every call with the same `region`. `request_headers` writes a
+token into it, so a later caller of `base_headers` for that region sends the token of whoever
+called `request_headers` last.
 
 ### A wall your project writes
 
@@ -117,22 +125,28 @@ def add_gift_wrap(order: Order) -> None:
     append_to(order.items, "gift-wrap")
 ```
 
-The image at the top is `heki check` on these examples: `EFF101` with no configuration, and
-`MUT201` from the contract. The same code passes mypy, Pyright, Pyrefly, and ty in strict mode
-(`mypy --strict`, Pyright's `strict`, Pyrefly's `strict` preset, every ty rule as an error), and
-Ruff with every rule on asks only for docstrings and copyright lines.
+tach and import-linter stop at the import layers, and every import here is allowed; heki follows
+the write through the helper, as it follows any change, call, or I/O across helpers and aliases.
 
-### How heki differs
+The image at the top is `heki check` on these examples: `MUT114` with no configuration, and
+`MUT201` from the contract. The same code passes Ruff, and mypy, Pyright, Pyrefly, and ty in
+strict mode (`mypy --strict`, Pyright's `strict`, Pyrefly's `strict` preset, every ty rule as an
+error). Ruff with every rule on asks only for docstrings, copyright lines, and an `__init__.py`.
+
+### Works alongside Ruff, your type checker, and import-linter
+
+heki does not replace these tools: run it next to them. Each one models one layer of the code,
+and heki checks what the code does across files.
 
 | Tool | Models | heki adds |
 | --- | --- | --- |
-| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
+| Ruff | syntax and style | the behavior behind a call, across files: the state it changes, a shared cache changed in place, a database query in a loop, a lock taken again while it is held, I/O where it should not happen, a blocking call in `async` code |
 | mypy, Pyright, Pyrefly, ty | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` / `AbstractSet` arguments |
-| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; import rules that know when each import runs (experimental); planned: reading these tools' contracts as heki contracts |
+| tach, import-linter | the import layers: which modules may import which | which functions write or read a field, call a function, or reach I/O, and which changes must invalidate a cache, through helpers and aliases; import rules that know when each import runs (experimental); planned: reading these tools' contracts as heki contracts |
 
-Use heki next to these tools; its configuration, suppression comments, and output formats follow
-Ruff's. [Design Philosophy](https://heki.koxudaxi.dev/philosophy/) says why heki works this way and compares its checks
-with what Rust and Haskell enforce.
+Its configuration, suppression comments, and output formats follow Ruff's.
+[Design Philosophy](https://heki.koxudaxi.dev/philosophy/) says why heki works this way and compares its checks with what
+Rust and Haskell enforce.
 
 ## 🧭 What heki can do
 
@@ -144,14 +158,14 @@ was checked by hand, with no false claim ([Rule precision](https://heki.koxudaxi
 
 | What goes wrong | Rule |
 | --- | --- |
-| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) |
-| A new HTTP, database, or RPC client (or a request without a session) on every iteration of a loop over data | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) |
+| A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/) |
+| A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
+| A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) |
 | A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) |
+| A new HTTP, database, or RPC client (or a request without a session) on every iteration of a loop over data | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) |
 | A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) |
 | A call of a generator function whose generator nothing iterates, so its body never runs | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) |
-| A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
-| A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/) |
-| A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) |
+| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](https://heki.koxudaxi.dev/rules/loop-carried-concat/) |
 | A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` ([fixes](https://heki.koxudaxi.dev/fixes/)) |
 
@@ -197,7 +211,7 @@ in its instructions, but not a contract that `heki check` enforces:
 ## 🚀 Try it in 5 minutes
 
 1. In your project's root (the directory with `pyproject.toml`), run `uvx heki check`. An exact
-   error, like `EFF101` above, fails the run (exit code 1). Warnings are printed but don't fail it
+   error, like `MUT114` above, fails the run (exit code 1). Warnings are printed but don't fail it
    unless you pass `--fail-on warning`.
 
 2. Ask what fits the project with [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental). It writes no
@@ -906,6 +920,16 @@ The knowledge base names the calls that wait. Besides `requests` and `httpx.Clie
 
 `DATA101` (exact, default, [`loop-carried-concat`](https://heki.koxudaxi.dev/rules/loop-carried-concat/)) also reports an array grown through `numpy.r_[...]` or `numpy.c_[...]` on every iteration (`arr = np.r_[arr, chunk]`), also when a helper returns that concatenation (`arr = grow(arr, chunk)`), as it does for `numpy.hstack`.
 
+A function handed to a thread or process pool runs once per item for these rules:
+`executor.submit(f, ...)` in a loop counts as a call of `f` on every iteration, and
+`executor.map(f, items)` as one call of `f` per item, for the `concurrent.futures` executors;
+`loop.run_in_executor(executor, f, ...)` in a loop is the same. `EFF102` then reports a client `f`
+makes per item, and `EFF103` a query `f` sends per item. Through a pool both reports are heuristic
+(with `--heuristic`), since the pool runs `f` after `submit` returns. A worker in another process
+(`ProcessPoolExecutor`, `anyio.to_process.run_sync`) runs on copies of its arguments, so what it
+changes in them does not reach the caller, and rules that follow changes to the caller's objects
+do not follow it there.
+
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
 
 The chain a blocking-call report shows (`EFF101`, both tiers, and `EFF105`) is one real path to the call, chosen in this order: a path the call's arguments allow (a helper that dispatches on `isinstance(item, Response)` shows the branch an argument of known class takes), then a path on the normal flow before one through cleanup code (an `except` handler or a `finally` body), then the shortest. Which path is shown never decides whether the report exists or its tier. Output folds many reports into one (`(+N more)`) only when they reach the same blocking call through the same helper: sites that call one API directly still fold together, and sites that reach different blocking calls through different helpers stay separate groups.
@@ -1364,6 +1388,14 @@ Two independent questions decide whether heki offers the rewrite:
 | **Profitability:** is the rewrite faster for every input? | unconditional, or size-dependent (it can be slower for tiny inputs or for loops that run zero times) |
 
 ### Safety
+
+A rewrite keeps the program's behavior when the function returns an equal result or raises the
+same exception type, makes the same calls into other code in the same order, changes shared
+objects the same way, and ends the same way. Run time, memory, `id()` values, traceback line
+numbers, and the messages of builtin exceptions are not kept
+([observational equivalence](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md#31-observational-equivalence)):
+after an `OPT120` fix, `q[0]` of an empty queue still raises `IndexError`, with the message of a
+`deque`.
 
 | Obligations | What you get |
 | ----------- | ------------ |
@@ -2143,6 +2175,7 @@ Each diagnostic has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+| `unresolved_sites` | for an effect boundary's `unresolved-calls` or `unresolved-writes` report, every site it stands for, with why heki cannot judge it ([Output Formats](https://heki.koxudaxi.dev/output-formats/#what-an-effect-boundary-cannot-judge)) |
 | `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
@@ -2837,6 +2870,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) records or an inline [suppression](https://heki.koxudaxi.dev/configuration/#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
+| `unmatched-paths` | `"warning"` | `"warning"` or `"error"`: what `heki check` does with a path it is given to report on, in [`--touched`](https://heki.koxudaxi.dev/cli-reference/#heki-check) or as a file among PATHS, that names no analyzed file: a missing file, a directory, a file that is not Python, one outside the directories given, or an excluded one. A warning names the paths and the run goes on, and passes when nothing it shows fails it. An error stops the run with exit code 2 before it reports, prints a diff or a prompt, or rewrites a file, so that a CI job given a wrong path fails. A TOML file that is no configuration file is passed over either way, as the pre-commit hook passes every staged one. `--unmatched-paths` overrides it. |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
@@ -3685,7 +3719,7 @@ import-probes = "report"
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `include-overrides` | `false` | `true`: a `scopes` or `allowed-callees` entry naming a method (`Class.method`, `module:Class.method`) also names the methods of that name in the project subclasses of `Class`, with the scopes nested in them. See [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain; the JSON output lists every site of the report ([Output Formats](https://heki.koxudaxi.dev/output-formats/#what-an-effect-boundary-cannot-judge)). |
 | `message` | none | The help of every report of the boundary. |
 | `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 
@@ -3986,8 +4020,11 @@ fail = true
 ```
 
 - Other warnings and heuristic reports stay advisory: `fail = true` does not change `fail-on`,
-  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF, GitHub
-  annotations) are the same with and without it.
+  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF) are the same
+  with and without it. Only the level of a GitHub annotation, which says whether its report
+  fails the run, follows it: an `error` report of a contract is an `error` annotation with
+  `fail = true` and a `warning` one without it (see
+  [Continuous integration](https://heki.koxudaxi.dev/adoption/#continuous-integration)).
 - A report that several contracts find stands for each of them, and fails the run when one of
   them has `fail = true`. A `MUT202` report is of the `readonly-returns` tables naming a producer
   the changed value may come from: all of them when the change reaches the producer's result
@@ -4688,7 +4725,7 @@ the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
 
 ## pre-commit
 
-The hook passes the staged Python and TOML files to `heki check --touched`, which passes over a
+The hook passes the staged Python, stub (`.pyi`), and TOML files to `heki check --touched`, which passes over a
 TOML file that is not part of the configuration. heki follows calls across files, so it still
 analyzes the whole project, but it shows and fails on only the reports in those files and the
 reports whose call chain reaches one of them: after a change to `app/users.py`, the `EFF101` in
@@ -4709,6 +4746,10 @@ report cannot be told from the code after it, so:
   [includes](https://heki.koxudaxi.dev/configuration/#several-configuration-files), the summary snapshot, the baseline)
   shows every report, as a run without `--touched` does: a contract added to `heki.toml` is checked in the
   whole project.
+
+pre-commit passes only the files a commit leaves in place, so a commit that deletes a configuration
+file, a stub, or a module does not run the hook for it: the whole-project run in continuous
+integration covers it.
 
 Use `--touched` while editing and in the hook, and run the whole project, with the baseline, before
 finishing a change and in continuous integration. A local hook may also pass the files as paths
@@ -4743,8 +4784,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: uvx heki==0.11.0 check --touched
             language: system   # needs uv on PATH
-            types_or: [python, toml]
-            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
+            types_or: [python, pyi, toml]
+            files: '\.(py|pyi|toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -4762,8 +4803,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             entry: heki check --touched
             language: python
             additional_dependencies: [heki==0.11.0]
-            types_or: [python, toml]
-            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
+            types_or: [python, pyi, toml]
+            files: '\.(py|pyi|toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -4819,9 +4860,19 @@ the run now.
         sarif_file: heki.sarif
     ```
 
-Warnings and heuristic reports become annotations without failing the step (a heuristic report
-of an `error` rule is an `error` annotation); `fail-on = "warning"` in `[tool.heki.lint]` (or
-`--fail-on warning`) makes them fail it, as in pre-commit.
+Each annotation is one workflow command at the reported location: its title names the rule
+(`heki EFF101`, `heki EFF101 (heuristic)` for a heuristic report), and its body is the message followed by one
+`related: <path>:<line>:<col>: <message>` line per related location (the hops of a call chain, in order).
+
+The level of an annotation says whether its report fails the run. A report that fails it keeps
+its severity, `error` or `warning`; one that does not is a `warning`, so an annotation reads as
+a failure only when the step fails on it. Warnings and heuristic reports do not fail the step:
+by default a heuristic report of an `error` rule is a `warning` annotation. `fail-on =
+"warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit,
+and the heuristic `error` is then an `error` annotation; so are the reports of a contract with
+[`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) and of a rule
+[`lint.fail`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint) names. The JSON, SARIF, and text
+formats give each report its severity.
 
 In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
@@ -4836,13 +4887,38 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.11.0 check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml' | xargs -0 -r uvx heki==0.11.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
 
-`--diff-filter=d` leaves out deleted files, and `xargs -r` skips the run when no Python file
-changed.
+`'*.toml'` takes in every configuration file, also one listed in
+[`include`](https://heki.koxudaxi.dev/configuration/#several-configuration-files) under another name; heki passes over a
+TOML file that is not part of its configuration. `--diff-filter=d` leaves out deleted files, and
+`xargs -r` skips the run when no Python, stub, or TOML file changed. A path that names no
+analyzed file (a typo, a file outside the analyzed directories, an excluded one) is named in a
+warning, and the run goes on with the others. With `--unmatched-paths error` (or
+[`unmatched-paths = "error"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint) in `[tool.heki.lint]`),
+it stops the run with exit code 2 instead, so a wrong path fails the job rather than passing it on
+nothing.
+
+A deleted path has nothing to touch: `--touched` names it in a warning and shows nothing for it,
+though deleting a configuration file, a stub, or a module can change reports elsewhere. A pull
+request that deletes one should run the whole project (`uvx heki==0.11.0 check`). With
+`--no-renames`, a renamed file counts as the deletion of its old path, and the list is kept in a
+variable before it is tested, so the test holds under `set -o pipefail` too:
+
+```yaml
+- run: |
+    deleted=$(git diff --name-only --no-renames --diff-filter=D "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml')
+    if [ -n "$deleted" ]; then
+      uvx heki==0.11.0 check
+    else
+      git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml' | xargs -0 -r uvx heki==0.11.0 check --touched
+    fi
+  env:
+    BASE: ${{ github.base_ref }}
+```
 
 With SARIF:
 
@@ -5135,7 +5211,7 @@ Options:
           Preview fixes as a unified diff without writing files
 
       --touched <FILE>...
-          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, a file its `include` lists, the baseline) shows every diagnostic. Another TOML file is passed over, and another path that is not an analyzed file is named in a warning
+          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). With a baseline, every Ratchet regression is shown, wherever it is; without one, a note counts the diagnostics that would fail the run and are not shown. A configuration file (`pyproject.toml`, `heki.toml`, a file its `include` lists, the baseline) shows every diagnostic. Another TOML file is passed over, and another path that is not an analyzed file is named in a warning (an error with `--unmatched-paths error`)
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -5166,6 +5242,11 @@ Options:
 
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning. A report of a contract with `fail = true` fails the run at either
+          
+          [possible values: error, warning]
+
+      --unmatched-paths <SEVERITY>
+          What to do with a path given to report on (`--touched`, a file among PATHS) that names no analyzed file: `warning` (the default) names it and goes on, `error` stops the run with exit code 2 before it reports or rewrites anything (`lint.unmatched-paths`)
           
           [possible values: error, warning]
 
@@ -5757,6 +5838,46 @@ file, an included one, a defaults table, or a group. A table's
 which are given instead. SARIF output adds the same places to `relatedLocations`, after the
 steps of the report's chain, and the [language server](https://heki.koxudaxi.dev/lsp/) to its related information. The
 places are no part of a baseline key.
+
+## What an effect boundary cannot judge
+
+An effect boundary with `unresolved = "report"` reports, under `EFF201`, the calls and writes it
+cannot judge in a scope function's reach, one report per kind
+(`<boundary>:unresolved-calls`, `<boundary>:unresolved-writes:<attribute>`) at the first one. In
+the JSON diagnostics, `unresolved_sites` of such a report lists every site it stands for, ordered by
+`path`, `line`, and `column`, with `function`, the function holding the site by its fully
+qualified name. `sites` is the number of listed sites and is written only above one: a report
+without `sites` stands for one site. A call has:
+
+- `callee`: the method or value called (`get` of `table.get(...)`), `null` for a value computed in
+  place (`make()(...)`), or for a body heki does not follow, that function's full name.
+- `reason`: why heki does not follow it. For a call it resolves to no function, the reasons
+  `heki recommend` gives: `unannotated-parameter`, `unresolved-annotation`, `any-value`,
+  `callable-value`, `unbound-name`, `unlisted-protocol`, `call-result`, `attribute`,
+  `computed-name`, `too-many-implementations`, `unknown-member`, or `untyped-value`. For a call
+  of a function whose body heki does not model (`eval`, a body too large), `unmodeled-body`; for
+  one only a stub declares, `stub-body`. A scope function whose own body is one of these is
+  listed at its definition, as its own `function` and `callee`.
+- `parameter`: the parameter a reason is about (`unannotated-parameter`, `unresolved-annotation`),
+  else `null`.
+
+A write has `attribute` (`null` for a name computed at run time, `setattr(obj, name, v)`) and
+`kind`, as `heki inspect` names write kinds (`direct_attr`, `set_attr`, `container_mut`, ...).
+
+```json
+"unresolved_sites": [
+  {"path": "pkg/m.py", "line": 7, "column": 9, "function": "pkg.m.run",
+   "callee": "strip", "reason": "unannotated-parameter", "parameter": "text"},
+  {"path": "pkg/m.py", "line": 9, "column": 5, "function": "pkg.m.run",
+   "callee": "fn", "reason": "unannotated-parameter", "parameter": "fn"}
+]
+```
+
+The list holds the sites the walk from the scope function records: the code behind a call heki
+does not follow is not in it. A site several scope functions reach is listed in each of their
+reports. Other diagnostics have no `unresolved_sites`, and the text output, SARIF, and the
+language server do not show the list. A baseline entry keys such a report by its target, which
+names no site, and counts its sites.
 
 ## Versions
 
@@ -10286,7 +10407,14 @@ unknown class or under a name computed at run time (`thing.required = True` of a
 object whose initializer runs `setattr(self, name, v)`, itself or in a helper it hands `self` to,
 is not reported. Each kind is reported once per scope function, at the call
 in the scope function starting the shortest chain to the first one, with the chain; calls and
-writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
+writes inside `allowed-callees` are not followed. The JSON output lists every site of such a
+report in `unresolved_sites`, ordered by path, line, and column: for a call, the function holding
+it, the name called, and why heki does not follow it (the reasons of `heki recommend`, such as
+`unannotated-parameter` with its `parameter`, `callable-value`, or `call-result`, and
+`unmodeled-body` or `stub-body` for a body); for a write, the attribute and the kind of write. The
+list holds the sites the scope function reaches, not the code behind them, which heki does not
+follow, and a site several scope functions reach is in each of their reports
+([Output Formats](https://heki.koxudaxi.dev/output-formats/#what-an-effect-boundary-cannot-judge)). Without it, the boundary is silent where heki
 cannot see, so no report does not mean the scope stays inside the boundary.
 
 `allow-writes` is only as precise as heki's view of which object each write changes. A write
@@ -11657,6 +11785,18 @@ argument as `maxlen`), and so does a list a starred target or pattern makes (`fi
 items`), which has no display to rewrite. Only `q = q[1:]` is a front pop: `q[1:n]` and
 `q[1::2]` are not.
 
+`q.extend(x)` and `q += x` make the same length query of `x` (`__len__`, else
+`__length_hint__`), and their `deque` forms do not, so the fix needs an `x` whose query runs no
+code: a builtin container, a string, or a `range` (a display, `list(...)`, `range(n)`). Any
+other `x` blocks it, a generator expression and the result of a project function among them, and
+so does `q.extend(*parts)`.
+
+An operation that raises on the list raises the same exception type on the `deque`, with the
+`deque`'s message: `q[0]` of an empty queue raises `IndexError` with `deque index out of range`
+instead of `list index out of range`, and `q.remove(x)` of a missing item a `ValueError` that
+names a deque. A fix keeps the types of builtin exceptions, not their messages
+([what a fix keeps](https://heki.koxudaxi.dev/fixes/#safety)).
+
 
 ---
 
@@ -12086,7 +12226,8 @@ the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... a
 variants), `pymongo`, `redis`, and DynamoDB commands, the `execute()` of a supabase-py / postgrest
 query, `pandas.read_sql`, and project functions
 that reach them, also when an offloading API runs them on a worker thread per item (`await
-asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`, a `concurrent.futures`
+pool's `executor.submit(load, i)` in a loop and `executor.map(load, ids)`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
 per item runs in a loop as long as the items (`sorted(users, key=lambda u: score(conn, u))`,
 `list(map(load, ids))`; see `EFF102` for the builtins and the items whose number the code fixes).
@@ -12146,7 +12287,9 @@ Each step is established, not assumed:
 
 Every other report the rule finds is heuristic: items whose origin heki does not establish, a
 path heki cannot decide, a call it cannot resolve to every implementation, a database call that
-sends a statement only in some state.
+sends a statement only in some state, a function an API runs for the call (a worker of
+`asyncio.to_thread` or of a pool, which may run it after the call returns, or a builtin calling
+it per item).
 
 ## What a report states
 
@@ -12611,6 +12754,13 @@ as long as the items, which are sized as a `for` loop's iterable: `map(fetch, ("
 not reported, nor is `max(a, b, key=fetch)`, which compares two values. A lambda written in the
 same function as another lambda is not followed: every lambda of a function has the same name
 (`f.<locals>.<lambda>`), and heki keeps one summary per name.
+
+A function a `concurrent.futures` pool runs counts the same way, on a `ThreadPoolExecutor`, a
+`ProcessPoolExecutor`, or a value typed with their `Executor` base: `executor.submit(fetch, url)`
+in a loop is a call of `fetch` on every iteration, and `executor.map(fetch, urls)` calls it once
+per item of its iterables, also through a `functools.partial`. So does
+`loop.run_in_executor(executor, fetch, url)` in a loop. An executor whose class heki does not
+know runs nothing heki follows.
 
 The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 16
@@ -13291,7 +13441,9 @@ It does not report:
 - a container inside the argument (`values["a"].append(1)` with
   `values: Mapping[str, list[int]]`): only the argument itself counts;
 - a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`,
-  `helper(set(tags))`);
+  `helper(set(tags))`), also one that hands it to a worker in another process, which gets a
+  copy made by pickling (`ProcessPoolExecutor.submit`, `anyio.to_process.run_sync`,
+  `loop.run_in_executor` with a process pool);
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
   `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument,
   unless a call handed it back (`fill(cast(list[int], items))`), which the type checker accepts;
@@ -13318,7 +13470,10 @@ Its premises:
   the value is the parameter, a local alias of it, or what a call hands back of it as itself:
   `typing.cast`, or a call binding only project functions that return that parameter on every
   path, directly or as what a call of another such function returns of it (`return same(x)`,
-  any number of calls deep). Not a copy or another value. Established. A function returning
+  any number of calls deep). Not a copy or another value. Established. A call handing it to an
+  executor that heki cannot tell a thread pool from a process pool (a value typed
+  `concurrent.futures.Executor`, or one of a class heki does not know given to
+  `run_in_executor`) is open: a process pool hands the function a copy. A function returning
   the result of any other call (a class, a method, a function outside the project, a function
   the project may bind again, `f = other` or `module.f = other`), or one that may return it
   only by calling itself again (`a(x)` returning `b(x)`, which returns `a(x)`), is open, and
@@ -13401,8 +13556,9 @@ The results of `functools.lru_cache` / `functools.cache` functions are checked w
 configuration by `MUT114` (`cached-result-mutation`).
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
-followed, also on the call result itself
+that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`; not
+a worker in another process, which changes a copy made by pickling: `ProcessPoolExecutor`,
+`anyio.to_process.run_sync`) are followed, also on the call result itself
 (`schema_of(raw).items.append(x)`); a generator function mutates its argument only where the
 generator that call returns is iterated. Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by

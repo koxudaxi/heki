@@ -321,7 +321,8 @@ fn output_formats_and_config_selection() {
             "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"src/pkg/legacy.py\" = [\"EFF\"] }\n\n[tool.heki.lint.severity]\nEFF101 = \"error\"\n",
         );
     // The message is one sentence; the help is a line of its own in `full`, a field in JSON,
-    // the result's `properties.help` in SARIF, and left out of `concise` and `github`.
+    // the result's `properties.help` in SARIF, and left out of `concise` and `github`. `github` lists the
+    // related locations after the message.
     let message = "`handler` runs the waiting call `time.sleep` on the event loop";
     let help = "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`";
     let (code, stdout, _) = p.heki(&["--output-format", "github"]);
@@ -329,7 +330,7 @@ fn output_formats_and_config_selection() {
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
+            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}%0Arelated: src/pkg/api.py:4:5: `handler` calls `time.sleep`"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
@@ -1270,6 +1271,65 @@ fn sites(stdout: &str) -> Vec<&str> {
         .collect()
 }
 
+const CHAIN_API: &str = "from app.service import load_user\n\n\nasync def get_user(user_id: int) -> dict[str, str]:\n    return load_user(user_id)\n";
+const CHAIN_SERVICE: &str = "from app.users import fetch_name\n\n\ndef load_user(user_id: int) -> dict[str, str]:\n    return {\"id\": str(user_id), \"name\": fetch_name(user_id)}\n";
+const CHAIN_USERS: &str = "import requests\n\n\ndef fetch_name(user_id: int) -> str:\n    return requests.get(f\"https://fixture.example/users/{user_id}\", timeout=5).text\n";
+const CHAIN_USERS_PURE: &str = "def fetch_name(user_id: int) -> str:\n    return str(user_id)\n";
+
+fn chain_project(name: &str, users: &str) -> Project {
+    let p = Project::new(name);
+    p.write("app/__init__.py", "")
+        .write("app/api.py", CHAIN_API)
+        .write("app/service.py", CHAIN_SERVICE)
+        .write("app/users.py", users);
+    p
+}
+
+#[test]
+fn github_annotation_lists_the_related_locations_of_a_touched_chain() {
+    let github = |p: &Project, touched: &str| {
+        p.heki(&[
+            "app",
+            "--select",
+            "EFF101",
+            "--output-format",
+            "github",
+            "--touched",
+            touched,
+        ])
+    };
+    let p = chain_project("github_related", CHAIN_USERS);
+    let (code, stdout, stderr) = github(&p, "app/users.py");
+    assert_eq!(code, 1, "{stderr}");
+    let commands: Vec<&str> = stdout.lines().filter(|l| l.starts_with("::")).collect();
+    assert_eq!(commands.len(), 1, "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let (head, body) = commands[0]
+        .split_once("::")
+        .unwrap()
+        .1
+        .split_once("::")
+        .unwrap();
+    assert!(
+        head.starts_with("error file=app/api.py,line=5,col=12,"),
+        "{head}"
+    );
+    let body = body.replace("%0A", "\n");
+    let related: Vec<&str> = body.lines().skip(1).collect();
+    assert_eq!(related.len(), 3, "{body}");
+    assert!(related[0].starts_with("related: app/api.py:"), "{body}");
+    assert!(related[1].starts_with("related: app/service.py:"), "{body}");
+    assert!(related[2].starts_with("related: app/users.py:"), "{body}");
+    assert!(related[2].contains("requests.get"), "{body}");
+
+    let pure = chain_project("github_related_pure", CHAIN_USERS_PURE);
+    let (code, stdout, stderr) = github(&pure, "app/users.py");
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
+
+    let (code, stdout, stderr) = github(&p, "app/__init__.py");
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
+}
+
 #[test]
 fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
     let p = touched_project("touched");
@@ -1444,6 +1504,221 @@ fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
         assert_eq!((code, stdout.as_str()), (2, ""), "{option}: {stderr}");
         assert!(stderr.contains("cannot be used with"), "{option}: {stderr}");
     }
+}
+
+#[test]
+fn unmatched_paths_error_stops_a_run_given_a_path_it_does_not_analyze() {
+    let p = touched_project("unmatched_paths");
+    p.write("generated/g.py", BLOCKING)
+        .write("notes.txt", "notes\n")
+        .write("extra.toml", "[tool.other]\nkey = 1\n")
+        .write("app/concat.py", SLOW)
+        .write("heki.toml", "extend-exclude = [\"generated\"]\n");
+    let concise = |args: &[&str]| p.heki(&[&["--output-format", "concise"][..], args].concat());
+    // A missing path, a directory, a file that is not Python, and an excluded file: the checked
+    // files have exact errors, and by default the run names the paths in a warning and passes.
+    let unmatched = ["gone.py", "app", "notes.txt", "generated/g.py"];
+    let named = "`--touched` names 4 path(s) that are not among the analyzed files (missing, not a Python file under PATHS, or excluded): `gone.py`, `app`, `notes.txt`, `generated/g.py`";
+    let touched = [&["--touched"][..], &unmatched[..]].concat();
+    for severity in [&[][..], &["--unmatched-paths", "warning"]] {
+        let (code, stdout, stderr) = concise(&[&touched[..], severity].concat());
+        assert_eq!((code, stdout.as_str()), (0, ""), "{severity:?}: {stderr}");
+        assert!(stderr.contains(&format!("warning: {named}\n")), "{stderr}");
+    }
+    // `error` stops the run with exit code 2 before it reports anything.
+    let (code, stdout, stderr) = concise(&[&touched[..], &["--unmatched-paths", "error"]].concat());
+    assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
+    assert_eq!(
+        stderr,
+        format!(
+            "error: {named}\n  = help: name the Python files the run analyzes: below PATHS, and not left out by `exclude` or `extend-exclude`\n  = docs: https://heki.koxudaxi.dev/cli-reference/#heki-check\n"
+        )
+    );
+    for path in unmatched {
+        let (code, _, stderr) = concise(&["--touched", path, "--unmatched-paths", "error"]);
+        assert_eq!(code, 2, "{path}: {stderr}");
+        assert!(
+            stderr.contains("`--touched` names 1 path(s)"),
+            "{path}: {stderr}"
+        );
+    }
+    // Paths that name analyzed files, a configuration file, and a TOML file heki passes over
+    // are no error.
+    let (code, stdout, stderr) = concise(&[
+        "--touched",
+        "app/jobs.py",
+        "extra.toml",
+        "--unmatched-paths",
+        "error",
+    ]);
+    assert_eq!(
+        (code, sites(&stdout)),
+        (1, vec!["app/jobs.py:4:5"]),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("names"), "{stderr}");
+    let (code, stdout, _) = concise(&["--touched", "heki.toml", "--unmatched-paths", "error"]);
+    assert_eq!((code, sites(&stdout).len()), (1, 3), "{stdout}");
+
+    // The configuration says it too, and points at the key; the command line overrides it both
+    // ways.
+    let config = "extend-exclude = [\"generated\"]\n\n[lint]\nunmatched-paths = \"error\"\n";
+    p.write("heki.toml", config);
+    let (code, stdout, stderr) = concise(&["--touched", "gone.py"]);
+    assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
+    assert!(
+        stderr.starts_with("error: heki.toml:4:1: `--touched` names 1 path(s)"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = concise(&["--touched", "gone.py", "--unmatched-paths", "warning"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("warning: `--touched` names 1 path(s)"),
+        "{stderr}"
+    );
+    // In JSON, stdout holds the error.
+    let (code, stdout, _) = p.heki(&["--output-format", "json", "--touched", "gone.py"]);
+    assert_eq!(code, 2);
+    let error: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        (error["error"]["message"].as_str().unwrap()).starts_with("`--touched` names 1 path(s)"),
+        "{stdout}"
+    );
+    // The run stops before `--fix` writes a file and before `--diff` or `--generate-prompt`
+    // prints anything.
+    for mode in [&["--fix"][..], &["--diff"], &["--generate-prompt"]] {
+        let (code, stdout, stderr) =
+            p.heki(&[mode, &["--touched", "app/concat.py", "gone.py"]].concat());
+        assert_eq!((code, stdout.as_str()), (2, ""), "{mode:?}: {stderr}");
+        assert!(
+            stderr.starts_with("error: heki.toml:4:1: `--touched`"),
+            "{stderr}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(p.dir.join("app/concat.py")).unwrap(),
+        SLOW
+    );
+    let (code, _, stderr) = p.heki(&["--fix", "--touched", "app/concat.py"]);
+    assert!(
+        stderr.starts_with("Fixed 1 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_ne!(
+        std::fs::read_to_string(p.dir.join("app/concat.py")).unwrap(),
+        SLOW
+    );
+    // A file among PATHS selects the reports as `--touched` does: one the run does not analyze
+    // is the same error.
+    let (code, stdout, stderr) = concise(&["notes.txt", "generated/g.py"]);
+    assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
+    assert!(
+        stderr.starts_with("error: heki.toml:4:1: PATHS name 2 file(s) that are not among the analyzed files (not a Python file of the project or below the directories given, or excluded): `notes.txt`, `generated/g.py`\n"),
+        "{stderr}"
+    );
+    let (code, stdout, stderr) = concise(&["app/jobs.py"]);
+    assert_eq!(
+        (code, sites(&stdout)),
+        (1, vec!["app/jobs.py:4:5"]),
+        "{stderr}"
+    );
+    // Other values are errors, in the configuration and on the command line.
+    let (code, _, stderr) = concise(&["--touched", "gone.py", "--unmatched-paths", "ignore"]);
+    assert_eq!(code, 2, "{stderr}");
+    p.write("heki.toml", "[lint]\nunmatched-paths = \"ignore\"\n");
+    let (code, _, stderr) = concise(&[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("unmatched-paths"), "{stderr}");
+}
+
+/// The level and the title of each GitHub annotation in `stdout`: `("warning", "heki EFF101
+/// (heuristic)")`.
+fn annotation_levels(stdout: &str) -> Vec<(String, String)> {
+    (stdout.lines())
+        .map(|line| {
+            let command = line.strip_prefix("::").unwrap().split_once("::").unwrap().0;
+            let (level, properties) = command.split_once(' ').unwrap();
+            let title = properties.split_once(",title=").unwrap().1;
+            (level.to_owned(), title.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn a_github_annotation_is_an_error_only_when_its_report_fails_the_run() {
+    let p = Project::new("github_levels");
+    p.write("app/__init__.py", "")
+        .write("app/concat.py", SLOW)
+        .write("app/maybe.py", MAYBE_BLOCKING);
+    let github = |args: &[&str]| {
+        let (code, stdout, stderr) = p.heki(&[&["--output-format", "github"][..], args].concat());
+        (code, annotation_levels(&stdout), stderr)
+    };
+    let levels = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        (pairs.iter())
+            .map(|(level, title)| ((*level).to_owned(), (*title).to_owned()))
+            .collect()
+    };
+    // A heuristic `error` does not fail the run: its annotation is a warning, and the title
+    // still names the rule and the tier.
+    let (code, found, stderr) = github(&[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        found,
+        levels(&[
+            ("warning", "heki OPT101"),
+            ("warning", "heki EFF101 (heuristic)")
+        ])
+    );
+    // The other formats keep the severity.
+    let (_, json, _) = p.heki(&["--output-format", "json"]);
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        [&json[0]["severity"], &json[1]["severity"]],
+        ["warning", "error"]
+    );
+    let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);
+    let sarif: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let results = sarif["runs"][0]["results"].as_array().unwrap();
+    assert_eq!(
+        [&results[0]["level"], &results[1]["level"]],
+        ["warning", "error"]
+    );
+    // At `fail-on = "warning"` both fail the run, and each keeps its severity.
+    let (code, found, _) = github(&["--fail-on", "warning"]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        found,
+        levels(&[
+            ("warning", "heki OPT101"),
+            ("error", "heki EFF101 (heuristic)")
+        ])
+    );
+    // `lint.fail` makes the heuristic report fail the run.
+    p.write("heki.toml", "[lint]\nfail = [\"EFF101\"]\n");
+    let (code, found, _) = github(&[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        found,
+        levels(&[
+            ("warning", "heki OPT101"),
+            ("error", "heki EFF101 (heuristic)")
+        ])
+    );
+    std::fs::remove_file(p.dir.join("heki.toml")).unwrap();
+    // An exact error fails it.
+    p.write("app/jobs.py", BLOCKING);
+    let (code, found, _) = github(&[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        found,
+        levels(&[
+            ("warning", "heki OPT101"),
+            ("error", "heki EFF101"),
+            ("warning", "heki EFF101 (heuristic)")
+        ])
+    );
 }
 
 /// `app/api.py` calls what `app/backend.py` re-exports from `app/fast.py`.

@@ -972,6 +972,131 @@ def old_iterator_returned(n):
     return iter(q)
 
 
+class Sized:
+    """`list.extend` and `list +=` ask an iterable that is not a builtin container for its
+    length before iterating it; `deque` never asks."""
+
+    def __iter__(self):
+        return iter([7, 8])
+
+    def __len__(self):
+        CALLS.append("len")
+        return 2
+
+
+class Hinted:
+    def __iter__(self):
+        return iter([7, 8])
+
+    def __length_hint__(self):
+        CALLS.append("hint")
+        return 2
+
+
+class Unsized:
+    def __iter__(self):
+        return iter([7, 8])
+
+    def __len__(self):
+        raise ValueError
+
+
+def cx_extended_by_sized(n):
+    q = list(range(n))
+    out = []
+    while q:
+        out.append(q.pop(0))
+        if out[-1] == 0:
+            q.extend(Sized())
+    return out
+
+
+def old_extended_by_sized(n):
+    q = collections.deque(range(n))
+    out = []
+    while q:
+        out.append(q.popleft())
+        if out[-1] == 0:
+            q.extend(Sized())
+    return out
+
+
+def cx_extended_by_hinted(n):
+    q = list(range(n))
+    out = []
+    while q:
+        out.append(q.pop(0))
+        if out[-1] == 0:
+            q.extend(Hinted())
+    return out
+
+
+def old_extended_by_hinted(n):
+    q = collections.deque(range(n))
+    out = []
+    while q:
+        out.append(q.popleft())
+        if out[-1] == 0:
+            q.extend(Hinted())
+    return out
+
+
+def cx_extended_by_unsized(n):
+    q = list(range(n))
+    out = []
+    while q:
+        out.append(q.pop(0))
+        if out[-1] == 0:
+            q.extend(Unsized())
+    return out
+
+
+def old_extended_by_unsized(n):
+    q = collections.deque(range(n))
+    out = []
+    while q:
+        out.append(q.popleft())
+        if out[-1] == 0:
+            q.extend(Unsized())
+    return out
+
+
+def cx_added_sized(n):
+    q = list(range(n))
+    out = []
+    while q:
+        out.append(q.pop(0))
+        if out[-1] == 0:
+            q += Sized()
+    return out
+
+
+def old_added_sized(n):
+    q = collections.deque(range(n))
+    out = []
+    while q:
+        out.append(q.popleft())
+        if out[-1] == 0:
+            q += Sized()
+    return out
+
+
+def cx_front_insert_extended_by_sized(n):
+    q = []
+    for i in range(n):
+        q.insert(0, i)
+        q.extend(Sized())
+    return list(q)
+
+
+def old_front_insert_extended_by_sized(n):
+    q = collections.deque([])
+    for i in range(n):
+        q.appendleft(i)
+        q.extend(Sized())
+    return list(q)
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -1048,6 +1173,15 @@ def main() -> int:
         (cx_iterator_type_observed, old_iterator_type_observed, lambda f: f(3)),
         (cx_stepped_slice, old_stepped_slice, lambda f: f(9)),
         (cx_iterator_returned, old_iterator_returned, lambda f: type(f(3)).__name__),
+        (cx_extended_by_sized, old_extended_by_sized, lambda f: f(3)),
+        (cx_extended_by_hinted, old_extended_by_hinted, lambda f: f(3)),
+        (cx_extended_by_unsized, old_extended_by_unsized, lambda f: f(3)),
+        (cx_added_sized, old_added_sized, lambda f: f(3)),
+        (
+            cx_front_insert_extended_by_sized,
+            old_front_insert_extended_by_sized,
+            lambda f: f(2),
+        ),
     ]
     lines = []
     for cx, old, call in pairs:

@@ -32,7 +32,9 @@ It does not report:
 - a container inside the argument (`values["a"].append(1)` with
   `values: Mapping[str, list[int]]`): only the argument itself counts;
 - a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`,
-  `helper(set(tags))`);
+  `helper(set(tags))`), also one that hands it to a worker in another process, which gets a
+  copy made by pickling (`ProcessPoolExecutor.submit`, `anyio.to_process.run_sync`,
+  `loop.run_in_executor` with a process pool);
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
   `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument,
   unless a call handed it back (`fill(cast(list[int], items))`), which the type checker accepts;
@@ -59,7 +61,10 @@ Its premises:
   the value is the parameter, a local alias of it, or what a call hands back of it as itself:
   `typing.cast`, or a call binding only project functions that return that parameter on every
   path, directly or as what a call of another such function returns of it (`return same(x)`,
-  any number of calls deep). Not a copy or another value. Established. A function returning
+  any number of calls deep). Not a copy or another value. Established. A call handing it to an
+  executor that heki cannot tell a thread pool from a process pool (a value typed
+  `concurrent.futures.Executor`, or one of a class heki does not know given to
+  `run_in_executor`) is open: a process pool hands the function a copy. A function returning
   the result of any other call (a class, a method, a function outside the project, a function
   the project may bind again, `f = other` or `module.f = other`), or one that may return it
   only by calling itself again (`a(x)` returning `b(x)`, which returns `a(x)`), is open, and

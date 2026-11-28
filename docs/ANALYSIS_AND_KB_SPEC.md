@@ -376,7 +376,7 @@ the targets of write and read boundaries.
 | 1 | Local constructors and direct imports (relative imports, source roots, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
 | 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` or `__post_init__`, and module globals the module body binds, each the join of what every store of it binds | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
-| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
+| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` (a class with `typing.Protocol` or `typing_extensions.Protocol` among its bases, also through a project module re-exporting it: `ProjectDecls::is_protocol`) dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 A module global the module body binds to a value of known type, and an instance attribute
 `__init__` or `__post_init__` binds to one through `self`, have the join of what every store of
@@ -518,9 +518,11 @@ Some receivers have the class the language or the standard library gives them. A
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
 instance may be (`invokes::reads_own_namespace`: no class defines `__getattribute__` or binds
-`__dict__`, and every base outside the project is a plain one or one whose `__setattr__` the
-catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
-read-only proxy, which stays untyped. Its methods are then those of `dict`, and the entries it
+`__dict__`, and every base outside the project is a plain one, one defining no attribute of its
+instances, such as the `typing.Protocol` of a protocol along the MRO, or one whose `__setattr__`
+the catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
+read-only proxy, and a value typed with a protocol may be of any class that has its members:
+both stay untyped. Its methods are then those of `dict`, and the entries it
 reads, stores, or removes stay reads and writes of the instance's attributes. The members a
 `NamedTuple` class takes from its base, and what the methods of a holder give of the value its
 type argument names (`ContextVar[T]`, kept as `types::Generic::Held` since annotations are read
@@ -850,7 +852,10 @@ its module the module binds once, an alias of its module, a name an import binds
 of one) or to `staticmethod` of one (`factory = Scope`, `REQUIRE: ClassVar[...] =
 staticmethod(require)`) is that object (`ClassDecl::named_attrs`, `ProjectDecls::class_alias`),
 when no code of the module stores the attribute on the class or on an instance, no other module
-rebinds it, and no hook runs on the read. The binding a name holds once its body has run is the
+rebinds it, and no hook runs on the read. A class body reads a name it has not bound yet, or has
+deleted, from the module's globals, never from an enclosing function, so `copy =
+staticmethod(partial(copy, deep=False))` names the module's `copy` (`sentinels::module_read`);
+after a binding of the name in the body the read is that binding's value. The binding a name holds once its body has run is the
 last one every path runs and each later one that runs on some paths only
 (`heki_ir::LastBindings::last_of`): `def fetch(...)` then `fetch = _quiet` is `_quiet`, and
 `if flag: fetch = _quiet` after the `def` is either the method or `_quiet`
@@ -1667,11 +1672,26 @@ imports and re-exports when the declarations are completed; every definition of 
 decorated so), and its body runs at the call on a worker thread: a site of its own, whose
 `CallSite::runner` is `Runner::Worker`. The callable an offloading API is given runs so too, as a call of the
 project function with the positional arguments after it (`asyncio.to_thread(f, a)` calls `f(a)`,
-`loop.run_in_executor(None, f, a)` too; keyword arguments are left unbound, since some APIs take
-their own). Every fact of such a site moves to the caller except the blocking effects, which do
+`loop.run_in_executor(None, f, a)` and a `concurrent.futures` executor's `ex.submit(f, a)` too;
+keyword arguments are left unbound, since some APIs take their own). An API whose catalog entry
+sets `offloads_per_item` runs it once per item of the positional arguments after it instead, one
+item of each per call (`ex.map(f, xs)`): the worker's site takes `CallSite::per_item` as a
+builtin's does (below), binds none of the call's arguments, and follows a `functools.partial`. Every fact of such a site moves to the caller except the blocking effects, which do
 not block the caller's thread: its queries per item (`EFF103`), its clients (`EFF102`), and its
 changes to shared objects (`MUT202`, which reads the offloading call the same way) count, and
-`EFF201` does not enter it. A callable a Layer 2 `sync_facade_arg` API runs
+`EFF201` does not enter it. The entry's `offloads_to` says where the worker runs: a thread of the
+caller's process by default; `"process"` for another process or interpreter
+(`ProcessPoolExecutor.submit` / `map`, `anyio.to_process.run_sync`,
+`anyio.to_interpreter.run_sync`); `"thread-or-process"` for an API that does not tell
+(`concurrent.futures.Executor`). An entry with `offloads_executor_arg` (`loop.run_in_executor`)
+runs it on the executor that argument names: `None` is the loop's default executor, a thread pool,
+and an executor runs it as the `submit` entry of the first class along its MRO with one says
+(`Extractor::offload_target`; an executor of a class heki does not know may be either). The site
+records it (`CallSite::offloads_to`). A worker in another process gets copies made by pickling:
+its bound parameters keep the arguments' classes and values but no tie to the caller's objects
+(`ArgOrigin::pickled`), and propagation moves only what it runs (its queries and clients), not its
+changes of the arguments, module state, or written fields. Where the site may be either, those
+changes move as for a thread, and `MUT110` leaves "Passed as itself" open on them. A callable a Layer 2 `sync_facade_arg` API runs
 (`AsyncSession.run_sync(fn)`) gets a site with `Runner::SyncFacade`: it runs on the caller's
 thread, so only its `blocking_db` (the database I/O through the synchronous facade it receives,
 awaited for it) is dropped; its arguments are left unbound. The callable a builtin calls once
@@ -2485,8 +2505,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
      dict named `requests` is not mistaken for the package (type and name resolution). A builtin
-     calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`) is a loop over
-     its items, relaxed as a `for` loop over the same iterable.
+     or a pool calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`,
+     `ex.map(fetch, urls)`) is a loop over its items, relaxed as a `for` loop over the same
+     iterable.
    - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
      `executescript` call (or SQLAlchemy's `exec_driver_sql`) whose statement is DDL (`CREATE`
      / `ALTER` / `DROP` / `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so
@@ -3191,7 +3212,7 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded); for `obj.attr +=`, every assignment of the attribute (the class's methods for `self`) stores a `str` / `bytes` / `tuple` literal of the right operand's kind | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right, `self.values = []` then `self.values += (i,)` |
 | **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe`; the edit needs a `for` statement (not a comprehension clause) and a name no other hoist of the function binds | `NotConstSmall(lst)`, not a `ConstSmall` / retry loop | S9a, S9b, S22, S27 |
 | **OPT111** | `size-dependent` | `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, only the appends the set mirrors (`OnlyPairedAppends`) | `NotConstSmall` | `seen.remove`, unhashable elements |
-| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly, no other object bound to a variable it reaches) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
+| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly, no other object bound to a variable it reaches, an `extend` / `+=` argument whose length request runs no code: a builtin container, a string, or a `range`) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))`, `q.extend(x)` / `q += x` of an `x` with `__len__` or `__length_hint__` |
 | **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
 Open premises (`CheckExtras::open_premises`, as for `EFF101` / `EFF103` in section 2.4): a
@@ -3259,7 +3280,10 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 (`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
 `unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
-`asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
+`asgiref.sync.sync_to_async`), `offloads_per_item` (with it: the callable runs once per item of
+the arguments after it, `concurrent.futures.Executor.map`), `offloads_to` and
+`offloads_executor_arg` (with it: where the worker runs, a thread, another process, or the
+executor an argument names), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
 `copy.deepcopy`, `BaseModel.__deepcopy__`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose
 `deep=True` copies deeply unless `update=` hands it values by reference: `MUT202`),
@@ -3475,9 +3499,9 @@ for it. A row's `runs_on` says where the call runs the callable when that is not
 thread (`EFF117`): `"thread"` for another thread of the process (`threading.Thread`, `Timer`, a
 thread pool's or an executor's `submit` and `map`, and the offloading APIs to a thread, which have
 rows of their own for it), `"fork-child"` for the child process after a fork
-(`os.register_at_fork(after_in_child=...)`). A row's `executor_arg` names the position of the
-executor argument that decides it (`loop.run_in_executor(executor, f)`): a process pool there
-runs the callable in another process, so the call has no `runs_on`.
+(`os.register_at_fork(after_in_child=...)`). Where the entry names the executor
+(`offloads_executor_arg`: `loop.run_in_executor(executor, f)`), a process pool there runs the
+callable in another process, so the call has no `runs_on`.
 
 `[[declared_fields]]` (`heki_kb::DeclaredFields`) says where a library keeps the fields a class
 declares, the names the bodies of the class and its bases declare as fields: the attributes of

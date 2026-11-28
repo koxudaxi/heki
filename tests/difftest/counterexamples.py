@@ -126,6 +126,59 @@ def test_s22_zero_trip_loop_unhashable_exception() -> None:
     assert raised
 
 
+def test_list_extend_asks_for_the_length() -> None:
+    """OPT120 / OPT121: `list.extend(x)` and `list += x` ask an `x` that is not a builtin
+    container for its length (`__len__`, else `__length_hint__`) before iterating it; the
+    `deque` the fix makes never asks, so the call and its exception are gone."""
+    from collections import deque
+
+    asked: list[str] = []
+
+    class Sized:
+        def __iter__(self):
+            return iter([1])
+
+        def __len__(self) -> int:
+            asked.append("len")
+            return 1
+
+    class Hinted:
+        def __iter__(self):
+            return iter([1])
+
+        def __length_hint__(self) -> int:
+            asked.append("hint")
+            return 1
+
+    class Unsized:
+        def __iter__(self):
+            return iter([1])
+
+        def __len__(self) -> int:
+            raise ValueError
+
+    lst: list[int] = []
+    lst.extend(Sized())
+    lst.extend(Hinted())
+    lst += Sized()
+    assert asked == ["len", "hint", "len"]
+
+    del asked[:]
+    dq: deque[int] = deque()
+    dq.extend(Sized())
+    dq.extend(Hinted())
+    dq += Sized()
+    assert asked == []
+
+    raised = False
+    try:
+        [].extend(Unsized())
+    except ValueError:
+        raised = True
+    assert raised
+    deque().extend(Unsized())
+
+
 def main() -> int:
     tests = [
         test_s23_for_iter_mutation_infinite_loop,
@@ -135,6 +188,7 @@ def main() -> int:
         test_s27_loop_target_mutated_inside_loop,
         test_s9b_list_subclass_custom_eq_contains,
         test_s22_zero_trip_loop_unhashable_exception,
+        test_list_extend_asks_for_the_length,
     ]
     for fn in tests:
         fn()

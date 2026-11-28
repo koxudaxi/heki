@@ -863,7 +863,7 @@ fn local_premises(
     }
     let class = owner_class(cx, &c.key);
     if let Some(class) = &class
-        && cx.decls.class_decl(class).is_some_and(|d| d.is_protocol)
+        && cx.decls.is_protocol(class)
     {
         push(
             "Whole family",

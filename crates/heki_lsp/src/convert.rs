@@ -330,6 +330,7 @@ mod tests {
                 replacement: replacement.into(),
             }]),
             sites: 1,
+            unresolved_sites: Vec::new(),
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),

@@ -175,6 +175,13 @@
         "target": {
           "description": "What the report is about: the call, name, or module it names.",
           "type": "string"
+        },
+        "unresolved_sites": {
+          "description": "Every site of an effect boundary's `unresolved-calls` or `unresolved-writes` report\n(`sites` counts them), ordered by path, line, and column: those the walk from the scope\nfunction records, not the code behind them, which heki does not follow. Written to JSON\nonly when not empty; no other output writes them.",
+          "items": {
+            "$ref": "#/$defs/UnresolvedSite"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -282,6 +289,117 @@
       "required": [
         "span",
         "replacement"
+      ],
+      "type": "object"
+    },
+    "UnresolvedCall": {
+      "additionalProperties": false,
+      "description": "A call whose code heki does not follow: a call it resolves to no function, or a call of a\nfunction whose body it does not model or only a stub declares.",
+      "properties": {
+        "callee": {
+          "description": "The method or value called (`get` of `table.get(...)`, `handler` of `handler(...)`),\n`null` for a value computed in place (`make()(...)`); for a body heki does not follow,\nthat function, by fully qualified name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "column": {
+          "description": "The 1-based byte column of the call.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "function": {
+          "description": "The function holding the call, by fully qualified name; the scope function itself, at\nits definition, when its own body is the one heki does not follow.",
+          "type": "string"
+        },
+        "line": {
+          "description": "The 1-based line of the call.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parameter": {
+          "description": "The parameter the reason is about (`unannotated-parameter`, `unresolved-annotation`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The file, as reports print paths.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why heki does not follow it: the reasons `heki recommend` gives for a call it resolves\nto no function (`unannotated-parameter`, `callable-value`, `call-result`,\n`unknown-member`, ...), `unmodeled-body` for a body heki does not model (`eval`, a body\ntoo large), or `stub-body` for a function only a stub declares.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "function",
+        "callee",
+        "reason",
+        "parameter"
+      ],
+      "type": "object"
+    },
+    "UnresolvedSite": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UnresolvedCall"
+        },
+        {
+          "$ref": "#/$defs/UnresolvedWrite"
+        }
+      ],
+      "description": "A site an effect boundary with `unresolved = \"report\"` cannot judge, one of those its\n`unresolved-calls` or `unresolved-writes` report stands for."
+    },
+    "UnresolvedWrite": {
+      "additionalProperties": false,
+      "description": "A write, on an object of unknown class, of an attribute the boundary names.",
+      "properties": {
+        "attribute": {
+          "description": "The attribute written; `null` for a name computed at run time (`setattr(obj, name, v)`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "column": {
+          "description": "The 1-based byte column of the write.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "function": {
+          "description": "The function holding the write, by fully qualified name.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "How it is written, as `heki inspect` names write kinds (`direct_attr`, `set_attr`,\n`container_mut`, ...).",
+          "type": "string"
+        },
+        "line": {
+          "description": "The 1-based line of the write.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file, as reports print paths.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "function",
+        "attribute",
+        "kind"
       ],
       "type": "object"
     }

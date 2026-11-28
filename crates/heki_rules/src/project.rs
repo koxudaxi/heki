@@ -1521,6 +1521,7 @@ fn suppression_report(
         contract_locations: Vec::new(),
         fix,
         sites: 1,
+        unresolved_sites: Vec::new(),
         fold_key: None,
         open_records: Vec::new(),
         contracts: Vec::new(),

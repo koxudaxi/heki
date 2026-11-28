@@ -304,15 +304,12 @@ pub(crate) fn per_item_callable(
     };
     let items = if symbol == "builtins.list.sort" {
         Items::Receiver
-    } else if known < args.len() {
-        Items::Unpacked
     } else {
-        let positions: Vec<u8> = (0..args.len())
-            .map_while(|i| u8::try_from(i).ok())
-            .collect();
-        Items::Args(match constructor_args(symbol, &positions) {
-            Some(w) => w.stepped,
-            None => consumer_args(symbol, &positions),
+        items_of(args, star_from, |positions| {
+            match constructor_args(symbol, positions) {
+                Some(w) => w.stepped,
+                None => consumer_args(symbol, positions),
+            }
         })
     };
     Some(PerItemCall {
@@ -320,6 +317,40 @@ pub(crate) fn per_item_callable(
         items,
         passed,
     })
+}
+
+/// What a worker calls `callable` with once per item of the call's positional arguments from
+/// `first` on, one item of each per call, as `map` does (`Executor.map(fn, *iterables)`,
+/// `heki_kb::EcosystemEntry::offloads_per_item`).
+pub(crate) fn per_item_of_args_from(
+    callable: VarId,
+    first: usize,
+    args: &[VarId],
+    star_from: Option<u8>,
+) -> PerItemCall {
+    PerItemCall {
+        callable,
+        items: items_of(args, star_from, |positions| {
+            positions.iter().skip(first).copied().collect()
+        }),
+        passed: ItemArgs::OnePerIterable,
+    }
+}
+
+/// The items of the iterables `iterables` picks among the call's positional arguments: hidden
+/// when `*` unpacking makes an argument any number of values.
+fn items_of(
+    args: &[VarId],
+    star_from: Option<u8>,
+    iterables: impl FnOnce(&[u8]) -> Vec<u8>,
+) -> Items {
+    if star_from.is_some_and(|s| usize::from(s) < args.len()) {
+        return Items::Unpacked;
+    }
+    let positions: Vec<u8> = (0..args.len())
+        .map_while(|i| u8::try_from(i).ok())
+        .collect();
+    Items::Args(iterables(&positions))
 }
 
 /// One iteration of tracked values by an instruction.

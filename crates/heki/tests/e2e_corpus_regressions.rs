@@ -555,7 +555,7 @@ def bfs(start: int, children) -> list[int]:
     while queue:
         node = queue.pop(0)
         order.append(node)
-        queue.extend(children(node))
+        queue.extend(list(children(node)))
     return order
 
 
@@ -997,7 +997,7 @@ fn loops_that_wait_for_a_condition_or_count_attempts_are_not_data_sized() {
 
 // ======================================================================== fix quality
 
-const R15_NO_IMPORT: &str = "\"\"\"A module without imports.\"\"\"\n\n\ndef bfs(start, children):\n    queue = [start]\n    order = []\n    while queue:\n        node = queue.pop(0)\n        order.append(node)\n        queue.extend(children(node))\n    return order\n\n\nprint(bfs(1, lambda n: [n + 1] if n < 4 else []))\n";
+const R15_NO_IMPORT: &str = "\"\"\"A module without imports.\"\"\"\n\n\ndef bfs(start, children):\n    queue = [start]\n    order = []\n    while queue:\n        node = queue.pop(0)\n        order.append(node)\n        queue.extend(list(children(node)))\n    return order\n\n\nprint(bfs(1, lambda n: [n + 1] if n < 4 else []))\n";
 
 #[test]
 fn r15_a_module_without_imports_gets_one_after_its_docstring_and_future_imports() {
@@ -1035,7 +1035,7 @@ fn r15_a_module_without_imports_gets_one_after_its_docstring_and_future_imports(
     }
 }
 
-const IMPORT_BLOCKS: &str = "def bfs(start, children):\n    queue = [start]\n    order = []\n    while queue:\n        node = queue.pop(0)\n        order.append(node)\n        queue.extend(children(node))\n    return order\n";
+const IMPORT_BLOCKS: &str = "def bfs(start, children):\n    queue = [start]\n    order = []\n    while queue:\n        node = queue.pop(0)\n        order.append(node)\n        queue.extend(list(children(node)))\n    return order\n";
 
 #[test]
 fn the_inserted_import_keeps_the_standard_library_block_sorted() {
@@ -1575,7 +1575,7 @@ def bfs(start, children) -> list:
     while queue:
         node = queue.pop(0)
         order.append(node)
-        queue.extend(children(node))
+        queue.extend(list(children(node)))
     return order
 
 
