@@ -4,10 +4,11 @@
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
 //! statements, module-level names bound twice, a package's name over a submodule of the same
 //! name (`from pkg import parse`), the names a star import binds, the parameters `*` arguments
-//! bind, project
-//! methods named like container mutators, augmented assignments, the bases of class statements
-//! in functions, what calling and awaiting an `async def` give, and the types of globals and
-//! instance attributes, which every store of each must agree on.
+//! bind, the candidates of a call (implementations of a protocol, overrides, members of a
+//! union) its arguments can bind, project methods named like container mutators, augmented
+//! assignments, the bases of class statements in functions, what calling and awaiting an
+//! `async def` give, and the types of globals and instance attributes, which every store of
+//! each must agree on.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -65,10 +66,15 @@ fn marked(files: &[(&str, &str)], rules: &[&str]) -> Vec<(String, u64, String)> 
 }
 
 fn check_marks(name: &str, files: &[(&str, &str)], rules: &[&str]) {
+    check_marks_in(name, CONFIG, files, rules);
+}
+
+/// [`check_marks`] under the configuration `config`.
+fn check_marks_in(name: &str, config: &str, files: &[(&str, &str)], rules: &[&str]) {
     let rules = common::with_tiers(rules);
     let rules = rules.as_slice();
     let p = Project::new(name);
-    p.write("pyproject.toml", CONFIG);
+    p.write("pyproject.toml", config);
     p.write("pkg/__init__.py", "");
     for (path, text) in files {
         p.write(path, text);
@@ -898,6 +904,284 @@ fn unpacked_arguments_bind_the_items_of_known_displays() {
         "unpacked_arguments",
         &[("pkg/model.py", MODEL), ("pkg/unpacked.py", UNPACKED)],
         &["MUT201"],
+    );
+}
+
+/// A boundary around the modules calling through candidate sets: a candidate that runs there
+/// writes the forbidden `Field.required`.
+const CANDIDATES_CONFIG: &str = r#"[project]
+name = "t"
+
+[[tool.heki.effect-boundaries]]
+name = "no-required"
+scopes = ["pkg.calls", "pkg.kept"]
+forbid = ["writes-targets"]
+write-targets = ["Field.required"]
+unresolved = "report"
+"#;
+
+/// The candidates of calls through a protocol (structural implementations), a class hierarchy
+/// (overrides), and a union, each writing `Field.required` where it runs.
+const CANDIDATES: &str = r#"from typing import Protocol, TypeAlias, overload
+
+
+class Field:
+    def __init__(self) -> None:
+        self.required = False
+
+
+CURRENT = Field()
+FLAG = len(CURRENT.__dict__) > 1
+
+
+class Step(Protocol):
+    def execute(self, state: dict[str, int]) -> None: ...
+
+
+class LocalStep:
+    def execute(self, state: dict[str, int]) -> None:
+        state["n"] = 1
+
+
+class Client:
+    def execute(self, operation: str, arguments: dict[str, int], body: bytes) -> None:
+        CURRENT.required = True
+
+
+class Overloaded:
+    @overload
+    def execute(self, state: dict[str, int]) -> None: ...
+
+    @overload
+    def execute(self, state: dict[str, int], strict: bool) -> None: ...
+
+    def execute(self, operation: str, arguments: dict[str, int], body: bytes) -> None:
+        CURRENT.required = True
+
+
+class Hook(Protocol):
+    def fire(self, state: dict[str, int]) -> None: ...
+
+
+class StaticHook:
+    @staticmethod
+    def fire(state: dict[str, int]) -> None:
+        state["n"] = 1
+
+
+class ClassHook:
+    @classmethod
+    def fire(cls, state: dict[str, int], extra: int) -> None:
+        CURRENT.required = True
+
+
+class Base:
+    def apply(self, field: Field) -> None:
+        pass
+
+
+class Wide(Base):
+    def apply(self, field: Field, extra: int) -> None:
+        CURRENT.required = True
+
+
+class Strict(Base):
+    def apply(self, field: Field, *, strict: bool) -> None:
+        CURRENT.required = True
+
+
+class Loose(Base):
+    def apply(self, field: Field, extra: int = 0) -> None:
+        pass
+
+
+class Added:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Removed:
+    def apply_to(self, field: Field, reason: str) -> None:
+        CURRENT.required = True
+
+
+Operation: TypeAlias = Added | Removed
+
+
+class Task(Protocol):
+    def start(self, state: dict[str, int]) -> None: ...
+
+
+class LocalTask:
+    def start(self, state: dict[str, int]) -> None:
+        pass
+
+
+class Versioned:
+    if FLAG:
+
+        def start(self, state: dict[str, int]) -> None:
+            pass
+
+    else:
+
+        def start(self, operation: str, arguments: dict[str, int], body: bytes) -> None:
+            CURRENT.required = True
+
+
+def traced(method):
+    return method
+
+
+class Job(Protocol):
+    def finish(self, state: dict[str, int]) -> None: ...
+
+
+class LocalJob:
+    def finish(self, state: dict[str, int]) -> None:
+        pass
+
+
+class TracedJob:
+    @traced
+    def finish(self, operation: str, arguments: dict[str, int], body: bytes) -> None:
+        CURRENT.required = True
+
+
+class Made:
+    def __init__(self, field: Field) -> None:
+        pass
+
+
+class MadeWide(Made):
+    def __init__(self, field: Field, extra: int) -> None:
+        CURRENT.required = True
+
+
+def only(field: Field, extra: int) -> None:
+    CURRENT.required = True
+"#;
+
+/// Calls whose arguments some candidates cannot bind: Python raises `TypeError` instead of
+/// running those, so only the others run (a static method binds no receiver, a class method
+/// its class; `typing.overload` signatures are no definitions that run).
+const CALLS: &str = r#"import functools
+
+from pkg.candidates import Base, Field, Hook, Operation, Step
+
+
+def run(step: Step, state: dict[str, int]) -> None:
+    step.execute(state)
+
+
+def run_by_keyword(step: Step, state: dict[str, int]) -> None:
+    step.execute(state=state)
+
+
+def run_three(step: Step, operation: str, arguments: dict[str, int]) -> None:
+    step.execute(operation, arguments, b"")  # EFF201
+
+
+def run_mapping(step: Step, state: dict[str, int]) -> None:
+    step.execute(**{"state": state})
+
+
+def run_partial(step: Step, state: dict[str, int]) -> None:
+    functools.partial(step.execute, state)()
+
+
+def run_held(step: Step, state: dict[str, int]) -> None:
+    execute = step.execute
+    execute(state)
+
+
+def fire(hook: Hook, state: dict[str, int]) -> None:
+    hook.fire(state)
+
+
+def fire_extra(hook: Hook, state: dict[str, int]) -> None:
+    hook.fire(state, 1)  # EFF201
+
+
+def through_base(base: Base, field: Field) -> None:
+    base.apply(field)
+
+
+def through_base_wide(base: Base, field: Field) -> None:
+    base.apply(field, 1)  # EFF201
+
+
+def through_base_strict(base: Base, field: Field) -> None:
+    base.apply(field, strict=True)  # EFF201
+
+
+def applies(field: Field, operation: Operation) -> None:
+    operation.apply_to(field)
+"#;
+
+#[test]
+fn a_call_runs_only_the_candidates_its_arguments_can_bind() {
+    check_marks_in(
+        "call_candidates",
+        CANDIDATES_CONFIG,
+        &[("pkg/candidates.py", CANDIDATES), ("pkg/calls.py", CALLS)],
+        &["EFF201"],
+    );
+}
+
+/// Calls that keep their candidates: unpacking with `*`, or with `**` a mapping the function does
+/// not build, may pass what a candidate takes, no candidate
+/// can take the call, a candidate's parameters depend on the path that defined it or on a
+/// decorator, a construction of a class or of one of several (a metaclass may pass `__init__`
+/// other arguments), a call of one function, and a callable handed to a builtin that calls it
+/// per item.
+const KEPT: &str = r#"from pkg.candidates import Field, Job, Made, MadeWide, Step, Task, only
+
+
+def run_unpacked(step: Step, states: list[dict[str, int]]) -> None:
+    step.execute(*states)  # EFF201
+
+
+def run_with(step: Step, options: dict[str, object]) -> None:
+    step.execute(**options)  # EFF201
+
+
+def run_two(step: Step, a: str, b: str) -> None:
+    step.execute(a, b)  # EFF201
+
+
+def run_task(task: Task, state: dict[str, int]) -> None:
+    task.start(state)  # EFF201
+
+
+def run_job(job: Job, state: dict[str, int]) -> None:
+    job.finish(state)  # EFF201
+
+
+def run_make(kind: type[Made], field: Field) -> None:
+    kind(field)  # EFF201
+
+
+def run_either(field: Field, wide: bool) -> None:
+    kind = MadeWide if wide else Made
+    kind(field)  # EFF201
+
+
+def run_only(field: Field) -> None:
+    only(field)  # EFF201
+
+
+def run_mapped(step: Step, states: list[dict[str, int]]) -> None:
+    list(map(step.execute, states))  # EFF201
+"#;
+
+#[test]
+fn a_call_keeps_the_candidates_heki_cannot_judge_by_its_arguments() {
+    check_marks_in(
+        "call_candidates_kept",
+        CANDIDATES_CONFIG,
+        &[("pkg/candidates.py", CANDIDATES), ("pkg/kept.py", KEPT)],
+        &["EFF201"],
     );
 }
 

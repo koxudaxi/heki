@@ -1056,6 +1056,11 @@ pub struct FunctionDecl {
     /// (`decorators::Decorator::keeps_call`: `staticmethod`, `typing.final`, ...), so calling it
     /// does what its definition says (see [`FunctionDecl::makes_no_coroutine`]).
     pub called_as_defined: bool,
+    /// Another definition of the name (past the `typing.overload` signatures) takes other
+    /// parameters, or a decorator may replace one of them: which one a call runs depends on the
+    /// path that bound the name, so the parameters listed here may not be those it binds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub definitions_differ: bool,
     /// A property getter that reading the attribute on an instance runs: a method decorated
     /// with the builtin `property` or a `cached_property` (by the name of what the decorator is
     /// bound to, `decorators::Decorator::getter`) whose every definition is such a getter. A
@@ -8028,6 +8033,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         }
     }
     let captured_params = crate::infer::captured_params(input.ir);
+    let differing = differing_definitions(input.ir, &decls);
     for f in &input.ir.functions {
         if !is_summarized_function(f) {
             continue;
@@ -8077,6 +8083,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
                 .collect(),
             is_generator: is_generator_function(f, &decls),
             called_as_defined: is_called_as_defined(f, &decls),
+            definitions_differ: differing.contains(f.qualname.as_str()),
             is_property: getters_only[f.qualname.as_str()],
             readonly_params,
             mutable_params,
@@ -10132,6 +10139,31 @@ fn is_called_as_defined(f: &IrFunction, decls: &ModuleDecls) -> bool {
     decorators::all_keep(&f.decorators, decls, |d| d.keeps_call)
 }
 
+/// The qualnames of `ir` with definitions a call binds differently
+/// ([`FunctionDecl::definitions_differ`]): two that are no `typing.overload` signatures take
+/// other parameters (names, kinds, which have defaults), or one is not called as defined.
+fn differing_definitions<'i>(ir: &'i ModuleIr, decls: &ModuleDecls) -> FxHashSet<&'i str> {
+    let same = |a: &heki_ir::ParamInfo, b: &heki_ir::ParamInfo| {
+        (a.name == b.name && a.has_default == b.has_default && a.kw_only == b.kw_only)
+            && (a.pos_only == b.pos_only && a.is_vararg == b.is_vararg && a.is_kwarg == b.is_kwarg)
+    };
+    let alike = |a: &IrFunction, b: &IrFunction| {
+        a.params.len() == b.params.len()
+            && a.params.iter().zip(&b.params).all(|(p, q)| same(p, q))
+            && is_called_as_defined(a, decls)
+            && is_called_as_defined(b, decls)
+    };
+    let mut first: FxHashMap<&str, &IrFunction> = FxHashMap::default();
+    let mut out = FxHashSet::default();
+    for f in (ir.functions.iter()).filter(|f| is_summarized_function(f) && !is_overload(f)) {
+        let seen = *first.entry(f.qualname.as_str()).or_insert(f);
+        if !std::ptr::eq(seen, f) && !alike(seen, f) {
+            out.insert(f.qualname.as_str());
+        }
+    }
+    out
+}
+
 /// The catalog symbol of a decorator of `f` that offloads the function it decorates
 /// (`FunctionDecl::offloaded_by`): its head (`sync_to_async` of
 /// `sync_to_async(thread_sensitive=False)`) resolved through the module's runtime imports and
@@ -10269,6 +10301,11 @@ fn module_scope(semantic: &SemanticModel) -> Option<heki_semantic::ScopeId> {
 /// Functions that get their own `FuncKey` summary (class bodies are folded away).
 pub(crate) fn is_summarized_function(f: &IrFunction) -> bool {
     !f.is_class_body && !f.is_module_body
+}
+
+/// A `@typing.overload` signature.
+pub(crate) fn is_overload(f: &IrFunction) -> bool {
+    f.has_decorator(&["overload"])
 }
 
 /// `FuncKey` qualname of an IR function (`<module>` for the module body).

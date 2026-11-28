@@ -4170,6 +4170,65 @@ fn argument_lists_are_looked_up_from_the_bound_parameters() {
     assert!(diags.iter().all(|d| d["qualname"] == "u0"));
 }
 
+/// A call through a protocol of eight implementations binds its arguments to the parameters of
+/// each to drop those it cannot take (`Extractor::callable_targets`), once besides the call's
+/// own binding of each: thousands of functions, each making four such calls that unpack a
+/// mapping display, take work linear in the calls. The four implementations needing another
+/// argument, which write the field the boundary forbids, run nowhere.
+#[test]
+fn the_candidates_a_call_cannot_take_are_dropped_in_the_work_of_its_arguments() {
+    let mut model = vec![
+        "from typing import Protocol".to_owned(),
+        String::new(),
+        String::new(),
+        "class Field:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.required = False".to_owned(),
+        String::new(),
+        String::new(),
+        "CURRENT = Field()".to_owned(),
+        String::new(),
+        String::new(),
+        "class Step(Protocol):".to_owned(),
+        "    def run(self, x, a=0, b=0) -> None: ...".to_owned(),
+    ];
+    for i in 0..4 {
+        model.extend([
+            String::new(),
+            String::new(),
+            format!("class Fits{i}:"),
+            "    def run(self, x, a=0, b=0) -> None:".to_owned(),
+            "        pass".to_owned(),
+            String::new(),
+            String::new(),
+            format!("class Wide{i}:"),
+            "    def run(self, x, y, a=0, b=0) -> None:".to_owned(),
+            "        CURRENT.required = True".to_owned(),
+        ]);
+    }
+    let model = model.join("\n") + "\n";
+    let found = check_linear(2_000, |functions| {
+        let mut calls = vec!["from model import Step".to_owned()];
+        for f in 0..functions {
+            calls.extend([
+                String::new(),
+                String::new(),
+                format!("def call{f}(step: Step, x):"),
+            ]);
+            calls.extend((0..4).map(|_| "    step.run(x, **{\"a\": 1, \"b\": 2})".to_owned()));
+        }
+        let p = Project::new(&format!("bounds_call_candidates_{functions}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"no-required\"\nscopes = [\"calls\"]\nforbid = [\"writes-targets\"]\nwrite-targets = [\"Field.required\"]\n",
+        )
+        .write("model.py", &model)
+        .write("calls.py", &(calls.join("\n") + "\n"));
+        p
+    });
+    assert!(found.is_empty(), "{found:#?}");
+}
+
 /// The names offered for a contract entry that matches nothing are found among the names one
 /// part away from it, under one budget for the run that grows with the project's functions and
 /// classes, not with the entries: each of a thousand functions of a module is one part away from

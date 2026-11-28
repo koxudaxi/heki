@@ -1395,7 +1395,7 @@ def _blocking(self, url):
     return requests.get(url)
 
 
-def _blocking_url(url):
+def _blocking_url(client, url):
     return requests.get(url)
 
 

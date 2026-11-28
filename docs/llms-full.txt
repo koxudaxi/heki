@@ -6739,6 +6739,12 @@ heki looks for the callee in this order:
 It also follows container item types (`list[Model]`), return annotations along the MRO,
 `isinstance` narrowing, unions of up to three classes, and project `Protocol`s.
 
+Of the methods a call may run through the class hierarchy, a union, or a `Protocol`, heki
+follows only those whose parameters can bind the call's arguments: Python raises `TypeError`
+instead of running the others. A call that unpacks with `*`, or with `**` a mapping heki does
+not build, keeps every method its arguments might bind, and a call none of them can take keeps
+them all.
+
 ## When heki cannot tell
 
 A rewrite and an exact report make the same choice when information is missing, in opposite

@@ -13,7 +13,9 @@
 use crate::callgraph::bound_params;
 use crate::decorators::{self, ReadsAnnotations};
 use crate::readonly::{ContainerFamily, ContainerKind, FamilyLevel};
-use crate::resolver::{FamilyOpen, TypeCtx, func_qualname, is_unknown_base, param_annotation};
+use crate::resolver::{
+    FamilyOpen, TypeCtx, func_qualname, is_overload, is_unknown_base, param_annotation,
+};
 use crate::{BoundCallee, EffectSummary, ProjectDecls};
 use heki_ast::Span;
 use heki_ir::{ConstLiteral, InstKind, IrFunction, PatternShape};
@@ -538,7 +540,7 @@ pub(crate) fn annotation_facts(
         if f.is_module_body || f.is_class_body || f.name.starts_with('<') || f.params.is_empty() {
             continue;
         }
-        let overload = f.has_decorator(&["overload"]);
+        let overload = is_overload(f);
         let params = f
             .params
             .iter()

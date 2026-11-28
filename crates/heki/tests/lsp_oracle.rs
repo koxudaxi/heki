@@ -3415,6 +3415,70 @@ fn steps_receiver_typing() -> Vec<Step> {
     ]
 }
 
+// A protocol in one module, the class implementing it structurally in a second, and a call
+// through the protocol in a third under a boundary forbidding what the implementation writes.
+const CAND_MODEL: &str = "from typing import Protocol\n\n\nclass Switch:\n    def __init__(self) -> None:\n        self.on = False\n\n\nCURRENT = Switch()\n\n\nclass Step(Protocol):\n    def execute(self, state: dict) -> None: ...\n\n\nclass LocalStep:\n    def execute(self, state: dict) -> None:\n        state[\"n\"] = 1\n";
+const CAND_CALLS: &str = "from pkg.cand_model import Step\n\n\ndef run(step: Step, state: dict) -> None:\n    step.execute(state)\n";
+
+/// The candidates of a call through a protocol that its arguments can bind
+/// (`Extractor::callable_targets`): an implementation in another module runs at the call only
+/// while its parameters can bind it, so the caller's boundary report comes and goes as the
+/// implementation gains or loses parameters, and stays while the module defines the method a
+/// second time, on another path, with other parameters (`FunctionDecl::definitions_differ`).
+fn steps_call_candidates() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"no-switch\"\nscopes = [\"pkg.cand_calls\"]\nforbid = [\"writes-targets\"]\nwrite-targets = [\"Switch.on\"]\n"
+    );
+    let client =
+        |body: &str| format!("from pkg.cand_model import CURRENT\n\n\nclass Client:\n{body}");
+    let execute = |params: &str| {
+        format!("    def execute(self, {params}) -> None:\n        CURRENT.on = True\n")
+    };
+    let two_paths = format!(
+        "    if len(CURRENT.__dict__) > 1:\n\n        def execute(self, state) -> None:\n            pass\n\n    else:\n\n    {}",
+        execute("state, extra").replace("\n        ", "\n            ")
+    );
+    vec![
+        Step::new(
+            "a call through a protocol whose implementation in another module takes three arguments",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/cand_model.py", CAND_MODEL.to_owned()),
+                Action::Create(
+                    "pkg/cand_client.py",
+                    client(&execute("operation, arguments, body")),
+                ),
+                Action::Create("pkg/cand_calls.py", CAND_CALLS.to_owned()),
+            ],
+        )
+        .reported("pkg/cand_calls.py", &[]),
+        Step::new(
+            "the implementation takes the one argument the call passes",
+            vec![save("pkg/cand_client.py", &client(&execute("state")))],
+        )
+        .reported("pkg/cand_calls.py", &[(5, "EFF201")]),
+        Step::new(
+            "it needs another argument",
+            vec![save("pkg/cand_client.py", &client(&execute("state, extra")))],
+        )
+        .reported("pkg/cand_calls.py", &[]),
+        Step::new(
+            "the module defines it again on another path, taking the call there",
+            vec![save("pkg/cand_client.py", &client(&two_paths))],
+        )
+        .reported("pkg/cand_calls.py", &[(5, "EFF201")]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/cand_calls.py"),
+                Action::Delete("pkg/cand_client.py"),
+                Action::Delete("pkg/cand_model.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// The index across files: facts its callers decide (`sync_driven_only`), members of a call
 /// cycle in other files, the catalog calls below an effect boundary, and the implementations a
 /// mixin's method runs for a receiver of known class.
@@ -8552,6 +8616,7 @@ sessions!(editing, Session::start, {
     attribute_types: steps_attribute_types,
     builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,
+    call_candidates: steps_call_candidates,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,
     returned_rows: steps_returned_rows,
