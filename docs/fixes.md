@@ -50,6 +50,14 @@ Two independent questions decide whether heki offers the rewrite:
 
 ### Safety
 
+A rewrite keeps the program's behavior when the function returns an equal result or raises the
+same exception type, makes the same calls into other code in the same order, changes shared
+objects the same way, and ends the same way. Run time, memory, `id()` values, traceback line
+numbers, and the messages of builtin exceptions are not kept
+([observational equivalence](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md#31-observational-equivalence)):
+after an `OPT120` fix, `q[0]` of an empty queue still raises `IndexError`, with the message of a
+`deque`.
+
 | Obligations | What you get |
 | ----------- | ------------ |
 | All established | A diagnostic with a fix. A statement whose shape heki does not rewrite (a parenthesized `x = (x + [i])`, an annotated `x: list = x + [i]`) gets a diagnostic saying the rewrite is proven safe, to be made by hand. |
