@@ -3162,13 +3162,9 @@ mod tests {
             "overlaps",
             "match",
             "max_affected",
-            "order",
-            "limit",
-            "offset",
-            "range",
-            "strip_nulls",
-            "select",
         ];
+        // The filter builder has no sorting or paging methods.
+        const SELECT_MODIFIERS: &[&str] = &["order", "limit", "offset", "range", "strip_nulls"];
         let handle = format!("{XINFERENCE_MODULE}.RESTfulModelHandle");
         let builder = |name: &str| format!("postgrest._sync.request_builder.{name}");
         let (select, filter, query, single, maybe_single, rpc, table) = (
@@ -3249,7 +3245,14 @@ mod tests {
             (
                 [&select, &filter, &rpc]
                     .iter()
-                    .flat_map(|class| with_prefix(class, FILTERS))
+                    .flat_map(|class| {
+                        let modifiers = if **class == filter {
+                            &[][..]
+                        } else {
+                            SELECT_MODIFIERS
+                        };
+                        with_prefix(class, &[FILTERS, modifiers, &["select"][..]].concat())
+                    })
                     .collect(),
                 returning(SELF_RETURN_TYPE, entry(&[])),
             ),

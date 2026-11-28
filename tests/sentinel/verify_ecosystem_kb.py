@@ -166,6 +166,12 @@ def build(owner, cls):
     return obj
 
 
+for owner in rows["chains"]:
+    try:
+        instances[owner] = build(owner, resolve(owner))
+    except Exception as e:
+        failures.append(f"{owner}: cannot build from its chain: {e!r}")
+
 pending = dict(rows["attributes"])
 while True:
     progressed = False
