@@ -30,8 +30,9 @@ unresolved = "report"
 
 const MODEL: &str = r#"import asyncio
 import concurrent.futures
+from abc import ABC
 from contextvars import ContextVar
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple, Protocol
 
 from pydantic import BaseModel
 from vendor import Unknown
@@ -58,6 +59,47 @@ class OwnDict:
 
 
 class Outside(Unknown):
+    pass
+
+
+class Nullable(Protocol):
+    def is_null(self) -> bool: ...
+
+
+class Fallback(Protocol):
+    def __getattr__(self, name: str) -> Any: ...
+
+
+class Intercepting(Protocol):
+    def __getattribute__(self, name: str) -> Any: ...
+
+
+class OwnNamespace(Protocol):
+    @property
+    def __dict__(self) -> Any: ...
+
+
+class Stored:
+    pass
+
+
+class PlainAbc(Stored, ABC):
+    pass
+
+
+class Implements(Stored, Nullable, ABC):
+    pass
+
+
+class FallsBack(Stored, Fallback):
+    pass
+
+
+class Intercepts(Stored, Intercepting):
+    pass
+
+
+class Replaces(Stored, OwnNamespace):
     pass
 
 
@@ -191,6 +233,38 @@ def vars(obj: object) -> object:
 
 def shadowed(field: Field) -> object:
     return vars(field).get("x")  # unresolved
+"#;
+
+/// A protocol along the MRO of an instance's class is a class body like any other: the
+/// namespace is a dict, also when the protocol defines `__getattr__`, which a read that finds
+/// the attribute never calls. A protocol defining `__getattribute__` or binding `__dict__`
+/// gives no class, and so does a value typed with a protocol, which may be of any class that
+/// has its members.
+const PROTOCOLS: &str = r#"from pkg.model import FallsBack, Implements, Intercepts, Nullable, PlainAbc, Replaces
+
+
+def plain(obj: PlainAbc) -> object:
+    return obj.__dict__.get("x"), vars(obj).get("y")
+
+
+def through_a_protocol(obj: Implements) -> object:
+    return obj.__dict__.get("x"), vars(obj).get("y")
+
+
+def falls_back(obj: FallsBack) -> object:
+    return obj.__dict__.get("x")
+
+
+def intercepts(obj: Intercepts) -> object:
+    return obj.__dict__.get("x")  # unresolved
+
+
+def replaces(obj: Replaces) -> object:
+    return vars(obj).get("x")  # unresolved
+
+
+def typed_with_the_protocol(obj: Nullable) -> object:
+    return obj.__dict__.get("x")  # unresolved
 "#;
 
 /// `_replace` copies the instance and `_make` builds one of the class it is called on (also on
@@ -348,6 +422,11 @@ fn an_instance_namespace_is_a_dict_where_reading_it_runs_no_code() {
             ("pkg/passes/shadowed.py", SHADOWED),
         ],
     );
+}
+
+#[test]
+fn a_protocol_base_reads_the_namespace_like_any_class() {
+    check_marks("protocols", &[("pkg/passes/protocols.py", PROTOCOLS)]);
 }
 
 #[test]

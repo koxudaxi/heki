@@ -2896,9 +2896,10 @@ pub struct ReadOnlyAttr {
     pub typed_read_only: bool,
 }
 
-/// The bases outside the project a read-only view may have: they define no attribute of its
-/// instances ([`ProjectDecls::is_readonly_view`]).
-const VIEW_BASES: &[&str] = &[
+/// The bases outside the project that define no attribute of their subclasses' instances: a
+/// read-only view may have them ([`ProjectDecls::is_readonly_view`]), and reading an attribute
+/// every object has finds it past them ([`ProjectDecls::object_attr_read_runs_no_code`]).
+const NO_ATTRIBUTE_BASES: &[&str] = &[
     "object",
     "builtins.object",
     "abc.ABC",
@@ -4934,13 +4935,14 @@ impl ProjectDecls {
     /// not, that defines, with every project class along its MRO, nothing but properties without
     /// a setter or deleter (`@property` getters), at least one; no plain attribute, method, or
     /// `__setattr__`, no metaclass heki does not know, and no other base than those defining no
-    /// attribute ([`VIEW_BASES`]). Code holding a value through such a class can only read it.
+    /// attribute ([`NO_ATTRIBUTE_BASES`]). Code holding a value through such a class can only
+    /// read it.
     fn is_readonly_view(&self, mro: &[String]) -> bool {
         let mut getters = false;
         let views = mro.iter().all(|c| {
             self.read(|k| note(&mut k.class_facts, c));
             let Some(decl) = self.class(c) else {
-                return VIEW_BASES.contains(&c.as_str());
+                return NO_ATTRIBUTE_BASES.contains(&c.as_str());
             };
             getters |= decl.only_getters;
             !decl.custom_metaclass && (decl.only_getters || decl.members.is_empty())
@@ -5474,10 +5476,13 @@ impl ProjectDecls {
     /// Whether reading `attr`, an attribute every object has (`__class__`, `__dict__`), on a
     /// value of the project class `class` runs no code but finding it, on every class the value
     /// may be under R2: none binds the name, defines `__getattribute__`, or has a metaclass heki
-    /// does not know, and every base outside the project is a plain base or one
-    /// `catalog_stores` accepts (a base whose `__setattr__` the catalog says stores on the
-    /// instance, R3). Kept per class and name for the life of the indexes, so the reads of one
-    /// class's namespace walk its subclasses once; the catalog is fixed while the indexes are.
+    /// does not know, and every base outside the project is a plain base, one defining no
+    /// attribute of its instances ([`NO_ATTRIBUTE_BASES`]: the `Protocol` of a protocol along
+    /// the MRO), or one `catalog_stores` accepts (a base whose `__setattr__` the catalog says
+    /// stores on the instance, R3). A value of a protocol may be of any class that has its
+    /// members, which R2 does not cover. Kept per class and name for the life of the indexes,
+    /// so the reads of one class's namespace walk its subclasses once; the catalog is fixed
+    /// while the indexes are.
     pub(crate) fn object_attr_read_runs_no_code(
         &self,
         class: &str,
@@ -5488,10 +5493,12 @@ impl ProjectDecls {
         self.object_attr_reads
             .ask(self, (class.clone(), attr.to_owned()), || {
                 let read = self.attr_read(&class, attr);
-                read.binders.is_empty()
+                let known_base = |b: &str| NO_ATTRIBUTE_BASES.contains(&b) || catalog_stores(b);
+                !self.class(&class).is_some_and(|d| d.is_protocol)
+                    && read.binders.is_empty()
                     && !read.runs_hook(false)
                     && !self.bound_after_body(&["__getattribute__"])
-                    && (read.bases_known || self.binds_none_of(&class, &[], catalog_stores))
+                    && (read.bases_known || self.binds_none_of(&class, &[], known_base))
             })
     }
 

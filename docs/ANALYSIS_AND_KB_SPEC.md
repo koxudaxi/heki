@@ -518,9 +518,11 @@ Some receivers have the class the language or the standard library gives them. A
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
 instance may be (`invokes::reads_own_namespace`: no class defines `__getattribute__` or binds
-`__dict__`, and every base outside the project is a plain one or one whose `__setattr__` the
-catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
-read-only proxy, which stays untyped. Its methods are then those of `dict`, and the entries it
+`__dict__`, and every base outside the project is a plain one, one defining no attribute of its
+instances, such as the `typing.Protocol` of a protocol along the MRO, or one whose `__setattr__`
+the catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
+read-only proxy, and a value typed with a protocol may be of any class that has its members:
+both stay untyped. Its methods are then those of `dict`, and the entries it
 reads, stores, or removes stay reads and writes of the instance's attributes. The members a
 `NamedTuple` class takes from its base, and what the methods of a holder give of the value its
 type argument names (`ContextVar[T]`, kept as `types::Generic::Held` since annotations are read
@@ -850,7 +852,10 @@ its module the module binds once, an alias of its module, a name an import binds
 of one) or to `staticmethod` of one (`factory = Scope`, `REQUIRE: ClassVar[...] =
 staticmethod(require)`) is that object (`ClassDecl::named_attrs`, `ProjectDecls::class_alias`),
 when no code of the module stores the attribute on the class or on an instance, no other module
-rebinds it, and no hook runs on the read. The binding a name holds once its body has run is the
+rebinds it, and no hook runs on the read. A class body reads a name it has not bound yet, or has
+deleted, from the module's globals, never from an enclosing function, so `copy =
+staticmethod(partial(copy, deep=False))` names the module's `copy` (`sentinels::module_read`);
+after a binding of the name in the body the read is that binding's value. The binding a name holds once its body has run is the
 last one every path runs and each later one that runs on some paths only
 (`heki_ir::LastBindings::last_of`): `def fetch(...)` then `fetch = _quiet` is `_quiet`, and
 `if flag: fetch = _quiet` after the `def` is either the method or `_quiet`
