@@ -385,22 +385,30 @@ impl Rule<'_, '_> {
                         })
                     };
                     let itself = ParamChange::Itself;
-                    let (chain, (changer, j), found) =
+                    let (chain, (changer, j), found, may_copy) =
                         self.chain(&call, k, itself.clone(), &unannotated);
                     if !found && self.chain(&call, k, itself, &|_, _| true).2 {
                         continue;
                     }
+                    // A worker that may run in another process changes a copy there: the object
+                    // it changes may not be the caller's.
+                    let copies = site.may_pass_copies() || may_copy;
                     // The line where the function at the end of the chain changes the object its
                     // parameter `j` holds, which is the caller's parameter whenever it runs. The
                     // chain does not follow a change made where a returned generator is
                     // iterated: without its line the claim is open, and the report heuristic.
-                    let witness = self.inplace_site(&changer, j).map(|(path, span)| {
+                    let line = self.inplace_site(&changer, j);
+                    let witness = line.filter(|_| !copies).map(|(path, span)| {
                         let what =
                             format!("`{}` changes the object in place here", changer.qualname);
                         cx.related_at(path, span, what)
                     });
-                    // "Read-only parameter" and "Passed as itself" hold for every report.
-                    let open = if cx.open_premises && witness.is_none() {
+                    // "Read-only parameter" holds for every report.
+                    let mut open = Vec::new();
+                    if cx.open_premises && copies {
+                        open.push(premises::MAY_RUN_ON_COPIES.open_at(None, None));
+                    }
+                    if cx.open_premises && line.is_none() {
                         let (cause, about) = if found {
                             (
                                 &premises::NOT_A_BUILTIN_CONTAINER_CHANGE,
@@ -409,10 +417,8 @@ impl Rule<'_, '_> {
                         } else {
                             (&premises::NO_CHANGING_BODY, None)
                         };
-                        vec![cause.open_at(None, about.map(|f| format!("`{f}`")))]
-                    } else {
-                        Vec::new()
-                    };
+                        open.push(cause.open_at(None, about.map(|f| format!("`{f}`"))));
+                    }
                     let (caller, callee) = (&site.caller.qualname, bc.callee.fqn());
                     let message = match &witness {
                         Some(w) => format!(
@@ -487,7 +493,7 @@ impl Rule<'_, '_> {
             call.site.caller.qualname,
             call.bc.callee.fqn()
         );
-        let (chain, _, _) = self.chain(call, k, what, &|_, _| true);
+        let (chain, ..) = self.chain(call, k, what, &|_, _| true);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
         let (code, fix) = reported_as(&ro);
         self.emit(out, code, unit, caller, span, target, message, fix, &chain);
@@ -533,7 +539,7 @@ impl Rule<'_, '_> {
              that a type checker reports the write"
         );
         let what = ParamChange::Rebinding(attr.to_owned());
-        let (chain, _, _) = self.chain(call, k, what, &|_, _| true);
+        let (chain, ..) = self.chain(call, k, what, &|_, _| true);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
         self.emit(
             out, "MUT120", unit, caller, span, target, message, &help, &chain,
@@ -554,14 +560,15 @@ impl Rule<'_, '_> {
     /// the shortest chain of calls down to the function whose own body makes the change, entering
     /// only the parameters `enters` admits ([`ProjectIndex::param_change_chain_entering`]), and
     /// that function with its parameter (the callee and `k` when no body on the way makes it);
-    /// whether such a body was found.
+    /// whether such a body was found, and whether a call below may hand on a copy
+    /// ([`heki_effect::ChangeChain::may_copy`]).
     fn chain(
         &mut self,
         call: &Call<'_>,
         k: u8,
         what: ParamChange,
         enters: &dyn Fn(&FuncKey, u8) -> bool,
-    ) -> (Vec<CallHop>, (FuncKey, u8), bool) {
+    ) -> (Vec<CallHop>, (FuncKey, u8), bool, bool) {
         let into = CallHop {
             caller: call.site.caller.clone(),
             callee: call.bc.callee.fqn(),
@@ -582,6 +589,7 @@ impl Rule<'_, '_> {
             std::iter::once(into).chain(below.hops).collect(),
             end,
             found,
+            below.may_copy,
         )
     }
 

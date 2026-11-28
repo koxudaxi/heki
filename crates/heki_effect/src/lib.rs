@@ -96,7 +96,7 @@ pub use resolver::{
     aliases_of, detect_source_roots, func_qualname, is_source_dir, module_name_for_path,
     module_prefix, resolve_relative_module, self_aliases,
 };
-pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
+pub use summary::BLOCKING_EFFECTS;
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
@@ -2466,6 +2466,25 @@ impl ArgOrigin {
         *self == Self::default()
     }
 
+    /// The argument as a callee run in another process gets it: a copy made by pickling, of the
+    /// argument's class and value, that nothing else holds. Nothing ties it to an object of the
+    /// caller.
+    pub fn pickled(&self) -> Self {
+        Self {
+            typed_instance: self.typed_instance.clone(),
+            implementers: self.implementers.clone(),
+            class: self.class.clone(),
+            exact: self.exact,
+            binding: self.binding.clone(),
+            fresh: true,
+            new_object: NewArg::New {
+                kind: NewKind::Copy,
+                cond: NewCond::default(),
+            },
+            ..Self::default()
+        }
+    }
+
     /// The project classes the ownership rules tie the argument to: `typed_instance`, and the
     /// implementations of the protocol it is typed with, as for a write through the object
     /// itself (a target on the protocol and one on an implementation both cover it).
@@ -2609,6 +2628,10 @@ pub struct CallSite {
     pub once_loops: u64,
     /// How the callees run when an API runs them for the caller (`Runner`).
     pub runner: Runner,
+    /// For a callable an offloading API runs (`Runner::Worker`): where its worker runs it. In
+    /// another process, the bound parameters are copies ([`ArgOrigin::pickled`]).
+    #[serde(default, skip_serializing_if = "heki_kb::OffloadsTo::is_thread")]
+    pub offloads_to: heki_kb::OffloadsTo,
     /// The callees bind the receiver of a method call (or the object a constructor makes) to
     /// their first parameter (a static method's binding aside), as the resolution of the call
     /// says (`Callee::Project`).
@@ -2618,8 +2641,8 @@ pub struct CallSite {
     /// `sorted(xs, key=f)`). Run on a worker, the callees take the positional arguments after
     /// it; through a sync facade or per item, none of the call's.
     pub handed_callable: Option<u8>,
-    /// For a callable a builtin calls once per item (`Runner::PerItem`): the builtin and where
-    /// it takes the items from.
+    /// For a callable a builtin (`Runner::PerItem`) or a pool's worker (`Runner::Worker`:
+    /// `ex.map(f, xs)`) calls once per item: the API and where it takes the items from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_item: Option<Box<PerItem>>,
     /// What the receiver tells about the implementations the callees run (`None`: nothing).
@@ -2760,7 +2783,8 @@ pub enum Runner {
     /// Called directly, on the caller's thread.
     #[default]
     Caller,
-    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`), a function
+    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`,
+    /// `ex.submit(f, x)`, once per item with [`CallSite::per_item`]: `ex.map(f, xs)`), a function
     /// decorated with `@sync_to_async`. Everything it does happens, but its blocking effects
     /// never block the caller's thread.
     Worker,
@@ -2774,17 +2798,17 @@ pub enum Runner {
     PerItem,
 }
 
-/// A builtin calling the callees of a site once per item ([`Runner::PerItem`]): `EFF102` and
-/// `EFF103` count it as a loop as long as the items, which they size as a `for` loop's
-/// iterable.
+/// A builtin or a pool calling the callees of a site once per item ([`CallSite::per_item`]):
+/// `EFF102` and `EFF103` count it as a loop as long as the items, which they size as a `for`
+/// loop's iterable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerItem {
-    /// The builtin (`builtins.sorted`).
+    /// The API (`builtins.sorted`, `concurrent.futures.ThreadPoolExecutor.map`).
     pub api: String,
     pub items: Items,
 }
 
-/// Where a builtin takes the items it calls a callable with ([`PerItem::items`]).
+/// Where a builtin or a pool takes the items it calls a callable with ([`PerItem::items`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Items {
     /// The call's positional arguments at these positions, walked together: as many items as
@@ -2841,6 +2865,19 @@ impl CallSite {
             heki_ir::Progress::Called => self.on_every_return.called,
             heki_ir::Progress::Returned => self.on_every_return.returned,
         }
+    }
+
+    /// Whether the callees run in another process or interpreter, on copies of the arguments
+    /// made by pickling: what they change of them, and of module state, stays there; what they
+    /// run (their queries, their clients) still happens.
+    pub fn passes_copies(&self) -> bool {
+        self.offloads_to == heki_kb::OffloadsTo::Process
+    }
+
+    /// Whether the callees may run in another process ([`Self::passes_copies`]): the site cannot
+    /// tell a process pool from a thread pool.
+    pub fn may_pass_copies(&self) -> bool {
+        !self.offloads_to.is_thread()
     }
 
     /// Whether the effect `e` of the callees does not reach the caller here: blocking work on a

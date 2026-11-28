@@ -920,6 +920,16 @@ The knowledge base names the calls that wait. Besides `requests` and `httpx.Clie
 
 `DATA101` (exact, default, [`loop-carried-concat`](https://heki.koxudaxi.dev/rules/loop-carried-concat/)) also reports an array grown through `numpy.r_[...]` or `numpy.c_[...]` on every iteration (`arr = np.r_[arr, chunk]`), also when a helper returns that concatenation (`arr = grow(arr, chunk)`), as it does for `numpy.hstack`.
 
+A function handed to a thread or process pool runs once per item for these rules:
+`executor.submit(f, ...)` in a loop counts as a call of `f` on every iteration, and
+`executor.map(f, items)` as one call of `f` per item, for the `concurrent.futures` executors;
+`loop.run_in_executor(executor, f, ...)` in a loop is the same. `EFF102` then reports a client `f`
+makes per item, and `EFF103` a query `f` sends per item. Through a pool both reports are heuristic
+(with `--heuristic`), since the pool runs `f` after `submit` returns. A worker in another process
+(`ProcessPoolExecutor`, `anyio.to_process.run_sync`) runs on copies of its arguments, so what it
+changes in them does not reach the caller, and rules that follow changes to the caller's objects
+do not follow it there.
+
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](https://heki.koxudaxi.dev/), with their output.
 
 The chain a blocking-call report shows (`EFF101`, both tiers, and `EFF105`) is one real path to the call, chosen in this order: a path the call's arguments allow (a helper that dispatches on `isinstance(item, Response)` shows the branch an argument of known class takes), then a path on the normal flow before one through cleanup code (an `except` handler or a `finally` body), then the shortest. Which path is shown never decides whether the report exists or its tier. Output folds many reports into one (`(+N more)`) only when they reach the same blocking call through the same helper: sites that call one API directly still fold together, and sites that reach different blocking calls through different helpers stay separate groups.
@@ -12216,7 +12226,8 @@ the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... a
 variants), `pymongo`, `redis`, and DynamoDB commands, the `execute()` of a supabase-py / postgrest
 query, `pandas.read_sql`, and project functions
 that reach them, also when an offloading API runs them on a worker thread per item (`await
-asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`, a `concurrent.futures`
+pool's `executor.submit(load, i)` in a loop and `executor.map(load, ids)`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
 per item runs in a loop as long as the items (`sorted(users, key=lambda u: score(conn, u))`,
 `list(map(load, ids))`; see `EFF102` for the builtins and the items whose number the code fixes).
@@ -12276,7 +12287,9 @@ Each step is established, not assumed:
 
 Every other report the rule finds is heuristic: items whose origin heki does not establish, a
 path heki cannot decide, a call it cannot resolve to every implementation, a database call that
-sends a statement only in some state.
+sends a statement only in some state, a function an API runs for the call (a worker of
+`asyncio.to_thread` or of a pool, which may run it after the call returns, or a builtin calling
+it per item).
 
 ## What a report states
 
@@ -12741,6 +12754,13 @@ as long as the items, which are sized as a `for` loop's iterable: `map(fetch, ("
 not reported, nor is `max(a, b, key=fetch)`, which compares two values. A lambda written in the
 same function as another lambda is not followed: every lambda of a function has the same name
 (`f.<locals>.<lambda>`), and heki keeps one summary per name.
+
+A function a `concurrent.futures` pool runs counts the same way, on a `ThreadPoolExecutor`, a
+`ProcessPoolExecutor`, or a value typed with their `Executor` base: `executor.submit(fetch, url)`
+in a loop is a call of `fetch` on every iteration, and `executor.map(fetch, urls)` calls it once
+per item of its iterables, also through a `functools.partial`. So does
+`loop.run_in_executor(executor, fetch, url)` in a loop. An executor whose class heki does not
+know runs nothing heki follows.
 
 The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 16
@@ -13421,7 +13441,9 @@ It does not report:
 - a container inside the argument (`values["a"].append(1)` with
   `values: Mapping[str, list[int]]`): only the argument itself counts;
 - a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`,
-  `helper(set(tags))`);
+  `helper(set(tags))`), also one that hands it to a worker in another process, which gets a
+  copy made by pickling (`ProcessPoolExecutor.submit`, `anyio.to_process.run_sync`,
+  `loop.run_in_executor` with a process pool);
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
   `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument,
   unless a call handed it back (`fill(cast(list[int], items))`), which the type checker accepts;
@@ -13448,7 +13470,10 @@ Its premises:
   the value is the parameter, a local alias of it, or what a call hands back of it as itself:
   `typing.cast`, or a call binding only project functions that return that parameter on every
   path, directly or as what a call of another such function returns of it (`return same(x)`,
-  any number of calls deep). Not a copy or another value. Established. A function returning
+  any number of calls deep). Not a copy or another value. Established. A call handing it to an
+  executor that heki cannot tell a thread pool from a process pool (a value typed
+  `concurrent.futures.Executor`, or one of a class heki does not know given to
+  `run_in_executor`) is open: a process pool hands the function a copy. A function returning
   the result of any other call (a class, a method, a function outside the project, a function
   the project may bind again, `f = other` or `module.f = other`), or one that may return it
   only by calling itself again (`a(x)` returning `b(x)`, which returns `a(x)`), is open, and
@@ -13531,8 +13556,9 @@ The results of `functools.lru_cache` / `functools.cache` functions are checked w
 configuration by `MUT114` (`cached-result-mutation`).
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
-followed, also on the call result itself
+that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`; not
+a worker in another process, which changes a copy made by pickling: `ProcessPoolExecutor`,
+`anyio.to_process.run_sync`) are followed, also on the call result itself
 (`schema_of(raw).items.append(x)`); a generator function mutates its argument only where the
 generator that call returns is iterated. Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by

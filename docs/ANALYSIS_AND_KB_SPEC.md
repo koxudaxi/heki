@@ -1672,11 +1672,26 @@ imports and re-exports when the declarations are completed; every definition of 
 decorated so), and its body runs at the call on a worker thread: a site of its own, whose
 `CallSite::runner` is `Runner::Worker`. The callable an offloading API is given runs so too, as a call of the
 project function with the positional arguments after it (`asyncio.to_thread(f, a)` calls `f(a)`,
-`loop.run_in_executor(None, f, a)` too; keyword arguments are left unbound, since some APIs take
-their own). Every fact of such a site moves to the caller except the blocking effects, which do
+`loop.run_in_executor(None, f, a)` and a `concurrent.futures` executor's `ex.submit(f, a)` too;
+keyword arguments are left unbound, since some APIs take their own). An API whose catalog entry
+sets `offloads_per_item` runs it once per item of the positional arguments after it instead, one
+item of each per call (`ex.map(f, xs)`): the worker's site takes `CallSite::per_item` as a
+builtin's does (below), binds none of the call's arguments, and follows a `functools.partial`. Every fact of such a site moves to the caller except the blocking effects, which do
 not block the caller's thread: its queries per item (`EFF103`), its clients (`EFF102`), and its
 changes to shared objects (`MUT202`, which reads the offloading call the same way) count, and
-`EFF201` does not enter it. A callable a Layer 2 `sync_facade_arg` API runs
+`EFF201` does not enter it. The entry's `offloads_to` says where the worker runs: a thread of the
+caller's process by default; `"process"` for another process or interpreter
+(`ProcessPoolExecutor.submit` / `map`, `anyio.to_process.run_sync`,
+`anyio.to_interpreter.run_sync`); `"thread-or-process"` for an API that does not tell
+(`concurrent.futures.Executor`). An entry with `offloads_executor_arg` (`loop.run_in_executor`)
+runs it on the executor that argument names: `None` is the loop's default executor, a thread pool,
+and an executor runs it as the `submit` entry of the first class along its MRO with one says
+(`Extractor::offload_target`; an executor of a class heki does not know may be either). The site
+records it (`CallSite::offloads_to`). A worker in another process gets copies made by pickling:
+its bound parameters keep the arguments' classes and values but no tie to the caller's objects
+(`ArgOrigin::pickled`), and propagation moves only what it runs (its queries and clients), not its
+changes of the arguments, module state, or written fields. Where the site may be either, those
+changes move as for a thread, and `MUT110` leaves "Passed as itself" open on them. A callable a Layer 2 `sync_facade_arg` API runs
 (`AsyncSession.run_sync(fn)`) gets a site with `Runner::SyncFacade`: it runs on the caller's
 thread, so only its `blocking_db` (the database I/O through the synchronous facade it receives,
 awaited for it) is dropped; its arguments are left unbound. The callable a builtin calls once
@@ -2490,8 +2505,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
      dict named `requests` is not mistaken for the package (type and name resolution). A builtin
-     calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`) is a loop over
-     its items, relaxed as a `for` loop over the same iterable.
+     or a pool calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`,
+     `ex.map(fetch, urls)`) is a loop over its items, relaxed as a `for` loop over the same
+     iterable.
    - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
      `executescript` call (or SQLAlchemy's `exec_driver_sql`) whose statement is DDL (`CREATE`
      / `ALTER` / `DROP` / `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so
@@ -3264,7 +3280,10 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 (`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
 `unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
-`asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
+`asgiref.sync.sync_to_async`), `offloads_per_item` (with it: the callable runs once per item of
+the arguments after it, `concurrent.futures.Executor.map`), `offloads_to` and
+`offloads_executor_arg` (with it: where the worker runs, a thread, another process, or the
+executor an argument names), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
 `copy.deepcopy`, `BaseModel.__deepcopy__`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose
 `deep=True` copies deeply unless `update=` hands it values by reference: `MUT202`),
@@ -3480,9 +3499,9 @@ for it. A row's `runs_on` says where the call runs the callable when that is not
 thread (`EFF117`): `"thread"` for another thread of the process (`threading.Thread`, `Timer`, a
 thread pool's or an executor's `submit` and `map`, and the offloading APIs to a thread, which have
 rows of their own for it), `"fork-child"` for the child process after a fork
-(`os.register_at_fork(after_in_child=...)`). A row's `executor_arg` names the position of the
-executor argument that decides it (`loop.run_in_executor(executor, f)`): a process pool there
-runs the callable in another process, so the call has no `runs_on`.
+(`os.register_at_fork(after_in_child=...)`). Where the entry names the executor
+(`offloads_executor_arg`: `loop.run_in_executor(executor, f)`), a process pool there runs the
+callable in another process, so the call has no `runs_on`.
 
 `[[declared_fields]]` (`heki_kb::DeclaredFields`) says where a library keeps the fields a class
 declares, the names the bodies of the class and its bases declare as fields: the attributes of

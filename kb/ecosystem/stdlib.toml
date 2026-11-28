@@ -2227,6 +2227,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ThreadPoolExecutor.submit"
+offloads_blocking_arg = 0
 result_of = { arg = 0, keywords = true }
 return_type = "concurrent.futures.Future"
 opaque_to_layer3 = true
@@ -2241,6 +2242,8 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ProcessPoolExecutor.submit"
+offloads_blocking_arg = 0
+offloads_to = "process"
 result_of = { arg = 0, keywords = true }
 return_type = "concurrent.futures.Future"
 opaque_to_layer3 = true
@@ -2257,7 +2260,8 @@ opaque_to_layer3 = true
 
 # Awaiting what the offloading APIs return gives what their callable returns (`result_of`):
 # `to_thread(func, /, *args, **kwargs)` passes on its keywords too, `run_in_executor(executor,
-# func, *args)` takes none.
+# func, *args)` takes none. `run_in_executor` calls `executor.submit(func, *args)`, or the
+# loop's default executor's for `None`, a thread pool (`offloads_executor_arg`).
 
 [[entries]]
 symbol = "asyncio.to_thread"
@@ -2270,6 +2274,7 @@ opaque_to_layer3 = true
 symbol = "asyncio.AbstractEventLoop.run_in_executor"
 async_safe = true
 offloads_blocking_arg = 1
+offloads_executor_arg = 0
 result_of = { arg = 1 }
 return_type = "asyncio.Future"
 opaque_to_layer3 = true
@@ -2278,6 +2283,7 @@ opaque_to_layer3 = true
 symbol = "asyncio.BaseEventLoop.run_in_executor"
 async_safe = true
 offloads_blocking_arg = 1
+offloads_executor_arg = 0
 result_of = { arg = 1 }
 return_type = "asyncio.Future"
 opaque_to_layer3 = true
@@ -2367,20 +2373,35 @@ opaque_to_layer3 = true
 symbol = "multiprocessing.Process"
 opaque_to_layer3 = true
 
+# An executor runs what `submit(fn, /, *args, **kwargs)` is handed on a worker, a thread or a
+# process of its pool (`offloads_blocking_arg`); `map(fn, *iterables)` calls `fn` there once per
+# item of the iterables, one item of each per call (`offloads_per_item`). A process pool's worker
+# runs it in a child process on copies of the arguments made by pickling, and the base class
+# may be either pool (`offloads_to`).
 [[entries]]
 symbol = "concurrent.futures.Executor.submit"
+offloads_blocking_arg = 0
+offloads_to = "thread-or-process"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.Executor.map"
+offloads_blocking_arg = 0
+offloads_per_item = true
+offloads_to = "thread-or-process"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ThreadPoolExecutor.map"
+offloads_blocking_arg = 0
+offloads_per_item = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ProcessPoolExecutor.map"
+offloads_blocking_arg = 0
+offloads_per_item = true
+offloads_to = "process"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -4480,7 +4501,7 @@ param = "fn"
 hands_back = true
 
 # The offloading APIs above run the callable on a worker thread; their rows say so (EFF117).
-# `run_in_executor` runs it in a process when the executor (its first argument) is a process pool.
+# `run_in_executor` runs it in a process when the executor its entry names is a process pool.
 [[calls_unawaited]]
 symbol = "asyncio.to_thread"
 arg = 0
@@ -4492,14 +4513,12 @@ symbol = "asyncio.AbstractEventLoop.run_in_executor"
 arg = 1
 hands_back = true
 runs_on = "thread"
-executor_arg = 0
 
 [[calls_unawaited]]
 symbol = "asyncio.BaseEventLoop.run_in_executor"
 arg = 1
 hands_back = true
 runs_on = "thread"
-executor_arg = 0
 
 # A handler `os.register_at_fork` runs in the child after a fork, before any other thread there.
 [[calls_unawaited]]

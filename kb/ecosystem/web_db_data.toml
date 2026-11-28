@@ -42,7 +42,8 @@ opaque_packages = [
 #
 # Awaiting what `run_sync(func, *args, ...)` and `run_in_threadpool(func, *args, **kwargs)`
 # return gives what `func` returns (`result_of`); `run_sync` takes keywords of its own. A process
-# or an interpreter hands back a copy made by pickling, of the class of the object it copies.
+# or an interpreter hands back a copy made by pickling, of the class of the object it copies, and
+# runs the callable on such copies of its arguments, with module state of its own (`offloads_to`).
 # The decorators return a function to call, not an awaitable. Each of these awaits checks for
 # cancellation before the callable starts: in a cancelled scope it raises there (`checkpoint`,
 # `EFF118`; Starlette's runs `anyio.to_thread.run_sync`).
@@ -60,6 +61,7 @@ symbol = "anyio.to_process.run_sync"
 effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
+offloads_to = "process"
 result_of = { arg = 0 }
 opaque_to_layer3 = true
 
@@ -68,6 +70,7 @@ symbol = "anyio.to_interpreter.run_sync"
 effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
+offloads_to = "process"
 result_of = { arg = 0 }
 opaque_to_layer3 = true
 
