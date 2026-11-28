@@ -367,6 +367,330 @@ def through_cls(cls: type[Spec], field: Field) -> bool:
     return spec.when is not None and spec.when(field)  # unresolved
 "#;
 
+const PRIVATE_DEFS: &str = r#"from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from typing import NamedTuple
+
+from pkg.model import Field, noop, require
+
+
+@dataclass(frozen=True)
+class _Spec:
+    name: str
+    run: Callable[[Field], bool]
+
+
+class _View(NamedTuple):
+    check: Callable[[Field], bool] = noop
+
+
+class _Store:
+    def __init__(self, hook: Callable[[Field], bool], *, other: Callable[[Field], bool]) -> None:
+        self._hook = hook
+        self._other = other
+
+    def fire(self, field: Field) -> bool:
+        return self._hook(field)
+
+
+class _Loud(_Store):
+    pass
+
+
+class _Picked(object):
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+
+@dataclass(frozen=True)
+class Spec:
+    run: Callable[[Field], bool]
+
+
+HOOK = require
+if __debug__:
+    HOOK = noop
+
+
+def rename(spec: _Spec) -> _Spec:
+    return replace(spec, name="c")
+
+
+PICKED = _Picked(HOOK)
+SPECS = (_Spec("a", require), _Spec(name="b", run=noop), Spec(require))
+VIEWS = (_View(), _View(noop))
+STORE = _Store(require, other=noop)
+LOUD = _Loud(noop, other=noop)
+"#;
+
+const PRIVATE_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import Spec, _Loud, _Picked, _Spec, _Store, _View
+from pkg.model import Field
+
+
+def through_parameter(spec: _Spec, field: Field) -> None:
+    spec.run(field)  # writes
+
+
+def bound_first(spec: _Spec, field: Field) -> None:
+    run = spec.run
+    run(field)  # writes
+
+
+def named_tuple_default(view: _View, field: Field) -> None:
+    view.check(field)
+
+
+def through_self(store: _Store, field: Field) -> None:
+    store.fire(field)  # writes
+
+
+def keyword_only(store: _Store, field: Field) -> None:
+    store._other(field)
+
+
+def subclass(loud: _Loud, field: Field) -> None:
+    loud._hook(field)  # writes
+
+
+def either_of_two(picked: _Picked, field: Field) -> None:
+    picked.hook(field)  # writes
+
+
+def public_class(spec: Spec, field: Field) -> None:
+    spec.run(field)  # unresolved
+"#;
+
+/// A field or attribute of a private class holds what every construction of the project
+/// passed for it, where the construction is not in view: a frozen dataclass field, a named
+/// tuple field with its default, and a parameter `__init__` stores, also on a subclass, by
+/// keyword, on a class naming `object` as its base, and from a name bound to either of two
+/// functions; a copy replacing another field
+/// keeps it. A public class may be constructed by code heki does not check.
+#[test]
+fn a_private_class_holds_what_its_constructions_pass() {
+    check_marks("function_values_private", PRIVATE_DEFS, PRIVATE_CALLS);
+}
+
+const OPEN_PRIVATE_DEFS: &str = r#"from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from typing import Any
+
+from pkg.model import Field, noop, require
+
+
+@dataclass(frozen=True)
+class _Given:
+    run: Callable[[Field], bool]
+
+
+@dataclass(frozen=True)
+class _Unpacked:
+    run: Callable[[Field], bool]
+
+
+@dataclass(frozen=True)
+class _Replaced:
+    run: Callable[[Field], bool]
+
+
+class _Again:
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+    def swap(self) -> None:
+        self.hook = noop
+
+
+class _Wrapped:
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = staticmethod(hook)
+
+
+class _Untyped:
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+
+class _Base:
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+
+class _Own(_Base):
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        super().__init__(hook)
+
+
+class _Made:
+    def __new__(cls, hook: Callable[[Field], bool]) -> "_Made":
+        return super().__new__(cls)
+
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+
+class _Defaulted:
+    def __init__(self, hook: Callable[[Field], bool] = noop) -> None:
+        self.hook = hook
+
+
+@dataclass(frozen=True)
+class _Factory:
+    run: Callable[[Field], bool] = field(default_factory=lambda: noop)
+
+
+class _Direct:
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+
+class _Twice:
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+
+@dataclass(frozen=True)
+class _Spread:
+    run: Callable[[Field], bool]
+
+
+class _Error(Exception):
+    def __init__(self, hook: Callable[[Field], bool]) -> None:
+        self.hook = hook
+
+
+def reinit(item: _Direct, spread: _Spread, options: dict[str, Any]) -> None:
+    _Direct.__init__(item, noop)
+    replace(spread, **options)
+
+
+def make(run: Callable[[Field], bool], options: dict[str, Any], spec: _Replaced) -> None:
+    _Given(run)
+    _Unpacked(**options)
+    replace(spec, run=run)
+
+
+def rebind(target) -> None:
+    target.hook = noop
+
+
+ITEMS = (
+    _Given(require),
+    _Unpacked(require),
+    _Replaced(require),
+    _Again(require),
+    _Wrapped(require),
+    _Untyped(require),
+    _Own(require),
+    _Made(require),
+    _Defaulted(),
+    _Factory(),
+    _Direct(require),
+    _Twice(require, hook=noop),
+    _Spread(require),
+    _Error(require),
+)
+"#;
+
+const OPEN_PRIVATE_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import (
+    _Again,
+    _Defaulted,
+    _Direct,
+    _Error,
+    _Factory,
+    _Given,
+    _Made,
+    _Own,
+    _Replaced,
+    _Spread,
+    _Twice,
+    _Unpacked,
+    _Untyped,
+    _Wrapped,
+)
+from pkg.model import Field
+
+
+def given(item: _Given, field: Field) -> None:
+    item.run(field)  # unresolved
+
+
+def unpacked(item: _Unpacked, field: Field) -> None:
+    item.run(field)  # unresolved
+
+
+def replaced(item: _Replaced, field: Field) -> None:
+    item.run(field)  # unresolved
+
+
+def stored_again(item: _Again, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def wrapped(item: _Wrapped, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def untyped(item: _Untyped, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def own_init(item: _Own, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def own_new(item: _Made, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def parameter_default(item: _Defaulted, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def default_factory(item: _Factory, field: Field) -> None:
+    item.run(field)  # unresolved
+
+
+def init_called(item: _Direct, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def bound_twice(item: _Twice, field: Field) -> None:
+    item.hook(field)  # unresolved
+
+
+def replaced_unpacking(item: _Spread, field: Field) -> None:
+    item.run(field)  # unresolved
+
+
+def library_base(item: _Error, field: Field) -> None:
+    item.hook(field)  # unresolved
+"#;
+
+/// Each completeness premise broken leaves the call unresolved: a construction passing a value
+/// heki does not name, one unpacking `**` keywords, a copy replacing the field with such a
+/// value or with `**` keywords, another store through `self`, a store of a value other than
+/// the parameter, a store through a receiver of unknown class, a subclass with its own
+/// `__init__`, a `__new__`, a parameter default or a default factory the construction leaves
+/// to bind, `__init__` called on an existing object, a construction binding the parameter twice
+/// (which raises), and a base outside the project.
+#[test]
+fn a_private_class_attribute_stays_unknown_where_a_store_is_not_seen() {
+    check_marks(
+        "function_values_private_open",
+        OPEN_PRIVATE_DEFS,
+        OPEN_PRIVATE_CALLS,
+    );
+}
+
 #[test]
 fn a_field_stays_unknown_where_its_value_may_change() {
     check_marks(

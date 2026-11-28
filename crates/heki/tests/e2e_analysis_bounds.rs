@@ -9517,6 +9517,52 @@ fn values_constructions_bind_to_frozen_fields_are_read_once_per_call() {
     assert_eq!(changed(check_linear(2000, shape)), 0);
 }
 
+/// The objects constructions bind to an attribute of a private class
+/// (`FieldValues::held`, `ProjectDecls::constructed_value`): `n` functions, each passed to one
+/// construction of a private frozen dataclass and of a private class whose `__init__` stores
+/// it, and a call through each attribute in another module, which past the candidate limit
+/// runs too many functions to name.
+#[test]
+fn objects_constructions_bind_to_private_attributes_are_joined_once() {
+    let shape = |n: usize| {
+        let p = Project::new(&format!("bounds_constructed_values_{n}"));
+        let mut model = vec![
+            "from dataclasses import dataclass".to_owned(),
+            String::new(),
+            String::new(),
+            "@dataclass(frozen=True)".to_owned(),
+            "class _Spec:".to_owned(),
+            "    run: object".to_owned(),
+            String::new(),
+            String::new(),
+            "class _Store:".to_owned(),
+            "    def __init__(self, hook):".to_owned(),
+            "        self.hook = hook".to_owned(),
+        ];
+        for i in 0..n {
+            model.extend([
+                String::new(),
+                String::new(),
+                format!("def step{i}(x):"),
+                "    return x".to_owned(),
+                String::new(),
+                String::new(),
+                format!("SPEC{i} = _Spec(step{i})"),
+                format!("STORE{i} = _Store(step{i})"),
+            ]);
+        }
+        p.write("pkg/__init__.py", "")
+            .write("pkg/model.py", &(model.join("\n") + "\n"))
+            .write(
+                "pkg/run.py",
+                "from pkg.model import _Spec, _Store\n\n\ndef run(spec: _Spec, store: _Store) -> None:\n    step = spec.run\n    step(1)\n    store.hook(2)\n",
+            );
+        p
+    };
+    let errors = |found: Vec<Value>| found.iter().filter(|d| d["severity"] == "error").count();
+    assert_eq!(errors(check_linear(2000, shape)), 0);
+}
+
 /// A handler of a recursion with `returns` clauses, each reporting the error and returning an exit
 /// status through a chain of `links` copies of a module constant.
 fn status_through_copies(returns: usize, links: usize) -> String {

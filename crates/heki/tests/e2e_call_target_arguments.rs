@@ -1535,6 +1535,91 @@ def library_class():
     return BaseModel.model_construct()
 "#;
 
+const COPIED: &str = r#"import copy
+
+
+class Ref:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class Hooked:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __copy__(self) -> "Hooked":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "Hooked":
+        return self
+
+
+def duplicate(ref: Ref) -> Ref:
+    return copy.copy(ref)
+
+
+def duplicate_deep(ref: Ref) -> Ref:
+    return copy.deepcopy(ref)
+
+
+def duplicate_hooked(item: Hooked) -> Hooked:
+    return copy.copy(item)
+
+
+def duplicate_hooked_deep(item: Hooked) -> Hooked:
+    return copy.deepcopy(item)
+
+
+def duplicate_anything(value):
+    return copy.copy(value)
+
+
+def duplicate_list(names: list[str]) -> list[str]:
+    return copy.deepcopy(names)
+"#;
+
+/// `copy.copy` and `copy.deepcopy` make a new instance of their argument's class where the copy
+/// protocol copies its attributes: a class target counts them as constructions. A class whose
+/// own copy hook decides the copy, a value of no class heki knows, and a library class are no
+/// construction of a project class.
+#[test]
+fn a_copy_constructs_its_arguments_class() {
+    let p = Project::new("call_target_arguments_copies");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"refs\"\ntargets = [\"pkg.models.Ref\", \"pkg.models.Hooked\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/models.py", COPIED);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "exit {code}: {stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut found: Vec<(u64, String)> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT204")
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["message"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    let constructs = |line: u64, func: &str| {
+        (
+            line,
+            format!("`{func}` constructs `pkg.models.Ref` outside the call owners of `refs`"),
+        )
+    };
+    assert_eq!(
+        found,
+        vec![
+            constructs(21, "duplicate"),
+            constructs(25, "duplicate_deep")
+        ]
+    );
+}
+
 /// The catalog's builders of a pydantic model (Layer 2 `builds_receiver`) construct the class of
 /// their receiver from the field values they take: `model_construct` from its keywords,
 /// `model_validate` from the dict it is passed (given anything else, it may return an instance

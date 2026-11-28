@@ -33,7 +33,8 @@ use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
 use crate::resolver::{
-    self, BoundArg, CalledThrough, Callee, CopyMade, LocalNames, ProjectDecls, TypeCtx, Val,
+    self, BoundArg, CalledThrough, Callee, CopyMade, FieldHeld, LocalNames, ProjectDecls, TypeCtx,
+    Val,
 };
 use crate::types::{Added, Args, Change, Container, Elem, Held, Obj, Operands, Ty};
 use heki_ast::Span;
@@ -3225,8 +3226,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             return (!bound.is_empty()).then(|| join_all(bound)).ok_or(Pending);
         }
         let cx = self.cx;
-        if let Some(held) = self.cx.field_held(recv, attr) {
-            return item_ty(held.clone());
+        match self.cx.field_held(recv, attr) {
+            Some(FieldHeld::Built(held)) => return item_ty(held.clone()),
+            Some(FieldHeld::Joined(t)) => return Ok(Some(t)),
+            Some(FieldHeld::TooMany) => return Ok(None),
+            None => {}
         }
         let Some((class, skip_self, self_ty)) = self.static_receiver(recv) else {
             return Ok(None);
@@ -3332,11 +3336,13 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
         let cx = self.cx;
         // A field holding a named object: the call calls it, binding no receiver.
-        if let Some(held) = self.cx.field_held(recv, method) {
-            return match held {
-                Elem::Of(t) => self.called(t, call),
-                Elem::Empty | Elem::Unknown => None,
-            };
+        match self.cx.field_held(recv, method) {
+            Some(FieldHeld::Built(Elem::Of(t))) => return self.called(t, call),
+            Some(FieldHeld::Joined(t)) => return self.called(&t, call),
+            Some(FieldHeld::Built(Elem::Empty | Elem::Unknown) | FieldHeld::TooMany) => {
+                return None;
+            }
+            None => {}
         }
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
         // A name of a class, or of its member, that may hold another object: the call may run

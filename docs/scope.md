@@ -330,9 +330,15 @@ Missed findings close as heki learns more:
   `NamedTuple` or a frozen dataclass whose generated constructor the code calls (also through a
   table of such instances bound once), the function a factory returns when every `return` gives
   one, and a class attribute bound to `functools.partial` of a function, read through the class
-  or wrapped in `staticmethod`. A call through a field of a dataclass that is not frozen, one with
-  a `__post_init__`, or a class a `dataclass_transform` decorator builds, through a value handed
-  in as a parameter (a view or a callback a caller passes), through a plain `partial` attribute
+  or wrapped in `staticmethod`. Where the construction is not in view (a parameter, `self`), an
+  instance of a private class (R5: its name, or a module along its dotted name, starts with an
+  underscore) holds in such a field, or in an attribute its `__init__` stores a parameter in and
+  nothing else stores, what every construction of the project passes there, up to the
+  candidate limit; a construction passing a value of no named object, `**` unpacking, a copy
+  replacing the field with such a value, or a store heki does not see leaves it unknown. A call
+  through a field of a dataclass that is not frozen, one with a `__post_init__`, or a class a
+  `dataclass_transform` decorator builds, through a value of a public class handed in as a
+  parameter (a view or a callback a caller passes), through a plain `partial` attribute
   read on an instance (Python 3.14 binds the instance to it, older versions do not), and through
   a `partial` holding a positional argument is a call heki cannot resolve.
 - The type of a module global or an instance attribute joins every store of it through a

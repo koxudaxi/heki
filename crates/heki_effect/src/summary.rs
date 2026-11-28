@@ -3175,17 +3175,21 @@ impl<'a> Extractor<'a> {
         })
     }
 
-    /// The project class `recv.method(...)` constructs when `method` holds it: a field of an
-    /// instance holding the class ([`TypeCtx::field_held`]), or a class attribute bound to a
+    /// The project class `recv.method(...)` constructs when `method` holds it: an attribute of
+    /// an instance holding the class ([`TypeCtx::field_held`]), or a class attribute bound to a
     /// `functools.partial` object of it (`ClassAlias::partial`).
     fn held_class(&self, recv: VarId, method: &str) -> Option<String> {
+        use crate::resolver::FieldHeld;
         let project = self.cx.project;
         let class = match self
             .inferred
             .ty(recv)
             .and_then(|t| self.cx.field_held(t, method))
         {
-            Some(crate::types::Elem::Of(crate::types::Ty::Ref(fqn))) => fqn.clone(),
+            Some(FieldHeld::Built(crate::types::Elem::Of(crate::types::Ty::Ref(fqn)))) => {
+                fqn.clone()
+            }
+            Some(FieldHeld::Joined(crate::types::Ty::Ref(fqn))) => fqn,
             Some(_) => return None,
             None => match self.val(recv)? {
                 Val::Ref(owner) | Val::Inst(owner, _) | Val::Class(owner) => {
@@ -7610,9 +7614,9 @@ impl<'a> Extractor<'a> {
                 // project callees.
                 let built = match &call.constructs {
                     Some(class) => Some((class.clone(), self.keyword_marks(call))),
-                    None => self
-                        .built_receiver(symbol, call)
-                        .map(|(class, fields)| (class, self.field_marks(call, fields))),
+                    None => self.built_receiver(symbol, call).map(|(class, fields)| {
+                        (class, fields.and_then(|f| self.field_marks(call, f)))
+                    }),
                 };
                 if let Some((class, arguments)) = built {
                     self.sites.push(CallSite {

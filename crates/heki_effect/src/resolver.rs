@@ -56,7 +56,7 @@ pub(crate) mod stores;
 mod type_names;
 mod workspace;
 
-pub use fields::{Changeable, FieldDefault, FieldValues, InitField, InitFields};
+pub use fields::{BoundObjects, Changeable, FieldDefault, FieldValues, InitField, InitFields};
 pub use forwarded::{ForwardedReturn, ForwardingCall};
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
 pub use sentinels::object_sentinel_calls;
@@ -830,6 +830,12 @@ pub struct ClassDecl {
     /// instance it makes holds in them. Boxed: few classes have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_fields: Option<Box<InitFields>>,
+    /// The attributes the class's own `__init__` binds to one of its parameters as passed
+    /// (`self._hook = hook`), each with the parameter's position (the receiver counted), sorted:
+    /// no other store through `self` in the class's methods binds them
+    /// ([`ProjectDecls::constructed_value`]).
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub init_params: Box<[(Box<str>, u8)]>,
     /// What the class's own body and methods store in its attributes (`attr = [...]` in the
     /// body, `self.attr = ...` in a method): `Some` when every store is a small display that
     /// none of them grows (`heki_ir::FnIndex::stored_display`), `None` when an attribute is
@@ -2819,6 +2825,10 @@ pub struct ProjectDecls {
     /// What every project module binds to each read-only container field of a class, by class
     /// and field (`ModuleDecls::field_values`, [`Self::field_rejects_changes`]).
     field_values: FxHashMap<(String, String), Changeable>,
+    /// What every project module's constructions bind to the attributes of the instances of
+    /// private classes, by class and attribute (`FieldValues::held`,
+    /// [`Self::constructed_value`]).
+    held_values: FxHashMap<(String, String), BoundObjects>,
     /// Some project module calls `__setstate__` itself (`ModuleDecls::calls_setstate`).
     setstate_called: bool,
     /// The packages whose `__path__` a project module changes (`ModuleDecls::path_changes`, the
@@ -2847,6 +2857,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::held_attr`] so far, by class and attribute; cleared with the
     /// indexes.
     held_attrs: KeptAnswers<(String, String), Option<Ty>>,
+    /// The answers of [`Self::constructed_value`] so far, by class and attribute; cleared with
+    /// the indexes.
+    constructed_values: KeptAnswers<(String, String), Option<fields::ConstructedValue>>,
     /// The answers of [`Self::capacity`] so far; cleared with the indexes.
     capacities: KeptAnswers<CapacityOf, CapacityOf>,
     /// The answers of [`Self::star_binding`] so far, by module and name; cleared with the
@@ -3231,7 +3244,11 @@ impl ProjectDecls {
     /// The joins only the completed declarations decide, which [`DeclPasses`] compares across
     /// an update.
     fn completed_joins(&self) -> CompletedJoins {
-        (self.elsewhere.clone(), self.field_values.clone())
+        (
+            self.elsewhere.clone(),
+            self.field_values.clone(),
+            self.held_values.clone(),
+        )
     }
 
     fn indexes(&self) -> Indexes {
@@ -3268,6 +3285,7 @@ impl ProjectDecls {
         self.class_constants.clear();
         self.attr_joins.clear();
         self.held_attrs.clear();
+        self.constructed_values.clear();
         self.capacities.clear();
         self.star_bindings.clear();
         self.late_star_bindings.clear();
@@ -3362,7 +3380,7 @@ impl ProjectDecls {
             .collect();
         self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
         self.elsewhere = self.stores_elsewhere();
-        self.field_values = self.joined_field_values();
+        (self.field_values, self.held_values) = self.joined_field_values();
         self.getattr_open = self.getattr_hooks_changed();
         self.changed_paths = self.package_path_changes();
         self.copy_registered = self
@@ -7388,7 +7406,11 @@ pub struct DeclPasses {
 
 /// The joins over every module that only the completed declarations decide
 /// ([`ProjectDecls::completed_joins`]).
-type CompletedJoins = (stores::Elsewhere, FxHashMap<(String, String), Changeable>);
+type CompletedJoins = (
+    stores::Elsewhere,
+    FxHashMap<(String, String), Changeable>,
+    FxHashMap<(String, String), BoundObjects>,
+);
 
 impl DeclPasses {
     /// From the completed declarations of every module (`.py` implementations after `.pyi`
@@ -7442,13 +7464,19 @@ impl DeclPasses {
     ) -> DeclKeys {
         let mut out = before.map_or_else(DeclKeys::default, |b| self.structural.index_changes(b));
         out.modules.insert(module.to_owned());
-        let (elsewhere, field_values) = before_stores;
+        let (elsewhere, field_values, held_values) = before_stores;
         out.grown_globals
             .extend(elsewhere.changes(&self.completed.elsewhere));
         let now = &self.completed.field_values;
         for key in field_values.keys().chain(now.keys()) {
             if field_values.get(key) != now.get(key) {
                 out.class_facts.insert(fields::field_key(&key.0, &key.1));
+            }
+        }
+        let now = &self.completed.held_values;
+        for key in held_values.keys().chain(now.keys()) {
+            if held_values.get(key) != now.get(key) {
+                out.class_facts.insert(fields::held_key(&key.0, &key.1));
             }
         }
         out
@@ -11661,33 +11689,39 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// Resolve `recv.method(...)` where `ty` is the type of `recv` with its arguments: an
-    /// instance holding a named object in its field `method` ([`crate::types::Args::Fields`],
-    /// [`ProjectDecls::field_holds_given`]) calls that object, binding no receiver; anything
-    /// else is resolved by its value ([`Self::resolve_method`]).
+    /// instance holding named objects in its field or attribute `method` ([`Self::field_held`])
+    /// calls them, binding no receiver; anything else is resolved by its value
+    /// ([`Self::resolve_method`]).
     pub(crate) fn resolve_method_of(
         &self,
         recv: Option<&Val>,
         ty: Option<&Ty>,
         method: &str,
     ) -> Callee {
-        if let Some(held) = ty.and_then(|t| self.field_held(t, method)) {
-            return match held {
-                Elem::Of(t) => self.resolve_call(t.val().as_ref()),
-                Elem::Empty | Elem::Unknown => Callee::Unresolved,
-            };
+        match ty.and_then(|t| self.field_held(t, method)) {
+            Some(FieldHeld::Built(Elem::Of(t))) => self.resolve_call(t.val().as_ref()),
+            Some(FieldHeld::Joined(t)) => self.resolve_call(t.val().as_ref()),
+            Some(FieldHeld::Built(Elem::Empty | Elem::Unknown)) => Callee::Unresolved,
+            Some(FieldHeld::TooMany) => Callee::TooMany,
+            None => self.resolve_method(recv, method),
         }
-        self.resolve_method(recv, method)
     }
 
-    /// What the instance of type `ty` holds in its field `attr`, when it holds what the call
-    /// constructing it bound: the one reading of [`crate::types::Args::Fields`], for typing and
-    /// for call targets.
-    pub(crate) fn field_held<'t>(&self, ty: &'t Ty, attr: &str) -> Option<&'t Elem> {
+    /// What the instance of type `ty` holds in its attribute `attr` while it lives, for typing
+    /// and for call targets: what the call constructing it bound to a field, where the type
+    /// carries that call ([`crate::types::Args::Fields`], [`ProjectDecls::field_holds_given`]);
+    /// otherwise, of a private class, what every construction binds there
+    /// ([`ProjectDecls::constructed_value`]).
+    pub(crate) fn field_held<'t>(&self, ty: &'t Ty, attr: &str) -> Option<FieldHeld<'t>> {
         let o = ty.obj()?;
-        let held = o.args.field(attr)?;
-        self.project
-            .field_holds_given(&o.class, attr)
-            .then_some(held)
+        if let Some(held) = o.args.field(attr) {
+            let given = self.project.field_holds_given(&o.class, attr);
+            return given.then_some(FieldHeld::Built(held));
+        }
+        Some(match self.project.constructed_value(&o.class, attr)? {
+            fields::ConstructedValue::Of(t) => FieldHeld::Joined(t),
+            fields::ConstructedValue::TooMany => FieldHeld::TooMany,
+        })
     }
 
     /// Resolve `recv.method(...)`.
@@ -12362,4 +12396,14 @@ impl<'a> TypeCtx<'a> {
                 .collect(),
         )
     }
+}
+
+/// What [`TypeCtx::field_held`] finds in an attribute.
+pub(crate) enum FieldHeld<'t> {
+    /// What the call constructing the instance bound, as its type carries it.
+    Built(&'t Elem),
+    /// The named objects every construction of the class binds.
+    Joined(Ty),
+    /// More objects than a call through the attribute is resolved to.
+    TooMany,
 }
