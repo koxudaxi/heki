@@ -504,6 +504,11 @@ const GLYPH_USER: &str = "from pkg.glyphs import shared_glyphs\n\n\ndef measure(
 const FIELDS: &str = "from functools import lru_cache\n\n\n@lru_cache\ndef fields(name):\n    return [name, \"id\"]\n";
 const FIELDS_MAYBE: &str = "from functools import lru_cache\n\n\n@lru_cache\ndef fields(name):\n    if not name:\n        return None\n    return [name, \"id\"]\n";
 const FIELDS_USER: &str = "from pkg.fields import fields\n\n\ndef extended(name):\n    result = fields(name)\n    result.append(\"extra\")\n    return result\n";
+// `MUT114`: a method in another module that fills a memo of its own hands out what the memo
+// keeps (`EffectSummary::result_cache`), then a copy of it.
+const MEMO_STORE: &str = "class Store:\n    def __init__(self):\n        self._cache = {}\n\n    def entry(self, key) -> dict:\n        if key not in self._cache:\n            self._cache[key] = {\"key\": key}\n        return self._cache[key]\n";
+const MEMO_STORE_COPYING: &str = "import copy\n\n\nclass Store:\n    def __init__(self):\n        self._cache = {}\n\n    def entry(self, key) -> dict:\n        if key not in self._cache:\n            self._cache[key] = {\"key\": key}\n        return copy.deepcopy(self._cache[key])\n";
+const MEMO_USER: &str = "from pkg.memo_store import Store\n\n\ndef label(s: Store, key):\n    s.entry(key)[\"label\"] = 1\n";
 const TAGGER: &str = "from pkg.catalog import Catalog\nfrom pkg.lookup import find\n\n\ndef tag(c: Catalog):\n    find(c, \"k\")[\"tag\"] = 1\n";
 const NODES: &str = "class Node:\n    def __init__(self):\n        self.kids = []\n\n\nclass Index:\n    def refresh(self):\n        self.stale = False\n\n\ndef attach(node: Node, kid):\n    node.kids.append(kid)\n";
 // A class an `invalidation` target names by its module (`pkg.dials:*.level`): written in
@@ -1290,6 +1295,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/tagger.py", TAGGER),
         ("pkg/fields.py", FIELDS),
         ("pkg/fields_user.py", FIELDS_USER),
+        ("pkg/memo_store.py", MEMO_STORE),
+        ("pkg/memo_user.py", MEMO_USER),
         ("pkg/glyphs.py", GLYPHS),
         ("pkg/glyph_user.py", GLYPH_USER),
         ("pkg/copied_node.py", COPIED_NODE),
@@ -5071,6 +5078,16 @@ fn steps_mut114_mut202_mut208() -> Vec<Step> {
             vec![Action::Delete("pkg/frozen_list.py")],
         )
         .present(&[("pkg/fields_user.py", "MUT114")]),
+        Step::new(
+            "a memo method in another module hands out a copy of what it keeps",
+            vec![save("pkg/memo_store.py", MEMO_STORE_COPYING)],
+        )
+        .absent(&[("pkg/memo_user.py", "MUT114")]),
+        Step::new(
+            "the method hands out the object its memo keeps again",
+            vec![save("pkg/memo_store.py", MEMO_STORE)],
+        )
+        .present(&[("pkg/memo_user.py", "MUT114")]),
         Step::new(
             "a wrapper in another module starts returning a declared producer's value",
             vec![save("pkg/lookup.py", LOOKUP_SHARED)],

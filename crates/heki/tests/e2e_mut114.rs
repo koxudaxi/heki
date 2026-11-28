@@ -559,6 +559,342 @@ def use(name):
     );
 }
 
+const HAND_MEMOS: &str = r#"import copy
+import shelve
+from abc import abstractmethod
+from typing import Any
+
+_CACHE = {}
+_BY_NAME = {}
+_MEMO = {}
+
+
+def logged(fn):
+    return fn
+
+
+def build(key):
+    return {"name": key}
+
+
+class Session:
+    def __init__(self, key):
+        self.key = key
+        self.closed = False
+
+
+class Configs:
+    _class_cache: dict = {}
+
+    def __init__(self):
+        self._cache = {}
+        self._lists_cache = {}
+        self._by_name = {}
+        self._bucket_cache = {}
+        self._results_cache = {}
+        self._memo = None
+        self._shelf_cache = shelve.open("memo")
+        self._sessions = {}
+        self._session_cache = {}
+
+    def get(self, key):
+        if key in self._cache:
+            return self._cache[key]
+        value = {"name": key}
+        self._cache[key] = value
+        return value
+
+    def annotated(self, key) -> dict[str, Any]:
+        if key in self._cache:
+            return self._cache[key]
+        value = {"name": key}
+        self._cache[key] = value
+        return value
+
+    def filled_first(self, key) -> dict:
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    def defaulted(self, key) -> list:
+        return self._lists_cache.setdefault(key, [key])
+
+    def looked_up(self, key) -> dict:
+        if (found := self._cache.get(key)) is None:
+            found = self._cache[key] = build(key)
+        return found
+
+    def lazily(self, key) -> dict:
+        if self._memo is None:
+            self._memo = {}
+        if key not in self._memo:
+            self._memo[key] = build(key)
+        return self._memo[key]
+
+    @classmethod
+    def of_class(cls, key) -> dict:
+        if key not in cls._class_cache:
+            cls._class_cache[key] = build(key)
+        return cls._class_cache[key]
+
+    @staticmethod
+    def by_class_name(key) -> dict:
+        if Configs._class_cache and key in Configs._class_cache:
+            return Configs._class_cache[key]
+        value = build(key)
+        Configs._class_cache[key] = value
+        return value
+
+    def named(self, key) -> dict:
+        if key not in self._by_name:
+            self._by_name[key] = build(key)
+        return self._by_name[key]
+
+    def sometimes(self, key) -> dict:
+        if not key:
+            return {}
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    def or_default(self, key) -> dict:
+        if key in self._cache:
+            return self._cache.get(key, {})
+        self._cache[key] = build(key)
+        return self._cache[key]
+
+    def deep_copied(self, key) -> dict:
+        if key not in self._results_cache:
+            self._results_cache[key] = build(key)
+        return copy.deepcopy(self._results_cache[key])
+
+    def copied(self, key) -> dict:
+        if key not in self._results_cache:
+            self._results_cache[key] = build(key)
+        return dict(self._results_cache[key])
+
+    def constant_key(self, key) -> dict:
+        if "all" not in self._cache:
+            self._cache["all"] = build(key)
+        return self._cache["all"]
+
+    def per_call(self, key) -> dict:
+        self._results_cache = {}
+        if key not in self._results_cache:
+            self._results_cache[key] = build(key)
+        return self._results_cache[key]
+
+    def bucket(self, key) -> list:
+        if key not in self._bucket_cache:
+            self._bucket_cache[key] = []
+        return self._bucket_cache[key]
+
+    def stored(self, key) -> dict:
+        self._results_cache[key] = build(key)
+        return self._results_cache[key]
+
+    @logged
+    def decorated(self, key) -> dict:
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    def evicting(self, key) -> dict:
+        if len(self._cache) > 100:
+            self._cache.clear()
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    @abstractmethod
+    def abstract(self, key) -> dict:
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    def maybe_none(self, key) -> dict:
+        if key is None:
+            return
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    def shelved(self, key) -> dict:
+        if key not in self._shelf_cache:
+            self._shelf_cache[key] = build(key)
+        return self._shelf_cache[key]
+
+    def session(self, key):
+        if key not in self._sessions:
+            self._sessions[key] = Session(key)
+        return self._sessions[key]
+
+    def session_of(self, key):
+        if key not in self._session_cache:
+            self._session_cache[key] = Session(key)
+        return self._session_cache[key]
+
+
+def module_level(key) -> dict:
+    if key not in _CACHE:
+        _CACHE[key] = build(key)
+    return _CACHE[key]
+
+
+def registry(key) -> dict:
+    if key not in _BY_NAME:
+        _BY_NAME[key] = build(key)
+    return _BY_NAME[key]
+
+
+def handed_on(c: Configs, key):
+    return c.annotated(key)
+
+
+def fresh_global(key) -> dict:
+    global _MEMO
+    _MEMO = {}
+    if key not in _MEMO:
+        _MEMO[key] = build(key)
+    return _MEMO[key]
+"#;
+
+const MEMO_USES: &str = r#"from memos import Configs, fresh_global, handed_on, module_level, registry
+
+
+def tune(c: Configs, k):
+    cfg = c.get(k)
+    cfg["x"] = 1
+    c.annotated(k)["x"] = 1
+    c.filled_first(k)["x"] = 1
+    c.defaulted(k).append(1)
+    c.looked_up(k)["x"] = 1
+    c.lazily(k)["x"] = 1
+    Configs.of_class(k)["x"] = 1
+    Configs.by_class_name(k)["x"] = 1
+    module_level(k)["x"] = 1
+    c.named(k)["x"] = 1
+    registry(k)["x"] = 1
+    c.sometimes(k)["x"] = 1
+    c.or_default(k)["x"] = 1
+    handed_on(c, k)["x"] = 1
+    c.annotated(k)["rows"].append(1)
+    c.deep_copied(k)["x"] = 1
+    c.copied(k)["x"] = 1
+    c.constant_key(k)["x"] = 1
+    c.per_call(k)["x"] = 1
+    c.bucket(k).append(1)
+    c.stored(k)["x"] = 1
+    c.decorated(k)["x"] = 1
+    c.evicting(k)["x"] = 1
+    c.abstract(k)["x"] = 1
+    c.maybe_none(k)["x"] = 1
+    fresh_global(k)["x"] = 1
+    c.shelved(k)["x"] = 1
+    c.session(k).closed = True
+    c.session_of(k).closed = True
+"#;
+
+/// A function that fills a container outliving the call (an attribute of `self` or of the
+/// class, a module global) and named as a cache or memo under a key from its arguments, and
+/// returns what the container keeps there, is a cache as a `functools` one is: `if k in c:
+/// return c[k]` / `c[k] = v; return v`, `if k not in c: c[k] = v` / `return c[k]`,
+/// `setdefault`, `.get(k)` then a fill. A container of the same shape without such a name is a
+/// registry (a pool, a get-or-create of handles) whose objects the callers are meant to change.
+/// The exact claim needs every return to hand out the kept object, a builtin dict, and a return
+/// annotation naming the kind; a copy, a key not from the arguments, a container made per call
+/// (also a module global the function rebinds), a registry slot built from none of the
+/// arguments, a store a call never finds kept, and a decorator heki does not know make no cache.
+#[test]
+fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
+    let p = Project::new("mut114_hand_memos");
+    p.write("memos.py", HAND_MEMOS).write("uses.py", MEMO_USES);
+    let diags = diagnostics(&p, &["--select", "MUT114"]);
+    assert_eq!(
+        claims(&diags),
+        vec![
+            // No return annotation: the value a call finding its key kept returns was stored by
+            // an earlier call or by other code.
+            (6, false),
+            // Each form, of an instance's and of a module's memo.
+            (7, true),
+            (8, true),
+            (9, true),
+            (10, true),
+            // A memo made lazily (`None` or a dict), and a class's memo through `cls` and through
+            // the class: heki does not type the container a builtin dict there.
+            (11, false),
+            (12, false),
+            (13, false),
+            (14, true),
+            // A return of a new dict on one path, a `.get` default, a wrapper, and an object
+            // below the result. Lines 15 and 16 fill a container not named as a cache or memo.
+            (17, false),
+            (18, false),
+            (19, false),
+            (20, false),
+            // Clearing the memo leaves what it keeps a cached result.
+            (28, true),
+            // A decorator a cache may not stand beside, and a return of `None`.
+            (29, false),
+            (30, false),
+            // A mapping that is no builtin dict: a shelf stores a copy and reads a new object.
+            (32, false),
+            // A get-or-create of a class instance: a memo by its name (line 34), a registry of
+            // sessions without one (line 33).
+            (34, false),
+        ],
+        "{diags:#?}"
+    );
+    let at = |line: u64| diags.iter().find(|d| d["line"] == line).unwrap();
+    assert_eq!(
+        at(6)["message"],
+        "`tune` mutates the shared object returned by cached function `memos.Configs.get`"
+    );
+    assert_eq!(
+        at(7)["message"],
+        "`tune` changes in place the dict that `Configs.annotated` returned; `Configs.annotated` keeps it in `self._cache`"
+    );
+    assert_eq!(at(7)["help"], "change a copy (`dict(...)`) instead");
+    assert_eq!(
+        at(13)["message"],
+        "`tune` mutates the shared object returned by cached function `memos.Configs.by_class_name`"
+    );
+    assert_eq!(
+        at(14)["message"],
+        "`tune` changes in place the dict that `module_level` returned; `module_level` keeps it in `_CACHE`"
+    );
+    // The exact claims are the exact reports a default run shows; the others are heuristic.
+    let exact: Vec<u64> = diagnostics(&p, &[])
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT114" && d["certainty"] == "exact")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(exact, vec![7, 8, 9, 10, 14, 28]);
+}
+
+/// A memo function named as a `readonly-returns` producer reports under the contract, as before
+/// heki took such a memo for a cache.
+#[test]
+fn mut114_leaves_a_declared_memo_producer_to_its_contract() {
+    let p = Project::new("mut114_declared_memo");
+    p.write("memos.py", HAND_MEMOS)
+        .write("uses.py", MEMO_USES)
+        .write(
+            "pyproject.toml",
+            "[[tool.heki.readonly-returns]]\nname = \"configs\"\nproducers = [\"memos.Configs.annotated\"]\ndeep = true\n",
+        );
+    let diags = diagnostics(&p, &["--select", "MUT114,MUT202"]);
+    let rule_at = |line: u64| {
+        let d = diags.iter().find(|d| d["line"] == line).unwrap();
+        d["rule_code"].as_str().unwrap().to_owned()
+    };
+    for line in [7, 19, 20] {
+        assert_eq!(rule_at(line), "MUT202", "{diags:#?}");
+    }
+    assert_eq!(rule_at(8), "MUT114");
+}
+
 /// Each `MUT114` report of the project as (function, certainty, open premises "premise: cause").
 fn open_premise_reports(p: &Project) -> Vec<(String, String, Vec<String>)> {
     let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "MUT114", "."]);

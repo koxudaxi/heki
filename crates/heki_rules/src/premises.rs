@@ -414,19 +414,25 @@ pub const NOT_A_BUILTIN_CONTAINER_CHANGE: OpenCause = OpenCause {
 
 pub const CACHED: Premise = Premise {
     name: "Cached",
-    states: "the decorator is `functools.cache`, or `functools.lru_cache` that keeps results",
-    decided_in: &["heki_effect::readonly::cache_decorator"],
+    states: "the decorator is `functools.cache`, or `functools.lru_cache` that keeps results; or the function keeps its results in a builtin `dict` named as a cache or memo that outlives the call, and every return a run can reach hands out the object kept there under one key",
+    decided_in: &[
+        "heki_effect::readonly::cache_decorator",
+        "heki_effect::cache_flow::hand_memo",
+    ],
 };
 
 pub const KEYED: Premise = Premise {
     name: "Keyed",
-    states: "the cached function takes a parameter besides `self` / `cls`",
-    decided_in: &["heki_effect::readonly::cached_result"],
+    states: "the cached function takes a parameter besides `self` / `cls`; a memo's key is computed from those parameters",
+    decided_in: &[
+        "heki_effect::readonly::cached_result",
+        "heki_effect::cache_flow::hand_memo",
+    ],
 };
 
 pub const CONTAINER_KIND: Premise = Premise {
     name: "Container kind",
-    states: "every return a run can reach hands out a builtin container of the named kind, by its return annotation (R2) or by construction",
+    states: "every return a run can reach hands out a builtin container of the named kind, by its return annotation (R2) or by construction; a memo's, by its return annotation only",
     decided_in: &[
         "heki_effect::readonly::annotated_kind",
         "heki_effect::readonly::constructed_kind",
@@ -435,7 +441,7 @@ pub const CONTAINER_KIND: Premise = Premise {
 
 /// The cause of "Cached", "Keyed", and "Container kind" for a cached function whose summary
 /// does not establish them ([`heki_effect::CachedResult`] keeps no reason).
-const CACHED_RESULT_STATES: &str = "the cached function's summary does not establish that it is a synchronous function a `functools` cache keeps the results of, that takes a parameter besides `self` / `cls`, and that hands out a builtin container of one kind on every return, or heki does not find the function; the summary keeps no reason, so heki cannot tell which of the three fails, and each is open";
+const CACHED_RESULT_STATES: &str = "the cached function's summary does not establish that it is a synchronous function a `functools` cache, or a memo named as one that it fills itself and hands out on every return, keeps the results of, that takes a parameter besides `self` / `cls`, and that hands out a builtin container of one kind on every return, or heki does not find the function; the summary keeps no reason, so heki cannot tell which of the three fails, and each is open";
 
 pub const NOT_ESTABLISHED_CACHED: OpenCause = OpenCause {
     id: "cached-result-not-established",

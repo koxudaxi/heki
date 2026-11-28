@@ -16,9 +16,9 @@ use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
     CellChange, Construction, ContractSharing, Delivery, EffectSummary, EntryKey, Facts, FuncKey,
     KeptBy, LocalOrigins, MayGiven, Need, NewArg, NewCond, NewFrom, NewKind, Origins,
-    PROVIDED_CHAIN_LIMIT, PROVIDED_LIMIT, ProjectIndex, ProtectedReturn, Provided, ReturnsNew,
-    Runner, Shared, SharedChain, SharedState, SiteRole, Slot, TypedFieldWrite, TypedFieldWriteSite,
-    UnresolvedWriteSite, WriteKind, cache_flow,
+    PROVIDED_CHAIN_LIMIT, PROVIDED_LIMIT, ProjectIndex, ProtectedReturn, Provided, ResultCache,
+    ReturnsNew, Runner, SharedChain, SharedState, SiteRole, Slot, TypedFieldWrite,
+    TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -1265,36 +1265,43 @@ fn return_flow_edge(
         span: site.span,
         path: path.to_path_buf(),
     });
-    let produced = if callee.is_lru_cache {
-        ProtectedReturn {
-            producer: fqn,
-            shared: Shared::produced(true),
-            chain: vec![hop],
-            declared: false,
-            contracts: ContractSharing::default(),
+    let kept_by = |cache: &ResultCache| ProtectedReturn {
+        producer: fqn.clone(),
+        shared: cache.shared(),
+        chain: vec![hop.clone()],
+        declared: false,
+        contracts: ContractSharing::default(),
+    };
+    let declared = || contracts.and_then(|c| c.readonly_producer(&fqn, &bc.callee.qualname));
+    // A `functools` cache goes before a declared producer, which goes before a memo the
+    // function fills itself: a contract naming such a function reports under its own rule.
+    let produced = match &callee.result_cache {
+        Some(cache @ ResultCache::Decorator) => kept_by(cache),
+        memo => {
+            if let Some(contracts) = declared() {
+                ProtectedReturn {
+                    producer: fqn,
+                    shared: contracts.shared(),
+                    chain: vec![hop],
+                    declared: true,
+                    contracts,
+                }
+            } else if let Some(memo) = memo {
+                kept_by(memo)
+            } else if let Some(r) = &callee.returns_protected {
+                let mut chain = vec![hop];
+                chain.extend(r.chain.iter().cloned());
+                ProtectedReturn {
+                    producer: r.producer.clone(),
+                    shared: r.shared,
+                    chain,
+                    declared: r.declared,
+                    contracts: r.contracts.clone(),
+                }
+            } else {
+                return;
+            }
         }
-    } else if let Some(contracts) =
-        contracts.and_then(|c| c.readonly_producer(&fqn, &bc.callee.qualname))
-    {
-        ProtectedReturn {
-            producer: fqn,
-            shared: contracts.shared(),
-            chain: vec![hop],
-            declared: true,
-            contracts,
-        }
-    } else if let Some(r) = &callee.returns_protected {
-        let mut chain = vec![hop];
-        chain.extend(r.chain.iter().cloned());
-        ProtectedReturn {
-            producer: r.producer.clone(),
-            shared: r.shared,
-            chain,
-            declared: r.declared,
-            contracts: r.contracts.clone(),
-        }
-    } else {
-        return;
     };
     ProtectedReturn::add(&mut s.returns_protected, produced, step);
 }

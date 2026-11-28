@@ -8265,6 +8265,51 @@ fn memo_keys_of_many_values_are_compared_once() {
     );
 }
 
+/// A memo method whose key passes `branches` tests, each of which may rebuild it, before the
+/// method reads its memo (`cache_flow::hand_memo`): the values derived from the arguments, a
+/// path to the read that passes no fill, and the values the returns hand out are each found in
+/// one walk of the function, and the caller's change stays exact.
+#[test]
+fn a_memo_read_after_many_branches_is_decided_in_one_walk() {
+    let found = check_linear(2048, |branches| {
+        let mut lines: Vec<String> = [
+            "class Store:",
+            "    def __init__(self):",
+            "        self._cache = {}",
+            "",
+            "    def entry(self, key) -> dict:",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for i in 0..branches {
+            lines.push(format!("        if key == {i}:"));
+            lines.push(format!("            key = (key, {i})"));
+        }
+        lines.extend(
+            [
+                "        if key in self._cache:",
+                "            return self._cache[key]",
+                "        value = {\"key\": key}",
+                "        self._cache[key] = value",
+                "        return value",
+                "",
+                "",
+                "def use(s: Store, k):",
+                "    s.entry(k)[\"x\"] = 1",
+            ]
+            .map(str::to_owned),
+        );
+        let p = Project::new(&format!("bounds_memo_branches_{branches}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let exact = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT114" && d["certainty"] == "exact")
+        .count();
+    assert_eq!(exact, 1, "{found:#?}");
+}
+
 /// A chain of `links` functions, each returning what the next one returns, the last the rows
 /// of a query, and for each a loop over what it returns that sends a query per row.
 fn helpers_returning_rows(links: usize) -> String {

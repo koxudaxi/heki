@@ -64,8 +64,8 @@ pub mod types;
 mod witness;
 
 pub use cache_flow::{
-    CacheEvent, CacheFlow, FlowBlock, InPlaceChange, KeptRemoval, SelfAttrWrite, attr_writes,
-    self_attr_writes,
+    CacheEvent, CacheFlow, FlowBlock, HandMemo, InPlaceChange, KeptRemoval, SelfAttrWrite,
+    attr_writes, self_attr_writes,
 };
 pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
 pub use contracts::{ContractClass, Contracts, OverrideRoles};
@@ -85,8 +85,8 @@ pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::container_mutator;
 pub use readonly::{
-    CacheDecorator, CachedResult, ContainerFamily, ContainerKind, ContractSharing, FamilyLevel,
-    FamilyRole, ProtectedReturn, ReturnStep, Shared,
+    CachedResult, ContainerFamily, ContainerKind, ContractSharing, FamilyLevel, FamilyRole, Keeper,
+    ProtectedReturn, ResultCache, ReturnStep, Shared,
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -1463,13 +1463,16 @@ pub struct EffectSummary {
     /// generator; its body runs where the generator is iterated.
     pub is_generator: bool,
     pub is_cached_property: bool,
-    pub is_lru_cache: bool,
+    /// What keeps the function's results for later calls with the same arguments: a
+    /// `functools` cache by its decorator's name, or a memo the function fills itself (local).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_cache: Option<ResultCache>,
     /// What running the function's body runs of a call cycle (`EFF114`; propagated, computed
     /// only while the rule runs: [`OptInFacts::call_cycles`]; `None`: none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_cycle: Option<CallCycle>,
-    /// A `functools` cache keeps the function's results, each a builtin container of one kind
-    /// (`MUT114`; a local fact, never propagated).
+    /// A cache keeps the function's results, each a builtin container of one kind (`MUT114`'s
+    /// exact claim; a local fact, never propagated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_result: Option<readonly::CachedResult>,
     /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.

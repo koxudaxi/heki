@@ -7,24 +7,53 @@ Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `error
 Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it.
 
 ## What it does
-Checks in-place changes of an object that a function cached by `functools.lru_cache` /
-`functools.cache` returned. The cache hands the same object to every later call with the same
-arguments, so the change is seen by all of them.
+Checks in-place changes of an object that a cached function returned: one decorated with
+`functools.lru_cache` / `functools.cache`, or one that keeps its results in a memo it fills
+itself. The cache hands the same object to every later call with the same arguments, so the
+change is seen by all of them.
+
+A function keeps its results in a memo when it returns, on some path, what a container that
+outlives the call and is named as a cache or memo holds under a key computed from its arguments
+(`self._cache[key]`, `cls._cache[key]`, `Configs._cache[key]`, a module global `_CACHE[key]`,
+`self._resultCache[key]`, `_MEMO[key]`), stores there a value computed from its arguments under
+the same key, and reads the container on a path that passes no such store, so that a later call
+finds the value kept:
+
+- `if key in cache: return cache[key]`, then `cache[key] = value; return value`;
+- `if key not in cache: cache[key] = value`, then `return cache[key]`;
+- `return cache.setdefault(key, value)`;
+- `found = cache.get(key)`, then a store when it is `None`, and `return found`.
+
+A function that returns a copy of the kept value (`copy.deepcopy(cache[key])`, `dict(...)`), keys
+the container by something other than its arguments, rebinds the container on each call (other
+than initializing it once, `if self._cache is None: self._cache = {}`), stores a new object built
+from none of its arguments (`cache[key] = []`, a registry of state its callers share on purpose),
+or only stores and returns what it stored, keeps no memo. Nor does one whose decorators heki does
+not know to return what it returns. Nor does a container of the same shape without such a name
+(`self._sessions`, `_BY_NAME`): a get-or-create registry, a pool, or a holder of shared handles is
+written the same way, and its callers are meant to change the objects it hands out.
 
 A report is exact when the function changes in place, at the reported line, the list, dict, or
 set that a cached function returned:
 
-- the cached function is decorated with `functools.cache`, or with `functools.lru_cache` whose
-  `maxsize` is left out, `None`, or a literal number above `0` (a name holding `0` would keep
-  nothing), known by what its name is bound to (`from functools import lru_cache as _lru_cache`
-  counts, a `cache` decorator the module defines itself does not), and
-  otherwise only with `staticmethod`, `classmethod`, `typing.override`, or `typing.final` (also
-  of `typing_extensions`);
-- it takes a parameter besides a method's `self` / `cls`, so the cache keys its results;
-- every return a run can reach hands out a builtin container of one kind: its return annotation
-  names `list`, `dict`, or `set` as a whole (`dict[str, Any]`, not `dict | None`), or each
-  returned value is built as one (a display, a comprehension, `list(...)`, `dict(...)`,
-  `set(...)`, `sorted(...)`, `str.split(...)`);
+- the function is cached in one of two ways:
+  - it is decorated with `functools.cache`, or with `functools.lru_cache` whose `maxsize` is left
+    out, `None`, or a literal number above `0` (a name holding `0` would keep nothing), known by
+    what its name is bound to (`from functools import lru_cache as _lru_cache` counts, a `cache`
+    decorator the module defines itself does not), and otherwise only with `staticmethod`,
+    `classmethod`, `typing.override`, or `typing.final` (also of `typing_extensions`); it takes a
+    parameter besides a method's `self` / `cls`, so the cache keys its results; and every return
+    a run can reach hands out a builtin container of one kind: its return annotation names
+    `list`, `dict`, or `set` as a whole (`dict[str, Any]`, not `dict | None`), or each returned
+    value is built as one (a display, a comprehension, `list(...)`, `dict(...)`, `set(...)`,
+    `sorted(...)`, `str.split(...)`);
+  - or it keeps its results in a memo it fills itself, every return a run can reach hands out the
+    object the memo keeps under one key (the value it reads there or the value it stores there),
+    the container is a builtin `dict` by its inferred type wherever the function reads or fills it
+    (another mapping may store a copy, as a shelf does, or make a new object on each read), it is
+    decorated only as above, and its return annotation names `list`, `dict`, or `set` as a whole
+    (the value a call finding its key kept returns was stored by an earlier call or by other code,
+    so no construction establishes its kind);
 - the changed object is the result of a direct call of that one function on every path to the
   line, through assignments, with no copy;
 - that function is every implementation the call can run: the receiver is not typed by a
@@ -38,9 +67,11 @@ set that a cached function returned:
 The other changes of a cached function's result are heuristic reports: an object below the
 result (`cached(k)["rows"].append(x)`), an instance of a class, a value handed out through
 other functions that return it on some path, a change made by a helper the value is passed to,
-a function that returns its cached value on some paths only, and a call that may run a function
-heki does not see, such as a method called on a value typed by a protocol whose one implementer
-in the project is cached.
+a function that returns its cached value on some paths only, a memo that is not known to be a
+builtin `dict` or whose function has no return annotation naming the kind, and a call that may
+run a function heki does not see, such as a method called on a value typed by a protocol whose
+one implementer in the project is cached. A memo function named as a producer of a `readonly-returns` contract reports
+under `MUT202` instead.
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
 that mutate their argument are followed for the heuristic reports, with the same copies and
@@ -49,15 +80,21 @@ memo fills as `MUT202` (`readonly-return-mutation`).
 ## What a report states
 
 An exact report states that the function changes in place, at the reported line, the list,
-dict, or set that a function cached by `functools.lru_cache` / `functools.cache` returned.
+dict, or set that a cached function returned: one cached by `functools.lru_cache` /
+`functools.cache`, or one that keeps every result it returns in a memo it fills itself.
 
 Its premises:
 
 - **Cached**: the decorator is `functools.cache`, or `functools.lru_cache` with `maxsize` left
-  out, `None`, or a literal number above `0`, known by what its name is bound to. Established.
-- **Keyed**: the cached function takes a parameter besides `self` / `cls`. Established.
+  out, `None`, or a literal number above `0`, known by what its name is bound to; or the
+  function keeps its results in a builtin `dict` named as a cache or memo that outlives the
+  call, and every return a run can reach hands out the object kept there under one key, read on
+  a path that passes no store or stored there. Established.
+- **Keyed**: the cached function takes a parameter besides `self` / `cls`; a memo's key is
+  computed from those parameters. Established.
 - **Container kind**: every return a run can reach hands out a builtin container of the named
-  kind, by its return annotation (R2) or by construction. Established.
+  kind, by its return annotation (R2) or by construction; for a memo, by its return annotation
+  only. Established.
 - **Same object**: the changed object is that call's result on every path, with no copy.
   Established.
 - **Every implementation**: the call has as its targets every implementation it can run
@@ -72,8 +109,9 @@ Its premises:
 
 A heuristic report states that the function changes an object that a cached function returned,
 or an object below it. Open: the value may be the cached one on some paths only, the call may
-run another implementation that caches nothing, and the object may be a class instance whose
-change heki cannot tell from a memo fill.
+run another implementation that caches nothing, the object may be a class instance whose
+change heki cannot tell from a memo fill, and a memo may be a registry of state its callers
+share on purpose.
 
 ## Why is this bad?
 A cached return value is shared by every caller with the same arguments. Changing it in place
@@ -106,6 +144,11 @@ def extended(name: str) -> list[str]:
 ## Known limitations
 - A cached value stored in an attribute (`self.kept = fields(...)`) and changed in another
   method is not followed.
+- A memo whose container is not named as a cache or memo (`self._results`, `_BY_KEY`) is not
+  taken for one: heki cannot tell it from a registry by its code.
+- A memo kept in a class attribute (`cls._cache`, `Configs._cache`) or made lazily
+  (`self._cache = None`, then a dict) gives heuristic reports only: heki does not type the
+  container a builtin `dict` there.
 - A generator's values and a coroutine's result (`await`) are not followed.
 
 ## Fix safety
