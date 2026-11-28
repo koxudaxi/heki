@@ -15,7 +15,8 @@ interpreter there (docs/ANALYSIS_AND_KB_SPEC.md section 4.2):
      unless it is a builder (3); one with a blocking effect is not, nor an async generator
      function.
   3. A method with `return_type = "Self"` returns an instance of the receiver's class, also on
-     an instance of a subclass.
+     an instance of a subclass. A receiver the constructors cannot build comes from a chain of
+     calls on a constructed root (`CHAINS`), and a subclass instance is that receiver re-classed.
 The constructors and the builders run with every network connection refused: they do no network
 I/O.
 
@@ -66,6 +67,46 @@ CONSTRUCTORS: dict[str, dict[str, str]] = {
     "anthropic.Anthropic": {"api_key": "sentinel"},
     "anthropic.AsyncAnthropic": {"api_key": "sentinel"},
     "google.genai.Client": {"api_key": "sentinel"},
+    "postgrest.SyncPostgrestClient": {"base_url": "https://sentinel.invalid"},
+}
+
+# A builder class that keyword arguments cannot build comes from a short chain of calls on a
+# constructed root: `[root, steps]`, where a step is `[method, arguments]` called on the object so
+# far, or `["wrap", class]`, which builds `class(obj.request)`. The calls only assemble a request.
+CHAINS: dict[str, list] = {
+    "postgrest._sync.request_builder.SyncSelectRequestBuilder": [
+        "postgrest.SyncPostgrestClient",
+        [["from_", ["sentinel"]], ["select", ["*"]]],
+    ],
+    "postgrest._sync.request_builder.SyncFilterRequestBuilder": [
+        "postgrest.SyncPostgrestClient",
+        [
+            ["from_", ["sentinel"]],
+            ["select", ["*"]],
+            ["wrap", "postgrest._sync.request_builder.SyncFilterRequestBuilder"],
+        ],
+    ],
+    "postgrest._sync.request_builder.SyncRPCFilterRequestBuilder": [
+        "postgrest.SyncPostgrestClient",
+        [["rpc", ["sentinel", {}]]],
+    ],
+}
+
+# The arguments of a builder method, by parameter name: every parameter without a default takes
+# the value here.
+ARGUMENTS: dict[str, object] = {
+    "column": "c",
+    "operator": "eq",
+    "criteria": "1",
+    "value": "1",
+    "values": ["1"],
+    "pattern": "p",
+    "filters": "c.eq.1",
+    "query": {"c": "1"},
+    "range": ["1", "2"],
+    "size": 1,
+    "start": 1,
+    "end": 2,
 }
 
 # Runs inside the environment of one release: reads the rows as JSON on stdin, prints a JSON list
@@ -107,6 +148,23 @@ for cls, kwargs in rows["constructors"].items():
         instances[cls] = resolve(cls)(**kwargs)
     except Exception as e:
         failures.append(f"{cls}: cannot construct: {e!r}")
+
+def build(owner, cls):
+    # An instance of `cls`, a class of `owner`, built by its constructor or by its chain.
+    if owner in rows["constructors"]:
+        return cls(**rows["constructors"][owner])
+    root, steps = rows["chains"][owner]
+    obj = resolve(root)(**rows["constructors"][root])
+    for step in steps:
+        if step[0] == "wrap":
+            obj = resolve(step[1])(obj.request)
+        else:
+            obj = getattr(obj, step[0])(*step[1])
+    if type(obj) is not resolve(owner):
+        raise TypeError(f"the chain of {owner} gives {type(obj).__qualname__}")
+    obj.__class__ = cls
+    return obj
+
 
 pending = dict(rows["attributes"])
 while True:
@@ -150,14 +208,30 @@ for symbol, entry in rows["entries"].items():
         failures.append(f"{symbol}: blocking, but a coroutine or async generator function")
     if builder:
         owner, _, method = symbol.rpartition(".")
-        if owner not in rows["constructors"]:
-            failures.append(f"{symbol}: no constructor for {owner}")
+        if owner not in rows["constructors"] and owner not in rows["chains"]:
+            failures.append(f"{symbol}: no constructor or chain for {owner}")
             continue
         base = resolve(owner)
         sub = type("SentinelSubclass", (base,), {})
         for cls in (base, sub):
-            receiver = cls(**rows["constructors"][owner])
-            result = getattr(receiver, method)()
+            try:
+                receiver = build(owner, cls)
+                if isinstance(inspect.getattr_static(base, method), property):
+                    result = getattr(receiver, method)
+                else:
+                    function = getattr(receiver, method)
+                    args = []
+                    for name, parameter in inspect.signature(function).parameters.items():
+                        if parameter.default is not parameter.empty or parameter.kind in (
+                            parameter.VAR_POSITIONAL,
+                            parameter.VAR_KEYWORD,
+                        ):
+                            continue
+                        args.append(rows["arguments"][name])
+                    result = function(*args)
+            except Exception as e:
+                failures.append(f"{symbol}: on {cls.__qualname__}: {e!r}")
+                continue
             if type(result) is not cls:
                 failures.append(f"{symbol}: on {cls.__qualname__} returns {type(result).__qualname__}")
 
@@ -269,6 +343,8 @@ def main() -> int:
         packages = dist["packages"]
         rows = {
             "constructors": {c: k for c, k in CONSTRUCTORS.items() if under(c, packages)},
+            "chains": {c: k for c, k in CHAINS.items() if under(c, packages)},
+            "arguments": ARGUMENTS,
             "attributes": {s: t for s, t in attributes.items() if under(s, packages)},
             "entries": {s: e for s, e in entries.items() if under(s, packages)},
             "blocking": sorted(BLOCKING),
