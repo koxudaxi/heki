@@ -8311,6 +8311,61 @@ fn a_memo_read_after_many_branches_is_decided_in_one_walk() {
     assert_eq!(exact, 1, "{found:#?}");
 }
 
+/// A memo method that, before its read, tests and drops the key under `branches` conditions,
+/// and between its store and its return changes the stored value under as many
+/// (`cache_flow::hand_memo`): the path from the store to a later call's read, with what each
+/// test finds of the key, and the paths back from each return to what the memo holds are each
+/// found in one walk of the function, and the caller's change stays exact.
+#[test]
+fn a_memo_with_many_drops_and_changes_around_its_store_is_decided_in_one_walk() {
+    let found = check_linear(512, |branches| {
+        let mut lines: Vec<String> = [
+            "class Store:",
+            "    def __init__(self):",
+            "        self._cache = {}",
+            "",
+            "    def entry(self, key, flag) -> dict:",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for i in 0..branches {
+            lines.push(format!("        if flag == {i} and key in self._cache:"));
+            lines.push("            self._cache.pop(key)".to_owned());
+        }
+        lines.extend(
+            [
+                "        if key in self._cache:",
+                "            return self._cache[key]",
+                "        value = {\"key\": key}",
+                "        self._cache[key] = value",
+            ]
+            .map(str::to_owned),
+        );
+        for i in 0..branches {
+            lines.push(format!("        if flag == {i}:"));
+            lines.push(format!("            value[\"n\"] = {i}"));
+        }
+        lines.extend(
+            [
+                "        return value",
+                "",
+                "",
+                "def use(s: Store, k, flag):",
+                "    s.entry(k, flag)[\"x\"] = 1",
+            ]
+            .map(str::to_owned),
+        );
+        let p = Project::new(&format!("bounds_memo_drops_{branches}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let exact = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT114" && d["certainty"] == "exact")
+        .count();
+    assert_eq!(exact, 1, "{found:#?}");
+}
+
 /// A chain of `links` functions, each returning what the next one returns, the last the rows
 /// of a query, and for each a loop over what it returns that sends a query per row.
 fn helpers_returning_rows(links: usize) -> String {

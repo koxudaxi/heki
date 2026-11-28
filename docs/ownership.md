@@ -144,7 +144,7 @@ Or annotate the helper's parameter with a mutable type, so the type checker show
 
 ### A cached result changed in place
 
-A function under `lru_cache` or `cache` hands the same list, dict, or set to every caller with the same arguments. `MUT114` reports a change of that object. Tier: exact, default ([`MUT114`](rules/cached-result-mutation.md)).
+A function under `lru_cache` or `cache`, or one that keeps its results in a memo dict it fills itself, hands the same list, dict, or set to every caller with the same arguments. `MUT114` reports a change of that object. Tier: exact, default ([`MUT114`](rules/cached-result-mutation.md)).
 
 ```python
 # app/stock.py
@@ -173,7 +173,38 @@ app/stock.py:11:5: MUT114 (cached-result-mutation) [error] `tag` changes in plac
 ```
 
 
-`MUT114` is an error, so it fails the run. A producer that is not cached, such as a function that returns a module-level dict, is covered by a `readonly-returns` contract.
+A function that keeps its results in a memo it fills itself is a cache too: it stores what it computes from its arguments in a dict that outlives the call and is named as a cache or memo (`self._cache`, `_CACHE`), and a later call with the same arguments returns what the dict keeps. `MUT114` reports a change of that object as well.
+
+```python
+# app/settings.py
+_CACHE = {}
+
+
+def load(name: str) -> dict:
+    if name not in _CACHE:
+        _CACHE[name] = {"name": name, "debug": False}
+    return _CACHE[name]
+
+
+def debug_settings(name: str) -> dict:
+    settings = load(name)
+    settings["debug"] = True
+    return settings
+```
+
+```console
+$ heki check
+app/settings.py:12:5: MUT114 (cached-result-mutation) [error] `debug_settings` changes in place the dict that `load` returned; `load` keeps it in `_CACHE`
+   |
+12 |     settings["debug"] = True
+   |     ^
+  = help: change a copy (`dict(...)`) instead
+...
+```
+
+Such a report is exact when every return of the memo function hands out what a builtin `dict` holds under one key when it returns, and its return annotation names `list`, `dict`, or `set`. It is heuristic when the function stores the value on some paths only, removes or changes the entry before it returns, or keeps the memo in a class attribute. A memo that clears or drops the key before every read keeps nothing and gives no report. The name decides because the code does not: a get-or-create registry of the same shape whose dict is named otherwise (`_sessions`, `_BY_NAME`) is not taken for a cache.
+
+`MUT114` is an error, so it fails the run. A producer that is not cached, such as a function that returns a module-level dict it never fills itself, is covered by a `readonly-returns` contract, which also takes precedence over a memo.
 
 ### A shared return value changed
 

@@ -204,9 +204,10 @@ pub struct HandMemo {
 /// A [`HandMemo`], and whether the memo keeps every result of its function.
 pub(crate) struct MemoFound {
     pub memo: HandMemo,
-    /// Every return a run can reach hands out, through copies and phis, the object the memo
-    /// keeps under one key (the value it reads or the value it stores there), and the container
-    /// is typed a builtin `dict` wherever the function reads or fills it.
+    /// Every return a run can reach hands out, through copies and phis, an object the memo
+    /// holds under one key when the function returns (read there, or stored there on the way,
+    /// with no change of the container after it), and the container is typed a builtin `dict`
+    /// wherever the function reads or fills it.
     pub exact: bool,
 }
 
@@ -241,7 +242,6 @@ struct MemoRead<'f> {
     container: VarId,
     held: Held<'f>,
     key: VarId,
-    lookup: Lookup,
 }
 
 /// A store of a computed value into a container under a key derived from the arguments.
@@ -258,9 +258,10 @@ struct MemoFill<'f> {
 /// is read from a container that outlives the call (an attribute of the method's receiver, an
 /// attribute of a module global such as a class, or a module global) and is named as a cache or
 /// memo ([`is_memo_name`]), under a key derived from its arguments, where the function also
-/// stores into that container, under the same key, a value computed from them, and the read
-/// runs on some path that passes no such store, so a later call with the same arguments gets
-/// the kept object.
+/// stores into that container, under the same key, a value computed from them, and a later call
+/// with the same arguments gets the kept object ([`reused`]): a store is followed on some path
+/// by a `return`, and the read is reached from the entry on some path, with no store before it
+/// and no change dropping the key (`clear()`, `del`, `pop`, a rebinding) on either.
 ///
 /// The name decides because the code does not: a get-or-create registry, a pool, or a
 /// singleton holder has the same shape as a memo, and its callers are meant to change the
@@ -268,11 +269,11 @@ struct MemoFill<'f> {
 ///
 /// Not a memo: a container the function only reads (a cache object's accessor), one it fills
 /// with a new object built from none of its arguments or with an argument as it is (a registry
-/// of state the callers share on purpose), one it rebinds other than lazily (a container made
-/// per call), a key derived from none of the arguments, and returns that only copy the kept
-/// value. `receiver` says whether the first parameter is the method's `self` / `cls`;
-/// `returned` is [`crate::readonly::returned_values`], and `class_of` the class of a value's
-/// inferred type. Past the function's budget, none.
+/// of state the callers share on purpose), one it clears or rebinds before every read or after
+/// every store (a container made per call), a key derived from none of the arguments, and
+/// returns that only copy the kept value. `receiver` says whether the first parameter is the
+/// method's `self` / `cls`; `returned` is [`crate::readonly::returned_values`], and `class_of`
+/// the class of a value's inferred type. Past the function's budget, none.
 pub(crate) fn hand_memo<'t>(
     shape: &FnShape<'_>,
     live: &crate::ownership::Live,
@@ -318,7 +319,7 @@ pub(crate) fn hand_memo<'t>(
     let alias = holders(shape, &objects, &containers);
     let reads: Vec<MemoRead<'_>> = reads
         .into_iter()
-        .filter_map(|(value, (at, container, key, lookup))| {
+        .filter_map(|(value, (at, container, key, _))| {
             let held = *alias.get(&container)?;
             is_memo_name(held.1).then_some(MemoRead {
                 value,
@@ -326,7 +327,6 @@ pub(crate) fn hand_memo<'t>(
                 container,
                 held,
                 key,
-                lookup,
             })
         })
         .collect();
@@ -339,53 +339,27 @@ pub(crate) fn hand_memo<'t>(
     // it is nor a new object built from none of them (`[]`, `State()`).
     let computed =
         |v: VarId| derived.contains(&v) && !matches!(shape.def(shape.copy_root(v)), Def::Param);
-    let mut fills: Vec<MemoFill<'_>> = Vec::new();
-    let mut rebound: FxHashSet<Held<'_>> = FxHashSet::default();
-    for (held, w, op, _) in write_ops(shape, &objects, &alias) {
-        let Some((_, method, _)) = op else {
-            if !w.lazy_init {
-                rebound.insert(held);
-            }
-            continue;
-        };
-        let (container, key, value) = match (method, &f.block(w.block).insts[w.index as usize].kind)
-        {
-            (
-                "__setitem__",
-                InstKind::SubscriptStore {
-                    obj, index, value, ..
-                },
-            ) => (*obj, *index, *value),
-            ("setdefault", InstKind::MethodCall { recv, args, .. }) if args.len() == 2 => {
-                (*recv, args[0], args[1])
-            }
-            _ => continue,
-        };
-        if derived.contains(&key) && computed(value) {
-            fills.push(MemoFill {
-                container,
-                held,
+    let writes = memo_writes(shape, &objects, &alias);
+    let fills: Vec<MemoFill<'_>> = writes
+        .iter()
+        .filter_map(|w| {
+            let (MemoChange::Store { key, value } | MemoChange::Default { key, value }) = w.change
+            else {
+                return None;
+            };
+            (derived.contains(&key) && computed(value)).then_some(MemoFill {
+                container: w.container?,
+                held: w.held,
                 key,
                 value,
-                at: (w.block, w.index),
-            });
-        }
-    }
-    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-        if let InstKind::StoreGlobal { name, .. } = &inst.kind {
-            rebound.insert((GLOBAL_CONTAINER, name.as_str()));
-        }
-    }
-    let filled_under = |read: &MemoRead<'_>| {
-        fills
-            .iter()
-            .any(|w| w.held == read.held && same_key(shape, &budget, read.key, w.key))
-    };
+                at: w.at,
+            })
+        })
+        .collect();
     let hits: Vec<(&MemoRead<'_>, Shared)> = reads
         .iter()
-        .filter(|r| !rebound.contains(&r.held) && derived.contains(&r.key) && filled_under(r))
         .filter(|r| {
-            r.lookup == Lookup::SetDefault || runs_before_fill(shape, live, &budget, &fills, r)
+            derived.contains(&r.key) && reused(shape, live, &budget, &alias, &writes, &fills, r)
         })
         .filter_map(|r| {
             let shared = returned.get(&r.value)?.apply(Shared::produced(true));
@@ -402,14 +376,6 @@ pub(crate) fn hand_memo<'t>(
                 .filter_map(|w| Some(returned.get(&w.value)?.apply(Shared::produced(true)))),
         )
         .fold(Shared::default(), Shared::join);
-    // The objects kept under the first hit's key: the values read there and those stored there.
-    let one_key = |k: VarId| same_key(shape, &budget, first.key, k);
-    let kept: FxHashSet<VarId> = (hits.iter())
-        .filter(|(r, _)| r.held == held && r.lookup != Lookup::GetOr && one_key(r.key))
-        .map(|(r, _)| r.value)
-        .chain(stored.iter().filter(|w| one_key(w.key)).map(|w| w.value))
-        .map(|v| shape.copy_root(v))
-        .collect();
     let (holder, name) = held;
     let container = match holder {
         GLOBAL_CONTAINER => name.to_owned(),
@@ -424,7 +390,14 @@ pub(crate) fn hand_memo<'t>(
     };
     let in_dict = (hits.iter().filter(|(r, _)| r.held == held)).all(|(r, _)| dict(r.container))
         && stored.iter().all(|w| dict(w.container));
-    let exact = in_dict && every_return_kept(shape, live, &budget, &kept);
+    // The objects kept under the first hit's key: the values read there and those stored there.
+    let kept = KeptUnder {
+        held,
+        alias: &alias,
+        one_key: |k: VarId| same_key(shape, &budget, first.key, k),
+        dict,
+    };
+    let exact = in_dict && every_return_kept(shape, live, &budget, &writes, &kept);
     Some(MemoFound {
         memo: HandMemo { container, shared },
         exact,
@@ -461,37 +434,240 @@ fn container_read(shape: &FnShape<'_>, v: VarId) -> Option<ContainerRead> {
     }
 }
 
-/// Whether `read` runs on some path from the entry that passes no store of `fills` into its
-/// container: the call finds the key kept and returns what an earlier call stored. Blocks are
-/// visited once; a block with such a store leaves only through its exception edge.
-fn runs_before_fill(
+/// What a write of a container that outlives the call does to the objects it keeps.
+#[derive(Clone, Copy)]
+enum MemoChange {
+    /// `c[k] = v`.
+    Store { key: VarId, value: VarId },
+    /// `c.setdefault(k, v)`: what `k` holds stays, else `v` is stored.
+    Default { key: VarId, value: VarId },
+    /// `del c[k]`, `c.pop(k)`.
+    Remove { key: VarId },
+    /// `c.clear()`, or a store or delete of the container itself (`self._cache = {}`, also a
+    /// lazy one): a later read finds none of what was kept.
+    Clear,
+    /// Another change (`update`, `popitem`, `c.setdefault(k)`): it may replace or remove any
+    /// kept object.
+    Other,
+}
+
+/// A write of a container that outlives the call, at the instruction's block and index.
+struct MemoWrite<'f> {
+    held: Held<'f>,
+    /// The variable holding the container, for a change made in place.
+    container: Option<VarId>,
+    at: (BlockId, u32),
+    change: MemoChange,
+}
+
+/// The writes of the containers `alias` holds ([`write_ops`]), and the stores of a module global
+/// itself.
+fn memo_writes<'f>(
+    shape: &FnShape<'f>,
+    objects: &FxHashMap<VarId, u32>,
+    alias: &Holders<'_, 'f>,
+) -> Vec<MemoWrite<'f>> {
+    let f = shape.f;
+    let mut writes: Vec<MemoWrite<'f>> = write_ops(shape, objects, alias)
+        .into_iter()
+        .map(|(held, w, op, _)| {
+            let inst = &f.block(w.block).insts[w.index as usize].kind;
+            let (container, change) = match op {
+                Some((container, method, _)) => (Some(container), memo_change(method, inst)),
+                None => (None, MemoChange::Clear),
+            };
+            MemoWrite {
+                held,
+                container,
+                at: (w.block, w.index),
+                change,
+            }
+        })
+        .collect();
+    for bb in &f.blocks {
+        for (index, inst) in bb.insts.iter().enumerate() {
+            if let InstKind::StoreGlobal { name, .. } = &inst.kind {
+                writes.push(MemoWrite {
+                    held: (GLOBAL_CONTAINER, name.as_str()),
+                    container: None,
+                    at: (bb.id, u32::try_from(index).unwrap_or(u32::MAX)),
+                    change: MemoChange::Clear,
+                });
+            }
+        }
+    }
+    writes
+}
+
+/// The [`MemoChange`] of `inst`, which changes a container in place by `method`.
+fn memo_change(method: &str, inst: &InstKind) -> MemoChange {
+    let args: &[VarId] = match inst {
+        InstKind::MethodCall {
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if kwargs.is_empty() => args,
+        _ => &[],
+    };
+    match (method, inst, args) {
+        (
+            "__setitem__",
+            InstKind::SubscriptStore {
+                index,
+                value,
+                is_slice: false,
+                ..
+            },
+            _,
+        ) => MemoChange::Store {
+            key: *index,
+            value: *value,
+        },
+        ("__delitem__", InstKind::SubscriptDelete { index, .. }, _) => {
+            MemoChange::Remove { key: *index }
+        }
+        ("pop", _, [key, ..]) => MemoChange::Remove { key: *key },
+        ("setdefault", _, [key, value]) => MemoChange::Default {
+            key: *key,
+            value: *value,
+        },
+        ("clear", ..) => MemoChange::Clear,
+        _ => MemoChange::Other,
+    }
+}
+
+/// The call a part of [`reused`]'s path runs in.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Call {
+    /// The call that stored the value, after the store.
+    Storing,
+    /// A later call, from its entry.
+    Later,
+}
+
+/// Whether the memo holds the key a later call reads, as far as the path tells ([`reused`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Present {
+    Maybe,
+    Yes,
+    No,
+}
+
+/// What a write of the memo does on [`reused`]'s path.
+#[derive(Clone, Copy)]
+enum PathStep {
+    /// A fill under another key: a later call reaching it returns what it stores.
+    Fill,
+    /// A store under the key, a fill or not: what the key holds is no earlier call's.
+    Replace,
+    /// `clear()`, a store or delete of the container, `del` or `pop` of the key: it is gone.
+    Drop,
+}
+
+/// Whether a later call returns at `read` what an earlier call stored under its key: a path
+/// leads from a fill of `fills` under that key through the rest of the call to a `return`, and
+/// from the entry of a later call to the read. Neither part passes a store under the key, nor
+/// the first a change of `writes` that drops it (`clear()`, a store or delete of the container,
+/// `del` or `pop` of the key); the later call's part passes no other fill before the read, and
+/// finds the key there unless a drop or an `in` / `not in` test of the container says it is
+/// missing (a test contradicting what the path found is not taken). A conditional eviction
+/// leaves such a path, an invalidation on every path none. Blocks are left along live edges and
+/// their exception edge, a block stopping the path only through the latter; each block is
+/// visited once per call and finding, the fill's own block also from the fill.
+fn reused(
     shape: &FnShape<'_>,
     live: &crate::ownership::Live,
     budget: &Budget,
+    alias: &Holders<'_, '_>,
+    writes: &[MemoWrite<'_>],
     fills: &[MemoFill<'_>],
     read: &MemoRead<'_>,
 ) -> bool {
     let f = shape.f;
-    let (block, index) = read.at;
-    let mut first_fill: FxHashMap<BlockId, u32> = FxHashMap::default();
-    for w in fills.iter().filter(|w| w.held == read.held) {
-        let at = first_fill.entry(w.at.0).or_insert(w.at.1);
-        *at = (*at).min(w.at.1);
+    let under_key = |key: VarId| same_key(shape, budget, key, read.key);
+    let mut steps: FxHashMap<BlockId, Vec<(u32, PathStep)>> = FxHashMap::default();
+    for w in writes.iter().filter(|w| w.held == read.held) {
+        let step = match w.change {
+            MemoChange::Store { key, .. } if under_key(key) => PathStep::Replace,
+            MemoChange::Clear => PathStep::Drop,
+            MemoChange::Remove { key } if under_key(key) => PathStep::Drop,
+            _ if fills.iter().any(|x| x.at == w.at) => PathStep::Fill,
+            _ => continue,
+        };
+        steps.entry(w.at.0).or_default().push((w.at.1, step));
     }
+    for at in steps.values_mut() {
+        at.sort_by_key(|(i, _)| *i);
+    }
+    // The edges of an `in` / `not in` test of the key in the container, with what each finds.
+    let mut tested: FxHashMap<(BlockId, BlockId), Present> = FxHashMap::default();
+    for bb in &f.blocks {
+        if let Terminator::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = bb.terminator
+            && let Some(InstKind::Compare { op, lhs, rhs, .. }) = shape.inst(cond).map(|i| &i.kind)
+            && matches!(op, CompareOpKind::In | CompareOpKind::NotIn)
+            && alias.get(rhs) == Some(&read.held)
+            && under_key(*lhs)
+        {
+            let (then, other) = match op {
+                CompareOpKind::In => (Present::Yes, Present::No),
+                _ => (Present::No, Present::Yes),
+            };
+            tested.insert((bb.id, then_bb), then);
+            tested.insert((bb.id, else_bb), other);
+        }
+    }
+    // What the key's holding is after the writes of `b` from index `from` up to `until`, or
+    // none when one of them stops the path.
+    let pass = |b: BlockId, call: Call, from: u32, until: u32, mut present: Present| {
+        let at = steps.get(&b).into_iter().flatten();
+        for (_, step) in at.filter(|(i, _)| (from..until).contains(i)) {
+            match (call, step) {
+                (Call::Later, PathStep::Drop) => present = Present::No,
+                (Call::Storing, PathStep::Fill) => {}
+                _ => return None,
+            }
+        }
+        Some(present)
+    };
+    let starts = fills
+        .iter()
+        .filter(|w| w.held == read.held && under_key(w.key))
+        .map(|w| (w.at.0, Call::Storing, w.at.1 + 1, Present::Maybe))
+        .collect::<Vec<_>>();
+    let entry = f.blocks.first().map(|b| b.id);
+    let (block, index) = read.at;
     let found = walk::reach(
         budget,
-        f.blocks.first().map(|b| b.id),
-        |b, next| {
+        starts,
+        |(b, call, from, present), next| {
             let bb = f.block(b);
-            if !first_fill.contains_key(&b) {
-                let succs = bb.terminator.successors();
-                next.extend(succs.into_iter().filter(|s| live.edge(b, *s)));
+            if let Some(out) = pass(b, call, from, u32::MAX, present) {
+                for s in bb.terminator.successors() {
+                    let holding = match (call, tested.get(&(b, s))) {
+                        (Call::Storing, _) => Present::Maybe,
+                        (Call::Later, None) => out,
+                        (Call::Later, Some(&t)) if t != out && out != Present::Maybe => continue,
+                        (Call::Later, Some(&t)) => t,
+                    };
+                    if live.edge(b, s) {
+                        next.push((s, call, 0, holding));
+                    }
+                }
+                if call == Call::Storing && matches!(bb.terminator, Terminator::Return(_)) {
+                    next.extend(entry.map(|e| (e, Call::Later, 0, Present::Maybe)));
+                }
             }
-            next.extend(bb.exc_target);
+            next.extend(bb.exc_target.map(|s| (s, call, 0, present)));
         },
-        |b| {
-            let fill = first_fill.get(&b).copied().unwrap_or(u32::MAX);
-            if b == block && index < fill {
+        |(b, call, from, present)| {
+            // A `setdefault` read is its own fill: it reads before it stores.
+            let at_read = pass(b, call, from, index, present);
+            if call == Call::Later && b == block && at_read.is_some_and(|p| p != Present::No) {
                 Visit::Stop(())
             } else {
                 Visit::Expand
@@ -501,46 +677,107 @@ fn runs_before_fill(
     found == Answer::Known(Some(()))
 }
 
-/// Whether every return a run can reach hands out, through copies and phis (along the edges a
-/// run can take), one of the `kept` values (copy roots).
-fn every_return_kept(
+/// The objects a memo keeps under one key, by how a function reaches them: through `alias`, a
+/// variable holding the container `held`, under a key `one_key` accepts, in a container `dict`
+/// types a builtin dict.
+struct KeptUnder<'a, 'f, K, D> {
+    held: Held<'f>,
+    alias: &'a Holders<'a, 'f>,
+    one_key: K,
+    dict: D,
+}
+
+/// Whether every return a run can reach hands out, when it returns, an object the memo `kept`
+/// holds under its key: on each path back from the return, through copies and phis along live
+/// edges, a store of the value there or the value's own read from there (not `.get(k, d)`)
+/// comes before any other change of the container among `writes` (a `setdefault`, and a store
+/// of the value under another key, drop nothing kept). A value defined otherwise, a parameter,
+/// and a path entering by an exception edge hand out another object. Each block is visited once
+/// per value.
+fn every_return_kept<K: Fn(VarId) -> bool, D: Fn(VarId) -> bool>(
     shape: &FnShape<'_>,
     live: &crate::ownership::Live,
     budget: &Budget,
-    kept: &FxHashSet<VarId>,
+    writes: &[MemoWrite<'_>],
+    kept: &KeptUnder<'_, '_, K, D>,
 ) -> bool {
     let f = shape.f;
     let mut returned = Vec::new();
     for b in f.blocks.iter().filter(|b| live.block(b.id)) {
         match b.terminator {
-            Terminator::Return(Some(v)) => returned.push(v),
+            Terminator::Return(Some(v)) => returned.push((b.id, shape.copy_root(v))),
             Terminator::Return(None) => return false,
             _ => {}
         }
     }
-    // The walk visits copy roots only: a copy hands out what its root holds. A root that is
-    // neither kept nor a phi is another object.
-    let other = std::cell::Cell::new(false);
+    let mut changes: FxHashMap<BlockId, Vec<&MemoWrite<'_>>> = FxHashMap::default();
+    for w in writes.iter().filter(|w| w.held == kept.held) {
+        changes.entry(w.at.0).or_default().push(w);
+    }
+    for at in changes.values_mut() {
+        at.sort_by_key(|w| w.at.1);
+    }
+    let read_there = |v: VarId| {
+        container_read(shape, v).is_some_and(|(_, container, key, lookup)| {
+            kept.alias.get(&container) == Some(&kept.held)
+                && lookup != Lookup::GetOr
+                && (kept.one_key)(key)
+                && (kept.dict)(container)
+        })
+    };
+    let entry = f.blocks.first().map(|b| b.id);
     let walked = walk::reach(
         budget,
-        returned.into_iter().map(|v| shape.copy_root(v)),
-        |v, next| match shape.def(v) {
-            Def::Phi(b, i) => {
+        returned,
+        |(b, v), next| match shape.def(v) {
+            Def::Phi(at, i) if at == b => {
                 let phi = &f.block(b).phis[i as usize];
                 let live_in = phi.incoming.iter().filter(|(from, _)| live.edge(*from, b));
-                next.extend(live_in.map(|(_, v)| shape.copy_root(*v)));
+                next.extend(live_in.map(|(from, v)| (*from, shape.copy_root(*v))));
             }
-            _ => other.set(true),
+            _ => {
+                let preds = shape.preds(b).iter().filter(|p| live.edge(**p, b));
+                next.extend(preds.map(|p| (*p, v)));
+            }
         },
-        |v| {
-            if kept.contains(&v) {
-                Visit::<()>::Prune
+        |(b, v)| {
+            let defined = match shape.def(v) {
+                Def::Inst(at, i) if at == b => Some(i),
+                _ => None,
+            };
+            let after = changes.get(&b).into_iter().flatten().rev();
+            for w in after.take_while(|w| defined.is_none_or(|d| w.at.1 > d)) {
+                let stored_under = match w.change {
+                    MemoChange::Store { key, value } if shape.copy_root(value) == v => Some(key),
+                    _ => None,
+                };
+                if stored_under
+                    .is_some_and(|key| (kept.one_key)(key) && w.container.is_some_and(&kept.dict))
+                {
+                    return Visit::Prune;
+                }
+                let neutral = matches!(w.change, MemoChange::Default { .. });
+                if stored_under.is_none() && !neutral {
+                    return Visit::Stop(());
+                }
+            }
+            if defined.is_some() {
+                return if read_there(v) {
+                    Visit::Prune
+                } else {
+                    Visit::Stop(())
+                };
+            }
+            let by_exception = (shape.preds(b).iter())
+                .any(|p| live.block(*p) && f.block(*p).exc_target == Some(b));
+            if Some(b) == entry || by_exception {
+                Visit::Stop(())
             } else {
                 Visit::Expand
             }
         },
     );
-    walked == Answer::Known(None) && !other.get()
+    walked == Answer::Known(None)
 }
 
 /// The values derived from `params`: they themselves, and every value an instruction or a phi

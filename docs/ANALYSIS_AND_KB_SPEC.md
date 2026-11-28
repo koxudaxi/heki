@@ -2332,17 +2332,25 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      (`cache_flow::is_memo_name`; a get-or-create registry or a pool has the same code, and its
      callers are meant to change what it hands out), `k` derived from the parameters besides
      the receiver (one walk over their readers), the function stores into `c` under the same key
-     (`cache_flow::same_key`) a value computed from them that is no parameter itself, and the
-     read runs on a path from the entry that passes no such store (one walk over the blocks); a
-     container the function rebinds other than lazily, a store of a new object built from none of
-     the arguments, a copy on every such return, and a decorator that may replace the result
-     make no memo. A `MUT114` report is exact when the cached function carries a `CachedResult`
-     (a `functools` cache resolved by import, with a `maxsize` other than `0`, a parameter
-     besides `self` / `cls`, and a builtin list, dict, or set on every live return, by its return
+     (`cache_flow::same_key`) a value computed from them that is no parameter itself, and a later
+     call finds it kept (`cache_flow::reused`, one walk over the blocks of the call that stores,
+     from the store to a `return`, then of a later call, from its entry to the read): neither part
+     passes another store under the key, the first no change that drops it (`clear()`, a store or
+     delete of the container, lazy ones included, `del` or `pop` of the key), and the second no
+     other fill, finding the key at the read unless such a drop or an `in` / `not in` test of it
+     on the way says it is missing; a conditional eviction leaves such a path, a removal before
+     every read or after every store none. A store of a new object built from none of the
+     arguments, a copy on every such return, and a decorator that may replace the result make no
+     memo. A `MUT114` report is exact when the cached function carries a `CachedResult` (a
+     `functools` cache resolved by import, with a `maxsize` other than `0`, a parameter besides
+     `self` / `cls`, and a builtin list, dict, or set on every live return, by its return
      annotation or by construction; or a memo typed a builtin `dict` wherever the function reads
-     or fills it, whose every live return
-     hands out, through copies and phis, a value read from or stored into it under one key, with
-     a return annotation naming the kind and only the decorators a cache may stand beside), the
+     or fills it, whose every live return hands out what the memo holds under one key when the
+     function returns (`cache_flow::every_return_kept`, one walk back from the returns over blocks
+     and values, through copies and phis: the value's read from it under the key, or a store of it
+     there, comes before any other change of the container on each path, and no exception edge
+     enters the path), with a return annotation naming the kind and only the decorators a cache
+     may stand beside), the
      changed value is that one
      function's result on every path (`MustResult`, an optimistic fixpoint over copies and phis:
      a value starts unset and moves only down, to one cached function, then to anything else),

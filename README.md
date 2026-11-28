@@ -141,7 +141,7 @@ was checked by hand, with no false claim
 | A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | `EFF109` |
 | A call of a generator function whose generator nothing iterates, so its body never runs | `EFF116` |
 | A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | `MUT110` |
-| A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | `MUT114` |
+| A list, dict, or set that an `lru_cache` / `cache` function, or one keeping a memo dict it fills itself, returned, changed in place | `MUT114` |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | `MUT119` |
 | A DataFrame or array concatenated with itself on every loop iteration | `DATA101` |
 | A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` |

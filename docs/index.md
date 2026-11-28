@@ -140,7 +140,7 @@ was checked by hand, with no false claim ([Rule precision](precision.md#certific
 | A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | [`EFF109`](rules/lock-reacquired-while-held.md) |
 | A call of a generator function whose generator nothing iterates, so its body never runs | [`EFF116`](rules/generator-never-iterated.md) |
 | A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) |
-| A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](rules/cached-result-mutation.md) |
+| A list, dict, or set that an `lru_cache` / `cache` function, or one keeping a memo dict it fills itself, returned, changed in place | [`MUT114`](rules/cached-result-mutation.md) |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](rules/change-lost-on-new-object.md) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](rules/loop-carried-concat.md) |
 | A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` ([fixes](fixes.md)) |

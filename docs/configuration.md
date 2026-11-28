@@ -288,7 +288,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   `*-boundaries` contract is drawn around the code it names (`scopes`, `importers`) and lists
   what that code must not reach or import.
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
-  `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
+  `functools.cache` functions, and of functions that keep their results in a memo they fill
+  themselves, are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
 - Their reports are heuristic, so they count as warnings for
   [`fail-on`](#rule-selection-toolhekilint) and do not fail the run by default: to make a broken

@@ -895,6 +895,187 @@ fn mut114_leaves_a_declared_memo_producer_to_its_contract() {
     assert_eq!(rule_at(8), "MUT114");
 }
 
+const MEMO_CHANGES: &str = r#"_CACHE = {}
+_MEMO = {}
+
+
+def build(key):
+    return {"name": key}
+
+
+class Configs:
+    def __init__(self):
+        self._cache = {}
+
+    def refreshed(self, key) -> dict:
+        if key in self._cache:
+            del self._cache[key]
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    def refreshing(self, key, refresh) -> dict:
+        if refresh and key in self._cache:
+            del self._cache[key]
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+    def reset_when_full(self, key) -> dict:
+        if len(self._cache) > 100:
+            self._cache = {}
+        if key not in self._cache:
+            self._cache[key] = build(key)
+        return self._cache[key]
+
+
+def kept_if(key, keep) -> dict:
+    if key in _CACHE:
+        return _CACHE[key]
+    value = {"name": key}
+    if keep:
+        _CACHE[key] = value
+    return value
+
+
+def cleared(key) -> dict:
+    _CACHE.clear()
+    if key not in _CACHE:
+        _CACHE[key] = build(key)
+    return _CACHE[key]
+
+
+def popped(key) -> dict:
+    _CACHE.pop(key, None)
+    if key not in _CACHE:
+        _CACHE[key] = build(key)
+    return _CACHE[key]
+
+
+def dropped_after_fill(key) -> dict:
+    if key in _CACHE:
+        return _CACHE[key]
+    value = build(key)
+    _CACHE[key] = value
+    if len(_CACHE) > 100:
+        _CACHE.pop(key)
+    return value
+
+
+def taken(key) -> dict:
+    if key not in _CACHE:
+        _CACHE[key] = build(key)
+    found = _CACHE[key]
+    if not found:
+        del _CACHE[key]
+    return found
+
+
+def scratch(key) -> dict:
+    if key in _CACHE:
+        return _CACHE[key]
+    value = build(key)
+    _CACHE[key] = value
+    try:
+        value.update(build(key))
+    finally:
+        del _CACHE[key]
+    return value
+
+
+def merged(key, extra) -> dict:
+    if key in _CACHE:
+        return _CACHE[key]
+    value = build(key)
+    _CACHE[key] = value
+    _CACHE.update(extra)
+    return value
+
+
+def single(key) -> dict:
+    if key in _MEMO:
+        return _MEMO[key]
+    _MEMO.clear()
+    value = build(key)
+    _MEMO[key] = value
+    return value
+
+
+def aliased(key, alias) -> dict:
+    if key in _CACHE:
+        return _CACHE[key]
+    value = build(key)
+    _CACHE[key] = value
+    _CACHE[alias] = value
+    return value
+
+
+def given(key, fallback) -> dict:
+    if key in _CACHE:
+        return _CACHE[key]
+    if fallback:
+        return fallback
+    value = build(key)
+    _CACHE[key] = value
+    return value
+"#;
+
+const MEMO_CHANGE_USES: &str = r#"from memos import Configs, aliased, cleared, dropped_after_fill, given, kept_if, merged, popped, scratch, single, taken
+
+
+def tune(c: Configs, k, flag):
+    c.refreshed(k)["x"] = 1
+    c.refreshing(k, flag)["x"] = 1
+    c.reset_when_full(k)["x"] = 1
+    kept_if(k, flag)["x"] = 1
+    cleared(k)["x"] = 1
+    popped(k)["x"] = 1
+    dropped_after_fill(k)["x"] = 1
+    taken(k)["x"] = 1
+    scratch(k)["x"] = 1
+    merged(k, {})["x"] = 1
+    single(k)["x"] = 1
+    aliased(k, flag)["x"] = 1
+    given(k, {})["x"] = 1
+"#;
+
+/// A memo is one only where a later call can find what an earlier call kept: a removal of the
+/// key (`clear()`, `del`, `pop`, a rebinding of the container) on every path before the read, or
+/// after every fill, leaves no cache; one under a condition is an eviction, as `lru_cache`'s.
+/// The exact claim also needs each return to hand out what the memo holds when the function
+/// returns: a fill under a condition, or a removal or another change of the container between
+/// the store or read and the return, leaves it heuristic.
+#[test]
+fn mut114_follows_the_changes_of_a_memo_along_its_paths() {
+    let p = Project::new("mut114_memo_changes");
+    p.write("memos.py", MEMO_CHANGES)
+        .write("uses.py", MEMO_CHANGE_USES);
+    let diags = diagnostics(&p, &["--select", "MUT114"]);
+    assert_eq!(
+        claims(&diags),
+        vec![
+            // Line 5 drops the key whenever the memo holds it, line 9 clears and line 10 pops it
+            // first, line 13 deletes it after every fill: no later call finds it kept.
+            // An eviction under a condition, by `del` and by a rebinding of the container.
+            (6, true),
+            (7, true),
+            // A fill under a condition, and a removal on some path after the store or the read.
+            (8, false),
+            (11, false),
+            (12, false),
+            // Another change of the container after the store.
+            (14, false),
+            // A memo of one entry: cleared on a miss, before the store, and one that also keeps
+            // the value under a second key.
+            (15, true),
+            (16, true),
+            // A return of what the caller passed.
+            (17, false),
+        ],
+        "{diags:#?}"
+    );
+}
+
 /// Each `MUT114` report of the project as (function, certainty, open premises "premise: cause").
 fn open_premise_reports(p: &Project) -> Vec<(String, String, Vec<String>)> {
     let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "MUT114", "."]);

@@ -374,7 +374,7 @@ pub const NOT_A_BUILTIN_CONTAINER_CHANGE: OpenCause = OpenCause {
 
 pub const CACHED: Premise = Premise {
     name: "Cached",
-    states: "the decorator is `functools.cache`, or `functools.lru_cache` that keeps results; or the function keeps its results in a builtin `dict` named as a cache or memo that outlives the call, and every return a run can reach hands out the object kept there under one key",
+    states: "the decorator is `functools.cache`, or `functools.lru_cache` that keeps results; or the function keeps its results in a builtin `dict` named as a cache or memo that outlives the call, a later call can find what an earlier one stored there, and every return a run can reach hands out what the dict holds under one key when the function returns",
     decided_in: &[
         "heki_effect::readonly::cache_decorator",
         "heki_effect::cache_flow::hand_memo",

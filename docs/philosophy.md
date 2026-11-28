@@ -55,7 +55,8 @@ heki adds no syntax and asks for no new annotations. It reads what the code alre
 - an `async def` must not wait on a blocking call, even several helpers below (`EFF101`);
 - a lock that is not reentrant, held by a `with` block, is not taken again inside it, also
   through a call (`EFF109`);
-- what an `lru_cache` or `cache` function returns is shared by every caller (`MUT114`).
+- what an `lru_cache` or `cache` function, or one keeping a memo it fills itself, returns is
+  shared by every caller (`MUT114`).
 
 Ownership or borrow markers would make some checks easier, but they would be a dialect only heki
 understands. Type checkers, editors, and readers already know these types and statements, so the
