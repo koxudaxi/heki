@@ -3724,101 +3724,207 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.filter"
+delegates_to = [
+    "__init__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter", "_deferred_filter",
+    "_fetch_mode", "_fields", "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class",
+    "_known_related_objects", "_not_support_combined_queries", "_prefetch_done",
+    "_prefetch_related_lookups", "_query", "_result_cache", "_sticky_filter", "query",
+]
 return_type = "django.db.models.query.QuerySet"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.exclude"
+delegates_to = [
+    "__init__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter", "_deferred_filter",
+    "_fetch_mode", "_fields", "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class",
+    "_known_related_objects", "_not_support_combined_queries", "_prefetch_done",
+    "_prefetch_related_lookups", "_query", "_result_cache", "_sticky_filter", "query",
+]
 return_type = "django.db.models.query.QuerySet"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.all"
+delegates_to = [
+    "__init__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter", "_deferred_filter",
+    "_fetch_mode", "_fields", "_iterable_class", "_known_related_objects", "_prefetch_done",
+    "_prefetch_related_lookups", "_query", "_result_cache", "_sticky_filter", "query",
+]
 return_type = "django.db.models.query.QuerySet"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.order_by"
+delegates_to = [
+    "__init__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter", "_deferred_filter",
+    "_fetch_mode", "_fields", "_iterable_class", "_known_related_objects", "_prefetch_done",
+    "_prefetch_related_lookups", "_query", "_result_cache", "_sticky_filter", "query",
+]
 return_type = "django.db.models.query.QuerySet"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.get"
+delegates_to = [
+    "__init__", "__len__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter",
+    "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields", "_filter_or_exclude",
+    "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "db", "filter",
+    "order_by", "query",
+]
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.first"
+delegates_to = [
+    "__getitem__", "__init__", "__iter__", "_chain",
+    "_check_ordering_first_last_queryset_aggregation", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_iterable_class", "_known_related_objects", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "db", "order_by",
+    "ordered", "query",
+]
 effects = ["blocking_db", "db_query"]
 emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.last"
+delegates_to = [
+    "__getitem__", "__init__", "__iter__", "_chain",
+    "_check_ordering_first_last_queryset_aggregation", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_iterable_class", "_known_related_objects", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "db", "order_by",
+    "ordered", "query", "reverse",
+]
 effects = ["blocking_db", "db_query"]
 emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.exists"
+delegates_to = ["_iterable_class", "_query", "_result_cache", "db", "query"]
 effects = ["blocking_db", "db_query"]
 emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.count"
+delegates_to = ["_iterable_class", "_query", "_result_cache", "db", "query"]
 effects = ["blocking_db", "db_query"]
 emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.create"
+delegates_to = ["_fetch_mode", "db"]
+effect_through = "django.db.models.Model"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.update"
+delegates_to = [
+    "_iterable_class", "_not_support_combined_queries", "_query", "_result_cache", "db", "query",
+]
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.delete"
+delegates_to = [
+    "__bool__", "__getitem__", "__init__", "__iter__", "_chain", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_iterable_class", "_known_related_objects", "_not_support_combined_queries", "_prefetch_done",
+    "_prefetch_related_lookups", "_prefetch_related_objects", "_query", "_raw_delete",
+    "_result_cache", "_sticky_filter", "db", "only", "query",
+]
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.get_or_create"
+delegates_to = [
+    "__init__", "__len__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter",
+    "_deferred_filter", "_extract_model_params", "_fetch_all", "_fetch_mode", "_fields",
+    "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "create", "db",
+    "filter", "get", "order_by", "query",
+]
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.update_or_create"
+delegates_to = [
+    "__init__", "__len__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter",
+    "_deferred_filter", "_extract_model_params", "_fetch_all", "_fetch_mode", "_fields",
+    "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "create", "db",
+    "filter", "get", "get_or_create", "order_by", "query", "select_for_update",
+]
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.bulk_create"
+delegates_to = [
+    "_batched_insert", "_check_bulk_create_options", "_handle_order_with_respect_to", "_insert",
+    "_prepare_for_bulk_create", "db",
+]
 effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.in_bulk"
+delegates_to = [
+    "__init__", "__iter__", "_annotate", "_chain", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter",
+    "_validate_values_are_expressions", "_values", "annotate", "db", "filter", "order_by", "query",
+    "values", "values_list",
+]
 effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aggregate"
+delegates_to = ["_iterable_class", "_query", "_validate_values_are_expressions", "db", "query"]
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aget"
+delegates_to = [
+    "__init__", "__len__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter",
+    "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields", "_filter_or_exclude",
+    "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "db", "filter", "get",
+    "order_by", "query",
+]
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.afirst"
+delegates_to = [
+    "__getitem__", "__init__", "__iter__", "_chain",
+    "_check_ordering_first_last_queryset_aggregation", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_iterable_class", "_known_related_objects", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "db", "first",
+    "order_by", "ordered", "query",
+]
 effects = ["db_query"]
 async_safe = true
 emits = "unless-cached"
@@ -3826,6 +3932,14 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.alast"
+delegates_to = [
+    "__getitem__", "__init__", "__iter__", "_chain",
+    "_check_ordering_first_last_queryset_aggregation", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_iterable_class", "_known_related_objects", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "db", "last",
+    "order_by", "ordered", "query", "reverse",
+]
 effects = ["db_query"]
 async_safe = true
 emits = "unless-cached"
@@ -3833,6 +3947,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aexists"
+delegates_to = ["_iterable_class", "_query", "_result_cache", "db", "exists", "query"]
 effects = ["db_query"]
 async_safe = true
 emits = "unless-cached"
@@ -3840,6 +3955,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.acount"
+delegates_to = ["_iterable_class", "_query", "_result_cache", "count", "db", "query"]
 effects = ["db_query"]
 async_safe = true
 emits = "unless-cached"
@@ -3847,48 +3963,107 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.acreate"
+delegates_to = ["_fetch_mode", "create", "db"]
+effect_through = "django.db.models.Model"
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aupdate"
+delegates_to = [
+    "_iterable_class", "_not_support_combined_queries", "_query", "_result_cache", "db", "query",
+    "update",
+]
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.adelete"
+delegates_to = [
+    "__bool__", "__getitem__", "__init__", "__iter__", "_chain", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_iterable_class", "_known_related_objects", "_not_support_combined_queries", "_prefetch_done",
+    "_prefetch_related_lookups", "_prefetch_related_objects", "_query", "_raw_delete",
+    "_result_cache", "_sticky_filter", "db", "delete", "only", "query",
+]
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aget_or_create"
+delegates_to = [
+    "__init__", "__len__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter",
+    "_deferred_filter", "_extract_model_params", "_fetch_all", "_fetch_mode", "_fields",
+    "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "create", "db",
+    "filter", "get", "get_or_create", "order_by", "query",
+]
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aupdate_or_create"
+delegates_to = [
+    "__init__", "__len__", "_chain", "_clone", "_cloning_enabled", "_defer_next_filter",
+    "_deferred_filter", "_extract_model_params", "_fetch_all", "_fetch_mode", "_fields",
+    "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter", "create", "db",
+    "filter", "get", "get_or_create", "order_by", "query", "select_for_update", "update_or_create",
+]
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.abulk_create"
+delegates_to = [
+    "_batched_insert", "_check_bulk_create_options", "_handle_order_with_respect_to", "_insert",
+    "_prepare_for_bulk_create", "bulk_create", "db",
+]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.ain_bulk"
+delegates_to = [
+    "__init__", "__iter__", "_annotate", "_chain", "_clone", "_cloning_enabled",
+    "_defer_next_filter", "_deferred_filter", "_fetch_all", "_fetch_mode", "_fields",
+    "_filter_or_exclude", "_filter_or_exclude_inplace", "_iterable_class", "_known_related_objects",
+    "_not_support_combined_queries", "_prefetch_done", "_prefetch_related_lookups",
+    "_prefetch_related_objects", "_query", "_result_cache", "_sticky_filter",
+    "_validate_values_are_expressions", "_values", "annotate", "db", "filter", "in_bulk",
+    "order_by", "query", "values", "values_list",
+]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aaggregate"
+delegates_to = [
+    "_iterable_class", "_query", "_validate_values_are_expressions", "aggregate", "db", "query",
+]
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+# Every query method above reads these names of the queryset, and its row lists the others it
+# looks up on it, through the queryset's own methods, the clones they make (`_chain`,
+# `filter`, `order_by`), the model iterables, and the deleting `Collector`; an `a*` method
+# looks up its synchronous method (`sync_to_async(self.count)`) and what that looks up. A
+# project QuerySet that binds one of a method's names runs its own code under the method's row,
+# so the row describes only querysets that bind none of them; one that only adds methods keeps
+# every row. `models.QuerySet` names the same class (checked in Django 3.2.25, 4.2.24, 5.2.8,
+# 6.0, 6.1.3: `db/models/query.py`, `db/models/deletion.py`).
+[[entries]]
+symbol = "django.db.models.query.QuerySet"
+aliases = ["django.db.models.QuerySet"]
+delegates_to = ["_db", "_for_write", "_hints", "model"]
 opaque_to_layer3 = true
 
 # A model's managers (`Model.objects`, and those a model's body declares) are instances of
@@ -3946,6 +4121,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.Manager.create"
+effect_through = "django.db.models.Model"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
@@ -4011,6 +4187,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.Manager.acreate"
+effect_through = "django.db.models.Model"
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
@@ -4055,9 +4232,10 @@ opaque_to_layer3 = true
 # of these names (a `get_queryset` returning an evaluated or a custom QuerySet, a
 # `_queryset_class`, an `__init__`) runs its own code under the rows above, so they describe
 # only managers that bind none of them (checked in Django 3.2.25, 4.2.20, 5.2.8, 6.0:
-# `db/models/manager.py`).
+# `db/models/manager.py`). `django.db.models.manager.Manager` names the same class.
 [[entries]]
 symbol = "django.db.models.Manager"
+aliases = ["django.db.models.manager.Manager"]
 delegates_to = ["__init__", "get_queryset", "_queryset_class", "model", "_db", "_hints"]
 opaque_to_layer3 = true
 
@@ -4075,10 +4253,22 @@ versions = "Django 3.2.25, 4.2.20, 5.2.8, 6.0"
 # `__getattr__`; `ModelBase.__new__` hands a class-body object with a `contribute_to_class`
 # (a field, a manager) to it, which installs the field's descriptor, and keeps any other as it
 # is. `pk` is the one property of `Model` (checked in Django 3.2.25, 4.2.20, 5.2.8, 6.0:
-# `db/models/base.py`).
+# `db/models/base.py`). `QuerySet.create` (and so `acreate` and the manager's) inserts the row
+# by `obj.save(force_insert=True)` on the new instance of the queryset's model: the
+# `effect_methods` are `save` and the names it looks up on the instance on the way to the
+# insert. A project model binding one of them otherwise than as a method calling
+# `super().<name>(...)` on every path may send nothing (checked in Django 3.2.25, 4.2.24, 5.2.8,
+# 6.0, 6.1.3: `db/models/base.py`, `db/models/query.py`). `get_or_create` and
+# `update_or_create` query by `self.get()` first on every call, and `QuerySet.delete` deletes
+# through `Collector`, which never calls `Model.delete`.
 [[entries]]
 symbol = "django.db.models.Model"
 plain_attributes_except = ["pk"]
+effect_methods = [
+    "save", "save_base", "_save_parents", "_save_table", "_do_insert", "_do_update",
+    "_prepare_related_fields_for_save", "_get_pk_val", "_is_pk_set", "_assign_returned_values",
+    "_parse_save_params", "_validate_force_insert", "get_deferred_fields",
+]
 opaque_to_layer3 = true
 
 # --- Key-value: redis (sync) ---

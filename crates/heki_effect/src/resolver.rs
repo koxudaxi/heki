@@ -44,6 +44,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
+mod chained_methods;
 mod fields;
 mod forwarded;
 mod getattr_exports;
@@ -876,6 +877,11 @@ pub struct ClassDecl {
     /// the name from then on, which no string constant of the class or its bases fixes.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_attrs: BTreeSet<String>,
+    /// The methods of its body named in some catalog class's `effect_methods` that call the
+    /// next definition along the MRO (`super().save(...)`) on every path to a return, each the
+    /// only binding of its name in the body (`chained_methods`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub chains_to_next: BTreeSet<String>,
     /// The class-body names bound to something other than a constant, a display, or a field
     /// specifier (`dataclasses.field(...)`, `attrs.field(...)`): methods, properties, and any
     /// call, which may make a descriptor. Reading such a name on an instance may run code.
@@ -2854,6 +2860,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::class_object_attribute`] so far, by class, name, and whether a
     /// subclass may be read; cleared with the indexes.
     class_object_attributes: SharedMemo<(String, String, bool), Option<String>, DeclKeys>,
+    /// The answers of [`Self::effect_methods_replaced`] so far, by library base; cleared with
+    /// the indexes.
+    effect_methods_replaced: SharedMemo<String, bool, DeclKeys>,
     /// The answers of [`Self::object_attr_read_runs_no_code`] so far, by class and name;
     /// cleared with the indexes.
     object_attr_reads: SharedMemo<(String, String), bool, DeclKeys>,
@@ -3256,6 +3265,7 @@ impl ProjectDecls {
         self.late_star_bindings.clear();
         self.catalog_attributes.clear();
         self.class_object_attributes.clear();
+        self.effect_methods_replaced.clear();
         self.object_attr_reads.clear();
         // What other modules change, which deciding what a module's `__getattr__` serves reads
         // (`Self::getattr_open`) while the indexes are built: as for new declarations, nothing
@@ -7189,10 +7199,14 @@ impl ProjectDecls {
         }
     }
 
-    /// Whether a project class before the library class of the method `symbol` along `mro`
-    /// binds a name the catalog says the library's methods look up on the instance
-    /// (`heki_kb::EcosystemEntry::delegates_to`, R3: Django's `Manager.get_queryset`), in its
-    /// body or methods or by a store elsewhere: the call then runs that binding, which the
+    /// Whether project code replaces what the library method `symbol` runs, on an instance
+    /// whose class has the MRO `mro` (R3): a project class before the library class binds a
+    /// name the catalog says the method looks up on the instance
+    /// (`heki_kb::EcosystemEntry::delegates_to`: Django's `Manager.get_queryset`,
+    /// `QuerySet._fetch_all`), in its body or methods or by a store elsewhere, or a project
+    /// class deriving from the base whose methods the call runs on an instance it makes binds
+    /// one of them otherwise than as the catalog allows ([`Self::effect_methods_replaced`]:
+    /// a model's `save` behind `QuerySet.create`). The call then runs that binding, which the
     /// method's row does not describe.
     pub(crate) fn replaces_delegate(
         &self,
@@ -7200,19 +7214,55 @@ impl ProjectDecls {
         symbol: &str,
         kb: &EffectiveEcosystemKb,
     ) -> bool {
-        let library = symbol.rsplit_once('.').map_or(symbol, |(class, _)| class);
-        let names = kb.delegates_of(library);
+        if kb
+            .effect_through(symbol)
+            .is_some_and(|(base, methods)| self.effect_methods_replaced(base, methods))
+        {
+            return true;
+        }
+        let names: Vec<&String> = kb.delegates_of(symbol).collect();
         if names.is_empty() {
             return false;
         }
+        let library = symbol.rsplit_once('.').map_or(symbol, |(class, _)| class);
         let before = &mro[..mro.iter().position(|c| c == library).unwrap_or(mro.len())];
         let own = before.iter().filter(|c| self.is_project_class(c));
         let binds = |c: &String| {
             self.read(|k| note(&mut k.class_facts, c));
             self.class(c)
-                .is_some_and(|d| names.iter().any(|n| d.members.contains(n)))
+                .is_some_and(|d| names.iter().any(|n| d.members.contains(*n)))
         };
         own.into_iter().any(binds) || names.iter().any(|n| self.lookup_rebound(before, n))
+    }
+
+    /// Whether a project class deriving from the library class `base` may run code of its own,
+    /// or of a library class before `base` along its MRO, for one of the methods `methods` of
+    /// `base` (`heki_kb::EcosystemEntry::effect_methods`): it binds one other than as a method
+    /// calling the next definition along the MRO on every path to a return
+    /// ([`ClassDecl::chains_to_next`]), in its body or by a store elsewhere, or a library class
+    /// that is no plain base comes before `base`. One walk over the project's subclasses of
+    /// `base`, kept for the life of the indexes.
+    fn effect_methods_replaced(&self, base: &str, methods: &[String]) -> bool {
+        self.effect_methods_replaced.ask(self, base.to_owned(), || {
+            let replaces = |class: &String| {
+                let mro = self.mro(class);
+                let before = &mro[..mro.iter().position(|c| c == base).unwrap_or(mro.len())];
+                before.iter().any(|c| {
+                    let own_binding = |d: &ClassDecl| {
+                        (methods.iter()).any(|m| {
+                            (d.members.contains(m) && !d.chains_to_next.contains(m))
+                                || self.lookup_rebound(std::slice::from_ref(c), m)
+                        })
+                    };
+                    self.read(|k| note(&mut k.class_facts, c));
+                    match self.is_project_class(c) {
+                        true => self.class(c).is_none_or(own_binding),
+                        false => !PLAIN_BASES.contains(&c.as_str()),
+                    }
+                })
+            };
+            self.subclasses_of(base).iter().any(replaces)
+        })
     }
 
     /// Resolve `class.method` on an object that is exactly `class`: the class object itself
@@ -7747,6 +7797,10 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         }
         let mut unknown_base = false;
         for (i, base) in bases.iter_mut().enumerate() {
+            // A library class imported by another of its names is the class the catalog lists.
+            if let Some(class) = kb.class_aliases.get(base.as_str()) {
+                base.clone_from(class);
+            }
             if base == UNKNOWN_BASE {
                 *base = format!(
                     "{UNKNOWN_BASE} {}.{} {i}>",
@@ -8032,6 +8086,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
     init_containers::init_containers(input, &mut decls);
+    chained_methods::chained_methods(input, &mut decls, kb);
     code_attrs(input, &mut decls);
     for (class, attr) in class_attrs_rebound(input, &decls, &import_targets) {
         if let Some(c) = decls.classes.get_mut(&class) {
@@ -11492,8 +11547,9 @@ impl<'a> TypeCtx<'a> {
                 let mro = self.project.mro(&owner);
                 let after = mro.iter().position(|c| *c == owner).map_or(0, |i| i + 1);
                 let replaced = |symbol: &str| {
-                    let library = symbol.rsplit_once('.').map_or(symbol, |(c, _)| c);
-                    !self.kb.delegates_of(library).is_empty()
+                    let delegates = self.kb.delegates_of(symbol).next().is_some();
+                    let effect_through = self.kb.effect_through(symbol).is_some();
+                    (delegates || effect_through)
                         && (self.project.value_classes(&owner).iter()).any(|c| {
                             let mro = self.project.mro(c);
                             self.project.replaces_delegate(&mro, symbol, self.kb)

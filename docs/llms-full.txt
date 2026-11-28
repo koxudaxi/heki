@@ -891,6 +891,8 @@ Two rules are exact and run by default, and two more are exact by default and ar
 `EFF103` knows Django's model managers from the ecosystem catalog. `Model.objects`, read on a model class or on `cls`, is the `Manager` Django adds, or the manager the model's body declares (`objects = StreamManager()`, a project subclass of `models.Manager`). Its query methods (`get`, `count`, `create`, `get_or_create`, `update`, ...) send a statement on every call, so calling one per item of a loop over data is an exact, default `EFF103` report; `filter`, `exclude`, and `all` only build a `QuerySet`. A method the manager adds is followed as project code. Some managers keep the report heuristic (with `--heuristic`) or unknown:
 
 - a manager that binds a name its query methods use (`get_queryset`, `_queryset_class`, `__init__`) runs its own code under them: heuristic. So is a model's default `objects` while the project defines such a manager, since heki takes a `Manager` to be possibly an instance of any project subclass;
+- a project `QuerySet` subclass (`models.QuerySet` is the catalog's `QuerySet`) that binds a name a query method looks up on the queryset (`get`'s `filter` and `_fetch_all`, `acount`'s `count`) runs its own code under that method: a call of it on a `QuerySet` is heuristic, since heki takes a `QuerySet` to be possibly an instance of any project subclass. A subclass that only adds methods keeps every row, on its own instances too;
+- `create` and `acreate` save a new instance of the model: while a project model binds `save` (or a method `save` reaches, `save_base`, `_save_table`, ...) otherwise than as a method calling `super().save(...)` on every path, they are heuristic. `get_or_create` and `update_or_create` query by `get` first on every call, and `QuerySet.delete` never calls the model's `delete`, so a model's overrides leave them exact;
 - a manager `from_queryset()` or `as_manager()` builds, one of a class outside the project, and related managers (`question.choice_set`, a many-to-many field read on an instance) are unknown: they add no effect.
 
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](https://heki.koxudaxi.dev/effects/#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/#a-generator-that-is-never-iterated). Both are exact and run by default.
@@ -6812,7 +6814,11 @@ methods (`get`, `count`, `get_or_create`, ...) send a statement on every call, a
 (`filter`, `exclude`, `all`) give a `QuerySet`. A manager that binds a name those methods use
 (`get_queryset`, `_queryset_class`, `__init__`: the catalog's `delegates_to` of `Manager`) runs
 its own code under them, which the rows do not describe: a query through it is heuristic, and so
-is one through a `Manager` while the project defines such a manager (R2). A model whose body may
+is one through a `Manager` while the project defines such a manager (R2). The same holds for a
+project `QuerySet` subclass binding a name a query method of `QuerySet` looks up (each row's
+`delegates_to`: `get` looks up `filter` and `_fetch_all`) and for a project model binding `save`
+behind `create` without calling `super().save(...)` on every path (`effect_through`); which
+model a manager or queryset is for is not tracked, so one such model opens every `create`. A model whose body may
 bind another manager (a call of a project function, `QuerySet.as_manager()`) has no `objects` to
 heki, nor does one whose `objects` a module stores outside the class body, or is a manager of a
 class outside the project or of one `Manager.from_queryset()` builds. A manager of a library

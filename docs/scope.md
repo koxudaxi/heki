@@ -384,7 +384,11 @@ methods (`get`, `count`, `get_or_create`, ...) send a statement on every call, a
 (`filter`, `exclude`, `all`) give a `QuerySet`. A manager that binds a name those methods use
 (`get_queryset`, `_queryset_class`, `__init__`: the catalog's `delegates_to` of `Manager`) runs
 its own code under them, which the rows do not describe: a query through it is heuristic, and so
-is one through a `Manager` while the project defines such a manager (R2). A model whose body may
+is one through a `Manager` while the project defines such a manager (R2). The same holds for a
+project `QuerySet` subclass binding a name a query method of `QuerySet` looks up (each row's
+`delegates_to`: `get` looks up `filter` and `_fetch_all`) and for a project model binding `save`
+behind `create` without calling `super().save(...)` on every path (`effect_through`); which
+model a manager or queryset is for is not tracked, so one such model opens every `create`. A model whose body may
 bind another manager (a call of a project function, `QuerySet.as_manager()`) has no `objects` to
 heki, nor does one whose `objects` a module stores outside the class body, or is a manager of a
 class outside the project or of one `Manager.from_queryset()` builds. A manager of a library
