@@ -173,6 +173,8 @@ mod tests {
             "R\tm._impl.Base.size\tbuiltins.int\n",
             "R\tm.Child.get\tbuiltins.str\n",
             "bad line\n",
+            "F\tm.no_kind\n",
+            "Z\tm.unknown_tag\tvalue\n",
         ))
     }
 

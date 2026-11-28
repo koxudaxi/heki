@@ -203,3 +203,78 @@ pub(crate) fn attribute_result(
     let member = stubs.attribute(class, attr)?;
     binding(stubs, class, recv, member.base).decode(member.found)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unbound() -> Binding<'static> {
+        Binding {
+            self_ty: None,
+            params: Vec::new(),
+        }
+    }
+
+    fn inst(class: &str) -> Elem {
+        Elem::Of(Ty::inst(class))
+    }
+
+    #[test]
+    fn a_union_with_a_class_object_has_no_type() {
+        assert_eq!(unbound().decode("type[builtins.str]|builtins.int"), None);
+        assert_eq!(
+            unbound().decode("builtins.str|builtins.int"),
+            Ty::of_members([
+                Obj {
+                    class: "builtins.int".into(),
+                    args: Args::None,
+                },
+                Obj {
+                    class: "builtins.str".into(),
+                    args: Args::None,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn type_arguments_are_the_parameters_by_position() {
+        let pairs = Binding {
+            self_ty: None,
+            params: Vec::new(),
+        }
+        .decode("typing.ItemsView[builtins.str, builtins.int]")
+        .unwrap();
+        assert_eq!(
+            params(pairs.obj().unwrap()),
+            [inst("builtins.str"), inst("builtins.int")]
+        );
+        let odd_pairs = Obj {
+            class: "typing.ItemsView".into(),
+            args: Args::items(inst("builtins.str")),
+        };
+        assert!(params(&odd_pairs).is_empty());
+        let counter = unbound()
+            .decode("collections.Counter[builtins.str]")
+            .unwrap();
+        assert_eq!(params(counter.obj().unwrap()), [inst("builtins.str")]);
+        let tuple = unbound()
+            .decode("builtins.tuple[builtins.int, builtins.int]")
+            .unwrap();
+        assert_eq!(params(tuple.obj().unwrap()), [inst("builtins.int")]);
+        let callable = unbound()
+            .decode("collections.abc.Callable[builtins.int]")
+            .unwrap();
+        assert_eq!(callable.obj().unwrap().args, Args::None);
+    }
+
+    #[test]
+    fn an_instance_method_needs_an_instance() {
+        let kb = heki_kb::EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let text = Ty::inst("builtins.str");
+        let strip =
+            |on_instance| method_result(kb.stubs(), "builtins.str.strip", &text, on_instance, None);
+        assert_eq!(strip(true), Some(Ty::inst("builtins.str")));
+        assert_eq!(strip(false), None);
+    }
+}
