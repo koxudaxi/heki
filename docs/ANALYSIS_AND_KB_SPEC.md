@@ -2328,7 +2328,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      goes after one). A function keeps a memo (`cache_flow::hand_memo`, from its own body) when
      a value it returns (`readonly::returned_values`, so copies are seen) is `c[k]`, `c.get(k)`,
      or `c.setdefault(k, v)` on a container that outlives the call (an attribute of the
-     receiver, of a module global, or a module global), `k` derived from the parameters besides
+     receiver, of a module global, or a module global) and is named as a cache or memo
+     (`cache_flow::is_memo_name`; a get-or-create registry or a pool has the same code, and its
+     callers are meant to change what it hands out), `k` derived from the parameters besides
      the receiver (one walk over their readers), the function stores into `c` under the same key
      (`cache_flow::same_key`) a value computed from them that is no parameter itself, and the
      read runs on a path from the entry that passes no such store (one walk over the blocks); a
@@ -2338,7 +2340,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      (a `functools` cache resolved by import, with a `maxsize` other than `0`, a parameter
      besides `self` / `cls`, and a builtin list, dict, or set on every live return, by its return
      annotation or by construction; or a memo typed a builtin `dict` wherever the function reads
-     or fills it and named as a cache or memo, whose every live return
+     or fills it, whose every live return
      hands out, through copies and phis, a value read from or stored into it under one key, with
      a return annotation naming the kind and only the decorators a cache may stand beside), the
      changed value is that one

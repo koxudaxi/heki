@@ -205,10 +205,8 @@ pub struct HandMemo {
 pub(crate) struct MemoFound {
     pub memo: HandMemo,
     /// Every return a run can reach hands out, through copies and phis, the object the memo
-    /// keeps under one key (the value it reads or the value it stores there), the container is
-    /// typed a builtin `dict` wherever the function reads or fills it, and its name says cache
-    /// or memo ([`is_memo_name`]): a container of state the callers share on purpose is rarely
-    /// named so.
+    /// keeps under one key (the value it reads or the value it stores there), and the container
+    /// is typed a builtin `dict` wherever the function reads or fills it.
     pub exact: bool,
 }
 
@@ -258,10 +256,15 @@ struct MemoFill<'f> {
 
 /// The memo `f` keeps its results in, when it is a cache by hand: what it returns on some path
 /// is read from a container that outlives the call (an attribute of the method's receiver, an
-/// attribute of a module global such as a class, or a module global), under a key derived from
-/// its arguments, where the function also stores into that container, under the same key, a
-/// value computed from them, and the read runs on some path that passes no such store, so a
-/// later call with the same arguments gets the kept object.
+/// attribute of a module global such as a class, or a module global) and is named as a cache or
+/// memo ([`is_memo_name`]), under a key derived from its arguments, where the function also
+/// stores into that container, under the same key, a value computed from them, and the read
+/// runs on some path that passes no such store, so a later call with the same arguments gets
+/// the kept object.
+///
+/// The name decides because the code does not: a get-or-create registry, a pool, or a
+/// singleton holder has the same shape as a memo, and its callers are meant to change the
+/// objects it hands out.
 ///
 /// Not a memo: a container the function only reads (a cache object's accessor), one it fills
 /// with a new object built from none of its arguments or with an argument as it is (a registry
@@ -316,11 +319,12 @@ pub(crate) fn hand_memo<'t>(
     let reads: Vec<MemoRead<'_>> = reads
         .into_iter()
         .filter_map(|(value, (at, container, key, lookup))| {
-            Some(MemoRead {
+            let held = *alias.get(&container)?;
+            is_memo_name(held.1).then_some(MemoRead {
                 value,
                 at,
                 container,
-                held: *alias.get(&container)?,
+                held,
                 key,
                 lookup,
             })
@@ -420,7 +424,7 @@ pub(crate) fn hand_memo<'t>(
     };
     let in_dict = (hits.iter().filter(|(r, _)| r.held == held)).all(|(r, _)| dict(r.container))
         && stored.iter().all(|w| dict(w.container));
-    let exact = is_memo_name(name) && in_dict && every_return_kept(shape, live, &budget, &kept);
+    let exact = in_dict && every_return_kept(shape, live, &budget, &kept);
     Some(MemoFound {
         memo: HandMemo { container, shared },
         exact,

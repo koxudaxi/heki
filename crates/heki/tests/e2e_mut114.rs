@@ -577,6 +577,12 @@ def build(key):
     return {"name": key}
 
 
+class Session:
+    def __init__(self, key):
+        self.key = key
+        self.closed = False
+
+
 class Configs:
     _class_cache: dict = {}
 
@@ -584,10 +590,12 @@ class Configs:
         self._cache = {}
         self._lists_cache = {}
         self._by_name = {}
-        self._buckets = {}
-        self._kept = {}
+        self._bucket_cache = {}
+        self._results_cache = {}
         self._memo = None
         self._shelf_cache = shelve.open("memo")
+        self._sessions = {}
+        self._session_cache = {}
 
     def get(self, key):
         if key in self._cache:
@@ -656,14 +664,14 @@ class Configs:
         return self._cache[key]
 
     def deep_copied(self, key) -> dict:
-        if key not in self._kept:
-            self._kept[key] = build(key)
-        return copy.deepcopy(self._kept[key])
+        if key not in self._results_cache:
+            self._results_cache[key] = build(key)
+        return copy.deepcopy(self._results_cache[key])
 
     def copied(self, key) -> dict:
-        if key not in self._kept:
-            self._kept[key] = build(key)
-        return dict(self._kept[key])
+        if key not in self._results_cache:
+            self._results_cache[key] = build(key)
+        return dict(self._results_cache[key])
 
     def constant_key(self, key) -> dict:
         if "all" not in self._cache:
@@ -671,19 +679,19 @@ class Configs:
         return self._cache["all"]
 
     def per_call(self, key) -> dict:
-        self._kept = {}
-        if key not in self._kept:
-            self._kept[key] = build(key)
-        return self._kept[key]
+        self._results_cache = {}
+        if key not in self._results_cache:
+            self._results_cache[key] = build(key)
+        return self._results_cache[key]
 
     def bucket(self, key) -> list:
-        if key not in self._buckets:
-            self._buckets[key] = []
-        return self._buckets[key]
+        if key not in self._bucket_cache:
+            self._bucket_cache[key] = []
+        return self._bucket_cache[key]
 
     def stored(self, key) -> dict:
-        self._kept[key] = build(key)
-        return self._kept[key]
+        self._results_cache[key] = build(key)
+        return self._results_cache[key]
 
     @logged
     def decorated(self, key) -> dict:
@@ -715,6 +723,16 @@ class Configs:
         if key not in self._shelf_cache:
             self._shelf_cache[key] = build(key)
         return self._shelf_cache[key]
+
+    def session(self, key):
+        if key not in self._sessions:
+            self._sessions[key] = Session(key)
+        return self._sessions[key]
+
+    def session_of(self, key):
+        if key not in self._session_cache:
+            self._session_cache[key] = Session(key)
+        return self._session_cache[key]
 
 
 def module_level(key) -> dict:
@@ -773,17 +791,20 @@ def tune(c: Configs, k):
     c.maybe_none(k)["x"] = 1
     fresh_global(k)["x"] = 1
     c.shelved(k)["x"] = 1
+    c.session(k).closed = True
+    c.session_of(k).closed = True
 "#;
 
 /// A function that fills a container outliving the call (an attribute of `self` or of the
-/// class, a module global) under a key from its arguments, and returns what the container keeps
-/// there, is a cache as a `functools` one is: `if k in c: return c[k]` / `c[k] = v; return v`,
-/// `if k not in c: c[k] = v` / `return c[k]`, `setdefault`, `.get(k)` then a fill. The exact
-/// claim needs every return to hand out the kept object, a builtin dict named as a cache or
-/// memo, and a return annotation naming the kind; a copy, a key not from the arguments, a container
-/// made per call (also a module global the function rebinds), a registry slot built from none of
-/// the arguments, a store a call never finds kept, and a decorator heki does not know make no
-/// cache.
+/// class, a module global) and named as a cache or memo under a key from its arguments, and
+/// returns what the container keeps there, is a cache as a `functools` one is: `if k in c:
+/// return c[k]` / `c[k] = v; return v`, `if k not in c: c[k] = v` / `return c[k]`,
+/// `setdefault`, `.get(k)` then a fill. A container of the same shape without such a name is a
+/// registry (a pool, a get-or-create of handles) whose objects the callers are meant to change.
+/// The exact claim needs every return to hand out the kept object, a builtin dict, and a return
+/// annotation naming the kind; a copy, a key not from the arguments, a container made per call
+/// (also a module global the function rebinds), a registry slot built from none of the
+/// arguments, a store a call never finds kept, and a decorator heki does not know make no cache.
 #[test]
 fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
     let p = Project::new("mut114_hand_memos");
@@ -806,10 +827,8 @@ fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
             (12, false),
             (13, false),
             (14, true),
-            // A container not named as a cache or memo, a return of a new dict on one path, a
-            // `.get` default, a wrapper, and an object below the result.
-            (15, false),
-            (16, false),
+            // A return of a new dict on one path, a `.get` default, a wrapper, and an object
+            // below the result. Lines 15 and 16 fill a container not named as a cache or memo.
             (17, false),
             (18, false),
             (19, false),
@@ -821,6 +840,9 @@ fn mut114_takes_a_memo_the_function_fills_itself_as_a_cache() {
             (30, false),
             // A mapping that is no builtin dict: a shelf stores a copy and reads a new object.
             (32, false),
+            // A get-or-create of a class instance: a memo by its name (line 34), a registry of
+            // sessions without one (line 33).
+            (34, false),
         ],
         "{diags:#?}"
     );
