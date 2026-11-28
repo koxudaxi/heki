@@ -26,9 +26,12 @@ unresolved = "report"
 /// name (`datetime.now`), a method a library base declares (`bool.bit_length`, from `int`), a
 /// class spelled by its public re-export (`io.StringIO`), a property (`datetime.year`), an
 /// attribute (a named tuple's field), a container's type argument (`deque[str].popleft`), the
-/// overload of a subscript by its index (`bytes[0]` is an `int`), an enumeration's member and
+/// overload of a subscript by its index (`bytes[0]` is an `int`), a method of a base the stubs
+/// define in a private module and export under another name (`asyncio.Task.done`, from
+/// `asyncio.Future`), an enumeration's member and
 /// its value of the mixed-in type, and a class pattern narrowing its subject.
-const SHAPES: &str = r#"import collections
+const SHAPES: &str = r#"import asyncio
+import collections
 import datetime
 import io
 import shlex
@@ -104,6 +107,10 @@ def run_type_argument(queue: collections.deque[str]) -> str:
 
 def run_index(data: bytes) -> int:
     return data[0].bit_length()
+
+
+def run_base_by_public_name(task: asyncio.Task[int]) -> int:
+    return task.done().bit_length()
 "#;
 
 /// What stays unresolved: a result the stubs leave open (`Any`, a function's own type

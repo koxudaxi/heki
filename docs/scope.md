@@ -174,6 +174,29 @@ heki looks for the callee in this order:
 It also follows container item types (`list[Model]`), return annotations along the MRO,
 `isinstance` narrowing, unions of up to three classes, and project `Protocol`s.
 
+A call on what a builtin or standard-library call returns resolves too, so `text.strip().lower()`,
+`shlex.split(line)[0].upper()`, and `datetime.now().date().isoformat()` are followed to the end.
+The result types come from typeshed's stubs, read when heki is built, so a run needs no stubs.
+heki infers:
+
+- the result of a method or function (`str.strip` returns `str`, `shlex.split` a `list[str]`),
+  with `Self` as the receiver's class and a type argument of a container (`deque[str].popleft`
+  returns `str`);
+- a standard-library attribute, property, or named-tuple field (`datetime.year`,
+  `shutil.disk_usage(path).free`), and a method a base class declares (`bool.bit_length`, from
+  `int`; `asyncio.Task.done`, from `asyncio.Future`);
+- `bytes[0]` as an `int`, a member of a project enumeration as an instance of it, and its `value`
+  as the data type the enumeration mixes in (`class Version(str, Enum)`), unless a class along
+  its MRO binds `__new__`;
+- the subject of a `match` class pattern as that class inside the case.
+
+Its limits: a method with several overloads gets the join of their results, and no result when
+one is `Any`, `object`, or a type variable of the function itself, so `d.get(key).upper()` on a
+`dict` stays unresolved, as does `json.loads(text).get(...)`. Module-level variables of the
+standard library are not typed yet, and neither is anything from a package outside the standard
+library. An instance of a project class keeps the project's own facts; only library classes read
+the stubs.
+
 ## When heki cannot tell
 
 A rewrite and an exact report make the same choice when information is missing, in opposite

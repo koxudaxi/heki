@@ -46,6 +46,7 @@ module-name = "heki"
 # --changelog`), and the metadata links the changelog.
 include = [
     { path = "kb/**/*.toml", format = "sdist" },
+    { path = "kb/**/*.tsv", format = "sdist" },
     { path = "tests/**/*", format = "sdist" },
     { path = "docs/**/*.md", format = "sdist" },
     { path = "docs/llms.txt", format = "sdist" },

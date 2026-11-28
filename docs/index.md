@@ -149,6 +149,13 @@ was checked by hand, with no false claim ([Rule precision](precision.md#certific
 The size-dependent rewrites (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact
 too, but opt-in. The other rules are heuristic or opt-in ([Rules](rules/index.md)).
 
+A call on the result of a builtin or standard-library call is followed too
+(`text.strip().lower()`, `shlex.split(line)[0].upper()`), with result types from typeshed's
+stubs: heki infers a method's or function's result, a library attribute, an enumeration member and
+its value, and a `match` class pattern's subject. It stays unresolved where overloads join to no
+single type (`d.get(key).upper()`), for module variables, and for packages outside the standard
+library ([How a call is resolved](scope.md#how-a-call-is-resolved)).
+
 `heki check --fix` applies an `OPT` rewrite only when it proves, under CPython's semantics, that
 the program behaves the same ([Fixes and safety](fixes.md)). More by problem:
 [async and execution effects](effects.md), [state ownership and mutation](ownership.md), and

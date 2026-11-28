@@ -142,7 +142,8 @@ impl StubTable {
         let bases = self.bases.get(class)?;
         for base in bases.split('\t') {
             let owner = base.split_once('[').map_or(base, |(head, _)| head);
-            match declared(owner) {
+            // A base is spelled by its definition module; its rows use the public name.
+            match declared(self.canonical(owner)) {
                 (_, Some(found)) => {
                     return Some(StubMember {
                         base: Some(base),
