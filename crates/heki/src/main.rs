@@ -583,7 +583,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 heuristic: args.heuristic.value(),
                 ..heki_lsp::Selectors::default()
             };
-            Ok(if heki_lsp::run_stdio(selectors, stack::ANALYSIS_STACK)? {
+            Ok(if heki_lsp::run_stdio(selectors, stack::thread_stack())? {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -816,7 +816,8 @@ static ALLOC: cap::Cap<std::alloc::System> = cap::Cap::new(std::alloc::System, u
 fn main() -> ExitCode {
     let cli = parse_cli();
     let failures = failure::Failures::of(&cli.command);
-    let code = match stack::on_analysis_stack(|| run(cli)) {
+    let analyzes_source = stack::analyzes_source(&cli.command);
+    let code = match stack::run(analyzes_source, move || run(cli)) {
         Ok(code) => code,
         Err(err) => {
             failures.fail(&err);

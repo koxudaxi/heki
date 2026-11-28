@@ -185,3 +185,34 @@ fn deep_expressions_in_the_language_server_are_reported_as_short_ones() {
     assert_eq!(short.len(), 5, "{short:#?}");
     assert_eq!(report(DEEP), short);
 }
+
+/// A host that refuses the analysis stack (a limit on virtual memory; here a stack larger than
+/// any address space, through the test hook `HEKI_ANALYSIS_STACK`): the command and the thread
+/// pool run on the platform's default stack after one warning, with the same report.
+#[test]
+fn a_host_refusing_the_analysis_stack_runs_on_the_default_stack() {
+    const WARNING: &str = "warning: this host refuses threads with a stack of 256 MiB";
+    let p = Project::new("deep_expressions_refused_stack");
+    p.write("a.py", &deep_module(3));
+    p.write("b.py", &deep_module(3));
+    let check = |stack: Option<usize>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_heki"));
+        command
+            .args(["check", "--output-format", "json", "."])
+            .env_remove("GITHUB_ACTIONS")
+            .env_remove("HEKI_OUTPUT_FORMAT")
+            .current_dir(&p.dir);
+        if let Some(stack) = stack {
+            command.env("HEKI_ANALYSIS_STACK", stack.to_string());
+        }
+        let out = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(1), "{stderr}");
+        let found: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+        (places(&found), stderr.matches(WARNING).count())
+    };
+    let (sized, sized_warnings) = check(None);
+    assert_eq!(sized.len(), 10, "{sized:#?}");
+    assert_eq!(sized_warnings, 0);
+    assert_eq!(check(Some(1 << 62)), (sized, 1));
+}

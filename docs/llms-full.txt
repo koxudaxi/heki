@@ -7660,8 +7660,10 @@ the call graph, or the class hierarchy goes through them:
   language server's threads get the same stack. A level takes under 2 KiB in a release build
   (about 10 KiB in a debug build), so the stack holds several times the deepest chain CPython
   compiles; the platforms map a thread's stack as it is used, so the size costs nothing until
-  a source needs it. Dropping a parsed module does not recurse: the tree is taken apart a node
-  at a time.
+  a source needs it. A host that refuses the reservation (a limit on virtual memory) runs them
+  on the platform's default stack after one warning, and a command that reads no source
+  (`rule`, `version`) starts neither the thread nor the pool. Dropping a parsed module does not
+  recurse: the tree is taken apart a node at a time.
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
   types of one module) counts the steps of all the owner's walks, and the weight of every fact
   they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR
