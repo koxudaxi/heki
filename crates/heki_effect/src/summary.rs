@@ -9132,6 +9132,7 @@ impl<'a> Extractor<'a> {
                     },
                     guards: occurrence_of(e),
                     hop: self.hop(api.clone(), span),
+                    cleanup: self.in_cleanup(bb, span),
                 });
             }
         }

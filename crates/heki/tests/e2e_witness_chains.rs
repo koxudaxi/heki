@@ -351,3 +351,41 @@ def second() -> None:
         ]
     );
 }
+
+const BOUNDED_WAIT: &str = r#"import queue
+
+inbox = queue.Queue()
+
+
+def pull():
+    return inbox.get()
+
+
+class Pool:
+    def __init__(self, size: int = 8) -> None:
+        self.jobs: queue.Queue = queue.Queue(maxsize=size)
+
+    def drain(self, item):
+        try:
+            pull()
+        except ValueError:
+            self.jobs.put(item)
+
+
+def build():
+    Pool(4)
+
+
+async def serve(pool: Pool, item):
+    pool.drain(item)
+"#;
+
+#[test]
+fn a_wait_on_a_bounded_queue_in_cleanup_code_does_not_beat_the_normal_path() {
+    let p = Project::new("witness_bounded_wait_cleanup");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/q.py", BOUNDED_WAIT);
+    let diags = diagnostics(&p, "EFF101");
+    let (_, chain) = chain_of(&diags, "serve");
+    assert_eq!(chain.last().unwrap(), "queue.Queue.get", "{chain:?}");
+}
