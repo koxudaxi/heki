@@ -260,11 +260,16 @@ pub struct ModuleImports {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_before: Option<u32>,
     /// What the module reads of the namespaces of the modules its statements import, by dotted
-    /// name (`m.Name`; `m.*` for every public name; `*` alone for any public name of any
-    /// module), each with the earliest time it does ([`loading::LoadReads::names_read`]).
+    /// name (`m.Name`; `m.*` for every public name; [`ANY_NAME`] for any name of any module),
+    /// each with the earliest time it does ([`loading::LoadReads::names_read`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub names_read: BTreeMap<String, ReadTime>,
 }
+
+/// The name of [`ModuleImports::names_read`] for any name of any module, private ones
+/// included: what a module past the budget of the walk may read. The only name without a
+/// module.
+pub const ANY_NAME: &str = "**";
 
 /// When a module reads a name of another module's namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1016,7 +1021,8 @@ struct ReadIndex<'i> {
     /// Per project module and name of it (`*`: every public name), the earliest time another
     /// module reads it.
     names: FxHashMap<(u32, &'i str), ReadTime>,
-    /// The modules that may read any public name of any module, each with the earliest time.
+    /// The modules that may read any name of any module ([`ANY_NAME`]), each with the earliest
+    /// time.
     anything: Vec<(u32, ReadTime)>,
 }
 
@@ -1455,9 +1461,9 @@ impl<'i> ImportGraph<'i> {
     }
 
     /// The earliest time a project module other than `m` reads the name `name` of `m`: by a
-    /// `from` import, a star import if the name is public, or an attribute read off what an
-    /// import binds ([`ModuleImports::names_read`]). Code of `m` itself reads its globals by
-    /// name ([`ImportSite::read_while_loading`]).
+    /// `from` import, a star import if the name is public, an attribute read off what an import
+    /// binds, or past the budget of that walk, any name ([`ModuleImports::names_read`]). Code
+    /// of `m` itself reads its globals by name ([`ImportSite::read_while_loading`]).
     pub fn read_elsewhere(&self, m: u32, name: &str) -> Option<ReadTime> {
         let reads = self.reads.get_or_init(|| {
             let mut reads = ReadIndex::default();
@@ -1466,6 +1472,7 @@ impl<'i> ImportGraph<'i> {
                 let read = (facts.iter()).flat_map(|f| &f.names_read);
                 for (dotted, &time) in read {
                     let Some((module, name)) = dotted.rsplit_once('.') else {
+                        debug_assert_eq!(dotted, ANY_NAME);
                         reads.anything.push((reader, time));
                         continue;
                     };
@@ -1482,7 +1489,7 @@ impl<'i> ImportGraph<'i> {
         });
         let of = |name: &str| reads.names.get(&(m, name)).copied();
         let public = !name.starts_with('_');
-        let anything = (reads.anything.iter()).filter(|&&(reader, _)| reader != m && public);
+        let anything = (reads.anything.iter()).filter(|&&(reader, _)| reader != m);
         (of(name).into_iter())
             .chain(of("*").filter(|_| public))
             .chain(anything.map(|&(_, time)| time))

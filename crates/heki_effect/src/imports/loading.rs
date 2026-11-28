@@ -1,7 +1,7 @@
 //! What the code that runs while a module loads may read of what its imports bind
 //! ([`super::ImportSite::read_while_loading`]).
 
-use super::{ImportForm, ImportSite, Named, ReadTime, Statement, Timing, class_bodies};
+use super::{ANY_NAME, ImportForm, ImportSite, Named, ReadTime, Statement, Timing, class_bodies};
 use crate::resolver::stores::exported_names;
 use crate::{CallSite, CallTarget, ModuleInput};
 use heki_ast::Span;
@@ -128,8 +128,8 @@ impl LoadReads<'_> {
     }
 
     /// What the module reads of the namespaces of other modules
-    /// ([`super::ModuleImports::names_read`]; `*` alone past the budget of [`HeldNames`]: any
-    /// public name of any module), `statements` its import statements with their sites: the
+    /// ([`super::ModuleImports::names_read`]; [`ANY_NAME`] past the budget of [`HeldNames`]:
+    /// any name of any module), `statements` its import statements with their sites: the
     /// name a `from` import takes, every public name a star import takes (`m.*`), and the
     /// attributes code reads off what an import binds (`import m` then `m.Name`, each step of
     /// `a.b.Name`), also through a module global the module body binds to it, or, where that
@@ -195,8 +195,8 @@ impl LoadReads<'_> {
             attributes_read(f, time, &bases, &mut globals, &mut held)
         });
         if !walked || !held.spell(&mut read) {
-            // Past the budget, the module may read any public name of any module.
-            read.add("*".to_owned(), ReadTime::Loading);
+            // Past the budget, the module may read any name of any module.
+            read.add(ANY_NAME.to_owned(), ReadTime::Loading);
         }
         read.0
     }

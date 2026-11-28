@@ -9601,6 +9601,50 @@ fn the_names_a_chain_of_attributes_off_an_import_makes_stop_at_the_budget() {
     );
 }
 
+/// `c.a` importing the private `_Base` from `c.b`, which imports `c.a` back, and `c.d`, whose
+/// body reads a chain of `names` attributes off `c.a`, one assignment after another, and then
+/// `c.a._Base`.
+fn attribute_chain_then_a_private_read(names: usize) -> Project {
+    let p = Project::new("bounds_attribute_chain_then_a_private_read");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import _Base\n\n\ndef make() -> object:\n    return _Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass _Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let chain: String = (1..=names)
+        .map(|i| format!("v{i} = v{}.x{i}\n", i - 1))
+        .collect();
+    p.write(
+        "c/d.py",
+        &format!("import c.a\n\nv0 = c.a\n{chain}BASE = c.a._Base\n"),
+    );
+    selecting_import_cycles(p)
+}
+
+/// Past the budget the module may read any name of any module, a private one too: the read of
+/// `c.a._Base` after the chain is not followed, so the import binding `_Base` is not named.
+#[test]
+fn past_the_budget_a_module_may_read_any_private_name() {
+    let diags = check_past_budgets(
+        400,
+        &["import_names_read"],
+        attribute_chain_then_a_private_read,
+    );
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+}
+
 /// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which merges `c.a`
 /// with an attribute of each of `names` modules, one conditional after another, and reads
 /// `attr` off the result in a function.
