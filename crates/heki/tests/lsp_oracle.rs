@@ -2254,11 +2254,12 @@ const HAND_HELPERS: &str = "def call(fn):\n    return fn()\n";
 const HAND_USE: &str = "from pkg.hand_defs import blocking\nfrom pkg.hand_helpers import call\n\n\nasync def use():\n    call(blocking)\n";
 
 /// A helper of another module calls the function it is handed (`FunctionDecl::calls_params`),
-/// so the caller passing a function that waits runs it there (`EFF101`); the helper stores the
-/// function instead, then calls it in a nested function it calls; the caller passes a function
-/// that does not wait, then the waiting one again.
+/// so the caller passing a function that waits runs it there (`EFF101`, heuristic: whether the
+/// helper calls it on every path is the helper's); the helper stores the function instead, then
+/// calls it in a nested function it calls; the caller passes a function that does not wait, then
+/// the waiting one again, which then becomes a generator (calling it runs nothing) and back.
 fn steps_handed_callables() -> Vec<Step> {
-    const USE: &[(&str, &str)] = &[("pkg/hand_use.py", "EFF101")];
+    const USE: &[(&str, &str)] = &[("pkg/hand_use.py", "EFF101 [heuristic]")];
     vec![
         Step::new(
             "a helper of another module calls the function it is handed",
@@ -2296,6 +2297,19 @@ fn steps_handed_callables() -> Vec<Step> {
         Step::new(
             "the caller passes the waiting function again",
             vec![save("pkg/hand_use.py", HAND_USE)],
+        )
+        .present(USE),
+        Step::new(
+            "the function the caller passes becomes a generator",
+            vec![save(
+                "pkg/hand_defs.py",
+                &HAND_DEFS.replace("time.sleep(1)\n", "time.sleep(1)\n    yield\n"),
+            )],
+        )
+        .absent(USE),
+        Step::new(
+            "the function waits without yielding again",
+            vec![save("pkg/hand_defs.py", HAND_DEFS)],
         )
         .present(USE),
     ]

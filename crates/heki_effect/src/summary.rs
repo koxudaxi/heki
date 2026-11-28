@@ -8166,8 +8166,9 @@ impl<'a> Extractor<'a> {
     /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and the
     /// arguments left unbound; the one a builtin calls once per item (`map(f, xs)`, `sorted(xs,
     /// key=f)`) on the caller's thread; and the one a project callee calls through the parameter
-    /// it binds, on the caller's thread with its arguments unknown, awaited when the callee awaits
-    /// it. A callable run per item takes the items as its arguments (`Self::passed_items`). A
+    /// it binds (`Runner::Helper`), with its arguments unknown, awaited when the callee awaits it,
+    /// when calling it runs its bodies (no generator function, no `async def` the callee does not
+    /// await). A callable run per item takes the items as its arguments (`Self::passed_items`). A
     /// class run per item or handed to a project function constructs objects there, which is not
     /// modeled. Returns the site and whether it names every function the value can be.
     fn handed_callable(
@@ -8178,7 +8179,7 @@ impl<'a> Extractor<'a> {
     ) -> Option<(usize, bool)> {
         let (callable, passed, runner, per_item, api, awaited) = match handing {
             Handing::Param { value, awaited } => {
-                (value, &[][..], Runner::Caller, None, "", awaited)
+                (value, &[][..], Runner::Helper, None, "", awaited)
             }
             Handing::Api(symbol) => {
                 let facade = || {
@@ -8212,7 +8213,7 @@ impl<'a> Extractor<'a> {
             }
         };
         // An API's callable is one of the call's arguments.
-        let position = (runner != Runner::Caller)
+        let position = (runner != Runner::Helper)
             .then(|| call.args.iter().position(|a| *a == callable))
             .flatten()
             .and_then(|i| u8::try_from(i).ok());
@@ -8225,15 +8226,24 @@ impl<'a> Extractor<'a> {
         // A class run per item, or handed to a project function, constructs objects there: what
         // the call returns is not the new object, and that construction is not modeled. The
         // facts of a lambda that shares its name are those of every lambda of the name.
-        if (per_item.is_some() || runner == Runner::Caller)
+        if (per_item.is_some() || runner == Runner::Helper)
             && (self.class_called(target).is_some() || self.shares_its_name(target))
         {
             return None;
         }
         let (callee, recv_var) = self.callable_callee(target);
-        let Callee::Project(..) = &callee else {
+        let Callee::Project(targets, _) = &callee else {
             return None;
         };
+        // A generator function's body runs where what it returns is iterated, and an `async
+        // def`'s where its coroutine is awaited: a callee calling it without awaiting runs neither.
+        let body_runs = |key: &FuncKey| {
+            (self.cx.project.function_decl(key))
+                .is_some_and(|d| !d.is_generator && (!d.is_async || awaited))
+        };
+        if runner == Runner::Helper && !targets.iter().all(body_runs) {
+            return None;
+        }
         let complete = self.callable_targets_complete(target, &callee);
         let (recv, recv_is_self) = match recv_var {
             Some(r) => {
@@ -8311,6 +8321,16 @@ impl<'a> Extractor<'a> {
         handed_site.per_item = per_item;
         handed_site.offloads_to = offloads_to;
         bind_pickled_copies(handed_site);
+        // The callables the callees call of what they are handed run where the callees run.
+        if runner == Runner::Worker {
+            for run_by_callee in &mut self.sites[site + 1..] {
+                if run_by_callee.runner == Runner::Helper {
+                    run_by_callee.runner = Runner::Worker;
+                    run_by_callee.offloads_to = offloads_to;
+                    bind_pickled_copies(run_by_callee);
+                }
+            }
+        }
         Some((site, complete))
     }
 

@@ -10,7 +10,7 @@ use super::forwarded::{self, ForwardingCall};
 use super::{CapturedParams, FunctionDecl, ModuleDecls, ProjectDecls};
 use super::{func_qualname, is_summarized_function};
 use crate::{FuncKey, ModuleInput};
-use heki_ir::walk::{Answer, Budget, Facts, Or, Sparse, Visit, fixpoint, reach};
+use heki_ir::walk::{Answer, Budget, Facts, FnShape, Or, Sparse, Visit, fixpoint, reach};
 use heki_ir::{BlockId, InstKind, IrFunction, ModuleIr, VarId};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,7 @@ impl Own {
         let values = Values {
             ir,
             f,
+            shape: FnShape::new(f),
             defs: &defs,
             phis: &phis,
             cells,
@@ -178,6 +179,7 @@ fn one_param(mask: u64) -> Option<u8> {
 struct Values<'a> {
     ir: &'a ModuleIr,
     f: &'a IrFunction,
+    shape: FnShape<'a>,
     defs: &'a FxHashMap<VarId, &'a InstKind>,
     phis: &'a FxHashMap<VarId, &'a [(BlockId, VarId)]>,
     cells: &'a crate::infer::ParamCells,
@@ -210,17 +212,10 @@ impl Values<'_> {
         }
     }
 
-    /// The value `var` copies, through any number of copies.
+    /// The value `var` copies, through any number of copies (each value's root is found once per
+    /// function).
     fn copied(&self, var: VarId) -> VarId {
-        let mut cur = var;
-        // Copies in dead code can close a cycle: at most one step per instruction.
-        for _ in 0..self.defs.len() {
-            match self.defs.get(&cur) {
-                Some(InstKind::Copy { src, .. }) => cur = *src,
-                _ => break,
-            }
-        }
-        cur
+        self.shape.copy_root(var)
     }
 
     /// The captured position of the enclosing function's parameter the cell `name` holds.

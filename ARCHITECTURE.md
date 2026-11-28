@@ -359,8 +359,11 @@ parameters, in a nested function it calls or hands to a builtin calling it per i
 function of the project it hands the parameter to by name, which completing the declarations
 decides across modules (a union fixpoint charged to the module's budget). A call binding such a
 parameter to a project function, nested function, lambda, bound method, or `functools.partial`
-of one gets a call site of it there, so the call graph, every rule, and the effect boundaries see
-the call. In a boundary's reach, a call of a parameter is judged when every followed call binds it
+of one gets a call site of it there (`Runner::Helper`), so the call graph, every rule, and the
+effect boundaries see the call. Whether and on which paths the callee calls it are the callee's,
+so the site is never taken to run on every path of the caller; a callee an API runs on a worker
+runs it there too, and a generator function or an `async def` the callee does not await gets no
+site, since calling it runs no body. In a boundary's reach, a call of a parameter is judged when every followed call binds it
 to such functions, to `None`, or to a parameter of the caller that is itself bound so; the scope
 function's own parameters, `*` unpacking, and a nested function called away from its definer
 stay unresolved.

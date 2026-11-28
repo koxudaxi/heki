@@ -9210,6 +9210,42 @@ fn a_fan_out_of_handing_calls_is_charged_for_each_visit() {
     check_past_budgets(3000, &["heki_effect::resolver::handed"], handing_fan_out);
 }
 
+/// `h(fn)` copying its parameter down a chain (`f1 = f0`, `f2 = f1`, ...) and calling the last
+/// copy once per copy, and `use` handing it a function that sleeps.
+fn handing_copy_chain(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_handing_copy_chain_{n}"));
+    let mut lines = vec![
+        "import time".to_owned(),
+        String::new(),
+        String::new(),
+        "def blocking():".to_owned(),
+        "    time.sleep(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def h(fn):".to_owned(),
+        "    f0 = fn".to_owned(),
+    ];
+    lines.extend((1..n).map(|i| format!("    f{i} = f{}", i - 1)));
+    lines.extend((0..n).map(|_| format!("    f{}()", n - 1)));
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def use():".to_owned(),
+        "    h(blocking)".to_owned(),
+    ]);
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Recording which parameters a function calls finds each value's copy root once, so calls
+/// through the last of a long chain of copies take time linear in the function, and the call
+/// handing the helper a function runs it.
+#[test]
+fn calls_through_a_long_copy_chain_of_a_parameter_find_its_root_once() {
+    let found = check_linear(4000, handing_copy_chain);
+    assert_eq!(blocking_callers(&found), ["use"]);
+}
+
 /// `a1` and `a2`, each returning one of `branches` calls of functions returning their
 /// parameter, and in another module `use` handing a read-only parameter to `change` through
 /// `b`, which returns what `a1` or `a2` returns.

@@ -96,8 +96,22 @@ def generated(fields: list[Field], fn) -> None:
     later(fn)
 
 
+def drain(fn) -> None:
+    for _ in fn():
+        pass
+
+
+def start(fn):
+    return fn()
+
+
 def mark(field: Field, *, deep: bool = False) -> None:
     field.required = True
+
+
+def marks(field: Field):
+    field.required = True
+    yield field
 
 
 async def mark_async(field: Field) -> None:
@@ -107,8 +121,8 @@ async def mark_async(field: Field) -> None:
 const PASSES: &str = r#"from functools import partial
 
 from pkg.helpers import (
-    chosen, deep, each, each_async, generated, keep, mapped, mark, mark_async, nested, rebinds,
-    run_all, stores,
+    chosen, deep, drain, each, each_async, generated, keep, mapped, mark, mark_async, marks,
+    nested, rebinds, run_all, start, stores,
 )
 from pkg.model import Field, Marker
 
@@ -171,13 +185,40 @@ def run_stored(fields: list[Field]) -> None:
 
 def run_generator(fields: list[Field]) -> None:
     generated(fields, mark)
+
+
+def run_drained(fields: list[Field]) -> None:
+    drain(partial(marks, fields[0]))
+
+
+async def run_started(fields: list[Field]) -> None:
+    await start(partial(mark_async, fields[0]))
 "#;
 
-const BLOCKING: &str = r#"import requests
+const BLOCKING: &str = r#"import asyncio
+
+import requests
 
 
 def fetch() -> int:
     return requests.get("https://example.com").status_code
+
+
+def fetch_url(url: str) -> int:
+    return requests.get(url).status_code
+
+
+def maybe(fn, enabled: bool):
+    if enabled:
+        return fn()
+    return None
+
+
+def lazy(fn, urls):
+    def one(url):
+        return fn(url)
+
+    return map(one, urls)
 
 
 def retry(fn, times: int = 3):
@@ -211,6 +252,23 @@ async def through_lambda() -> int:
 
 async def through_register() -> None:
     register(fetch)
+
+
+async def through_maybe(enabled: bool) -> None:
+    maybe(fetch, enabled)
+
+
+async def through_lazy(urls: list[str]) -> list[int]:
+    return list(lazy(fetch_url, urls))
+
+
+async def through_thread() -> int:
+    return await asyncio.to_thread(call, fetch)
+
+
+async def through_executor() -> int:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, call, fetch)
 "#;
 
 fn project(name: &str) -> Project {
@@ -239,7 +297,7 @@ unresolved = "report"
 }
 
 /// `(rule, function, what)` of every report, sorted: a boundary's write or unresolved call, or
-/// the function an `EFF101` reports.
+/// the function an `EFF101` report's caller runs, with the report's certainty.
 fn found(p: &Project) -> Vec<(String, String, String)> {
     let (code, stdout, stderr) = p.check(&["--output-format", "json", "pkg"]);
     assert!(code == 0 || code == 1, "{stdout}{stderr}");
@@ -253,7 +311,9 @@ fn found(p: &Project) -> Vec<(String, String, String)> {
             } else if message.contains("writes `Field.required`") {
                 "write".to_owned()
             } else {
-                message.split('`').nth(1).unwrap_or_default().to_owned()
+                let hop = d["related"][0]["message"].as_str().unwrap();
+                let ran = hop.split('`').nth(3).unwrap_or_default();
+                format!("{ran}, {}", d["certainty"].as_str().unwrap())
             };
             let rule = d["rule_code"].as_str().unwrap().to_owned();
             (rule, d["qualname"].as_str().unwrap().to_owned(), what)
@@ -268,18 +328,29 @@ fn a_function_handed_to_a_helper_that_calls_it_runs_there() {
     let p = project("handed_callables");
     let r = |rule: &str, q: &str, what: &str| (rule.to_owned(), q.to_owned(), what.to_owned());
     let unresolved = |q: &str, called: &str| r("EFF201", q, &format!("unresolved {called}"));
+    // Whether and on which paths a helper calls its parameter is the helper's: what it runs is
+    // reached, never run on every path of the caller.
     let expected = vec![
-        r("EFF101", "through_call", "pkg.blocking.fetch"),
+        r("EFF101", "through_call", "pkg.blocking.fetch, heuristic"),
         r(
             "EFF101",
             "through_lambda",
-            "pkg.blocking.through_lambda.<locals>.<lambda>",
+            "pkg.blocking.through_lambda.<locals>.<lambda>, heuristic",
         ),
-        r("EFF101", "through_retry", "pkg.blocking.fetch"),
+        r(
+            "EFF101",
+            "through_lazy",
+            "pkg.blocking.fetch_url, heuristic",
+        ),
+        r("EFF101", "through_maybe", "pkg.blocking.fetch, heuristic"),
+        r("EFF101", "through_retry", "pkg.blocking.fetch, heuristic"),
         r("EFF201", "run_awaited", "write"),
         r("EFF201", "run_bound", "write"),
         r("EFF201", "run_choice", "write"),
         r("EFF201", "run_deep", "write"),
+        // A generator function's body runs where what it returns is iterated, and a coroutine's
+        // where it is awaited: the helper calling them runs neither, so the call stays unresolved.
+        unresolved("run_drained", "fn"),
         // The nested function runs away from the function binding its cell: nothing binds it.
         unresolved("run_escaping", "fn"),
         r("EFF201", "run_hand_on", "write"),
@@ -291,11 +362,13 @@ fn a_function_handed_to_a_helper_that_calls_it_runs_there() {
         r("EFF201", "run_partial", "write"),
         // The parameter is rebound before the call: what the call passes is not called.
         unresolved("run_rebound", "visit"),
+        unresolved("run_started", "fn"),
         // `*` unpacking hides which value binds the parameter.
         unresolved("run_unpacked", "visit"),
         // Nothing for `run_stored` (the helper keeps the function), `run_generator` (a
-        // generator's body does not run at the call handing it the function), or
-        // `through_register` (the helper does not call its parameter).
+        // generator's body does not run at the call handing it the function),
+        // `through_register` (the helper does not call its parameter), or `through_thread` and
+        // `through_executor` (the helper runs on a worker thread, and so does what it calls).
     ];
     assert_eq!(found(&p), expected);
 }

@@ -1716,7 +1716,13 @@ holds the facts of all of them. A builtin calling a
 callable per item and a sync-facade API resolve a `functools.partial` object to the function it
 calls, the arguments it holds binding the leading parameters (`partial(f, a)` handed to `map`
 calls `f(a, item)`); an offloading API's partial is not followed, since `MUT202` matches a
-worker's site to the arguments after the callable again (`site_call`).
+worker's site to the arguments after the callable again (`site_call`). A callable a project
+callee calls through the parameter the call binds (`FunctionDecl::calls_params`) gets a site with
+`Runner::Helper` at the call: it runs on the caller's thread, but whether and on which paths the
+callee calls it are the callee's, so no fact of the site holds on every path (`EFF101` reports it
+as reached); a callee an API runs on a worker runs it there, so its site takes the worker's
+runner and `offloads_to`; and a generator function, or an `async def` the callee does not await,
+gets no site, since calling it runs no body.
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
