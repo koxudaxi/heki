@@ -965,3 +965,25 @@ fn a_touched_included_file_shows_every_report_and_other_toml_files_are_passed_ov
     assert!(!none.contains("pkg/m.py:"), "{none}");
     assert!(!stderr.contains("`--touched` names"), "{stderr}");
 }
+
+#[test]
+fn a_touched_stub_counts_as_touched_and_a_deleted_path_is_named() {
+    let p = project("fold_touched_stub", "[tool.heki]\n");
+    p.write("pkg/m.pyi", "def f() -> None: ...\n");
+    let (code, stdout, stderr) = p.check(&["--touched", "pkg/m.pyi"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("in or through 1 touched file(s)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("`--touched` names"), "{stderr}");
+    let (_, _, stderr) = p.check(&["--touched", "pkg/gone.pyi"]);
+    assert!(
+        stderr.contains("in or through 0 touched file(s)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("`--touched` names 1 path(s) that are not among the analyzed files"),
+        "{stderr}"
+    );
+}
