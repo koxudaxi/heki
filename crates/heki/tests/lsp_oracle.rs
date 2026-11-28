@@ -2248,6 +2248,59 @@ fn steps_held_functions() -> Vec<Step> {
     ]
 }
 
+const HAND_DEFS: &str =
+    "import time\n\n\ndef blocking():\n    time.sleep(1)\n\n\ndef quiet():\n    pass\n";
+const HAND_HELPERS: &str = "def call(fn):\n    return fn()\n";
+const HAND_USE: &str = "from pkg.hand_defs import blocking\nfrom pkg.hand_helpers import call\n\n\nasync def use():\n    call(blocking)\n";
+
+/// A helper of another module calls the function it is handed (`FunctionDecl::calls_params`),
+/// so the caller passing a function that waits runs it there (`EFF101`); the helper stores the
+/// function instead, then calls it in a nested function it calls; the caller passes a function
+/// that does not wait, then the waiting one again.
+fn steps_handed_callables() -> Vec<Step> {
+    const USE: &[(&str, &str)] = &[("pkg/hand_use.py", "EFF101")];
+    vec![
+        Step::new(
+            "a helper of another module calls the function it is handed",
+            vec![
+                Action::Create("pkg/hand_defs.py", HAND_DEFS.to_owned()),
+                Action::Create("pkg/hand_helpers.py", HAND_HELPERS.to_owned()),
+                Action::Create("pkg/hand_use.py", HAND_USE.to_owned()),
+            ],
+        )
+        .present(USE),
+        Step::new(
+            "the helper keeps the function instead of calling it",
+            vec![save(
+                "pkg/hand_helpers.py",
+                "KEPT = []\n\n\ndef call(fn):\n    KEPT.append(fn)\n",
+            )],
+        )
+        .absent(USE),
+        Step::new(
+            "the helper calls the function in a nested function it calls",
+            vec![save(
+                "pkg/hand_helpers.py",
+                "def call(fn):\n    def once():\n        fn()\n\n    once()\n",
+            )],
+        )
+        .present(USE),
+        Step::new(
+            "the caller passes a function that does not wait",
+            vec![save(
+                "pkg/hand_use.py",
+                &HAND_USE.replace("blocking", "quiet"),
+            )],
+        )
+        .absent(USE),
+        Step::new(
+            "the caller passes the waiting function again",
+            vec![save("pkg/hand_use.py", HAND_USE)],
+        )
+        .present(USE),
+    ]
+}
+
 /// The items a loop over a function's result steps through are those every return of the
 /// function gives (`FunctionDecl::returns`): a query in another module whose text fixes its
 /// rows makes the loop's report heuristic, and rows returned through a helper of that module
@@ -8527,6 +8580,7 @@ sessions!(editing, Session::start, {
     returned_types: steps_returned_types,
     declared_types: steps_declared_types,
     held_functions: steps_held_functions,
+    handed_callables: steps_handed_callables,
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,

@@ -113,7 +113,7 @@ impl ForwardingCall {
     }
 
     /// The parameter of the calling function the call binds to the parameter `k` of `callee`.
-    fn binds(&self, callee: &FunctionDecl, k: u8) -> Option<u8> {
+    pub(super) fn binds(&self, callee: &FunctionDecl, k: u8) -> Option<u8> {
         let k = usize::from(k);
         match self.positional.get(k) {
             Some(param) => *param,
@@ -300,7 +300,7 @@ fn decide<'d>(
 /// The declaration of `key`: the module's own functions are those of its file, since pass 1
 /// `project` may hold those of another file of the same module name (a `.py` implementation next
 /// to its `.pyi` stub).
-fn decl_of<'d>(
+pub(super) fn decl_of<'d>(
     decls: &'d ModuleDecls,
     project: &'d ProjectDecls,
     key: &FuncKey,
@@ -349,7 +349,7 @@ fn returned(node: &Node, facts: &Facts<Returned>) -> Option<Returned> {
 /// The project function `call` calls, as `project` names it, and its key: not a method, whose
 /// receiver or class a call by this name would not bind as a parameter, nor a function the
 /// project may bind again, whose call may run another object ([`ProjectDecls::call_rebound`]).
-fn callee<'p>(
+pub(super) fn callee<'p>(
     project: &'p ProjectDecls,
     call: &ForwardingCall,
 ) -> Option<(FuncKey, &'p FunctionDecl)> {

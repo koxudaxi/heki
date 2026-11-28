@@ -19,6 +19,15 @@ pub struct BlindCall {
     pub loop_depth: u16,
     pub is_awaited: bool,
     pub blind: Blind,
+    /// The parameters of the function (a nested scope's captured ones at their positions) the
+    /// value called is on every path, itself or as a choice among them: what calls of the
+    /// function bind there decides what the call runs.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub params: u64,
+}
+
+fn is_zero(mask: &u64) -> bool {
+    *mask == 0
 }
 
 /// What heki does not see of a call.

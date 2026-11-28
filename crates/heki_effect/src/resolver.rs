@@ -48,6 +48,7 @@ mod chained_methods;
 mod fields;
 mod forwarded;
 mod getattr_exports;
+mod handed;
 mod init_containers;
 mod package_paths;
 mod returns;
@@ -58,6 +59,7 @@ mod workspace;
 
 pub use fields::{Changeable, FieldDefault, FieldValues, InitField, InitFields};
 pub use forwarded::{ForwardedReturn, ForwardingCall};
+pub use handed::HandingCall;
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
 pub use sentinels::object_sentinel_calls;
 pub(crate) use type_names::type_expression_text;
@@ -1118,6 +1120,23 @@ pub struct FunctionDecl {
     /// The parameters of enclosing functions a nested scope reads through its closure cells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_params: Option<Box<CapturedParams>>,
+    /// The parameters (bit `i`; a nested scope's captured ones at their positions) whose value
+    /// the function calls on its own thread, itself, in a nested function it calls, or through
+    /// a function it hands the value to ([`handed::complete`]): a call binding one to a known
+    /// function runs that function there.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub calls_params: u64,
+    /// Those of [`Self::calls_params`] whose call is awaited, which runs an `async def`'s body.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub awaits_params: u64,
+    /// The calls that may hand a parameter on, from which completing the declarations decides
+    /// [`Self::calls_params`] ([`handed::record`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handing: Option<Box<[HandingCall]>>,
+}
+
+fn is_zero(mask: &u64) -> bool {
+    *mask == 0
 }
 
 /// The parameters of the functions enclosing a nested scope (a comprehension or generator
@@ -8062,9 +8081,13 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             captured_params: captured_params
                 .get(f.qualname.as_str())
                 .map(|c| Box::new(c.clone())),
+            calls_params: 0,
+            awaits_params: 0,
+            handing: None,
         };
         decls.functions.insert(f.qualname.clone(), Box::new(decl));
     }
+    handed::record(input.ir, &mut decls, &captured_params);
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
     decls.calls_setstate = stores::calls_setstate(input);
@@ -10207,6 +10230,7 @@ fn complete_decls(
     crate::capacity::record(input, &cx, &mut decls);
     decls.field_values = fields::field_values(input, &cx);
     forwarded::complete(input, &mut decls, project);
+    handed::complete(input, &mut decls, project);
     decls
 }
 

@@ -1704,9 +1704,6 @@ impl<'a> Reach<'a> {
             if runs_body {
                 reach.collect_external(cx, b, i, &func);
             }
-            if b.report_unresolved && runs_body {
-                reach.collect_unjudged(cx, i, &func);
-            }
             for &(path, site) in own {
                 let hop = |caller: &FuncKey, callee: String| CallHop {
                     caller: caller.clone(),
@@ -1769,6 +1766,15 @@ impl<'a> Reach<'a> {
                 }
             }
             i += 1;
+        }
+        // The calls it cannot judge, once every followed call into each node is known: a call of
+        // a parameter runs what they bind there.
+        if b.report_unresolved {
+            let bound = reach.bound_callables(cx);
+            for (i, _) in bodies.iter().enumerate().filter(|(_, body)| **body) {
+                let func = reach.nodes[i].0.clone();
+                reach.collect_unjudged(cx, i, &func, bound[i]);
+            }
         }
         // The writes, once every followed call into each node is known: a write to the object a
         // parameter holds constructs it when every one of them hands it a new object.
@@ -2329,11 +2335,60 @@ impl<'a> Reach<'a> {
         }
     }
 
+    /// By node: the parameters of its function that every followed call into it binds to
+    /// functions all known (`ArgOrigin::handed`, whose sites the reach follows), to `None`
+    /// (calling it runs nothing), or to a parameter of the caller bound so itself (a cell of one, for a nested function). A
+    /// greatest fixpoint over the followed calls, each pass clearing bits: at most one pass per
+    /// node and parameter. The scope function's callers are outside the reach.
+    fn bound_callables(&self, cx: &CheckContext<'_>) -> Vec<u64> {
+        let mut bound = vec![0u64; self.nodes.len()];
+        for e in &self.edges {
+            bound[e.to] = u64::MAX;
+        }
+        bound[0] = 0;
+        // Where each callee's cells of enclosing parameters start ([`heki_effect::CapturedParams`]).
+        let captured: Vec<usize> = (self.edges.iter())
+            .map(|e| {
+                let decl = cx.decls.function_decl(&e.bc.callee);
+                let first = decl
+                    .and_then(|d| d.captured_params.as_deref())
+                    .map(|c| c.first);
+                first.map_or(usize::MAX, usize::from)
+            })
+            .collect();
+        loop {
+            let mut changed = false;
+            for (e, &first) in self.edges.iter().zip(&captured) {
+                let mut binds = 0u64;
+                for (k, arg) in e.bc.params.iter().enumerate().take(64) {
+                    let caller = match arg.param {
+                        Some((q, None)) if q < 64 => 1u64 << q,
+                        None if k >= first => arg.may_params,
+                        _ => 0,
+                    };
+                    if arg.handed || arg.is_none() || (caller != 0 && caller & !bound[e.from] == 0)
+                    {
+                        binds |= 1u64 << k;
+                    }
+                }
+                let kept = bound[e.to] & binds;
+                if kept != bound[e.to] {
+                    bound[e.to] = kept;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return bound;
+            }
+        }
+    }
+
     /// The calls the boundary cannot judge in node `i`'s own body (`unresolved = "report"`):
-    /// those heki resolves to no function (the blind spots of `heki recommend`), and a body it
-    /// does not model or that only a stub declares (`EffectSummary::unknown_calls` without such
-    /// a call, as `heki inspect`'s `purity.unknown_reach` lists it).
-    fn collect_unjudged(&mut self, cx: &CheckContext<'_>, i: usize, func: &FuncKey) {
+    /// those heki resolves to no function (the blind spots of `heki recommend`), but a call of
+    /// parameters the followed calls bind to known functions (`bound`, [`Self::bound_callables`]),
+    /// and a body it does not model or that only a stub declares (`EffectSummary::unknown_calls`
+    /// without such a call, as `heki inspect`'s `purity.unknown_reach` lists it).
+    fn collect_unjudged(&mut self, cx: &CheckContext<'_>, i: usize, func: &FuncKey, bound: u64) {
         // The node runs its body: the function has a summary, kept with its file.
         let path = cx.index.file_of(func).expect("summarized");
         let summary = cx.index.summary(func);
@@ -2344,6 +2399,9 @@ impl<'a> Reach<'a> {
                 continue;
             };
             unresolved = true;
+            if call.params != 0 && call.params & !bound == 0 {
+                continue;
+            }
             let nodes = &self.nodes;
             note(
                 &mut self.unjudged,

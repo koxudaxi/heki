@@ -351,6 +351,20 @@ setter or deleter is not modeled, because the setter shares the getter's qualnam
 property's value, `obj.attr(...)`, is that read and a call of what the getter returns, typed by
 its return annotation (`FunctionDecl.property_type`, also for a property with a setter).
 
+A function handed to a call runs where the callee calls it. A library API's callable
+(`asyncio.to_thread(f)`, `map(f, xs)`) is a call site of `f` at the call, on the runner the
+catalog names. A project function's declaration says which parameters it calls
+(`FunctionDecl::calls_params`, `awaits_params`): itself, through copies or a choice of
+parameters, in a nested function it calls or hands to a builtin calling it per item, or through a
+function of the project it hands the parameter to by name, which completing the declarations
+decides across modules (a union fixpoint charged to the module's budget). A call binding such a
+parameter to a project function, nested function, lambda, bound method, or `functools.partial`
+of one gets a call site of it there, so the call graph, every rule, and the effect boundaries see
+the call. In a boundary's reach, a call of a parameter is judged when every followed call binds it
+to such functions, to `None`, or to a parameter of the caller that is itself bound so; the scope
+function's own parameters, `*` unpacking, and a nested function called away from its definer
+stay unresolved.
+
 #### One `EffectSummary`, propagated bottom-up over Tarjan SCCs
 For the project's functions, a worklist fixpoint in reverse topological order of the call
 graph's Tarjan SCCs propagates **execution effects, mutation and state effects, and write

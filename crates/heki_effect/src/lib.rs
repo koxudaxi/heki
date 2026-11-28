@@ -2446,6 +2446,11 @@ pub struct ArgOrigin {
     /// arguments have one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origins: Option<Box<LocalOrigins>>,
+    /// The argument is a function the callee calls through this parameter
+    /// ([`resolver::FunctionDecl::calls_params`]), every function it can be known: the call's
+    /// sites of handed callables run them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handed: bool,
 }
 
 /// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
@@ -2464,6 +2469,13 @@ pub struct ArgTargets {
 impl ArgOrigin {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The argument is the constant `None` (passed, or a default the call leaves): calling it
+    /// raises `TypeError` before any function runs.
+    pub fn is_none(&self) -> bool {
+        let fact = self.binding.as_ref().and_then(|b| b.fact.as_deref());
+        fact.is_some_and(|f| f.exact && f.class.as_deref() == Some(ConstClass::None.name()))
     }
 
     /// The project classes the ownership rules tie the argument to: `typed_instance`, and the

@@ -9127,6 +9127,87 @@ fn a_fan_out_of_forwarding_calls_is_charged_for_each_visit() {
     );
 }
 
+/// `h{k}(fn)` handing `fn` to `h{k-1}`, and `h0` calling it: `use` hands `h{n-1}` a function
+/// that sleeps, and `top`, an effect boundary's scope, its own parameter, which the reach binds
+/// to nothing along the chain.
+fn handing_chain(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_handing_chain_{n}"));
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"top\"\nscopes = [\"m.top\"]\nwrite-universe = [\"Node.*\"]\nunresolved = \"report\"\n",
+    );
+    let mut lines = vec![
+        "import time".to_owned(),
+        String::new(),
+        String::new(),
+        "def blocking():".to_owned(),
+        "    time.sleep(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def h0(fn):".to_owned(),
+        "    fn()".to_owned(),
+    ];
+    for k in 1..n {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{k}(fn):"),
+            format!("    h{}(fn)", k - 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def use():".to_owned(),
+        format!("    h{}(blocking)", n - 1),
+        String::new(),
+        String::new(),
+        "def top(fn):".to_owned(),
+        format!("    h{}(fn)", n - 1),
+    ]);
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// A long chain of functions handing a parameter on to the one calling it: completing the
+/// declarations visits each function a bounded number of times, and so does the reach deciding
+/// what the scope's calls bind.
+#[test]
+fn a_parameter_handed_down_a_long_chain_of_calls_is_decided_in_linear_time() {
+    let found = check_linear(4000, handing_chain);
+    assert_eq!(blocking_callers(&found), ["use"]);
+    let unjudged = (found.iter()).filter(|d| {
+        d["rule_code"] == "EFF201" && d["message"].as_str().unwrap().contains("cannot resolve")
+    });
+    assert_eq!(unjudged.count(), 1);
+}
+
+/// `a(fn)` handing `fn` to `branches` functions `g{i}`, each handing it to `h`, which calls it:
+/// `a` is read again each time one of them grows.
+fn handing_fan_out(branches: usize) -> Project {
+    let p = Project::new(&format!("bounds_handing_fan_out_{branches}"));
+    let mut lines = vec!["def h(fn):".to_owned(), "    fn()".to_owned()];
+    lines.extend([String::new(), String::new(), "def a(fn):".to_owned()]);
+    lines.extend((0..branches).map(|i| format!("    g{i}(fn)")));
+    for i in 0..branches {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def g{i}(fn):"),
+            "    h(fn)".to_owned(),
+        ]);
+    }
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Every visit of a function is charged its calls, so a fan-out of handing calls past the
+/// module's budget leaves the facts open instead of reading the calls once per callee that grows.
+#[test]
+fn a_fan_out_of_handing_calls_is_charged_for_each_visit() {
+    check_past_budgets(3000, &["heki_effect::resolver::handed"], handing_fan_out);
+}
+
 /// `a1` and `a2`, each returning one of `branches` calls of functions returning their
 /// parameter, and in another module `use` handing a read-only parameter to `change` through
 /// `b`, which returns what `a1` or `a2` returns.
