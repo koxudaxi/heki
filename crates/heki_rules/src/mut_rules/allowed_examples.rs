@@ -9,7 +9,7 @@
 //! every edit above it, which leaves the facts the help names the same.
 
 use super::call_owners::split_arguments;
-use super::{Allowance, AllowanceKeys, Named, Overrides, patterns, split_item};
+use super::{Allowance, AllowanceKeys, Named, Overrides, items_target, patterns};
 use crate::{CheckContext, DottedPattern, last_name};
 use heki_diagnostics::AllowedExample;
 use heki_effect::{EffectSummary, FileSummary, FuncKey, ProjectIndex, SiteRole};
@@ -242,8 +242,13 @@ impl ExampleOwners {
         let exempt = config.invalidation.iter().flat_map(|r| &r.exempt_writers);
         let exempt: Vec<String> = exempt.cloned().collect();
         let out = Self {
+            // A text that may name items (whether it does depends on the classes) may be the
+            // target of any write.
             writers: OwnedNames::new(writers, "write-owners.targets", |t| {
-                last_name(split_item(t).map_or(t, |(base, _)| base))
+                match items_target(t, |_| true) {
+                    Some(_) => "*",
+                    None => last_name(t),
+                }
             })?,
             readers: OwnedNames::new(readers, "read-owners.targets", last_name)?,
             callers: OwnedNames::new(callers, calls, |t| {

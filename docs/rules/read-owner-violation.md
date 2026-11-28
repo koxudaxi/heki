@@ -38,8 +38,9 @@ A target names a class and an attribute; it covers the class's subclasses too. A
 attribute (`self.__secret` in class `Vault`) is the member `_Vault__secret`, which a target names
 `Vault.__secret` or `Vault._Vault__secret`, read inside the class as `self.__secret` and outside
 as `vault._Vault__secret`. A container
-entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
-read target names `Class.attr` (an entry is a configuration error).
+entry (`Class.attr["key"]`) and the items of a class (`Class[*]`) are write targets only: reading
+an entry reads the attribute, so a read target names `Class.attr` (an entry or items are a
+configuration error).
 
 The read object's class is the one heki infers for it, with annotations as hints: a
 parameter, local, attribute, or return annotation, including the items of `list[...]`,

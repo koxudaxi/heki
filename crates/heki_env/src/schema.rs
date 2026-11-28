@@ -150,6 +150,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("write-owners.forbidden-writers", r#"["pkg.views.*"]"#),
     ("write-owners.forbid-cached-property-on", r#"["DataModel"]"#),
     ("write-owners.unlisted-dict-keys", r#""report""#),
+    ("write-owners.unlisted-attributes", r#""report""#),
     ("read-owners.allowed-readers", r#"["*GenerationStore*"]"#),
     ("read-owners.forbidden-readers", r#"["pkg.views.*"]"#),
     ("call-owners.targets", r#"["pkg.db.Session.commit"]"#),

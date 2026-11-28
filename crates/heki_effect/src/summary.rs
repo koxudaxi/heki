@@ -767,6 +767,9 @@ struct ItemOf {
     fresh: bool,
     reach: Reach,
     holder: Option<VarId>,
+    /// The container itself (`obj.attr`), unless phi inputs read different ones: an instance
+    /// holding items ([`Extractor::items_of`]) has the entry among its items too.
+    container: Option<VarId>,
 }
 
 /// What every value a function binds to one of its closure cells is, as its alias maps join
@@ -2531,6 +2534,25 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The items of the instance `var` holds, as the container of [`crate::ITEMS_ATTR`]: of the
+    /// project classes it may be that hold items ([`ProjectDecls::holds_items`]). Only with an
+    /// ownership contract, whose targets alone name items.
+    fn items_of(&self, var: VarId) -> Option<ObjAttr> {
+        if !self.ownership {
+            return None;
+        }
+        // `super()` is the method's own `self`, an instance of the method's class.
+        let own = self.f.params.first().map(|p| p.var);
+        let (classes, holder) = match (self.val(var), own) {
+            (Some(Val::Super(owner)), Some(own)) => (vec![owner.clone()], own),
+            _ => (self.project_classes(var), var),
+        };
+        let classes: Vec<String> = (classes.into_iter())
+            .filter(|c| self.cx.project.holds_items(c))
+            .collect();
+        (!classes.is_empty()).then(|| self.obj_attr(classes, holder, crate::ITEMS_ATTR))
+    }
+
     /// The load `obj.<attr>` (`obj["<attr>"]`) of the project-class object `obj`.
     fn obj_attr(&self, classes: Vec<String>, obj: VarId, attr: &str) -> ObjAttr {
         ObjAttr {
@@ -2970,8 +2992,10 @@ impl<'a> Extractor<'a> {
 
     fn origin(&self, var: VarId) -> ArgOrigin {
         let (class, exact) = self.class_line(var);
-        let field = self.obj_attr_alias.get(&var);
-        let typed_field = field
+        // A helper handed an instance holding items changes them (`fill(imports)`).
+        let items = || self.items_of(var);
+        let field = (self.obj_attr_alias.get(&var).cloned()).or_else(items);
+        let typed_field = (field.as_ref())
             .filter(|a| a.classes.len() == 1)
             .map(|a| (a.classes[0].clone(), a.attr.clone()));
         let typed_instance = self.project_class(var);
@@ -4085,6 +4109,7 @@ impl<'a> Extractor<'a> {
                 obj_params: 0,
                 fresh: false,
                 holder: None,
+                container: None,
                 ..i
             });
             let dict = joined_owner(vars.iter().map(|v| self.dict_of.get(v)));
@@ -7096,9 +7121,27 @@ impl<'a> Extractor<'a> {
         } else if let Some(i) = self.item_alias.get(&var).cloned() {
             // `obj.attr["k"][name] = v`: an entry of an entry of the attribute's container.
             let written = i.written();
+            let key = (i.key.clone(), EntryKey::Written);
+            // An instance holding items in the attribute has the entry among them too.
+            let container_items = (i.container)
+                .filter(|_| i.attr != crate::ITEMS_ATTR)
+                .and_then(|c| self.items_of(c));
             for class in i.classes {
-                let key = (i.key.clone(), EntryKey::Written);
-                self.typed_site(class, &i.attr, key, WriteKind::ItemMut, span, written);
+                self.typed_site(
+                    class,
+                    &i.attr,
+                    key.clone(),
+                    WriteKind::ItemMut,
+                    span,
+                    written,
+                );
+            }
+            if let Some(a) = container_items {
+                let written = a.written();
+                for class in a.classes {
+                    let attr = crate::ITEMS_ATTR;
+                    self.typed_site(class, attr, key.clone(), WriteKind::ItemMut, span, written);
+                }
             }
         } else if let Some((attr, obj, nested)) = self.untyped_container(var) {
             let kind = if nested {
@@ -7107,6 +7150,18 @@ impl<'a> Extractor<'a> {
                 WriteKind::ContainerMut
             };
             self.unresolved(Unresolved::Receiver(attr), obj, kind, span);
+        }
+        // The items of an instance, also one an attribute holds: unless a project method along
+        // the class's MRO replaces the implicit item store or deletion, which is that method's
+        // write.
+        if let Some(a) = self.items_of(var) {
+            let written = a.written();
+            for class in a.classes {
+                if by_name || self.cx.project.mro_method(&class, method).is_none() {
+                    let (attr, kind) = (crate::ITEMS_ATTR, WriteKind::ContainerMut);
+                    self.typed_site(class, attr, item_key.clone(), kind, span, written);
+                }
+            }
         }
     }
 
@@ -7127,8 +7182,9 @@ impl<'a> Extractor<'a> {
             self.write_named(owner, &name, is_delete, WriteKind::DictDirect, span);
             return;
         }
-        // The changed entry's key matters only for a typed attribute's container.
-        let item_key = if self.obj_attr_alias.contains_key(&obj) {
+        // The changed entry's key matters only for a typed attribute's container or the items
+        // of an instance.
+        let item_key = if self.obj_attr_alias.contains_key(&obj) || self.items_of(obj).is_some() {
             self.entry_key(key_const, index)
         } else {
             (None, EntryKey::Written)
@@ -7180,8 +7236,9 @@ impl<'a> Extractor<'a> {
         // typed attribute's container.
         let item_key = match args.first() {
             Some(a)
-                if self.obj_attr_alias.contains_key(&recv)
-                    && matches!(method, "pop" | "__delitem__" | "setdefault" | "__setitem__") =>
+                if matches!(method, "pop" | "__delitem__" | "setdefault" | "__setitem__")
+                    && (self.obj_attr_alias.contains_key(&recv)
+                        || self.items_of(recv).is_some()) =>
             {
                 self.entry_key(None, *a)
             }
@@ -10197,6 +10254,9 @@ fn joined_item<'m>(inputs: impl IntoIterator<Item = Option<&'m ItemOf>>) -> Opti
                 f.reach = f.reach.join(a.reach);
                 if f.holder != a.holder {
                     f.holder = None;
+                }
+                if f.container != a.container {
+                    f.container = None;
                 }
             }
         }

@@ -3894,6 +3894,150 @@ fn unlisted_dict_keys_reports_the_namespace_keys_no_target_names() {
     );
 }
 
+const UNLISTED_ATTRS_MODEL: &str = r#"class Base:
+    def __init__(self) -> None:
+        self.kind = ""
+
+
+class Field(Base):
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = ""
+        self.required = False
+        self.alias = None
+        self.tags: list[str] = []
+
+
+class Sub(Field):
+    pass
+
+
+class Other:
+    def __init__(self) -> None:
+        self.alias = None
+"#;
+
+const UNLISTED_ATTRS_USE: &str = r#"from pkg.model import Base, Field, Other, Sub
+
+
+def rename(field: Field) -> None:
+    field.name = "x"
+
+
+def alias(field: Field) -> None:
+    field.alias = "y"
+
+
+def flag(field: Field) -> None:
+    setattr(field, "required", True)
+
+
+def drop(field: Field) -> None:
+    del field.alias
+
+
+def tag(field: Field) -> None:
+    field.tags.append("x")
+
+
+def on_a_subclass(sub: Sub) -> None:
+    sub.alias = "z"
+
+
+def namespace_key(field: Field) -> None:
+    field.__dict__["_cache"] = 1
+
+
+def on_a_base(base: Base) -> None:
+    base.kind = "k"
+
+
+def on_another_class(other: Other) -> None:
+    other.alias = "o"
+
+
+def make() -> Field:
+    made = Field()
+    made.alias = "m"
+    return made
+
+
+def untyped(obj) -> None:
+    obj.alias = "u"
+"#;
+
+fn unlisted_attrs_project(name: &str, mode: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"fields\"\n\
+             targets = [\"pkg.model.Field.name\"]\nallowed-writers = [\"pkg.store.*\"]\n{mode}\n\
+             [[tool.heki.write-owners]]\nname = \"flags\"\n\
+             targets = [\"pkg.model.Field.required\"]\nallowed-writers = [\"*\"]\n"
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", UNLISTED_ATTRS_MODEL)
+    .write("pkg/use.py", UNLISTED_ATTRS_USE)
+    .write(
+        "pkg/store.py",
+        "from pkg.model import Field\n\n\ndef save(field: Field) -> None:\n    field.alias = \"s\"\n",
+    );
+    p
+}
+
+/// With `unlisted-attributes = "report"`, a write of an attribute of an object of a target's
+/// class (or a subclass) that no target of any `write-owners` contract names is a `MUT201`
+/// write under the contract's allowance: rebinding, `setattr`, deleting, and changing its
+/// container in place. An attribute another contract names, a `__dict__` key (left to
+/// `unlisted-dict-keys`), a base class the targets do not cover, another class, the class's own
+/// initialization, constructing an object, and the allowed writers are not. With `unresolved =
+/// "report"`, `MUT205` reports the attribute written on an object of unknown class.
+#[test]
+fn unlisted_attributes_reports_the_attributes_no_target_names() {
+    let u = "pkg/use.py";
+    let listed = d(u, 5, "MUT201", "rename", "pkg.model.Field.name");
+    let p = unlisted_attrs_project("unlisted_attrs_off", "");
+    assert_eq!(found(&diagnostics(&p, &[])), vec![listed.clone()]);
+    let unlisted = vec![
+        listed,
+        d(u, 9, "MUT201", "alias", "Field.alias"),
+        d(u, 17, "MUT201", "drop", "Field.alias"),
+        d(u, 21, "MUT201", "tag", "Field.tags"),
+        d(u, 25, "MUT201", "on_a_subclass", "Sub.alias"),
+    ];
+    let p = unlisted_attrs_project("unlisted_attrs_on", "unlisted-attributes = \"report\"\n");
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(found(&diags), unlisted);
+    assert_eq!(
+        message_at(&diags, u, 9),
+        "`alias` writes `pkg.model.Field.alias` (by attribute), an attribute no target names, outside the write owners of `fields`"
+    );
+    let p = unlisted_attrs_project(
+        "unlisted_attrs_strict",
+        "unlisted-attributes = \"report\"\nunresolved = \"report\"\n",
+    );
+    let diags = diagnostics(&p, &[]);
+    let mut strict = unlisted;
+    strict.push(d(u, 47, "MUT205", "untyped", "alias"));
+    assert_eq!(found(&diags), strict);
+    assert_eq!(
+        message_at(&diags, u, 47),
+        "`untyped` writes `alias` (by attribute), an attribute no target names, on an object of unknown class outside the write owners of `fields`: heki cannot tell whether it writes `pkg.model.Field.alias`"
+    );
+    let p = unlisted_attrs_project("unlisted_attrs_bad", "unlisted-attributes = \"all\"\n");
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains(
+            "unknown `unlisted-attributes` value `all` in write-owners `fields` (expected `ignore` or `report`)"
+        ),
+        "{stderr}"
+    );
+}
+
 const LISTED_ELSEWHERE_MODEL: &str = r#"from __future__ import annotations
 
 CACHE_KEY = "_cache_key"

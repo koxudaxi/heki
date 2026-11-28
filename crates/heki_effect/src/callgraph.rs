@@ -2235,8 +2235,10 @@ pub(crate) fn indirect_writes<'a>(
         // an allowed callee and make the other itself. A helper writing the value's own
         // attributes writes those, as `obj.attr.x = v` does.
         if let Some((class, attr)) = &origin.typed_field {
+            // The object holding the attribute, or the instance holding the items.
             let obj_params = match &origin.param {
                 Some((p, Some(path))) if path == attr => 1u64 << p,
+                Some((p, None)) if attr == crate::ITEMS_ATTR => 1u64 << p,
                 _ => 0,
             };
             // The method's body runs at the call itself (no function iterating its generator

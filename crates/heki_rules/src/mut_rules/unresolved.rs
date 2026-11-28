@@ -13,13 +13,13 @@
 use super::call_owners::CallOwnerRule;
 use super::{
     Allowance, AllowedExamples, ClassMembers, ContractTarget, FamilyMembers, MergedReports, Named,
-    NamedDictKeys, OwnerRule, ReadOwnerRule, place_functions, project_classes, runs_inside_allowed,
+    NamedMembers, OwnerRule, ReadOwnerRule, place_functions, project_classes, runs_inside_allowed,
     write_hits,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
-use heki_effect::{Access, Construction, FuncKey, Unresolved, WriteKind};
+use heki_effect::{Access, Construction, FuncKey, Unresolved};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -27,7 +27,7 @@ use std::path::Path;
 pub(super) fn mut205(
     cx: &CheckContext<'_>,
     rules: &[OwnerRule<'_>],
-    named: &NamedDictKeys<'_>,
+    named: &NamedMembers<'_>,
     out: &mut Vec<Diagnostic>,
 ) {
     if !cx.selection.is_enabled("MUT205") {
@@ -44,8 +44,8 @@ pub(super) fn mut205(
     // The classes of every target of each rule, the family of a computed name on an object of
     // unknown class, built once per rule.
     let mut every_family: Vec<Option<FxHashSet<String>>> = vec![None; strict.len()];
-    // The classes each rule's `__dict__` keys no target names may be new keys of, by rule and
-    // key, found once rather than once per write.
+    // The classes each rule's attributes and `__dict__` keys no target names may be new
+    // members of, by rule and name, found once rather than once per write.
     let mut unlisted_by_key: FxHashMap<(usize, &str), Option<FxHashSet<String>>> =
         FxHashMap::default();
     let mut reports = MergedReports::default();
@@ -70,9 +70,7 @@ pub(super) fn mut205(
                     .collect();
                 let unlisted = match &w.what {
                     Unresolved::Receiver(attr)
-                        if hits.is_empty()
-                            && rule.report_unlisted_keys
-                            && w.kind == WriteKind::DictDirect =>
+                        if hits.is_empty() && rule.reports_unlisted(w.kind) =>
                     {
                         unlisted_by_key
                             .entry((r, attr.as_str()))
@@ -95,8 +93,8 @@ pub(super) fn mut205(
                 // callers bind, which `MUT201` reports at those callers. A computed name on an
                 // object of unknown class is tied to the other classes its callers bind;
                 // `MUT201` sees no name at a caller binding a target class, so such a caller
-                // leaves the write to this rule. A `__dict__` key no target names is new to the
-                // classes `unlisted` holds, and `MUT201` sees no `__dict__` write at a caller
+                // leaves the write to this rule. A member no target names is new to the
+                // classes `unlisted` holds, and `MUT201` sees no such write at a caller
                 // handing one of them to a helper that never sees its class: such a caller
                 // leaves the write to this rule too, and a class's own initialization through
                 // the helper stays allowed.
@@ -140,9 +138,9 @@ pub(super) fn mut205(
                 };
                 let what = match &w.what {
                     Unresolved::Receiver(attr) if unlisted.is_some() => format!(
-                        "writes `{attr}` ({}), a `__dict__` key no target names, on an object of \
-                         unknown class",
-                        w.kind.describe()
+                        "writes `{attr}` ({}){} on an object of unknown class",
+                        w.kind.describe(),
+                        super::unlisted_member(w.kind)
                     ),
                     Unresolved::Receiver(attr) => format!(
                         "writes `{attr}` ({}) on an object of unknown class",
@@ -201,13 +199,13 @@ pub(super) fn mut205(
     });
 }
 
-/// The classes of `rule`'s targets that the constant `__dict__` key `key`, written on an object
-/// of unknown class, would be a new key of (`unlisted-dict-keys = "report"`): those no
-/// `write-owners` target covering them names it for (`named`), as `MUT201` judges a typed
-/// object. `None` when every class has a target naming the key.
+/// The classes of `rule`'s targets that the attribute or constant `__dict__` key `key`, written
+/// on an object of unknown class, would be a new member of (`unlisted-attributes`,
+/// `unlisted-dict-keys`): those no `write-owners` target covering them names it for (`named`),
+/// as `MUT201` judges a typed object. `None` when every class has a target naming the key.
 fn unlisted_key_classes(
     rule: &OwnerRule<'_>,
-    named: &NamedDictKeys<'_>,
+    named: &NamedMembers<'_>,
     key: &str,
 ) -> Option<FxHashSet<String>> {
     let classes: FxHashSet<String> = (rule.targets.iter())

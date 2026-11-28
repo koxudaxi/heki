@@ -980,9 +980,9 @@ pub enum RuleConfigError {
         section: &'static str,
         target: String,
     },
-    /// A container entry (`Class.attr["key"]`) among read targets.
+    /// A container entry (`Class.attr["key"]`) or items (`Class[*]`) among read targets.
     #[error(
-        "invalid {section} target `{target}`: a container entry (`Class.attr[\"key\"]`) is a write target only; reads are of `Class.attr`"
+        "invalid {section} target `{target}`: a container entry (`Class.attr[\"key\"]`) or the items of a class (`Class[*]`) is a write target only; reads are of `Class.attr`"
     )]
     ItemTarget {
         section: &'static str,
@@ -1124,7 +1124,7 @@ impl Explain for RuleConfigError {
                 in_table(section, "", None, Some(target)),
             ),
             Self::ItemTarget { section, target } => (
-                problem.help("a read target is `Class.attr`: drop the `[\"key\"]`, or make the entry a `write-owners` target"),
+                problem.help("a read target is `Class.attr`: drop the `[\"key\"]` or `[*]`, or make the entry a `write-owners` target"),
                 in_table(section, "", None, Some(target)),
             ),
             Self::UnknownForbid { boundary: name, token, values, .. } => (

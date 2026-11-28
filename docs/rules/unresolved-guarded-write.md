@@ -43,7 +43,9 @@ write:
   class (`field.__dict__["_name_cache"] = v`, `field.__dict__.setdefault(KEY, v)`, `del
   vars(field)["k"]`) that no target of any `write-owners` contract names for some class this
   contract's targets cover: it may be a new key of that class, which `MUT201` reports on a typed
-  object.
+  object;
+- with `unlisted-attributes = "report"`, likewise an attribute written on an object of unknown
+  class (`obj.alias = v`) that no target names for some class this contract's targets cover.
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
@@ -141,5 +143,7 @@ No automatic fix.
   - `unresolved`: `"ignore"` (default) or `"report"`.
   - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
     key no `write-owners` target names, written on an object of unknown class.
+  - `unlisted-attributes`: `"ignore"` (default) or `"report"`: also report an attribute no
+    `write-owners` target names, written on an object of unknown class.
   - `targets`, `allowed-writers`, `forbidden-writers`, `exempt-methods`, `fresh-objects`,
     `attribution`, `message`: as for `MUT201`.

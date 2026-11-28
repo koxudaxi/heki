@@ -1259,6 +1259,7 @@ impl Boundary<'_> {
             .find(|(_, t)| {
                 t.key.is_some() && t.matches(&w.class_qualname, &w.attr) && !own_init(t)
             })?;
+        // `Class.attr` of `Class.attr["key"]`, the class of `Class["key"]`.
         let (container, _) = split_item(&entry.text)?;
         (!allowed).then(|| (container.to_owned(), (key, position)))
     }
@@ -2137,8 +2138,8 @@ impl<'a> Reach<'a> {
                 .find(|(_, t)| !own_init(t))
         {
             let text = match &t.key {
-                Some(_) => t.text.clone(),
-                None => undeclared_text(&t.text, &w.attr),
+                None if !t.names_items() => undeclared_text(&t.text, &w.attr),
+                _ => t.text.clone(),
             };
             buckets.push((WriteBucket::Undeclared(text), Some(("write-universe", ui))));
         }

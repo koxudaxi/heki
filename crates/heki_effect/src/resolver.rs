@@ -5325,6 +5325,18 @@ impl ProjectDecls {
         self.families.get(&(kind, level)).unwrap_or(&NO_MEMBERS)
     }
 
+    /// Whether the instances of the project class `class` hold items as a builtin `list`,
+    /// `dict`, or `set` does: its MRO reaches one of them or a standard-library class deriving
+    /// from one (`collections.defaultdict`), not only an ABC of the family.
+    pub fn holds_items(&self, class: &str) -> bool {
+        const KINDS: [ContainerKind; 3] =
+            [ContainerKind::Dict, ContainerKind::List, ContainerKind::Set];
+        let holder =
+            |f: &ContainerFamily| KINDS.contains(&f.kind) && FamilyLevel::Builtin.admits(f.role);
+        self.is_project_class(class)
+            && (self.mro(class).iter()).any(|c| ContainerFamily::of(c).is_some_and(holder))
+    }
+
     /// Whether `class` is a nominal container ABC ([`ContainerFamily::nominal_abc`]) whose
     /// family the project leaves closed: a value of it is an instance of a builtin of the
     /// family, of another class outside the project that implements it, or of a project

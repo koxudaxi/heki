@@ -10337,6 +10337,100 @@ fn lsp_diagnostics_equal_a_full_check_for_keys_another_contract_names() {
     s.lsp.stop(true);
 }
 
+/// `unlisted-attributes`, as for keys: an attribute another contract's target names on a base
+/// class in another module is listed while the written object's class derives from it.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_attributes_another_contract_names() {
+    let config = LISTED_KEYS_CONFIG.replace(
+        "unlisted-dict-keys = \"report\"",
+        "unlisted-attributes = \"report\"",
+    );
+    let parser = "from pkg.model import Field\n\n\ndef cache(field: Field) -> None:\n    field._type_cache = 1\n";
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", LISTED_KEYS_BASE.to_owned()),
+        ("pkg/model.py", LISTED_KEYS_MODEL.to_owned()),
+        ("pkg/parser.py", parser.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_listed_attrs", &config, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/parser.py", "MUT201")];
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(reported),
+        Step::new(
+            "the class stops deriving from the base the other contract names",
+            vec![save(
+                "pkg/model.py",
+                &LISTED_KEYS_MODEL.replace("class Field(Base):", "class Field:"),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the class derives from the base again",
+            vec![save("pkg/model.py", LISTED_KEYS_MODEL)],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------- the items of a class deriving from a builtin container
+
+const ITEMS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "table"
+targets = ["pkg.model.Table[*]"]
+allowed-writers = ["pkg.model:*"]
+"#;
+
+const ITEMS_BASE: &str = "class Base(dict[str, int]):\n    pass\n";
+const ITEMS_MODEL: &str = "from pkg.base import Base\n\n\nclass Table(Base):\n    pass\n";
+const ITEMS_USE: &str =
+    "from pkg.model import Table\n\n\ndef fill(table: Table) -> None:\n    table[\"k\"] = 1\n";
+
+/// An items target (`Table[*]`) whose class holds items through a base in another module: the
+/// item store is a write of the target while the base derives from `dict`, and none once it
+/// derives from `object`.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_the_items_of_a_container_subclass() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", ITEMS_BASE.to_owned()),
+        ("pkg/model.py", ITEMS_MODEL.to_owned()),
+        ("pkg/use.py", ITEMS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_items", ITEMS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT201")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the base derives from object",
+            vec![save("pkg/base.py", "class Base:\n    pass\n")],
+        )
+        .absent(reported),
+        Step::new(
+            "the base derives from dict again",
+            vec![save("pkg/base.py", ITEMS_BASE)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ------------------------- `__dict__` keys no target names, on an object of unknown class
 
 const UNKNOWN_CLASS_KEYS_CONFIG: &str = r#"[project]
