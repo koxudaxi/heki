@@ -495,6 +495,11 @@ pub struct OnEveryReturn {
 /// No attribute has this name.
 pub const ELEMENTS_PATH: &str = "[]";
 
+/// The [`TypedFieldWriteSite::attr`] of a write of the items of an instance of a project class
+/// deriving from a builtin `dict`, `list`, or `set` (`imports["k"] = v`, `imports.add(x)`): the
+/// instance is the container, and `key` the entry's. No attribute has this name.
+pub const ITEMS_ATTR: &str = "[*]";
+
 pub const fn effect_bit(e: ExecEffectKind) -> u16 {
     1 << (e as u16)
 }

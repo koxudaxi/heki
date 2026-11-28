@@ -224,6 +224,10 @@ pub struct WriteOwnerRule {
     /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target of any
     /// `write-owners` contract covering the class names; `"ignore"` (default) does not.
     pub unlisted_dict_keys: Option<String>,
+    /// `"report"`: also report (`MUT201`) a write of an attribute of an object of a target's
+    /// class that no target of any `write-owners` contract covering the class names (the
+    /// attribute-level twin of `unlisted-dict-keys`); `"ignore"` (default) does not.
+    pub unlisted_attributes: Option<String>,
     /// `true`: an entry naming a method (`Class.method`, `module:Class.method`) in the keys that
     /// name places or callees also names the methods of that name in the project subclasses of
     /// `Class`; `false` (default): it names the method of `Class` only.
@@ -1341,6 +1345,7 @@ fresh-objects = "report"
 unresolved = "report"
 attribution = "lexical"
 unlisted-dict-keys = "report"
+unlisted-attributes = "report"
 
 [[tool.heki.read-owners]]
 name = "reference-children"
@@ -1409,6 +1414,10 @@ import-probes = "report"
         assert_eq!(cfg.write_owners[0].attribution.as_deref(), Some("lexical"));
         assert_eq!(
             cfg.write_owners[0].unlisted_dict_keys.as_deref(),
+            Some("report")
+        );
+        assert_eq!(
+            cfg.write_owners[0].unlisted_attributes.as_deref(),
             Some("report")
         );
         assert_eq!(

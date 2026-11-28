@@ -13,9 +13,10 @@ use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AccessKind, ArgOrigin, AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite,
     CallTarget, Callee, Construction, ContractClass, ContractSharing, Delivery, ELEMENTS_PATH,
-    EffectSummary, Facts, FuncKey, ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared,
-    SiteRole, TypeCtx, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, Val, WriteKind,
-    attr_writes, container_mutator, initializes_own_self, is_initializer, self_attr_writes,
+    EffectSummary, Facts, FuncKey, ITEMS_ATTR, ProjectDecls, ProjectIndex, ReturnStep,
+    SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    Val, WriteKind, attr_writes, container_mutator, initializes_own_self, is_initializer,
+    self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -881,11 +882,14 @@ pub use sentinel_copies::{SentinelTestKey, deep_copy_files, sentinel_tests_in};
 // ==================================================================================== MUT201
 
 /// A `Class.attr` contract target (`write-owners`, `read-owners`, `effect-boundaries`), or
-/// an entry of the container an attribute holds (`Class.attr["key"]`, write targets only).
+/// an entry of the container an attribute holds (`Class.attr["key"]`), or the items of the
+/// instances of a class holding items (`Class[*]`, `Class["key"]`), write targets only.
 pub(crate) struct ContractTarget {
     /// The configured text (diagnostic target and baseline key).
     pub text: String,
-    attr: MemberPattern,
+    /// The attribute pattern; `None` for a target naming the items ([`ITEMS_ATTR`]), which no
+    /// attribute pattern names.
+    attr: Option<MemberPattern>,
     /// The entry key of an item target.
     pub key: Option<String>,
     /// Project classes (fqn) the class pattern names, plus all their subclasses: the
@@ -895,7 +899,12 @@ pub(crate) struct ContractTarget {
 
 impl ContractTarget {
     pub fn matches(&self, class: &str, attr: &str) -> bool {
-        self.classes.contains(class) && self.attr.matches(attr)
+        self.classes.contains(class) && self.matches_attr(attr)
+    }
+
+    /// Whether the target names the items of its classes' instances (`Class[*]`).
+    pub(crate) fn names_items(&self) -> bool {
+        self.attr.is_none()
     }
 
     /// Whether `read` reads the target: its class and attribute, or, through a value typed with
@@ -905,21 +914,25 @@ impl ContractTarget {
         let (class, attr) = (read.class_qualname.as_str(), read.attr.as_str());
         self.matches(class, attr)
             || !read.class_object
-                && self.attr.matches(attr)
+                && self.matches_attr(attr)
                 && decls.protocol_declares(class, attr)
                 && implemented_within(decls, class, &self.classes)
     }
 
-    /// Whether the attribute pattern matches `attr`, whatever the class.
+    /// Whether the attribute pattern matches `attr`, whatever the class: an attribute pattern
+    /// never matches the items, which a glob would.
     pub fn matches_attr(&self, attr: &str) -> bool {
-        self.attr.matches(attr)
+        match &self.attr {
+            Some(pattern) => attr != ITEMS_ATTR && pattern.matches(attr),
+            None => attr == ITEMS_ATTR,
+        }
     }
 
     /// Whether an access of `attr` on an object of unknown class may be one of the target
     /// ([`MemberPattern::matches_on_unknown`], the target's class family having the names
     /// `family` gives).
     pub(crate) fn matches_on_unknown(&self, attr: &str, family: impl FnOnce() -> bool) -> bool {
-        self.attr.matches_on_unknown(attr, family)
+        (self.attr.as_ref()).is_some_and(|pattern| pattern.matches_on_unknown(attr, family))
     }
 
     /// Whether `site` writes the target: its class and attribute, and for an item target the
@@ -1197,6 +1210,20 @@ pub(crate) fn write_hits<'t>(
     }
 }
 
+/// The class pattern and the key of a target naming the items of the instances of a class:
+/// `Class[*]` (every item) and `Class["key"]` (one entry) where `Class` has no dot or names a
+/// project class (`names_class`); `None` for a `Class.attr` or `Class.attr["key"]` target.
+pub(crate) fn items_target(
+    text: &str,
+    names_class: impl FnOnce(&str) -> bool,
+) -> Option<(&str, Option<&str>)> {
+    if let Some(class) = text.strip_suffix(ITEMS_ATTR) {
+        return Some((class, None));
+    }
+    let (base, key) = split_item(text)?;
+    (split_last_dot(base).is_none() || names_class(base)).then_some((base, Some(key)))
+}
+
 /// `Class.attr["key"]` / `Class.attr['key']` -> (`Class.attr`, `key`).
 pub(crate) fn split_item(text: &str) -> Option<(&str, &str)> {
     let quote = match text.as_bytes() {
@@ -1244,8 +1271,8 @@ pub(crate) fn class_set(
     out
 }
 
-/// Parse `Class.attr` (and `Class.attr["key"]`) targets: a target without a dot is
-/// `InvalidTarget { section }`, a bad glob `Glob { context }`.
+/// Parse `Class.attr` (and `Class.attr["key"]`, `Class[*]`, `Class["key"]`) targets: an
+/// attribute target without a dot is `InvalidTarget { section }`, a bad glob `Glob { context }`.
 pub(crate) fn parse_targets(
     cx: &CheckContext<'_>,
     all: &[ContractClass],
@@ -1255,6 +1282,25 @@ pub(crate) fn parse_targets(
 ) -> Result<Vec<ContractTarget>, RuleConfigError> {
     let mut out = Vec::new();
     for t in targets {
+        let names_class = |base: &str| {
+            DottedPattern::new(base, context).is_ok_and(|p| all.iter().any(|c| p.matches_class(c)))
+        };
+        if let Some((class, key)) = items_target(t, names_class) {
+            if class.is_empty() {
+                return Err(RuleConfigError::InvalidTarget {
+                    section,
+                    target: t.clone(),
+                });
+            }
+            let class = DottedPattern::new(class, context)?;
+            out.push(ContractTarget {
+                text: t.clone(),
+                attr: None,
+                key: key.map(str::to_owned),
+                classes: class_set(cx, &class, all, Subclasses::Covered),
+            });
+            continue;
+        }
         let (base, key) = match split_item(t) {
             Some((base, key)) => (base, Some(key.to_owned())),
             None => (t.as_str(), None),
@@ -1268,7 +1314,7 @@ pub(crate) fn parse_targets(
         let class = DottedPattern::new(class, context)?;
         out.push(ContractTarget {
             text: t.clone(),
-            attr: MemberPattern::new(attr, Some(&class), all, context)?,
+            attr: Some(MemberPattern::new(attr, Some(&class), all, context)?),
             key,
             classes: class_set(cx, &class, all, Subclasses::Covered),
         });
@@ -1276,8 +1322,8 @@ pub(crate) fn parse_targets(
     Ok(out)
 }
 
-/// [`parse_targets`] for reads: an item target is `ItemTarget { section }` (a read site is an
-/// attribute read).
+/// [`parse_targets`] for reads: an entry or items target is `ItemTarget { section }` (a read
+/// site is an attribute read).
 pub(crate) fn parse_read_targets(
     cx: &CheckContext<'_>,
     all: &[ContractClass],
@@ -1286,7 +1332,7 @@ pub(crate) fn parse_read_targets(
     context: &'static str,
 ) -> Result<Vec<ContractTarget>, RuleConfigError> {
     let out = parse_targets(cx, all, targets, section, context)?;
-    if let Some(t) = out.iter().find(|t| t.key.is_some()) {
+    if let Some(t) = out.iter().find(|t| t.key.is_some() || t.names_items()) {
         return Err(RuleConfigError::ItemTarget {
             section,
             target: t.text.clone(),
@@ -2708,7 +2754,8 @@ pub(crate) fn matched_name(text: &str, member: impl FnOnce() -> String) -> Strin
 /// is a glob (the key of an entry target, `Class.attr["key"]`, is no glob), or names the members
 /// of every module and class outside the project ([`EXTERNAL`]).
 pub(crate) fn names_members(text: &str) -> bool {
-    text.starts_with(EXTERNAL) || has_glob_syntax(split_item(text).map_or(text, |(base, _)| base))
+    let base = split_item(text).map_or(text, |(base, _)| base);
+    text.starts_with(EXTERNAL) || has_glob_syntax(base.strip_suffix(ITEMS_ATTR).unwrap_or(base))
 }
 
 struct MergedReport<'u> {
@@ -2921,9 +2968,9 @@ const UNRESOLVED: &[&str] = &["ignore", "report"];
 /// `fresh-objects` values; the first is the default (writes that construct an object are no
 /// violation).
 const FRESH_OBJECTS: &[&str] = &["allow", "report"];
-/// `unlisted-dict-keys` values; the first is the default (a `__dict__` key no target names is
-/// no target's write).
-const UNLISTED_DICT_KEYS: &[&str] = &["ignore", "report"];
+/// `unlisted-dict-keys` and `unlisted-attributes` values; the first is the default (a
+/// `__dict__` key or an attribute no target names is no target's write).
+const UNLISTED: &[&str] = &["ignore", "report"];
 /// The values of `import-probes`, the default first.
 const IMPORT_PROBES: &[&str] = &["allow", "report"];
 
@@ -3212,23 +3259,39 @@ struct OwnerRule<'r> {
     /// `unlisted-dict-keys = "report"`: the `__dict__` keys of the targets' classes that no
     /// target names are reported too.
     report_unlisted_keys: bool,
+    /// `unlisted-attributes = "report"`: the attributes of the targets' classes that no target
+    /// names are reported too.
+    report_unlisted_attrs: bool,
 }
 
 impl OwnerRule<'_> {
-    /// What `site` writes of the contract: the targets it hits, or, with `unlisted-dict-keys =
-    /// "report"`, a key written through the namespace of an object of a class some targets cover
-    /// (a `dict_direct` write) that no `write-owners` target names (`named`), once for each
-    /// family of the contract's targets covering the class. Each comes with the index of a target
-    /// whose family it is.
+    /// Whether the contract reports a write of `kind` of a member of its targets' classes that
+    /// no target names: a key written through the namespace (`dict_direct`) with
+    /// `unlisted-dict-keys`, an attribute written any other way with `unlisted-attributes`.
+    fn reports_unlisted(&self, kind: WriteKind) -> bool {
+        if kind == WriteKind::DictDirect {
+            self.report_unlisted_keys
+        } else {
+            self.report_unlisted_attrs
+        }
+    }
+
+    /// What `site` writes of the contract: the targets it hits, or a member of an object of a
+    /// class some targets cover that no `write-owners` target names (`named`), when the contract
+    /// reports such writes ([`Self::reports_unlisted`]), once for each family of the contract's
+    /// targets covering the class. Each comes with the index of a target whose family it is. The
+    /// items of an instance are no member, and a copy of a callee's item write with the key a call
+    /// passes is the callee's write of the attribute.
     fn written<'s>(
         &'s self,
         site: &TypedFieldWriteSite,
-        named: &NamedDictKeys<'_>,
+        named: &NamedMembers<'_>,
     ) -> Vec<(usize, Written<'s>)> {
         let hits = write_hits(&self.targets, site);
         if !hits.is_empty()
-            || !self.report_unlisted_keys
-            || site.kind != WriteKind::DictDirect
+            || site.attr == ITEMS_ATTR
+            || site.passed
+            || !self.reports_unlisted(site.kind)
             || named.names(&site.class_qualname, &site.attr)
         {
             return hits
@@ -3246,26 +3309,29 @@ impl OwnerRule<'_> {
         }
         families
             .into_iter()
-            .map(|(k, f)| (k, Written::UnlistedKey(f)))
+            .map(|(k, f)| (k, Written::Unlisted(f)))
             .collect()
     }
 }
 
-/// The `__dict__` keys the `write-owners` contracts name, by class (`unlisted-dict-keys`): a
-/// target names the keys its attribute pattern matches (an entry target its container) on every
-/// class of its family, whichever contract declares it. A key one contract guards is a listed
-/// key of the class for every other contract, whose own allowance does not cover it. A contract
-/// that only forbids writers (`forbidden-writers` without `allowed-writers`) judges no other
-/// writer, so it names no key.
-struct NamedDictKeys<'r> {
-    /// The targets covering each class (fqn); empty when no contract reports unlisted keys.
+/// The attributes and `__dict__` keys the `write-owners` contracts name, by class
+/// (`unlisted-attributes`, `unlisted-dict-keys`): a target names the members its attribute
+/// pattern matches (an entry target its container) on every class of its family, whichever
+/// contract declares it. A member one contract guards is a listed member of the class for every
+/// other contract, whose own allowance does not cover it. A contract that only forbids writers
+/// (`forbidden-writers` without `allowed-writers`) judges no other writer, so it names no member.
+struct NamedMembers<'r> {
+    /// The targets covering each class (fqn); empty when no contract reports unlisted members.
     by_class: FxHashMap<&'r str, Vec<&'r ContractTarget>>,
 }
 
-impl<'r> NamedDictKeys<'r> {
+impl<'r> NamedMembers<'r> {
     fn new(rules: &'r [OwnerRule<'_>]) -> Self {
         let mut by_class: FxHashMap<&str, Vec<&ContractTarget>> = FxHashMap::default();
-        if rules.iter().any(|r| r.report_unlisted_keys) {
+        if rules
+            .iter()
+            .any(|r| r.report_unlisted_keys || r.report_unlisted_attrs)
+        {
             let listing = rules.iter().filter(|r| !r.allowance.only_forbids());
             for target in listing.flat_map(|r| &r.targets) {
                 for class in &target.classes {
@@ -3276,11 +3342,11 @@ impl<'r> NamedDictKeys<'r> {
         Self { by_class }
     }
 
-    /// Whether a target covering `class` names the `__dict__` key `key`.
-    fn names(&self, class: &str, key: &str) -> bool {
+    /// Whether a target covering `class` names the attribute or `__dict__` key `member`.
+    fn names(&self, class: &str, member: &str) -> bool {
         self.by_class
             .get(class)
-            .is_some_and(|targets| targets.iter().any(|t| t.matches_attr(key)))
+            .is_some_and(|targets| targets.iter().any(|t| t.matches_attr(member)))
     }
 }
 
@@ -3288,21 +3354,36 @@ impl<'r> NamedDictKeys<'r> {
 /// the configured text, or the member written, with the key of an entry target.
 fn written_member(t: &ContractTarget, site: &TypedFieldWriteSite) -> String {
     matched_name(&t.text, || {
-        let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
-        format!(
-            "{}.{}{}",
-            site.class_qualname,
-            site.attr,
-            entry.unwrap_or_default()
-        )
+        member_text(&site.class_qualname, &site.attr, t.key.as_deref())
     })
+}
+
+/// How a report names the member `attr` of `class` a write changes, with the key of an entry:
+/// `Class.attr`, `Class.attr["key"]`, `Class[*]` for the items, `Class["key"]` for one of them.
+pub(crate) fn member_text(class: &str, attr: &str, key: Option<&str>) -> String {
+    let entry = key.map(|k| format!("[\"{k}\"]"));
+    match entry {
+        Some(entry) if attr == ITEMS_ATTR => format!("{class}{entry}"),
+        None if attr == ITEMS_ATTR => format!("{class}{ITEMS_ATTR}"),
+        entry => format!("{class}.{attr}{}", entry.unwrap_or_default()),
+    }
+}
+
+/// How a report of a write of `kind` calls a member no target names.
+fn unlisted_member(kind: WriteKind) -> &'static str {
+    if kind == WriteKind::DictDirect {
+        ", a `__dict__` key no target names,"
+    } else {
+        ", an attribute no target names,"
+    }
 }
 
 /// What a write site writes of a `write-owners` contract ([`OwnerRule::written`]).
 enum Written<'r> {
     Target(&'r ContractTarget),
-    /// A `__dict__` key no target names, on an object of this target family's class.
-    UnlistedKey(&'r FxHashSet<String>),
+    /// An attribute or a `__dict__` key no target names, on an object of this target family's
+    /// class.
+    Unlisted(&'r FxHashSet<String>),
 }
 
 pub(crate) fn mut201(
@@ -3372,17 +3453,25 @@ pub(crate) fn mut201(
             report_unresolved,
             report_unlisted_keys: mode(
                 rule.unlisted_dict_keys.as_deref(),
-                UNLISTED_DICT_KEYS,
+                UNLISTED,
                 "`ignore` or `report`",
                 "write-owners",
                 &rule.name,
                 "unlisted-dict-keys",
             )? == "report",
+            report_unlisted_attrs: mode(
+                rule.unlisted_attributes.as_deref(),
+                UNLISTED,
+                "`ignore` or `report`",
+                "write-owners",
+                &rule.name,
+                "unlisted-attributes",
+            )? == "report",
         });
     }
 
-    let named_keys = NamedDictKeys::new(&rules);
-    unresolved::mut205(cx, &rules, &named_keys, out);
+    let named_members = NamedMembers::new(&rules);
+    unresolved::mut205(cx, &rules, &named_members, out);
     if !writes {
         return Ok(());
     }
@@ -3437,10 +3526,10 @@ pub(crate) fn mut201(
                     }
                     let (judged, obj_params) =
                         rule.allowance.judged_access(cx.decls, key, site.obj_params);
-                    for (ti, written) in rule.written(site, &named_keys) {
+                    for (ti, written) in rule.written(site, &named_members) {
                         let family = match written {
                             Written::Target(t) => &t.classes,
-                            Written::UnlistedKey(family) => family,
+                            Written::Unlisted(family) => family,
                         };
                         let mut chain: Vec<FuncKey> = vec![judged.clone().into_owned()];
                         chain.extend(
@@ -3515,15 +3604,15 @@ pub(crate) fn mut201(
                             .last()
                             .map_or_else(|| key.fqn(), |h| h.callee.clone());
                         let member = format!("{}.{}", site.class_qualname, site.attr);
-                        // The report's target: the configured one, or the unlisted key as a
+                        // The report's target: the configured one, or the unlisted member as a
                         // target naming it would (`Class.key`).
                         let (text, named, unlisted) = match written {
                             Written::Target(t) => (t.text.clone(), written_member(t, site), ""),
-                            Written::UnlistedKey(_) => {
+                            Written::Unlisted(_) => {
                                 let class = &site.class_qualname;
                                 let qualname = cx.decls.class_qualname(class).unwrap_or(class);
                                 let text = format!("{qualname}.{}", site.attr);
-                                (text, member, ", a `__dict__` key no target names,")
+                                (text, member, unlisted_member(site.kind))
                             }
                         };
                         let quoted = format!("`{named}`");

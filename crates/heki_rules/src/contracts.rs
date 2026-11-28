@@ -20,7 +20,7 @@ use crate::{
 };
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    BLOCKING_EFFECTS, ContractClass, ContractSharing, Contracts, FuncKey, OptInFacts,
+    BLOCKING_EFFECTS, ContractClass, ContractSharing, Contracts, FuncKey, ITEMS_ATTR, OptInFacts,
     OverrideRoles, ProjectDecls, TypedWrites,
 };
 use heki_env::HekiConfig;
@@ -76,8 +76,11 @@ impl InvalidationNames {
     /// the class and its project bases): its place in `targets`, and its text as configured.
     ///
     /// A private name of the class a target names is held mangled with it: `C.__cache` names
-    /// `_C__cache`.
+    /// `_C__cache`. No attribute pattern names the items of an instance ([`ITEMS_ATTR`]).
     pub(crate) fn target(&self, classes: &[ContractClass], attr: &str) -> Option<(usize, &str)> {
+        if attr == ITEMS_ATTR {
+            return None;
+        }
         (self.targets.iter().enumerate())
             .find(|(_, (_, class, a))| {
                 classes.iter().any(|c| {
@@ -815,6 +818,7 @@ pub(crate) fn configured_names(config: &HekiConfig) -> Vec<ConfiguredName<'_>> {
         for &(key, texts) in lists {
             for text in texts {
                 let base = split_item(text).map_or(text.as_str(), |(base, _)| base);
+                let base = base.strip_suffix(ITEMS_ATTR).unwrap_or(base);
                 let base = split_arguments(base, key).map_or(base, |(name, _)| name);
                 let holder = split_last_dot(base).map(|(holder, _)| holder);
                 let patterns = std::iter::once(base)

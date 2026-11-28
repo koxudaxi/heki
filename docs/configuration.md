@@ -351,7 +351,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   group in `relative-imports`, or an `ignored-imports` entry without `->` in `import-boundaries`, or
   an unknown value of `forbid`,
   `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`,
-  `unlisted-dict-keys`, `type-checking`, or `reach`.
+  `unlisted-dict-keys`, `unlisted-attributes`, `type-checking`, or `reach`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -539,7 +539,7 @@ unresolved = "report"
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | `Class.attr` attributes, or `Class.attr["key"]` for one entry of the container an attribute holds. |
+| `targets` | `[]` | `Class.attr` attributes, `Class.attr["key"]` for one entry of the container an attribute holds, or `Class[*]` / `Class["key"]` for the items of the instances of a class deriving from a builtin `dict`, `list`, or `set` ([below](#items-of-a-container-class)). |
 | `allowed-writers` | `[]` | Functions allowed to write the targets. |
 | `forbidden-writers` | `[]` | When set, only writes by these functions are reported: see [Allowed and forbidden functions](#allowed-and-forbidden-functions). |
 | `exempt-methods` | `[]` | Construction and copy methods allowed to write the targets. A plain name (`__deepcopy__`) matches any method of that name; a name with a dot or a glob (`DataModel.copy_deep`, `create_*`) is a pattern, as in `allowed-writers`. |
@@ -554,6 +554,7 @@ unresolved = "report"
 | `protocol-subclasses` | `true` | `false`: an `allowed-protocols` pattern names the protocols it matches, not their subprotocols (a protocol deriving from an allowed one stays judged). |
 | `include-overrides` | `false` | `true`: an entry naming a method (`Class.method`, `module:Class.method`) in `allowed-writers`, `forbidden-writers`, and the `exempt-methods` patterns also names the methods of that name in the project subclasses of `Class`. See [Allowed and forbidden functions](#allowed-and-forbidden-functions). |
 | `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written; with `unresolved = "report"`, also on an object of unknown class (`MUT205`). |
+| `unlisted-attributes` | `"ignore"` | `"ignore"` or `"report"`: whether an attribute of a target's class that no `write-owners` target names is reported when it is written (any write but a `__dict__` key, which is `unlisted-dict-keys`'s); with `unresolved = "report"`, also on an object of unknown class (`MUT205`). |
 
 A container entry (`Class.attr["key"]`):
 
@@ -563,6 +564,33 @@ A container entry (`Class.attr["key"]`):
 - is reported once, under the entry, when its container is a target too;
 - in an effect boundary, makes a write of the container under a key heki cannot tell a report of
   its own ("under a key heki cannot tell"), unless the boundary allows the whole container.
+
+### Items of a container class
+
+A target `Class[*]` names the items of the instances of a project class deriving from a builtin
+`dict`, `list`, or `set` (or from a standard-library class deriving from one, such as
+`collections.defaultdict`), and `Class["key"]` the entry of one constant key. `Class["key"]` is an
+items target when `Class` has no dot or names a project class; otherwise it is `Class.attr["key"]`.
+
+```toml
+[[tool.heki.write-owners]]
+name = "imports"
+targets = ["pkg.imports.Imports[*]"]
+allowed-writers = ["pkg.imports.Imports.*"]
+```
+
+They match an item store or deletion (`imports["typing"] = s`, `del imports["sys"]`), a mutating
+method the class inherits (`imports.setdefault("os", set())`, `pop`, `update`, `clear`, `add`,
+`append`, ...), and a change in place of an item (`imports["typing"].add("Any")`, also of the
+entry `setdefault` returns), as for the entries of an attribute's container. An instance an
+attribute holds counts too: `model.imports["k"] = v` writes `Model.imports` and the items of
+`Imports`. A helper handed the instance writes them at the call. The class's own methods are
+writers like any other. When a project `__setitem__` or `__delitem__` along the class's MRO
+replaces the store or the deletion, the caller's `imports["k"] = v` runs that method, whose own
+writes (`super().__setitem__(key, value)`) are judged in it. A `__missing__` the class defines is
+a method like the others, and reading an item is no write. A change through a value heki cannot
+type is not tied to the items (`MUT205` and the boundaries' `unresolved` name attributes), and an
+in-place operator on the instance (`imports |= other`) is not followed.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
@@ -692,6 +720,13 @@ targets = ["pkg.model.Field._derived_from", "pkg.model.Field._seen_*"]
 allowed-writers = ["*"]
 ```
 
+With `unlisted-attributes = "report"`, `MUT201` likewise reports an attribute of an object of a
+class a target covers that no target covering the class names, in any `write-owners` contract:
+rebinding or deleting it (`field.alias = v`, `del field.alias`), `setattr` with a constant name,
+and changing its container in place (`field.tags.append(v)`). The contract's allowance, the
+class's own initialization, and `fresh-objects` apply as to a target write. A `__dict__` key is
+`unlisted-dict-keys`'s, and the items of an instance are no attribute.
+
 With `unresolved = "report"`, `MUT205` reports:
 
 - an attribute named like a target, written on an object of unknown class;
@@ -702,7 +737,9 @@ With `unresolved = "report"`, `MUT205` reports:
   class the contract's targets cover, written on an object of unknown class, where it may be a
   new key of that class. A helper whose callers hand it only objects of classes no target covers
   is not reported, and neither is a class's own initialization through a helper it passes `self`
-  to.
+  to;
+- with `unlisted-attributes = "report"`, likewise an attribute written on an object of unknown
+  class that no target names for some class the contract's targets cover.
 
 ### `read-owners`
 
@@ -745,7 +782,7 @@ report](#how-contracts-report)).
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | `Class.attr` attributes. A container entry (`Class.attr["key"]`) is a write target only, and a configuration error here. An entry can also name attributes of modules outside the project ([below](#symbols-outside-the-project)). |
+| `targets` | `[]` | `Class.attr` attributes. A container entry (`Class.attr["key"]`) and the items of a class (`Class[*]`) are write targets only, and a configuration error here. An entry can also name attributes of modules outside the project ([below](#symbols-outside-the-project)). |
 | `allowed-readers` | `[]` | Functions allowed to read the targets. |
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
@@ -1079,11 +1116,11 @@ import-probes = "report"
 | `name` | `""` | The boundary's name in reports. |
 | `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. A module body is included only where a pattern names `<module>` (`pkg.gen:<module>`, below). |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
-| `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
-| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
+| `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, and `Class[*]` / `Class["key"]` the items of a container class, as in `write-owners`. |
+| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry or items target is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
 | `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners` (also with an argument list). An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
-| `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
-| `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
+| `write-universe` | `[]` | `Class.attr` entries (and `Class[*]` items): a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. An attribute pattern (`Class.*`) does not name the items. |
+| `allow-writes` | `[]` | `Class.attr` writes (and `Class[*]` items) the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
@@ -1565,7 +1602,9 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   `dataclasses.fields(obj)`; an attrs class's `__attrs_attrs__`, `attrs.fields(cls)`, and
   `attrs.fields_dict(cls)`.
   An attribute that only a base outside the project defines matches when the code
-  uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
+  uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute, and an
+  items target (`Class[*]`, `Class["key"]`) names something when a class of its family derives
+  from a builtin `dict`, `list`, or `set`.
 - An entry whose last part is a glob is a rule about every name it may match, later ones
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
   `Field._*`, the function of `run.*`). A holder that is a glob itself is judged by the parts

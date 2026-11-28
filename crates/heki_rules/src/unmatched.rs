@@ -16,8 +16,8 @@
 //! `import-boundaries`) are judged when an entry's first name is a module of the project.
 
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, FunctionMatcher, Overrides, Subclasses, class_set, parse_targets,
-    project_classes, split_arguments, split_item,
+    Allowance, AllowanceKeys, FunctionMatcher, Overrides, Subclasses, class_set, items_target,
+    parse_targets, project_classes, split_arguments, split_item,
 };
 use crate::selection::RuleSelection;
 use crate::{
@@ -974,7 +974,10 @@ fn unmatched_names<'a>(
 ) -> Result<Vec<(Option<String>, Missing)>, RuleConfigError> {
     let pattern = match shape {
         Shape::Definition(Definition::CallTarget) => split_arguments(entry, context)?.0,
-        Shape::Attribute => split_item(entry).map_or(entry, |(base, _)| base),
+        Shape::Attribute => {
+            let base = split_item(entry).map_or(entry, |(base, _)| base);
+            base.strip_suffix(heki_effect::ITEMS_ATTR).unwrap_or(base)
+        }
         _ => entry,
     };
     let rest = &entry[pattern.len()..];
@@ -1233,6 +1236,40 @@ fn binds_imported_name(cx: &CheckContext<'_>, m: &FunctionMatcher) -> bool {
         .any(|name| m.names_def(&format!("{}.{name}", module.text()), name))
 }
 
+/// [`judge_attribute`] for a target naming the items of the instances of `class_part`
+/// (`Class[*]`, `Class["key"]`): it names something when a class of its family holds items
+/// ([`ProjectDecls::holds_items`]); a class glob is judged by the parts written out before it.
+fn judge_items<'a>(
+    cx: &CheckContext<'a>,
+    names: &mut ProjectNames<'a>,
+    (section, context): (&'static str, &'static str),
+    entry: &str,
+    class_part: &str,
+) -> Result<Option<Missing>, RuleConfigError> {
+    let item = &entry[class_part.len()..];
+    let classes: Vec<ContractClass> = names.candidate_classes(class_part).cloned().collect();
+    let parsed = parse_targets(cx, &classes, &[entry.to_owned()], section, context)?;
+    let family = &parsed[0].classes;
+    if family.iter().any(|c| cx.decls.holds_items(c))
+        || family.is_empty() && glob_holder_named(names, class_part, context)? == Some(true)
+    {
+        return Ok(None);
+    }
+    if family.is_empty() {
+        let nearest = (names.nearest_classes(class_part).into_iter())
+            .filter(|(i, _)| cx.decls.holds_items(&names.classes[*i].fqn))
+            .map(|(_, class)| format!("{class}{item}"))
+            .collect();
+        return Ok(Some(Missing::new("class".to_owned(), nearest)));
+    }
+    Ok(Some(Missing::new(
+        format!(
+            "items of `{class_part}`, a class deriving from no builtin `dict`, `list`, or `set`,"
+        ),
+        Vec::new(),
+    )))
+}
+
 /// For `name` whose last part is a glob: whether the parts written out before its first glob
 /// name a module, class, or function, which every name it matches is held by: what holds the
 /// last part (`pkg.store` of `pkg.store.*`, `pkg:Store` of `pkg:Store.*`), or the prefix of a
@@ -1274,6 +1311,13 @@ fn judge_attribute<'a>(
     (section, context): (&'static str, &'static str),
     entry: &str,
 ) -> Result<Option<Missing>, RuleConfigError> {
+    let names_class = |base: &str| {
+        DottedPattern::new(base, context)
+            .is_ok_and(|p| names.candidate_classes(base).any(|c| p.matches_class(c)))
+    };
+    if let Some((class_part, _)) = items_target(entry, names_class) {
+        return judge_items(cx, names, (section, context), entry, class_part);
+    }
     // A read target guards the reads of a key, so a key only read exists for it.
     let with_dict_reads = matches!(
         context,

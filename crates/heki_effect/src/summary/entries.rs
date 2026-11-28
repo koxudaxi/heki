@@ -33,7 +33,7 @@ enum EntryFact {
 /// The most times an [`EntryFact`] grows: its key once, the objects' parameters and the
 /// parameters they are reached from a bit at a time, the other parts of [`ItemOf`] once each,
 /// and [`EntryFact::Unnamed`] last.
-const ENTRY_FACT_HEIGHT: usize = 2 * 64 + 5;
+const ENTRY_FACT_HEIGHT: usize = 2 * 64 + 6;
 
 impl Join for EntryFact {
     fn join(&mut self, other: &Self) -> bool {
@@ -102,7 +102,8 @@ impl<'a> Extractor<'a> {
     /// budget or the visits of one value the entries are unknown: no value is an entry.
     pub(super) fn build_entry_aliases(&mut self) {
         let cells = std::mem::take(&mut self.item_alias);
-        let follows = self.ownership && !(self.obj_attr_alias.is_empty() && cells.is_empty());
+        let follows = self.ownership
+            && !(self.obj_attr_alias.is_empty() && cells.is_empty() && !self.reads_items());
         if cells.is_empty() && !follows {
             return;
         }
@@ -139,6 +140,24 @@ impl<'a> Extractor<'a> {
                 self.item_alias.insert(*v, item);
             }
         }
+    }
+
+    /// Whether the function reads an entry, a view, or an iterator of the items of an instance
+    /// holding items ([`Self::items_of`]).
+    fn reads_items(&mut self) -> bool {
+        let f = self.f;
+        for bb in &f.blocks {
+            self.pos = (bb.id, 0);
+            for inst in &bb.insts {
+                if let Some(Made::Item { container, .. } | Made::Access { container, .. }) =
+                    self.made_entry(&inst.kind)
+                    && self.items_of(container).is_some()
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// The values of the function that may be entries or hand them out, in block order, each
@@ -280,7 +299,8 @@ impl<'a> Extractor<'a> {
     }
 
     /// The entry under `key` of `container`, whose fact is `fact`: an entry of an entry is one
-    /// of the attribute's container, under its first key.
+    /// of the attribute's container, under its first key, and an item of an instance holding
+    /// items is one of its items.
     fn entry_below(
         &self,
         container: VarId,
@@ -290,8 +310,11 @@ impl<'a> Extractor<'a> {
         match fact {
             Read::Fact(EntryFact::Entry(outer)) => EntryFact::Entry(outer.clone()),
             _ => match self.obj_attr_alias.get(&container) {
-                Some(a) => EntryFact::Entry(entry_of_attr(a, key())),
-                None => EntryFact::Unnamed,
+                Some(a) => EntryFact::Entry(entry_of_attr(a, key(), container)),
+                None => match self.items_of(container) {
+                    Some(items) => EntryFact::Entry(entry_of_attr(&items, key(), container)),
+                    None => EntryFact::Unnamed,
+                },
             },
         }
     }
@@ -314,8 +337,8 @@ impl Read<'_> {
     }
 }
 
-/// An entry under `key` of the container the attribute load `a` gives.
-fn entry_of_attr(a: &ObjAttr, key: Option<String>) -> ItemOf {
+/// An entry under `key` of `container`, the container the attribute load `a` gives.
+fn entry_of_attr(a: &ObjAttr, key: Option<String>, container: VarId) -> ItemOf {
     ItemOf {
         classes: a.classes.clone(),
         attr: a.attr.clone(),
@@ -324,5 +347,6 @@ fn entry_of_attr(a: &ObjAttr, key: Option<String>) -> ItemOf {
         fresh: a.fresh,
         reach: a.reach,
         holder: a.holder,
+        container: Some(container),
     }
 }
