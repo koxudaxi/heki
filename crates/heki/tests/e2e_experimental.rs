@@ -162,7 +162,7 @@ fn docs_check_fails_on_a_stale_example_image() {
     // bold bright red.
     let image = docs.0.read("docs/assets/example-check.svg");
     assert!(
-        image.contains(r#"class="b f1">EFF101</tspan>"#)
+        image.contains(r#"class="b f1">MUT114</tspan>"#)
             && image.contains(r#"class="b f1">MUT201</tspan>"#)
             && image.matches(r#"class="b f9">error</tspan>"#).count() == 2
             && image.contains(">Found 2 diagnostic(s) in 6 file(s).</tspan>"),
@@ -171,7 +171,7 @@ fn docs_check_fails_on_a_stale_example_image() {
     assert_eq!(docs.build_docs(&["--check"]).0, 0);
 
     // The image follows the code of the examples.
-    let (code, out) = docs.check_with("README.md", "async def get_user", "async def fetch_user");
+    let (code, out) = docs.check_with("README.md", "def request_headers(", "def build_headers(");
     assert_eq!(code, 1);
     assert!(
         out.starts_with("Generated docs are out of date")

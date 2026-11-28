@@ -327,7 +327,7 @@ the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
 
 ## pre-commit
 
-The hook passes the staged Python and TOML files to `heki check --touched`, which passes over a
+The hook passes the staged Python, stub (`.pyi`), and TOML files to `heki check --touched`, which passes over a
 TOML file that is not part of the configuration. heki follows calls across files, so it still
 analyzes the whole project, but it shows and fails on only the reports in those files and the
 reports whose call chain reaches one of them: after a change to `app/users.py`, the `EFF101` in
@@ -348,6 +348,10 @@ report cannot be told from the code after it, so:
   [includes](configuration.md#several-configuration-files), the summary snapshot, the baseline)
   shows every report, as a run without `--touched` does: a contract added to `heki.toml` is checked in the
   whole project.
+
+pre-commit passes only the files a commit leaves in place, so a commit that deletes a configuration
+file, a stub, or a module does not run the hook for it: the whole-project run in continuous
+integration covers it.
 
 Use `--touched` while editing and in the hook, and run the whole project, with the baseline, before
 finishing a change and in continuous integration. A local hook may also pass the files as paths
@@ -382,8 +386,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: uvx heki==0.11.0 check --touched
             language: system   # needs uv on PATH
-            types_or: [python, toml]
-            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
+            types_or: [python, pyi, toml]
+            files: '\.(py|pyi|toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -401,8 +405,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             entry: heki check --touched
             language: python
             additional_dependencies: [heki==0.11.0]
-            types_or: [python, toml]
-            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
+            types_or: [python, pyi, toml]
+            files: '\.(py|pyi|toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -485,17 +489,38 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.11.0 check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml' | xargs -0 -r uvx heki==0.11.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
 
-`--diff-filter=d` leaves out deleted files, and `xargs -r` skips the run when no Python file
-changed. A path that names no analyzed file (a typo, a file outside the analyzed directories, an
-excluded one) is named in a warning, and the run goes on with the others. With
-`--unmatched-paths error` (or [`unmatched-paths = "error"`](configuration.md#rule-selection-toolhekilint)
-in `[tool.heki.lint]`), it stops the run with exit code 2 instead, so a wrong path fails the job
-rather than passing it on nothing.
+`'*.toml'` takes in every configuration file, also one listed in
+[`include`](configuration.md#several-configuration-files) under another name; heki passes over a
+TOML file that is not part of its configuration. `--diff-filter=d` leaves out deleted files, and
+`xargs -r` skips the run when no Python, stub, or TOML file changed. A path that names no
+analyzed file (a typo, a file outside the analyzed directories, an excluded one) is named in a
+warning, and the run goes on with the others. With `--unmatched-paths error` (or
+[`unmatched-paths = "error"`](configuration.md#rule-selection-toolhekilint) in `[tool.heki.lint]`),
+it stops the run with exit code 2 instead, so a wrong path fails the job rather than passing it on
+nothing.
+
+A deleted path has nothing to touch: `--touched` names it in a warning and shows nothing for it,
+though deleting a configuration file, a stub, or a module can change reports elsewhere. A pull
+request that deletes one should run the whole project (`uvx heki==0.11.0 check`). With
+`--no-renames`, a renamed file counts as the deletion of its old path, and the list is kept in a
+variable before it is tested, so the test holds under `set -o pipefail` too:
+
+```yaml
+- run: |
+    deleted=$(git diff --name-only --no-renames --diff-filter=D "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml')
+    if [ -n "$deleted" ]; then
+      uvx heki==0.11.0 check
+    else
+      git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml' | xargs -0 -r uvx heki==0.11.0 check --touched
+    fi
+  env:
+    BASE: ${{ github.base_ref }}
+```
 
 With SARIF:
 

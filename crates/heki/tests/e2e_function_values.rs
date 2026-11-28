@@ -617,6 +617,140 @@ fn a_partial_class_attribute_calls_its_callable() {
     );
 }
 
+const LATER_NAME_DEFS: &str = r#"from __future__ import annotations
+
+from functools import partial
+
+from pkg.model import Field, require
+
+FLAG = True
+
+
+def copy_field(field: Field, *, deep: bool = True) -> Field:
+    return Field()
+
+
+def copy_other(field: Field, *, deep: bool = True) -> Field:
+    return Field()
+
+
+def mark(field: Field, *, deep: bool) -> Field:
+    field.required = True
+    return field
+
+
+def make_copier():
+    return copy_field
+
+
+def rebound(field: Field, *, deep: bool = True) -> Field:
+    return Field()
+
+
+rebound = make_copier()
+
+
+class Holder:
+    copy_field = staticmethod(partial(copy_field, deep=False))
+    other = staticmethod(partial(copy_other, deep=False))
+    mark = staticmethod(partial(mark, deep=True))
+    require = staticmethod(require)
+
+    def copies(self, field: Field) -> Field:
+        copied = self.copy_field(field)
+        copied.required = True
+        return copied
+
+    def copies_other(self, field: Field) -> Field:
+        copied = self.other(field)
+        copied.required = True
+        return copied
+
+    def marks(self, field: Field) -> Field:
+        return self.mark(field)
+
+    def requires(self, field: Field) -> bool:
+        return self.require(field)
+
+
+class Prior:
+    copy_field = make_copier()
+    copy_field = staticmethod(partial(copy_field, deep=False))
+
+    def copies(self, field: Field) -> Field:
+        copied = self.copy_field(field)
+        copied.required = True
+        return copied
+
+
+class Conditional:
+    if FLAG:
+        copy_field = make_copier()
+    copy_field = staticmethod(partial(copy_field, deep=False))
+
+    def copies(self, field: Field) -> Field:
+        copied = self.copy_field(field)
+        copied.required = True
+        return copied
+
+
+class Rebound:
+    rebound = staticmethod(partial(rebound, deep=False))
+
+    def copies(self, field: Field) -> Field:
+        copied = self.rebound(field)
+        copied.required = True
+        return copied
+"#;
+
+/// A class body reads a name it binds only later from the module: in `copy_field =
+/// staticmethod(partial(copy_field, deep=False))` the inner `copy_field` is the module's
+/// function (or the import), so a call through the attribute calls it and gives what it
+/// returns, here a new `Field`. After a binding of the name in the body, on every path or on
+/// some, the read is that value; a name the module binds twice holds no function heki knows.
+const LATER_NAME_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import Conditional, Holder, Prior, Rebound
+from pkg.model import Field
+
+
+def copies(field: Field) -> Field:
+    return Holder().copies(field)
+
+
+def copies_other(field: Field) -> Field:
+    return Holder().copies_other(field)
+
+
+def marks(field: Field) -> Field:
+    return Holder().marks(field)  # writes
+
+
+def requires(field: Field) -> bool:
+    return Holder().requires(field)  # writes
+
+
+def after_a_binding(field: Field) -> Field:
+    return Prior().copies(field)  # unresolved, unknown class
+
+
+def after_a_conditional_binding(field: Field) -> Field:
+    return Conditional().copies(field)  # unresolved, unknown class
+
+
+def bound_twice_in_the_module(field: Field) -> Field:
+    return Rebound().copies(field)  # unresolved, unknown class
+"#;
+
+#[test]
+fn a_class_body_reads_a_name_it_binds_later_from_the_module() {
+    check_marks(
+        "function_values_later_names",
+        LATER_NAME_DEFS,
+        LATER_NAME_CALLS,
+    );
+}
+
 /// A keyword a partial class attribute holds binds its parameter with a value the call does not
 /// show: the parameter's default is not what the callable gets, so the wait its default selects
 /// is no exact report. A partial holding nothing passes the default, as the call written out

@@ -376,7 +376,7 @@ the targets of write and read boundaries.
 | 1 | Local constructors and direct imports (relative imports, source roots, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
 | 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` or `__post_init__`, and module globals the module body binds, each the join of what every store of it binds | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
-| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
+| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` (a class with `typing.Protocol` or `typing_extensions.Protocol` among its bases, also through a project module re-exporting it: `ProjectDecls::is_protocol`) dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 A module global the module body binds to a value of known type, and an instance attribute
 `__init__` or `__post_init__` binds to one through `self`, have the join of what every store of
@@ -518,9 +518,11 @@ Some receivers have the class the language or the standard library gives them. A
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
 instance may be (`invokes::reads_own_namespace`: no class defines `__getattribute__` or binds
-`__dict__`, and every base outside the project is a plain one or one whose `__setattr__` the
-catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
-read-only proxy, which stays untyped. Its methods are then those of `dict`, and the entries it
+`__dict__`, and every base outside the project is a plain one, one defining no attribute of its
+instances, such as the `typing.Protocol` of a protocol along the MRO, or one whose `__setattr__`
+the catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
+read-only proxy, and a value typed with a protocol may be of any class that has its members:
+both stay untyped. Its methods are then those of `dict`, and the entries it
 reads, stores, or removes stay reads and writes of the instance's attributes. The members a
 `NamedTuple` class takes from its base, and what the methods of a holder give of the value its
 type argument names (`ContextVar[T]`, kept as `types::Generic::Held` since annotations are read
@@ -850,7 +852,10 @@ its module the module binds once, an alias of its module, a name an import binds
 of one) or to `staticmethod` of one (`factory = Scope`, `REQUIRE: ClassVar[...] =
 staticmethod(require)`) is that object (`ClassDecl::named_attrs`, `ProjectDecls::class_alias`),
 when no code of the module stores the attribute on the class or on an instance, no other module
-rebinds it, and no hook runs on the read. The binding a name holds once its body has run is the
+rebinds it, and no hook runs on the read. A class body reads a name it has not bound yet, or has
+deleted, from the module's globals, never from an enclosing function, so `copy =
+staticmethod(partial(copy, deep=False))` names the module's `copy` (`sentinels::module_read`);
+after a binding of the name in the body the read is that binding's value. The binding a name holds once its body has run is the
 last one every path runs and each later one that runs on some paths only
 (`heki_ir::LastBindings::last_of`): `def fetch(...)` then `fetch = _quiet` is `_quiet`, and
 `if flag: fetch = _quiet` after the `def` is either the method or `_quiet`
