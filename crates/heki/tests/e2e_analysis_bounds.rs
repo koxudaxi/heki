@@ -9553,6 +9553,54 @@ fn the_attributes_a_module_reads_off_its_imports_are_followed_within_a_budget() 
     );
 }
 
+/// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, whose function reads
+/// a chain of `names` attributes off `c.a`, one assignment after another.
+fn attribute_chain_off_an_import(names: usize) -> Project {
+    let p = Project::new("bounds_attribute_chain_off_an_import");
+    p.write("c/__init__.py", "");
+    p.write(
+        "c/a.py",
+        "from c.b import Base\n\n\ndef make() -> object:\n    return Base()\n",
+    );
+    p.write(
+        "c/b.py",
+        "import c.a\n\n\nclass Base:\n    pass\n\n\nOWNER = c.a\n",
+    );
+    let chain: String = (1..=names)
+        .map(|i| format!("    v{i} = v{}.x{i}\n", i - 1))
+        .collect();
+    p.write(
+        "c/d.py",
+        &format!("import c.a\n\n\ndef chain():\n    v0 = c.a\n{chain}    return v{names}\n"),
+    );
+    selecting_import_cycles(p)
+}
+
+/// Each step of a chain of attributes makes a name as long as the chain so far: past the budget
+/// of the module the walk stops, and the module may read any name of any module.
+#[test]
+fn the_names_a_chain_of_attributes_off_an_import_makes_stop_at_the_budget() {
+    let diags = check_past_budgets(400, &["import_names_read"], attribute_chain_off_an_import);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(
+        reports[0]["help"],
+        "break the cycle at one of its imports: move what the modules share into a module none \
+         of them imports, or import the name only where it is used"
+    );
+    let small = check_linear(10, attribute_chain_off_an_import);
+    let small: Vec<&Value> = (small.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(
+        small[0]["help"],
+        "every import cycle of these modules goes through the import of `c.b` in `c.a`: move it \
+         into the functions of `c.a` that use it"
+    );
+}
+
 /// `c.a` importing `Base` from `c.b`, which imports `c.a` back, and `c.d`, which merges `c.a`
 /// with an attribute of each of `names` modules, one conditional after another, and reads
 /// `attr` off the result in a function.
