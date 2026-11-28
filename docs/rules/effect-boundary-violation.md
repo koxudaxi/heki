@@ -143,7 +143,14 @@ unknown class or under a name computed at run time (`thing.required = True` of a
 object whose initializer runs `setattr(self, name, v)`, itself or in a helper it hands `self` to,
 is not reported. Each kind is reported once per scope function, at the call
 in the scope function starting the shortest chain to the first one, with the chain; calls and
-writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
+writes inside `allowed-callees` are not followed. The JSON output lists every site of such a
+report in `unresolved_sites`, ordered by path, line, and column: for a call, the function holding
+it, the name called, and why heki does not follow it (the reasons of `heki recommend`, such as
+`unannotated-parameter` with its `parameter`, `callable-value`, or `call-result`, and
+`unmodeled-body` or `stub-body` for a body); for a write, the attribute and the kind of write. The
+list holds the sites the scope function reaches, not the code behind them, which heki does not
+follow, and a site several scope functions reach is in each of their reports
+([Output Formats](../output-formats.md#what-an-effect-boundary-cannot-judge)). Without it, the boundary is silent where heki
 cannot see, so no report does not mean the scope stays inside the boundary.
 
 `allow-writes` is only as precise as heki's view of which object each write changes. A write

@@ -426,6 +426,7 @@ mod tests {
             contract_locations: Vec::new(),
             fix: None,
             sites: 1,
+            unresolved_sites: Vec::new(),
             fold_key: None,
             open_records: open
                 .iter()

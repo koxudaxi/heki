@@ -50,6 +50,45 @@ which are given instead. SARIF output adds the same places to `relatedLocations`
 steps of the report's chain, and the [language server](lsp.md) to its related information. The
 places are no part of a baseline key.
 
+## What an effect boundary cannot judge
+
+An effect boundary with `unresolved = "report"` reports, under `EFF201`, the calls and writes it
+cannot judge in a scope function's reach, one report per kind
+(`<boundary>:unresolved-calls`, `<boundary>:unresolved-writes:<attribute>`) at the first one. In
+the JSON diagnostics, `unresolved_sites` of such a report lists every site it stands for (`sites`
+is their number), ordered by `path`, `line`, and `column`, with `function`, the function holding
+the site by its fully qualified name. A call has:
+
+- `callee`: the method or value called (`get` of `table.get(...)`), `null` for a value computed in
+  place (`make()(...)`), or for a body heki does not follow, that function's full name.
+- `reason`: why heki does not follow it. For a call it resolves to no function, the reasons
+  `heki recommend` gives: `unannotated-parameter`, `unresolved-annotation`, `any-value`,
+  `callable-value`, `unbound-name`, `unlisted-protocol`, `call-result`, `attribute`,
+  `computed-name`, `too-many-implementations`, `unknown-member`, or `untyped-value`. For a call
+  of a function whose body heki does not model (`eval`, a body too large), `unmodeled-body`; for
+  one only a stub declares, `stub-body`. A scope function whose own body is one of these is
+  listed at its definition, as its own `function` and `callee`.
+- `parameter`: the parameter a reason is about (`unannotated-parameter`, `unresolved-annotation`),
+  else `null`.
+
+A write has `attribute` (`null` for a name computed at run time, `setattr(obj, name, v)`) and
+`kind`, as `heki inspect` names write kinds (`direct_attr`, `set_attr`, `container_mut`, ...).
+
+```json
+"unresolved_sites": [
+  {"path": "pkg/m.py", "line": 7, "column": 9, "function": "pkg.m.run",
+   "callee": "strip", "reason": "unannotated-parameter", "parameter": "text"},
+  {"path": "pkg/m.py", "line": 9, "column": 5, "function": "pkg.m.run",
+   "callee": "fn", "reason": "unannotated-parameter", "parameter": "fn"}
+]
+```
+
+The list holds the sites the walk from the scope function records: the code behind a call heki
+does not follow is not in it. A site several scope functions reach is listed in each of their
+reports. Other diagnostics have no `unresolved_sites`, and the text output, SARIF, and the
+language server do not show the list. A baseline entry keys such a report by its target, which
+names no site, and counts its sites.
+
 ## Versions
 
 The version of a format is part of its schema name. A format with a `version` or

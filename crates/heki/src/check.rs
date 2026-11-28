@@ -824,6 +824,10 @@ pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
         for c in &mut d.contract_locations {
             c.path = shown_path(&c.path);
         }
+        for s in &mut d.unresolved_sites {
+            let path = s.path_mut();
+            *path = shown_path(path);
+        }
     }
 }
 
@@ -1492,6 +1496,7 @@ mod tests {
                 replacement: "y".to_owned(),
             }]),
             sites: 1,
+            unresolved_sites: Vec::new(),
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
