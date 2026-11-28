@@ -8,7 +8,7 @@ yanked). Each is installed in a throwaway virtual environment of its own, with i
 as they were a day after its upload (`uv pip install --exclude-newer`), and checked in a child
 interpreter there (docs/ANALYSIS_AND_KB_SPEC.md section 4.2):
   1. Every `[[attributes]]` row under the distribution's packages: reading the attribute on an
-     instance of the row's class gives an instance of exactly the row's `type`. The instances
+     instance of the row's class gives an instance of exactly the row's `type` (`Self`: the class of the instance read). The instances
      come from the constructors below (`CONSTRUCTORS`, which do no I/O) and from the rows
      themselves, followed from them; a row no instance reaches fails.
   2. Every `[[entries]]` row resolves. A method listed `async_safe` is a coroutine function,
@@ -183,14 +183,16 @@ while True:
         progressed = True
         try:
             value = getattr(instances[owner], attr)
-            expected = resolve(type_path)
+            # `Self`: the owner's own class (`not_` of a filter builder gives the builder).
+            expected = type(instances[owner]) if type_path == "Self" else resolve(type_path)
         except Exception as e:
             failures.append(f"{symbol}: {e!r}")
             continue
         if type(value) is not expected:
             failures.append(f"{symbol}: {type(value).__module__}.{type(value).__qualname__}, not {type_path}")
             continue
-        instances.setdefault(type_path, value)
+        if type_path != "Self":
+            instances.setdefault(type_path, value)
     if not progressed:
         break
 for symbol in pending:
