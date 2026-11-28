@@ -55,9 +55,10 @@ places are no part of a baseline key.
 An effect boundary with `unresolved = "report"` reports, under `EFF201`, the calls and writes it
 cannot judge in a scope function's reach, one report per kind
 (`<boundary>:unresolved-calls`, `<boundary>:unresolved-writes:<attribute>`) at the first one. In
-the JSON diagnostics, `unresolved_sites` of such a report lists every site it stands for (`sites`
-is their number), ordered by `path`, `line`, and `column`, with `function`, the function holding
-the site by its fully qualified name. A call has:
+the JSON diagnostics, `unresolved_sites` of such a report lists every site it stands for, ordered by
+`path`, `line`, and `column`, with `function`, the function holding the site by its fully
+qualified name. `sites` is the number of listed sites and is written only above one: a report
+without `sites` stands for one site. A call has:
 
 - `callee`: the method or value called (`get` of `table.get(...)`), `null` for a value computed in
   place (`make()(...)`), or for a body heki does not follow, that function's full name.

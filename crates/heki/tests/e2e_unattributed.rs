@@ -758,6 +758,48 @@ fn a_report_of_what_a_boundary_cannot_judge_lists_every_site_in_the_json_output(
 }
 
 #[test]
+fn a_body_reached_through_a_delivery_wrapper_is_listed_in_the_function_holding_the_call() {
+    let p = Project::new("unattributed_listed_via");
+    p.write(
+        "pyproject.toml",
+        &LISTED_CONFIG.replace("\"pkg.m.evaluates\"", "\"pkg.m.deliver_all\""),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/m.py",
+        r#"from pkg import helpers
+
+
+def deliver(items):
+    for item in items:
+        print(item)
+
+
+def deliver_all():
+    deliver(helpers.numbers())
+"#,
+    );
+    p.write("pkg/helpers.py", "def numbers():\n    yield eval(\"1\")\n");
+    let found = by_report(&p);
+    let report = &found[&(
+        "deliver_all".to_owned(),
+        "no-required:unresolved-calls".to_owned(),
+    )];
+    // The site is the call in `deliver_all`, which `deliver` runs the generator's body for.
+    assert_eq!(
+        report["unresolved_sites"],
+        json!([call(
+            "pkg/m.py",
+            10,
+            5,
+            "pkg.m.deliver_all",
+            json!("pkg.helpers.numbers"),
+            "unmodeled-body"
+        )])
+    );
+}
+
+#[test]
 fn a_baseline_keys_a_report_listing_its_sites_by_its_target_and_counts_the_sites() {
     let p = listed_project("unattributed_listed_baseline");
     let (code, stdout, stderr) = p.check(&["--baseline", "baseline.toml", "--update-baseline"]);

@@ -2461,6 +2461,9 @@ impl<'a> Reach<'a> {
             let nodes = &self.nodes;
             // At the call reaching the function, or at the scope function itself.
             let reaching = nodes[i].2.as_ref().and_then(|(_, h)| h.last());
+            // The site is in the body of the step's first hop's caller: a `via` route adds a
+            // second hop from the function iterating the result, at the same site.
+            let holder = nodes[i].2.as_ref().and_then(|(_, h)| h.first());
             let span = reaching.map_or(self.start_span, |h| h.span);
             let (what, reason) = if stub {
                 ("a body only a stub declares", "stub-body")
@@ -2475,7 +2478,7 @@ impl<'a> Reach<'a> {
                 || Listed {
                     path: reaching.map_or(path, |h| &h.path).to_path_buf(),
                     span,
-                    function: reaching.map_or(func, |h| &h.caller).fqn(),
+                    function: holder.map_or(func, |h| &h.caller).fqn(),
                     what: ListedWhat::Call {
                         callee: Some(func.fqn()),
                         reason,

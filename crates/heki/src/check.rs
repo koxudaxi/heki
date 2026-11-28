@@ -828,6 +828,8 @@ pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
             let path = s.path_mut();
             *path = shown_path(path);
         }
+        // The stored paths fixed the order, and shown paths can order differently.
+        d.unresolved_sites.sort();
     }
 }
 
@@ -1507,6 +1509,38 @@ mod tests {
             key_module: None,
             fails_run_by_config: false,
         }
+    }
+
+    #[test]
+    fn unresolved_sites_are_in_path_order_as_shown() {
+        // Stored as absolute and relative paths, `<cwd>/z.py` sorts before `a.py`; shown
+        // relative, it sorts after it.
+        let site = |path: PathBuf| {
+            heki_diagnostics::UnresolvedSite::Write(heki_diagnostics::UnresolvedWrite {
+                path,
+                line: 1,
+                column: 1,
+                function: "f".to_owned(),
+                attribute: None,
+                kind: "set_attr".to_owned(),
+            })
+        };
+        let inside = std::env::current_dir().unwrap().join("z.py");
+        let mut report = fixable("a.py", &[]);
+        report.unresolved_sites = vec![site(PathBuf::from("a.py")), site(inside)];
+        report.unresolved_sites.sort();
+        let order = |d: &mut Diagnostic| {
+            (d.unresolved_sites.iter_mut())
+                .map(|s| s.path_mut().clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(order(&mut report)[0].is_absolute());
+        let mut diags = [report];
+        show_paths(&mut diags);
+        assert_eq!(
+            order(&mut diags[0]),
+            [PathBuf::from("a.py"), PathBuf::from("z.py")]
+        );
     }
 
     #[test]
