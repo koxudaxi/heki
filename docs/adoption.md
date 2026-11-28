@@ -491,11 +491,14 @@ TOML file that is not part of its configuration. `--diff-filter=d` leaves out de
 
 A deleted path has nothing to touch: `--touched` names it in a warning and shows nothing for it,
 though deleting a configuration file, a stub, or a module can change reports elsewhere. A pull
-request that deletes one should run the whole project (`uvx heki==0.11.0 check`):
+request that deletes one should run the whole project (`uvx heki==0.11.0 check`). With
+`--no-renames`, a renamed file counts as the deletion of its old path, and the list is kept in a
+variable before it is tested, so the test holds under `set -o pipefail` too:
 
 ```yaml
 - run: |
-    if git diff --name-only --diff-filter=D "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml' | grep -q .; then
+    deleted=$(git diff --name-only --no-renames --diff-filter=D "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml')
+    if [ -n "$deleted" ]; then
       uvx heki==0.11.0 check
     else
       git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' '*.pyi' '*.toml' | xargs -0 -r uvx heki==0.11.0 check --touched
