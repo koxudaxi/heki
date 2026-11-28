@@ -1835,6 +1835,33 @@ fn a_client_call_that_raised_into_a_handler_has_made_no_client() {
 }
 
 #[test]
+fn a_helper_whose_client_call_raised_into_a_handler_has_made_no_client() {
+    // The helper returns normally after the constructor raised, so an iteration completes
+    // without a client. Re-raising, or making the client another way in the handler, leaves no
+    // such path.
+    let open = "import sqlite3\n\n\ndef open_db():\n    try:\n        conn = sqlite3.connect(\"app.db\")\n    except sqlite3.Error:\n        return None\n    return conn\n\n\ndef load(names: list[str]):\n    for name in names:\n        open_db()\n";
+    heuristic(
+        "op_client_helper_raised",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Every return", "not-made-on-every-return")],
+    );
+    let reraised = open.replace("        return None\n", "        raise\n");
+    exact("op_client_helper_reraised", EFF102, &reraised, "EFF102");
+    let another_way = open.replace(
+        "        return None\n",
+        "        conn = sqlite3.connect(\":memory:\")\n",
+    );
+    exact(
+        "op_client_helper_another_way",
+        EFF102,
+        &another_way,
+        "EFF102",
+    );
+}
+
+#[test]
 fn a_loop_over_an_attribute_has_items_not_from_the_data() {
     let open = "import requests\n\n\nclass Fetcher:\n    def run(self):\n        for url in self.urls:\n            requests.get(url)\n";
     heuristic(

@@ -253,6 +253,24 @@ impl ExecEffectKind {
         Self::BLOCKING.contains(&self)
     }
 
+    /// Whether a catalog call with the effect has had it once it was made, also when it raised:
+    /// a blocking call has waited and a statement has gone out before the call fails, and a
+    /// checkpoint is where the cancellation is raised. A constructor that raised may have made
+    /// no client, and a reallocation that raised has copied nothing.
+    pub const fn had_when_raised(self) -> bool {
+        match self {
+            Self::BlockingNet
+            | Self::BlockingDb
+            | Self::BlockingSubprocess
+            | Self::BlockingSync
+            | Self::Sleep
+            | Self::BlockingFs
+            | Self::DbQuery
+            | Self::Checkpoint => true,
+            Self::UnpooledClientAlloc | Self::QuadraticRealloc => false,
+        }
+    }
+
     /// What a blocking effect waits for; `None` for the loop-sensitive costs.
     pub const fn wait_kind(self) -> Option<WaitKind> {
         match self {

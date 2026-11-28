@@ -574,9 +574,6 @@ struct LoopClaim {
     effect: ExecEffectKind,
     /// The cause of a last call whose effect the catalog makes conditional.
     conditional: &'static OpenCause,
-    /// A library call counts once it is made, also when it raised (a statement goes out before
-    /// the database answers), not only once it returned.
-    counts_when_made: bool,
     /// What the call does, in a heuristic report ("runs a database query").
     heuristic_verb: &'static str,
     /// What every iteration does, in an exact report ("sends a database statement").
@@ -585,23 +582,22 @@ struct LoopClaim {
 }
 
 /// `EFF102`'s claim: a client made on every iteration. A constructor that raised may have made
-/// nothing, so only a call that returned counts.
+/// nothing, so only a call that returned counts (`ExecEffectKind::had_when_raised`).
 const CLIENT_PER_ITERATION: LoopClaim = LoopClaim {
     code: "EFF102",
     effect: ExecEffectKind::UnpooledClientAlloc,
     conditional: &premises::CONDITIONAL_ALLOCATION,
-    counts_when_made: false,
     heuristic_verb: "allocates an unpooled client",
     exact_verb: "allocates an unpooled client",
     help: client_help,
 };
 
-/// `EFF103`'s claim: a statement sent on every iteration.
+/// `EFF103`'s claim: a statement sent on every iteration. A library call counts once it is
+/// made, also when it raised: the statement goes out before the database answers.
 const QUERY_PER_ITERATION: LoopClaim = LoopClaim {
     code: "EFF103",
     effect: ExecEffectKind::DbQuery,
     conditional: &premises::CONDITIONAL_STATEMENT,
-    counts_when_made: true,
     heuristic_verb: "runs a database query",
     exact_verb: "sends a database statement",
     help: query_help,
@@ -827,7 +823,10 @@ fn established_loop_calls(
                 let Some((site, must)) = established else {
                     let open = cx.open_premises.then(|| {
                         let mut open = loop_chain_open_premises(cx, path, q);
-                        open.extend(loop_open_premises(q, progress_of(q.claim, q.chain_site)));
+                        open.extend(loop_open_premises(
+                            q,
+                            q.chain_site.progress_for(q.claim.effect),
+                        ));
                         open
                     });
                     return LoopVerdict {
@@ -835,7 +834,7 @@ fn established_loop_calls(
                         open: open.unwrap_or_default(),
                     };
                 };
-                let progress = progress_of(q.claim, site);
+                let progress = site.progress_for(q.claim.effect);
                 let exact = loops_around(q.at).find_map(|li| {
                     let origins = loop_steps(li, q.at, progress, &mut |_| ControlFlow::Break(()))?;
                     Some(EstablishedLoopCall {
@@ -852,15 +851,6 @@ fn established_loop_calls(
             })
             .collect()
     })
-}
-
-/// How far a call has to get for its effect to count: a Layer 2 call when it is made, where the
-/// claim counts it then ([`LoopClaim::counts_when_made`]), any other call when it returned.
-fn progress_of(claim: &LoopClaim, site: &CallSite) -> Progress {
-    match site.target {
-        CallTarget::Layer2 { .. } if claim.counts_when_made => Progress::Called,
-        _ => Progress::Returned,
-    }
 }
 
 /// The premises of `EFF102`'s or `EFF103`'s claim the must-fact of `q` leaves open along its

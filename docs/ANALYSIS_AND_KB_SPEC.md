@@ -2423,11 +2423,18 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).
    - A function has run effect `e` whenever it returns when it makes, on every normal return,
-     an unconditional Layer 2 call with `e` (made, also if it raised), or a complete call whose
-     every non-abstract target runs at the call, as written (decorators that call the body each
-     time), on the caller's thread, and has run `e` whenever it returns (returned). A target
-     that never returns normally has run anything; a name bound twice has no facts. The facts
-     grow over each SCC with the summaries and take part in Early Cutoff.
+     an unconditional Layer 2 call with `e` (made, also if it raised, where a raised call has
+     had `e`: `ExecEffectKind::had_when_raised`, true for the blocking effects, statements, and
+     checkpoints; returned for a client allocation or a reallocation, which a raised call may
+     not have done), or a complete call whose every non-abstract target runs at the call, as
+     written (decorators that call the body each time), on the caller's thread, and has run `e`
+     whenever it returns (returned): `CallSite::made_on_every_return`. For an effect a call has
+     only once it returned, every normal return may instead pass a return of one of several
+     such calls (`Extractor::must_through_one_of`: a handler that makes the client another way
+     when the first constructor raised); the chain goes through the first, and each other API
+     is a witness. A target that never returns normally has run anything; a name bound twice
+     has no facts. The facts grow over each SCC with the summaries and take part in Early
+     Cutoff.
    - A Layer 2 call whose case or receiver state depends on the function's parameter (the
      shapes of `GuardTest::Value`) has the effect whenever its callers pass a value passing a
      test: `MustExec::given` keeps the chain with the `ValueTest` (whether each case, or passing

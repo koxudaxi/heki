@@ -526,7 +526,7 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
     }
     for (path, i) in sites {
         let site = &index.files[path].call_sites[*i];
-        if site.project_callees().is_empty() || !site.made_on_every_return() {
+        if site.project_callees().is_empty() {
             continue;
         }
         let kinds: BTreeSet<ExecEffectKind> = site
@@ -534,6 +534,7 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
             .iter()
             .filter_map(|bc| index.summary(&bc.callee)?.must_exec.as_deref())
             .flat_map(|m| m.effects.keys().copied().chain(m.given.effects()))
+            .filter(|e| site.made_on_every_return(*e))
             .collect();
         for e in kinds {
             let found = site_steps(index, path, site, e, true, &mut |_| ControlFlow::Break(()));
@@ -573,8 +574,8 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
 }
 
 /// The locks the function attempts to take whenever it returns normally through the project
-/// calls it has made whenever it returns ([`CallSite::made_on_every_return`]): each lock that
-/// every implementation of such a call attempts whenever it returns
+/// calls that have returned whenever it returns ([`crate::OnEveryReturn::returned`]): each
+/// lock that every implementation of such a call attempts whenever it returns
 /// ([`ProjectIndex::site_must_take`]), unless the function may give it back
 /// (`LockFacts::gives_back`). A name bound to two definitions gains nothing, as for
 /// [`must_through_calls`].
@@ -598,7 +599,7 @@ fn must_takes_through_calls(
     let mut found: Vec<Option<crate::locks::LockAcquire>> = vec![None; open.len()];
     for (path, i) in sites {
         let site = &index.files[path].call_sites[*i];
-        if site.project_callees().is_empty() || !site.made_on_every_return() {
+        if site.project_callees().is_empty() || !site.on_every_return.returned {
             continue;
         }
         for (lock, best) in open.iter().zip(&mut found) {
@@ -936,7 +937,7 @@ impl<'i> MustExplainer<'i> {
             let Some((path, site)) = at.take() else {
                 break;
             };
-            if hop > 0 && !site.made_on_every_return() {
+            if hop > 0 && !site.made_on_every_return(e) {
                 out.push(HopGap {
                     hop,
                     gap: MustGap::NotOnEveryReturn,

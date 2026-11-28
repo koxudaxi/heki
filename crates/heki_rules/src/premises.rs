@@ -124,6 +124,8 @@ pub const EVERY_RETURN: Premise = Premise {
     decided_in: &[
         "heki_ir::facts::paths::Paths::on_every_return",
         "heki_effect::paths::with_paths",
+        "heki_effect::CallSite::made_on_every_return",
+        "heki_effect::summary::Extractor::must_through_one_of",
         "heki_effect::callgraph::site_must_chain",
         "heki_effect::ProjectIndex::site_must_take",
     ],
