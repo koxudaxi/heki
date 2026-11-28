@@ -5899,7 +5899,9 @@ impl<'a> Extractor<'a> {
                 };
                 let callable = callee_val.or(partial.as_ref().map(|(c, _)| c));
                 let target = match (callee_var, &partial) {
-                    (Some(_), Some((c, held))) => self.cx.partial_targets(Some(c), *held),
+                    (Some(_), Some((c, held))) => {
+                        TypeCtx::through_partial(*held, self.cx.resolve_call(Some(c)))
+                    }
                     (Some(_), None) => self.cx.resolve_call(callable),
                     // Non-inlined comprehension (Python 3.11, `__comp_<function id>`) runs
                     // immediately.

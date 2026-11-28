@@ -819,7 +819,7 @@ pub(super) fn record(
         return;
     }
     let unfixed = Unfixed::of(input, project, &fns);
-    let (decided, fallbacks, foreign, tables) = {
+    let (mut decided, fallbacks, foreign, tables) = {
         let decls: &ModuleDecls = decls;
         let first_reads = FirstReads::default();
         let cx0 = TypeCtx::new(input, project, kb).reading_stores(&first_reads);
@@ -876,6 +876,14 @@ pub(super) fn record(
             .collect();
         (decided, fallbacks, foreign.into_decl(), (tables, declaring))
     };
+    // A global the configuration declares is what the catalog says of it, not the partial object
+    // its module binds (`get = functools.partial(urlopen, timeout=5)` declared blocking).
+    decided.globals.retain(|name, t| {
+        !matches!(t, Ty::Partial(..))
+            || kb
+                .declared(&format!("{}.{name}", decls.module_name))
+                .is_none()
+    });
     decided.write(decls);
     (decls.tables, decls.declared_items) = tables;
     decls.store_fallbacks = fallbacks.map(Box::new);

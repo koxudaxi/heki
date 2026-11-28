@@ -680,13 +680,13 @@ fn names_no_item_class(t: &Ty) -> bool {
 /// Whether `t` is a named object, one of several, or a tuple of known length of them: what a
 /// [`Returned::Named`] fact keeps.
 fn names_objects(t: &Ty) -> bool {
-    if !t.named().is_empty() {
+    if !Ty::named(t).is_empty() {
         return true;
     }
     t.obj().is_some_and(|o| {
         o.class == "builtins.tuple"
             && matches!(&o.args, Args::Tuple(es) if !es.is_empty()
-                && es.iter().all(|e| matches!(e, Elem::Of(t) if !t.named().is_empty())))
+                && es.iter().all(|e| matches!(e, Elem::Of(t) if !Ty::named(t).is_empty())))
     })
 }
 

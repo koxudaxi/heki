@@ -10256,7 +10256,7 @@ fn complete_decls(
 fn kept_in_declarations(t: &Ty) -> bool {
     match t {
         Ty::Inst(_) | Ty::Union(_) | Ty::Class(_) => true,
-        Ty::Partial(callable, _) => !callable.named().is_empty(),
+        Ty::Partial(callable, _) => !Ty::named(callable).is_empty(),
         Ty::Coroutine(result) => kept_in_declarations(result),
         _ => false,
     }
@@ -11385,6 +11385,20 @@ impl<'a> TypeCtx<'a> {
         mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
         let symbol = self.called_symbol(fqn);
+        // A partial object calls its callable, past the arguments it holds, which shift the
+        // call's: what the callable gives, its arguments not followed.
+        if let Symbol::Global(_) = symbol
+            && let Some((callable, _)) = self.global_partial(fqn)
+        {
+            let unknown: fn(Option<u8>, Option<&str>) -> Option<ArgFact> = |_, _| None;
+            let mut results = Ty::named(&callable).iter().map(|c| {
+                (self.project.name_holds(c) == NameHolds::Definition)
+                    .then(|| self.symbol_result(c, self.called_symbol(c), unknown))
+                    .flatten()
+            });
+            let first = results.next()??;
+            return results.try_fold(first, |acc, t| acc.join(&t?));
+        }
         if through == CalledThrough::Name
             && matches!(symbol, Symbol::Class(_) | Symbol::Function(..))
         {
@@ -11414,15 +11428,6 @@ impl<'a> TypeCtx<'a> {
                     .declared_result(fqn, arg)
                     .or_else(|| decl.declared_return(self.project))
                     .map(|t| decl.call_type(t));
-            }
-            // A partial object calls its callable, past the arguments it holds, which shift the
-            // call's: what the callable gives, its arguments not followed.
-            Symbol::Global(_) if let Some((callable, _)) = self.global_partial(fqn) => {
-                let unknown: fn(Option<u8>, Option<&str>) -> Option<ArgFact> = |_, _| None;
-                let mut results = (callable.named().iter())
-                    .map(|c| self.call_result(c, CalledThrough::Name, unknown));
-                let first = results.next()??;
-                return results.try_fold(first, |acc, t| acc.join(&t?));
             }
             Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => return None,
             Symbol::External => {}
@@ -11477,12 +11482,12 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// What calling a `functools.partial` object of `callable` holding `held` runs: what calling
-    /// the callable runs with the call's own positions. Held positions shift them past ones heki
-    /// does not know, and held keywords may decide what a library call does, which the catalog
-    /// reads from the arguments the call shows: such calls stay unresolved.
-    pub(crate) fn partial_targets(&self, callable: Option<&Val>, held: Held) -> Callee {
-        match (held, self.resolve_call(callable)) {
+    /// What calling a `functools.partial` object holding `held` runs, `target` being what calling
+    /// its callable runs: that, with the call's own positions. Held positions shift them past ones
+    /// heki does not know, and held keywords may decide what a library call does, which the
+    /// catalog reads from the arguments the call shows: such calls stay unresolved.
+    pub(crate) fn through_partial(held: Held, target: Callee) -> Callee {
+        match (held, target) {
             (Held::Positions, _) | (Held::Keywords, Callee::External(_)) => Callee::Unresolved,
             (_, target) => target,
         }
@@ -11495,7 +11500,7 @@ impl<'a> TypeCtx<'a> {
     pub(crate) fn global_partial(&self, fqn: &str) -> Option<(Ty, Held)> {
         match self.called_symbol(fqn) {
             Symbol::Global(Ty::Partial(callable, held))
-                if (callable.named().iter())
+                if (Ty::named(&callable).iter())
                     .all(|c| !matches!(self.called_symbol(c), Symbol::Global(_))) =>
             {
                 Some((*callable, held))
@@ -11504,25 +11509,37 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// What calling the name `fqn`, which is `symbol`, runs: a function, the `__init__` a class's
+    /// MRO finds, or a library symbol.
+    fn definition_targets(&self, fqn: &str, symbol: Symbol<'_>) -> Callee {
+        match symbol {
+            Symbol::Function(key, _) => Callee::Project(vec![key], false),
+            Symbol::Class(_) => constructor(
+                self.project,
+                fqn,
+                self.project.class_targets(fqn, "__init__", self.kb),
+            ),
+            Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => {
+                Callee::Unresolved
+            }
+            Symbol::External => Callee::External(fqn.to_owned()),
+        }
+    }
+
     /// Calling a named class constructs exactly that class: its `__init__` is the one its MRO
     /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
         match callee.filter(|c| !c.says_nothing()) {
             Some(Recv::Ref(fqn)) => match self.called_symbol(fqn) {
-                Symbol::Function(key, _) => Callee::Project(vec![key], false),
-                Symbol::Class(_) => constructor(
-                    self.project,
-                    fqn,
-                    self.project.class_targets(fqn, "__init__", self.kb),
-                ),
-                // `helpers.MARK(f)` of a module global `MARK = partial(mark, deep=True)`.
+                // `helpers.MARK(f)` of a module global `MARK = partial(mark, deep=True)`, whose
+                // callables are no globals ([`Self::global_partial`]).
                 Symbol::Global(_) if let Some((callable, held)) = self.global_partial(fqn) => {
-                    self.partial_targets(callable.val().as_ref(), held)
+                    let target = named_targets(Ty::named(&callable), |c| {
+                        self.definition_targets(c, self.called_symbol(c))
+                    });
+                    Self::through_partial(held, target)
                 }
-                Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => {
-                    Callee::Unresolved
-                }
-                Symbol::External => Callee::External(fqn.to_owned()),
+                symbol => self.definition_targets(fqn, symbol),
             },
             Some(Recv::Class(class)) => constructor(
                 self.project,
