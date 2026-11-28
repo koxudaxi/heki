@@ -643,6 +643,8 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 A contract names a method as `Class.method`, and a subclass that overrides the method is another function. Set `include-overrides = true` on a contract (or in its [defaults table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind)) and an entry naming a method in `allowed-*`, `forbidden-*`, `exempt-methods`, `invalidators`, or `exempt-writers` also names the overrides of it in the project subclasses of `Class`. The key is off by default because it allows a subclass written later to do what its base class may, with no change of the configuration. See [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions).
 
+A value that an annotation declares as a union (`Model | Node`, `Optional[...]`, a `TypeAlias`, a `TypeVar` bound) is each of its classes when it has at most eight, and a method call on it runs the method of each. A value that different assignments join keeps at most three classes. Past the limit the value has no class, and a write on it stays an unresolved write. A loop that writes the keys of a `TypedDict` (`for name, value in td.items(): setattr(obj, name, value)`) writes the keys the class declares only when the `TypedDict` is closed (`closed=True`, PEP 728, or a base that is closed). A `TypedDict` without it is open: a subclass value may be passed where it is declared, so the write names an attribute at run time, as for a plain `dict`.
+
 `lru_cache` and `cache` results are protected without a contract. A `readonly-returns` entry adds the producers that are not cached, such as a function that returns a module-level dict.
 
 ## 🤝 Not breaking a value you borrowed or share
@@ -1113,6 +1115,8 @@ Found 1 diagnostic(s) in 3 file(s).
 ```
 
 The run exits with code 1. `forbid` takes tokens such as `blocking`, `blocking-net`, `blocking-db`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, and `reads-environment`. [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) lists them all with their extra keys.
+
+A value that an annotation declares as a union of up to eight classes is each of them, so a call on it reaches the method of each class; a union that different assignments join keeps three. A loop over a `TypedDict`'s keys or items that calls `setattr(obj, name, value)` writes the keys the class declares only for a closed `TypedDict` (`closed=True`, or a base that is closed). For an open one the write stays an attribute named at run time (`unresolved-writes`), because a subclass value may carry more keys.
 
 A `scopes` or `allowed-callees` entry naming a method (`Class.method`) names that method only. With `include-overrides = true` in the boundary (or in its [defaults table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind)) it also names the overrides in the project subclasses of `Class`, nested scopes included, so a subclass written later is in scope or allowed with no change of the configuration. The key is off by default for that reason.
 
@@ -15317,7 +15321,10 @@ allowed writers:
   tuple of them (`for key in RECORDS`, imported or not), writes each of them, when no code
   changes the list or set (`keys.append(name)` makes the name unknown), and so does the key of
   each pair a generator gives `__dict__.update`
-  (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`);
+  (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`); the name a loop takes
+  from the keys or items of a closed `TypedDict` (`closed=True`, or a base that is closed)
+  writes each key the class and its bases declare, while an open `TypedDict` may hold more keys
+  (a subclass value) and its write stays one named at run time;
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry, an entry `get` returns, and
   the entries a loop takes from `values()` or `items()`: `for names in model.meta.values():

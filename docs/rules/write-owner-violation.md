@@ -55,7 +55,10 @@ allowed writers:
   tuple of them (`for key in RECORDS`, imported or not), writes each of them, when no code
   changes the list or set (`keys.append(name)` makes the name unknown), and so does the key of
   each pair a generator gives `__dict__.update`
-  (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`);
+  (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`); the name a loop takes
+  from the keys or items of a closed `TypedDict` (`closed=True`, or a base that is closed)
+  writes each key the class and its bases declare, while an open `TypedDict` may hold more keys
+  (a subclass value) and its write stays one named at run time;
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry, an entry `get` returns, and
   the entries a loop takes from `values()` or `items()`: `for names in model.meta.values():

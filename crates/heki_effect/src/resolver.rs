@@ -817,6 +817,14 @@ pub struct ClassDecl {
     /// the metaclass makes of the class ([`ProjectDecls::attr_write_stores_value`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub passes_keywords: bool,
+    /// The `closed=` keyword of the class statement (PEP 728): `Some(true)` only for the literal
+    /// `True`; any other value, one heki cannot read included, is `Some(false)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_keyword: Option<bool>,
+    /// The class statement passes a keyword other than `metaclass=`, `closed=`, and `total=`
+    /// (`extra_items=`, an unpacked mapping): a `TypedDict` it builds may hold other keys.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub opens_typed_dict_keys: bool,
     /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
     /// builds): `Some(frozen_default)`.
     pub transform: Option<bool>,
@@ -4855,22 +4863,30 @@ impl ProjectDecls {
     /// The keys a value of the project `TypedDict` `class` holds, sorted: the names the class
     /// bodies along its MRO declare ([`ClassDecl::members`]; a `TypedDict` body declares its keys
     /// and nothing else). `None` when such a value may hold keys none of them names or heki
-    /// cannot list them: a class along the MRO passes a class keyword (`total=False`, PEP 728's
-    /// `closed=` and `extra_items=`), names a metaclass, binds a name of its body to code (a
-    /// method, a call: [`ClassDecl::code_attrs`]), or is no project `TypedDict` (besides
-    /// `TypedDict` and `Generic` themselves).
+    /// cannot list them: the class is open (a value of a `TypedDict` with more keys, such as a
+    /// subclass, is a value of it), which only PEP 728's `closed=True` on the class or the first
+    /// base that sets `closed=` prevents; a class along the MRO passes `extra_items=` or another
+    /// keyword, names a metaclass, binds a name of its body to code (a method, a call:
+    /// [`ClassDecl::code_attrs`]), or is no project `TypedDict` (besides `TypedDict` and
+    /// `Generic` themselves).
     pub(crate) fn typed_dict_keys(&self, class: &str) -> Option<Vec<String>> {
         if !self.is_typed_dict(class) {
             return None;
         }
+        let mro = self.mro(class);
+        // The first `closed=` class keyword along the MRO decides.
+        let closed = mro.iter().find_map(|c| self.class(c)?.closed_keyword);
+        if !closed.unwrap_or(false) {
+            return None;
+        }
         let mut keys = BTreeSet::new();
-        for c in self.mro(class) {
+        for c in mro {
             if TYPED_DICT_KEYLESS_BASES.contains(&c.as_str()) {
                 continue;
             }
             let decl = self.class(&c).filter(|_| self.is_typed_dict(&c))?;
             let binds_code = decl.members.iter().any(|m| decl.code_attrs.contains(m));
-            if decl.passes_keywords || decl.custom_metaclass || binds_code {
+            if decl.opens_typed_dict_keys || decl.custom_metaclass || binds_code {
                 return None;
             }
             keys.extend(decl.members.iter().cloned());
@@ -7866,6 +7882,11 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             });
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
         let passes_keywords = class.keywords.iter().any(|(k, _)| k != "metaclass");
+        let closed_keyword = keyword("closed").map(|v| bool_literal(v) == Some(true));
+        let opens_typed_dict_keys = class
+            .keywords
+            .iter()
+            .any(|(k, _)| !matches!(k.as_str(), "metaclass" | "closed" | "total"));
         let is_protocol = bases
             .iter()
             .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
@@ -7892,6 +7913,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             c.custom_metaclass = custom_metaclass;
             c.frozen_keyword = frozen_keyword;
             c.passes_keywords = passes_keywords;
+            c.closed_keyword = closed_keyword;
+            c.opens_typed_dict_keys = opens_typed_dict_keys;
             c.is_protocol = is_protocol;
             c.members = members;
         }

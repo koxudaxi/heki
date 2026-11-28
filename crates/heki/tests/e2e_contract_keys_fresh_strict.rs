@@ -4282,12 +4282,12 @@ class Field:
         self.kind = ""
 
 
-class Identity(TypedDict):
+class Identity(TypedDict, closed=True):
     name: str
     alias: str
 
 
-class Named(TypedDict):
+class Named(TypedDict, closed=True):
     name: str
 
 
@@ -4295,7 +4295,7 @@ class Kinded(Named):
     kind: str
 
 
-class Held(TypedDict, Generic[T]):
+class Held(TypedDict, Generic[T], closed=True):
     name: T
 
 
@@ -4305,13 +4305,27 @@ class Partial(TypedDict, total=False):
 
 class Closed(typing_extensions.TypedDict, closed=True):
     name: str
+    alias: str
+
+
+class ClosedChild(Closed):
+    kind: str
+
+
+class Open(TypedDict):
+    name: str
+    alias: str
+
+
+class OpenChild(Open):
+    kind: str
 
 
 class Extra(typing_extensions.TypedDict, extra_items=str):
     name: str
 
 
-class Helped(TypedDict):
+class Helped(TypedDict, closed=True):
     name: str
 
     def helper(self) -> None: ...
@@ -4319,7 +4333,7 @@ class Helped(TypedDict):
 
 const TYPED_DICT_PASSES: &str = r#"from typing import Any
 
-from pkg.model import Closed, Extra, Field, Held, Helped, Identity, Kinded, Named, Partial
+from pkg.model import Closed, ClosedChild, Extra, Field, Held, Helped, Identity, Kinded, Named, Open, OpenChild, Partial
 
 
 def over_the_items(field: Field, identity: Identity) -> None:
@@ -4366,6 +4380,21 @@ def closed(field: Field, value: Closed) -> None:
         setattr(field, attribute, value[attribute])
 
 
+def closed_child(field: Field, value: ClosedChild) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def open_dict(field: Field, value: Open) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def open_child(field: Field, value: OpenChild) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
 def with_extra_items(field: Field, value: Extra) -> None:
     for attribute in value:
         setattr(field, attribute, value[attribute])
@@ -4381,12 +4410,13 @@ def over_a_dict(field: Field, value: dict[str, Any]) -> None:
         setattr(field, attribute, value[attribute])
 "#;
 
-/// A loop over a `TypedDict`'s keys or items (also through `sorted`, a generator of its pairs,
-/// and `vars(obj).update(td)`) writes exactly the keys the class and its bases declare: a write
-/// of `Field.alias` where the keys name it, none where they do not, for a generic `TypedDict`
-/// and a union of them too. A `TypedDict` passing a class keyword (`total=False`, `closed=`,
-/// `extra_items=`), one whose body binds a method, and a plain `dict` may hold any key: their
-/// writes stay named at run time. The `items()` and `keys()` calls themselves are calls heki
+/// A loop over a closed `TypedDict`'s keys or items (`closed=True`, or a base that is closed;
+/// also through `sorted`, a generator of its pairs, and `vars(obj).update(td)`) writes exactly
+/// the keys the class and its bases declare: a write of `Field.alias` where the keys name it,
+/// none where they do not, for a generic `TypedDict` and a union of them too. An open
+/// `TypedDict` (a value of a subclass is a value of it), one passing `extra_items=`, one whose
+/// body binds a method (even a closed one), and a plain `dict` may hold any key: their writes stay named at run
+/// time. The `items()` and `keys()` calls themselves are calls heki
 /// cannot resolve: a method of a `TypedDict` value is looked up on its `TypedDict` base.
 #[test]
 fn a_loop_over_a_typed_dict_writes_its_keys() {
@@ -4432,10 +4462,13 @@ fn a_loop_over_a_typed_dict_writes_its_keys() {
     expected.extend(alias(22, "updated"));
     expected.extend(alias(27, "over_a_union"));
     expected.extend(any_name(42, "not_total"));
-    expected.extend(any_name(47, "closed"));
-    expected.extend(any_name(52, "with_extra_items"));
-    expected.extend(any_name(57, "with_a_method"));
-    expected.extend(any_name(62, "over_a_dict"));
+    expected.extend(alias(47, "closed"));
+    expected.extend(alias(52, "closed_child"));
+    expected.extend(any_name(57, "open_dict"));
+    expected.extend(any_name(62, "open_child"));
+    expected.extend(any_name(67, "with_extra_items"));
+    expected.extend(any_name(72, "with_a_method"));
+    expected.extend(any_name(77, "over_a_dict"));
     assert_eq!(found(&diags), expected);
     let mut1 = diags
         .iter()

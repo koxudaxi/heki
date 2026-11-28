@@ -9092,7 +9092,7 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
 const BOUND_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"uses\"\nscopes = [\"pkg.use_*.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\n";
 const BOUND_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n";
 const BOUND_HELPERS: &str = "from pkg.model import Field\n\n\ndef require(field: Field):\n    field.required = True\n\n\ndef skip(field: Field):\n    pass\n";
-const BOUND_DEFS: &str = "from typing import Protocol, TypeAlias, TypedDict, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n\n\nclass Writer:\n    def touch(self, field: Field):\n        field.required = True\n\n\nclass Reader:\n    def touch(self, field: Field):\n        pass\n\n\nTouching: TypeAlias = Writer | Reader\nTouchers = list[Writer]\n\n\nclass Identity(TypedDict):\n    name: str\n";
+const BOUND_DEFS: &str = "from typing import Protocol, TypeAlias, TypedDict, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n\n\nclass Writer:\n    def touch(self, field: Field):\n        field.required = True\n\n\nclass Reader:\n    def touch(self, field: Field):\n        pass\n\n\nTouching: TypeAlias = Writer | Reader\nTouchers = list[Writer]\n\n\nclass Identity(TypedDict, closed=True):\n    name: str\n";
 const BOUND_TABLE_USE: &str =
     "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
 const BOUND_ALIAS_USE: &str =
@@ -9352,12 +9352,12 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         )
         .present(&[("pkg/use_typed_dict.py", "EFF201")]),
         Step::new(
-            "it passes `total=False`, so a value may hold any key",
+            "it is no longer closed, so a value may hold any key",
             vec![save(
                 "pkg/defs.py",
                 &BOUND_DEFS
                     .replace("    name: str\n", "    name: str\n    required: bool\n")
-                    .replace("(TypedDict)", "(TypedDict, total=False)"),
+                    .replace("(TypedDict, closed=True)", "(TypedDict)"),
             )],
         )
         .absent(&[("pkg/use_typed_dict.py", "EFF201")]),
