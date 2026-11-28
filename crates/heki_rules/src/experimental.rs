@@ -95,6 +95,16 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "command.init",
+        kind: ExperimentalKind::Command,
+        target: "heki init",
+        since: "0.12.0",
+        reason: "Its questions, their defaults, and the files it writes can still change as \
+            projects try it; the keys it adds follow `heki recommend`, and the skill and the \
+            agents' instructions follow `heki skill`.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "command.recommend",
         kind: ExperimentalKind::Command,
         target: "heki recommend",

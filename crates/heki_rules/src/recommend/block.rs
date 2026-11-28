@@ -24,6 +24,11 @@ pub struct Additions {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub toml: String,
+    /// The keys `toml` sets in the settings table itself (`src`), without the table's header:
+    /// a file that holds the table already takes them below its own header.
+    pub settings: String,
+    /// The tables of `toml` after those keys, each with its header.
+    pub tables: String,
     pub config: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -61,13 +66,11 @@ pub fn render(additions: &Additions, current: &HekiConfig, layout: ConfigLayout)
         (Some(prefix), name) => format!("[{prefix}.{name}]"),
         (None, name) => format!("[{name}]"),
     };
-    let mut toml = String::new();
+    let mut settings = String::new();
+    let mut tables = String::new();
     let mut config = serde_json::Map::new();
     if let Some(src) = &additions.src {
-        if prefix.is_some() {
-            let _ = writeln!(toml, "{}", header(""));
-        }
-        let _ = writeln!(toml, "src = {}", array(src));
+        let _ = writeln!(settings, "src = {}", array(src));
         config.insert("src".to_owned(), json(src));
     }
     if !additions.extend_select.is_empty() {
@@ -79,9 +82,9 @@ pub fn render(additions: &Additions, current: &HekiConfig, layout: ConfigLayout)
             .collect();
         whole.extend(added.iter().map(|code| (*code).clone()));
         let names: Vec<&str> = added.iter().map(|code| code.as_str()).collect();
-        separate(&mut toml);
+        separate(&mut tables);
         let _ = writeln!(
-            toml,
+            tables,
             "{}\nextend-select = {}  # adds {}",
             header("lint"),
             array(&whole),
@@ -96,8 +99,8 @@ pub fn render(additions: &Additions, current: &HekiConfig, layout: ConfigLayout)
             return;
         }
         for (lines, _) in &entries {
-            separate(&mut toml);
-            let _ = write!(toml, "[{}]\n{lines}", header(name));
+            separate(&mut tables);
+            let _ = write!(tables, "[{}]\n{lines}", header(name));
         }
         let values = entries.into_iter().map(|(_, value)| value).collect();
         config.insert(name.to_owned(), serde_json::Value::Array(values));
@@ -105,7 +108,23 @@ pub fn render(additions: &Additions, current: &HekiConfig, layout: ConfigLayout)
     entries("write-owners", written(&additions.write_owners));
     entries("read-owners", written(&additions.read_owners));
     entries("effect-boundaries", written(&additions.effect_boundaries));
-    Block { toml, config }
+    let mut toml = String::new();
+    if !settings.is_empty() {
+        if prefix.is_some() {
+            let _ = writeln!(toml, "{}", header(""));
+        }
+        toml.push_str(&settings);
+    }
+    if !tables.is_empty() {
+        separate(&mut toml);
+        toml.push_str(&tables);
+    }
+    Block {
+        toml,
+        settings,
+        tables,
+        config,
+    }
 }
 
 /// Each entry of a list of tables as its TOML lines and its JSON object.
@@ -287,7 +306,28 @@ mod tests {
                 && block.ends_with("forbid = [\"blocking\"]\n"),
             "{block}"
         );
+        // The keys of the settings table itself come apart from the tables, for a file that
+        // holds that table's header already.
+        let split = render(
+            &additions(),
+            &HekiConfig::default(),
+            ConfigLayout::PyProject,
+        );
+        assert_eq!(split.settings, "src = [\"backend\", \"\"]\n");
+        assert!(
+            split.tables.starts_with("[tool.heki.lint]\n"),
+            "{}",
+            split.tables
+        );
+        assert_eq!(
+            split.toml,
+            format!("[tool.heki]\n{}\n{}", split.settings, split.tables)
+        );
         let nothing = render(&Additions::default(), &current, ConfigLayout::PyProject);
         assert_eq!((nothing.toml.as_str(), nothing.config.len()), ("", 0));
+        assert_eq!(
+            (nothing.settings.as_str(), nothing.tables.as_str()),
+            ("", "")
+        );
     }
 }

@@ -194,6 +194,9 @@ Contract reports are heuristic, so they are warnings until the table sets `fail 
 See [Contracts](configuration.md#contracts) for every key. A coding agent can miss a rule written
 in its instructions, but not a contract that `heki check` enforces:
 
+- [`heki init`](getting-started.md#set-up-a-repository-heki-init-experimental) (experimental)
+  writes the configuration, a Ratchet baseline of today's reports, and the Agent Skill and an
+  `AGENTS.md` section in one run.
 - List `heki.toml` and `heki-baseline.toml` in `CODEOWNERS`: moving a wall takes a review.
 - Run `heki check --report-suppressed <PATH>` in CI: it lists every inline `# heki: ignore` and `# noqa`
   that silences a report, so a change that goes around a wall shows in review ([details](adoption.md#auditing-inline-suppressions)).

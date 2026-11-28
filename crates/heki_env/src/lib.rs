@@ -1269,10 +1269,13 @@ impl HekiConfig {
         ConfigLayout::of(path).parse(path, &text, root)
     }
 
+    /// The configuration files of a project root, in the order heki looks for them.
+    pub const FILES: [&'static str; 3] = ["heki.toml", ".heki.toml", "pyproject.toml"];
+
     /// The file a project rooted at `root` reads its configuration from: the first of
-    /// `heki.toml`, `.heki.toml`, and `pyproject.toml` there.
+    /// [`Self::FILES`] there.
     pub fn file_in(root: &Path) -> Option<PathBuf> {
-        ["heki.toml", ".heki.toml", "pyproject.toml"]
+        Self::FILES
             .into_iter()
             .map(|candidate| root.join(candidate))
             .find(|p| p.is_file())

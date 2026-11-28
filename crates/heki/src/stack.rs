@@ -37,6 +37,7 @@ pub(crate) fn analyzes_source(command: &Commands) -> bool {
         | Commands::Assumptions(_)
         | Commands::Inspect(_)
         | Commands::Recommend(_)
+        | Commands::Init(_)
         | Commands::DumpSemantic(_)
         | Commands::DumpIr(_)
         | Commands::DumpFacts(_)

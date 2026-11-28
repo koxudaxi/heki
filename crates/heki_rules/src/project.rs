@@ -18,8 +18,8 @@ use heki_effect::{
     analyze_project_for,
 };
 use heki_env::{
-    ConfigError, Docs, Explain, HekiConfig, LintConfig, Problem, PythonVersion, RuntimeProfile,
-    Setting, Severity,
+    ConfigError, ConfigLayout, Docs, Explain, HekiConfig, LintConfig, Problem, PythonVersion,
+    RuntimeProfile, Setting, Severity,
 };
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -710,6 +710,9 @@ pub struct ProjectOptions<'a> {
     /// directory (`.`), and the language server names its workspace folder.
     pub paths: &'a [PathBuf],
     pub config: Option<&'a Path>,
+    /// The text of the file `config` names, read in place of the disk's: `heki init` analyzes
+    /// the project under the configuration it is about to write.
+    pub config_text: Option<&'a str>,
     /// The directory the run works from, where a project without a configuration file is
     /// rooted ([`find_root`]): the workspace folder of the language server. `None`: the current
     /// directory.
@@ -769,9 +772,10 @@ impl ProjectEnv {
     pub fn load(opts: &ProjectOptions<'_>) -> Result<Self, ProjectError> {
         let root = opts.root();
         let config_file = opts.config_file_at(&root);
-        let cfg = match &config_file {
-            Some(path) => HekiConfig::load_from_file(path, &root)?,
-            None => HekiConfig::default(),
+        let cfg = match (&config_file, opts.config_text) {
+            (Some(path), Some(text)) => ConfigLayout::of(path).parse(path, text, &root)?,
+            (Some(path), None) => HekiConfig::load_from_file(path, &root)?,
+            (None, _) => HekiConfig::default(),
         };
         let runtime = match opts.target_version.or(cfg.target_version.as_deref()) {
             Some(t) => PythonVersion::parse_tag(t)

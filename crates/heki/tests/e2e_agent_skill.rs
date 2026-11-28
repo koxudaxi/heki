@@ -450,6 +450,7 @@ fn the_long_help_links_the_documentation() {
         ("assumptions", "heki-assumptions"),
         ("inspect", "heki-inspect"),
         ("recommend", "heki-recommend"),
+        ("init", "heki-init"),
         ("skill install", "heki-skill-install"),
         ("version", "heki-version"),
     ] {

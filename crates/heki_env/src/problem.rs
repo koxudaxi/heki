@@ -83,9 +83,11 @@ docs_pages! {
     CliAssumptions => "cli-reference/#heki-assumptions",
     CliInspect => "cli-reference/#heki-inspect",
     CliRecommend => "cli-reference/#heki-recommend",
+    CliInit => "cli-reference/#heki-init",
     CliSkillInstall => "cli-reference/#heki-skill-install",
     CliVersion => "cli-reference/#heki-version",
     Inspect => "coding-agents/#what-a-function-does-heki-inspect-experimental",
+    Init => "getting-started/#set-up-a-repository-heki-init-experimental",
 }
 
 impl Docs {

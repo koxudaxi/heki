@@ -140,8 +140,7 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
         config: args.analysis.config.as_deref(),
         working_dir: None,
         target_version: args.analysis.target_version.as_deref(),
-        overrides: None,
-        removed: None,
+        ..ProjectOptions::default()
     })?;
     let selection = selection(&selectors(&args.analysis), &project)?;
     let Indexed { project, index, .. } =

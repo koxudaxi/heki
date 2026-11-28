@@ -12,6 +12,7 @@ mod dump_facts;
 mod dump_recommend_facts;
 mod failure;
 mod help;
+mod init;
 mod inspect;
 mod open_premises;
 mod prompt;
@@ -148,6 +149,11 @@ enum Commands {
     /// the keys to add (it writes no file).
     #[command(after_long_help = help::RECOMMEND.render())]
     Recommend(RecommendArgs),
+    /// Experimental: set up heki in a repository: a configuration file with the keys `heki
+    /// recommend` proposes commented out, a Ratchet baseline, and the coding agents' skill and
+    /// instructions, from a few questions or the options.
+    #[command(after_long_help = help::INIT.render())]
+    Init(InitArgs),
     /// Experimental: install heki's Agent Skill where a coding agent reads skills.
     Skill(SkillArgs),
     /// Print the version of this heki, and with `--changelog` what this release changed.
@@ -388,6 +394,57 @@ struct RecommendArgs {
     analysis: AnalysisArgs,
 }
 
+#[derive(Debug, Args)]
+struct InitArgs {
+    /// Take the default answer of every question the options leave open, without asking:
+    /// `heki.toml`, the keys `heki recommend` proposes commented out, and a baseline when `heki
+    /// check` reports something; the coding agents only as `--skill` and `--agents-md` say.
+    #[arg(short, long)]
+    yes: bool,
+    /// Where the configuration goes: `heki.toml`, or the `[tool.heki]` table of `pyproject.toml`
+    /// (the default when the project has that table).
+    #[arg(long, value_name = "FILE", value_parser = [init::CONFIG_FILE, init::PYPROJECT])]
+    config: Option<String>,
+    /// Run `heki recommend` and add the keys it proposes to the configuration, commented out:
+    /// `heki check` reports what it did before until you remove the `#` of a key.
+    #[arg(long, overrides_with = "no_recommend")]
+    recommend: bool,
+    /// Do not run `heki recommend`.
+    #[arg(long, overrides_with = "recommend")]
+    no_recommend: bool,
+    /// When `heki check` reports something now, record it in the Ratchet baseline
+    /// `heki-baseline.toml` and set `baseline`, so that only new reports fail.
+    #[arg(long, overrides_with = "no_baseline")]
+    baseline: bool,
+    /// Do not write a baseline.
+    #[arg(long, overrides_with = "baseline")]
+    no_baseline: bool,
+    /// Install the Agent Skill into the project for this coding agent, as `heki skill install`
+    /// does; give it twice for both.
+    #[arg(long, value_enum, value_name = "AGENT")]
+    skill: Vec<SkillAgent>,
+    /// Add a heki section to `AGENTS.md` and `CLAUDE.md`, those the project has (a `CLAUDE.md`
+    /// with an `@AGENTS.md` line reads that file already), or to a new `AGENTS.md`.
+    #[arg(long)]
+    agents_md: bool,
+    /// Print the files it would write, the text ones as diffs, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Replace a heki configuration (`heki.toml`, `.heki.toml`, the `[tool.heki]` table), a
+    /// baseline, a skill, or a heki section that is there already.
+    #[arg(long)]
+    force: bool,
+}
+
+/// `--<name>` / `--no-<name>`, the last one given winning: `None` when neither is given.
+fn on_off(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
 /// The sections `heki recommend --focus` prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum RecommendFocus {
@@ -418,11 +475,7 @@ struct HeuristicArgs {
 impl HeuristicArgs {
     /// `None`: the configuration decides.
     fn value(&self) -> Option<bool> {
-        match (self.heuristic, self.no_heuristic) {
-            (true, _) => Some(true),
-            (_, true) => Some(false),
-            _ => None,
-        }
+        on_off(self.heuristic, self.no_heuristic)
     }
 }
 
@@ -578,7 +631,7 @@ struct SkillInstallArgs {
     overwrite: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum SkillAgent {
     ClaudeCode,
     Codex,
@@ -666,6 +719,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Assumptions(args) => run_assumptions(args),
         Commands::Inspect(args) => inspect::run(&args),
         Commands::Recommend(args) => recommend::run(&args),
+        Commands::Init(args) => init::run(&args),
         Commands::Skill(SkillArgs {
             command: SkillCommand::Install(args),
         }) => skill::install(&args),
@@ -768,8 +822,7 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
         config: None,
         working_dir: None,
         target_version: args.target_version.as_deref(),
-        overrides: None,
-        removed: None,
+        ..ProjectOptions::default()
     })?;
     let mut total_fns = 0usize;
     let mut all_records = Vec::new();

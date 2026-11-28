@@ -21,6 +21,7 @@ Commands:
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
+  init         Experimental: set up heki in a repository: a configuration file with the keys `heki recommend` proposes commented out, a Ratchet baseline, and the coding agents' skill and instructions, from a few questions or the options
   skill        Experimental: install heki's Agent Skill where a coding agent reads skills
   version      Print the version of this heki, and with `--changelog` what this release changed
   help         Print this message or the help of the given subcommand(s)
@@ -55,6 +56,8 @@ Examples:
       apply the fixes heki proves safe
   heki rule EFF101
       the documentation of one rule
+  heki init
+      set up the configuration, a baseline, and the coding agents in a few questions (experimental)
   heki skill install --agent claude-code
       install the Agent Skill for Claude Code (experimental)
 
@@ -581,6 +584,74 @@ Output for programs:
       the exact suggestions as one unified diff of annotations
   heki recommend --output-format-json-schema
       the JSON Schema of that object
+```
+
+## `heki init`
+
+```text
+Experimental: set up heki in a repository: a configuration file with the keys `heki recommend` proposes commented out, a Ratchet baseline, and the coding agents' skill and instructions, from a few questions or the options
+
+Usage: heki init [OPTIONS]
+
+Options:
+  -y, --yes
+          Take the default answer of every question the options leave open, without asking: `heki.toml`, the keys `heki recommend` proposes commented out, and a baseline when `heki check` reports something; the coding agents only as `--skill` and `--agents-md` say
+
+      --config <FILE>
+          Where the configuration goes: `heki.toml`, or the `[tool.heki]` table of `pyproject.toml` (the default when the project has that table)
+          
+          [possible values: heki.toml, pyproject.toml]
+
+      --recommend
+          Run `heki recommend` and add the keys it proposes to the configuration, commented out: `heki check` reports what it did before until you remove the `#` of a key
+
+      --no-recommend
+          Do not run `heki recommend`
+
+      --baseline
+          When `heki check` reports something now, record it in the Ratchet baseline `heki-baseline.toml` and set `baseline`, so that only new reports fail
+
+      --no-baseline
+          Do not write a baseline
+
+      --skill <AGENT>
+          Install the Agent Skill into the project for this coding agent, as `heki skill install` does; give it twice for both
+          
+          [possible values: claude-code, codex]
+
+      --agents-md
+          Add a heki section to `AGENTS.md` and `CLAUDE.md`, those the project has (a `CLAUDE.md` with an `@AGENTS.md` line reads that file already), or to a new `AGENTS.md`
+
+      --dry-run
+          Print the files it would write, the text ones as diffs, and write nothing
+
+      --force
+          Replace a heki configuration (`heki.toml`, `.heki.toml`, the `[tool.heki]` table), a baseline, a skill, or a heki section that is there already
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-init
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the files are written, or with `--dry-run` shown
+  2  a heki configuration, a baseline, or a skill is there already (pass `--force`), a question is left open while the standard input is not a terminal (pass `--yes`), or a file cannot be read, analyzed, or written
+
+Examples:
+  heki init
+      answer a few questions, then write the configuration and what the answers chose
+  heki init --yes --dry-run
+      show what the default answers would write, and write nothing
+  heki init --yes --skill claude-code --agents-md
+      the default answers, the Agent Skill for Claude Code, and a heki section in AGENTS.md
 ```
 
 ## `heki skill install`

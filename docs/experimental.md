@@ -11,6 +11,7 @@ On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, th
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.generate-prompt` | cli-option | `heki check --generate-prompt` | 0.2.2 | - |
+| `command.init` | command | `heki init` | 0.12.0 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `command.skill` | command | `heki skill` | 0.2.5 | - |
@@ -38,6 +39,14 @@ On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, th
 - **Since:** 0.2.2
 
 What the prompt holds and how it says it can still change as it is tried with models, and so can its JSON object, whose schema `heki check --output-format-json-schema generate-prompt` prints; the object's `version` changes when a field is removed or changes meaning.
+
+## `command.init`
+
+- **Kind:** command
+- **Target:** `heki init`
+- **Since:** 0.12.0
+
+Its questions, their defaults, and the files it writes can still change as projects try it; the keys it adds follow `heki recommend`, and the skill and the agents' instructions follow `heki skill`.
 
 ## `command.inspect`
 

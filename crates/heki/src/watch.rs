@@ -163,8 +163,7 @@ impl Watcher<'_> {
             config: self.args.analysis.config.as_deref(),
             working_dir: None,
             target_version: self.args.analysis.target_version.as_deref(),
-            overrides: None,
-            removed: None,
+            ..ProjectOptions::default()
         }
     }
 
