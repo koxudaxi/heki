@@ -45,7 +45,7 @@ fn the_readme_examples_report_what_the_image_shows() {
     let sections: Vec<&str> = examples(&readme).split("\n### ").skip(1).collect();
     // A bug found with no configuration, and a wall written as a contract.
     let rules = [
-        "EFF101 (async-blocking-call) [error]",
+        "MUT114 (cached-result-mutation) [error]",
         "MUT201 (write-owner-violation) [error, heuristic]",
     ];
     assert_eq!(sections.len(), rules.len(), "{sections:#?}");

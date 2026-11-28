@@ -117,7 +117,7 @@ fn codes_that_suppressed_nothing_are_reported_only_when_asked() {
 #[test]
 fn only_codes_of_rules_that_ran_on_the_file_are_judged() {
     // `--select` leaves `EFF101` off; `per-file-ignores` turns it off in `a.py`; a heuristic
-    // rule left off (`EFF102`) did not run either.
+    // rule left off (`EFF117`) did not run either.
     let p = project("unused_ran", UNUSED, SUPPRESSED);
     let (code, stdout, _) = p.heki(&["check", "--select", "DATA101", "--output-format", "json"]);
     assert_eq!((code, json_reports(&stdout).len()), (0, 0), "{stdout}");
@@ -131,7 +131,7 @@ fn only_codes_of_rules_that_ran_on_the_file_are_judged() {
     let p = project(
         "unused_heuristic",
         UNUSED,
-        "def f(xs):\n    return [x for x in xs]  # heki: ignore[EFF102]\n",
+        "def f(xs):\n    return [x for x in xs]  # heki: ignore[EFF117]\n",
     );
     let (code, stdout, _) = p.heki(&["check", "--output-format", "json"]);
     assert_eq!((code, json_reports(&stdout).len()), (0, 0), "{stdout}");
@@ -139,7 +139,7 @@ fn only_codes_of_rules_that_ran_on_the_file_are_judged() {
     assert_eq!(code, 1);
     assert_eq!(
         found(&json_reports(&stdout)),
-        [(2, "unused-suppression", "EFF102")]
+        [(2, "unused-suppression", "EFF117")]
     );
 }
 
@@ -252,7 +252,7 @@ fn baseline_entries_that_matched_nothing_fail_the_run_when_asked() {
         "version = 2\n\n{}{}{}",
         entry("a.py", "EFF101", "time.sleep"),
         entry("b.py", "EFF101", "time.sleep"),
-        entry("a.py", "EFF102", "requests.Session"),
+        entry("a.py", "EFF117", "Shared.items"),
     );
     let clean = "async def handler():\n    return 1\n";
     for (name, config, unused) in [("entries_off", "", false), ("entries_on", UNUSED, true)] {
@@ -260,7 +260,7 @@ fn baseline_entries_that_matched_nothing_fail_the_run_when_asked() {
         p.write("b.py", clean);
         p.write("heki-baseline.toml", &baseline);
         let (code, _, stderr) = p.heki(&["check", "--baseline", "heki-baseline.toml", "a.py"]);
-        // `b.py` was not checked, and `EFF102` (heuristic, left off) did not run.
+        // `b.py` was not checked, and `EFF117` (heuristic, left off) did not run.
         let reported = "error: baseline entry a.py::handler EFF101 `time.sleep` matched no report (`--update-baseline` removes it)";
         assert_eq!(stderr.contains(reported), unused, "{stderr}");
         assert_eq!(code, i32::from(unused), "{stderr}");
@@ -269,7 +269,7 @@ fn baseline_entries_that_matched_nothing_fail_the_run_when_asked() {
             "{stderr}"
         );
         assert!(
-            !stderr.contains("EFF102 `requests.Session` matched"),
+            !stderr.contains("EFF117 `Shared.items` matched"),
             "{stderr}"
         );
         assert_eq!(

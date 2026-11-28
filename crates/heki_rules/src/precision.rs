@@ -194,6 +194,8 @@ const CERTIFIED: &[(&str, &str, [u32; 2], [u32; 2])] = &[
     ("MUT119", "0.2.5", [23, 0], [2, 0]),
     ("EFF109", "0.10.0", [6, 0], [1, 0]),
     ("EFF116", "0.10.0", [10, 0], [0, 0]),
+    ("EFF105", "0.12.0", [1289, 0], [1514, 0]),
+    ("EFF102", "0.12.0", [54, 0], [30, 0]),
 ];
 
 /// The harm of the exact reports of a certification's census and holdout run, for the rules whose
@@ -211,6 +213,8 @@ const CERTIFIED_HARM: &[(&str, [u32; 4], [u32; 4])] = &[
     ("OPT113", [0, 2, 6, 0], [0, 0, 6, 0]),
     ("EFF109", [3, 3, 0, 0], [1, 0, 0, 0]),
     ("EFF116", [1, 4, 5, 0], [0, 0, 0, 0]),
+    ("EFF105", [43, 419, 809, 18], [48, 493, 973, 0]),
+    ("EFF102", [1, 14, 39, 0], [5, 16, 9, 0]),
 ];
 
 /// The real bugs a rule with fewer than 10 exact reports found, as the number of bugs two

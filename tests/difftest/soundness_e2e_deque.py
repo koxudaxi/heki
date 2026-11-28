@@ -169,6 +169,59 @@ def deque_more_uses(n):
     return out
 
 
+def extended_by_builtins(n):
+    """`list.extend` and `+=` ask their argument for its length, which runs no code for a
+    builtin container, a string, or a `range`."""
+    q = list(range(n))
+    out = []
+    while q:
+        cur = q.pop(0)
+        out.append(cur)
+        if cur == 0:
+            q.extend([-1, -2])
+            q.extend((-3,))
+            q.extend(range(1, 3))
+            q.extend("ab")
+            q.extend({"k": 1})
+            q.extend({-4})
+            q.extend(b"\x05")
+            q.extend(list("cd"))
+            q += [-5]
+            q += (-6,)
+    return out
+
+
+def caught_errors(n):
+    """A deque raises the exception types a list raises, with other messages, which no fix
+    keeps for a builtin exception."""
+    q = list(range(n))
+    out = []
+    for _ in range(n + 1):
+        try:
+            out.append(q.pop(0))
+        except IndexError as e:
+            out.append(type(e).__name__)
+        try:
+            q.remove(-1)
+        except ValueError as e:
+            out.append(type(e).__name__)
+    for attempt in range(5):
+        try:
+            if attempt == 0:
+                out.append(q[0])
+            elif attempt == 1:
+                out.append(q[-1])
+            elif attempt == 2:
+                q[0] = 1
+            elif attempt == 3:
+                del q[-1]
+            else:
+                out.append(q.pop())
+        except IndexError as e:
+            out.append(type(e).__name__)
+    return out
+
+
 def alias_after_site(n):
     q = [1, 2, 3]
     out = []
@@ -491,6 +544,8 @@ def main() -> int:
             run(deque_uses, n),
             run(unknown_list_methods, n),
             run(deque_more_uses, n),
+            run(extended_by_builtins, n),
+            run(caught_errors, n),
             run(alias_after_site, n),
             run(formatted_items, items),
             run(middle_index, n),

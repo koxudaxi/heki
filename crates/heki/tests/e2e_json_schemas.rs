@@ -188,6 +188,20 @@ targets = [\"Model.value\"]
 allowed-readers = [\"app.Store.*\"]
 ";
 
+const BLIND: &str = "\
+def run(text, thing):
+    thing.value = text.strip()
+";
+
+const BOUNDARY: &str = "\
+[[tool.heki.effect-boundaries]]
+name = \"blind\"
+scopes = [\"app.run\"]
+write-universe = [\"Model.value\"]
+allow-writes = []
+unresolved = \"report\"
+";
+
 fn check_json(p: &Project, args: &[&str]) -> Vec<Value> {
     let mut all = vec!["check", "--output-format", "json"];
     all.extend_from_slice(args);
@@ -217,11 +231,17 @@ fn the_diagnostics_array_meets_its_schema() {
         ],
     );
     let counted = project("schema_check_sites", READERS, &[("app.py", HELPER_READS)]);
+    let blind = project(
+        "schema_check_unresolved_sites",
+        BOUNDARY,
+        &[("app.py", &format!("{BLIND}\n\n{HELPER_READS}"))],
+    );
     let mut all = Vec::new();
     for (p, args) in [
         (&chain, vec!["--heuristic"]),
         (&owners, vec!["--select", "MUT201"]),
         (&counted, vec!["--select", "MUT203"]),
+        (&blind, vec!["--select", "EFF201"]),
     ] {
         let found = check_json(p, &args);
         assert!(!found.is_empty());
@@ -235,6 +255,8 @@ fn the_diagnostics_array_meets_its_schema() {
         "RelatedLocation",
         "TextEdit",
         "AllowedExample",
+        "UnresolvedCall",
+        "UnresolvedWrite",
         "Span",
     ] {
         assert_all_used(&schema, std::slice::from_ref(&all), name, &[]);
@@ -848,10 +870,10 @@ fn the_inspect_output_meets_its_schema() {
         "Candidate",
         "InspectError",
     ] {
-        // `Report` flattens a diagnostic: its two properties written only for some reports are
-        // used by the `check` test.
+        // `Report` flattens a diagnostic: its properties written only for some reports are used
+        // by the `check` test.
         let unused: &[&str] = if name == "Report" {
-            &["allowed_examples", "sites"]
+            &["allowed_examples", "sites", "unresolved_sites"]
         } else {
             &[]
         };

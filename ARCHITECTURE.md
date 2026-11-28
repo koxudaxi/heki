@@ -582,9 +582,9 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 | Rule ID | Default | Stage 0-A density | What it finds and how precision is controlled |
 |---|---|---|---|
 | **EFF101** | On (exact) | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; `queue.Queue.put` only on a queue known to be bounded (its `maxsize`, followed through locals, attributes, globals, and parameters); a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
-| **EFF102** | Off (heuristic) | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
+| **EFF102** | On (exact, per report) | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
 | **EFF103** | On (exact) | DB **47.6%** (74% indirect) | Explicit database queries or external RPC calls in a loop (N+1, across functions too). `for.iter`, DDL, migrations, ORM internals, and bulk APIs excluded. **Implicit ORM lazy loading is out of scope (known limitation)** |
-| **EFF105** | Opt-in (heuristic) | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
+| **EFF105** | Opt-in (exact, per report) | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
 | **EFF106** | Opt-in (heuristic) | 2.1% (fatal when it happens) | `await` or `BlockingNet` (across functions too) while a type-certain synchronous lock (`threading.Lock` / `RLock` / `Semaphore` / `BoundedSemaphore` / `Condition`) or a database transaction (`.begin()` / `.begin_nested()` / `transaction.atomic()` / ...) is held by a `with`. Async locks and `async with` are out of scope; offloading and test relaxation as in `EFF101` |
 | **EFF107** | Opt-in (heuristic) | — | `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future` results bound to a local variable but never awaited, returned, stored, passed on, or captured (lost to the garbage collector). Discarded results are Ruff's `RUF006` and are not reported; `TaskGroup.create_task` is out of scope |
 | **EFF109** | On (exact, per report) | — | A non-reentrant lock (`threading.Lock`, `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`) taken again while it is held, by a nested `with` / `acquire()` or by a function the holder calls on its own thread or task, across modules; both sides name the lock the same way (`self.<attr>`, a module global, a closure variable), mapped through each call's arguments (`EffectSummary::locks`), while nothing binds the name to another object. Calls that only create a coroutine or a generator, run on a worker thread, or hand a callable on are not followed; acquisitions a constant argument switches off, or behind a test of the lock owner's state that the holder or its callees change, in the acquiring function or on the way to it (re-entrance flags), and non-blocking or timed acquisitions are not reported |
@@ -757,7 +757,7 @@ heki/
 
 ## 9. CLI, configuration, and Ratchet baseline (one interface with Ruff and `t-linter`)
 
-### 9.1 Commands (exit codes: `0` clean, or only warnings and heuristic reports / `1` exact errors, any report with `--fail-on warning`, the reports of a contract with `fail = true`, and the reports of the rules `lint.fail` lists / `2` configuration, I/O, or syntax errors)
+### 9.1 Commands (exit codes: `0` clean, or only warnings and heuristic reports / `1` exact errors, any report with `--fail-on warning`, the reports of a contract with `fail = true`, and the reports of the rules `lint.fail` lists / `2` configuration, path, I/O, or syntax errors)
 ```bash
 heki check [PATHS...]                         # semantic diagnostics (MUT, EFF / DATA, OPT)
 heki check FILE...                            # the project of the files, showing what touches them (as ROOT --touched FILE...)
@@ -772,6 +772,7 @@ heki check --color auto|always|never          # colored full / concise / --diff 
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused; entries of files PATHS leave out stay)
 heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one (every Ratchet regression; every report for a configuration file)
+heki check --touched FILE... --unmatched-paths error   # a FILE (or file PATH) that names no analyzed file stops the run with 2 (lint.unmatched-paths = "error"); default: a warning
 heki check --watch [PATHS...]                 # re-check on file changes
 
 heki server                                   # incremental LSP server (alias: heki lsp)
@@ -797,6 +798,7 @@ ignore = []
 heuristic = true                     # prefixes and the defaults also select the heuristic rules
 fail-on = "warning"                  # warnings and heuristic reports fail heki check too (default: "error")
 fail = ["IMP101"]                    # the reports of these rules fail heki check whatever their tier (default: none)
+unmatched-paths = "error"            # a --touched path or file PATH that names no analyzed file stops heki check (default: "warning")
 
 [tool.heki.lint.severity]
 MUT101 = "warning"

@@ -1022,6 +1022,14 @@ const DEQUE: &[Expect] = &[
         &[("OPT121", V::Fix(&["deque([5, 4, 3])", "q.appendleft(i)"]))],
     ),
     (
+        "extended_by_builtins",
+        &[("OPT120", V::Fix(&["deque(range(n))", "q.popleft()"]))],
+    ),
+    (
+        "caught_errors",
+        &[("OPT120", V::Fix(&["deque(range(n))", "q.popleft()"]))],
+    ),
+    (
         "alias_after_site",
         &[("OPT120", V::Fix(&["deque([1, 2, 3])", "q.popleft()"]))],
     ),
@@ -1129,7 +1137,7 @@ const DEQUE: &[Expect] = &[
         "alias_bound_to_argument",
         &[(
             "OPT121",
-            V::Blocked("DequeEquivalentOps(q): `s` is also bound to another object at line 320:"),
+            V::Blocked("DequeEquivalentOps(q): `s` is also bound to another object at line 373:"),
         )],
     ),
     (
@@ -1482,12 +1490,14 @@ const COUNTEREXAMPLES: &[Expect] = &[
             V::Blocked("DequeEquivalentOps(q): `list(...)` with `*` / `**` arguments"),
         )],
     ),
+    // The iterator `reversed(q)` is also live while `q.extend` changes `q`; its length request
+    // blocks the fix first.
     (
         "cx_extended_by_its_own_iterator",
         &[(
             "OPT120",
             V::Blocked(
-                "DequeEquivalentOps(q): the result of `reversed(...)` still iterates it when it changes",
+                "DequeEquivalentOps(q): `q` : `.extend(...)` asks the result of `reversed(...)` for its length",
             ),
         )],
     ),
@@ -1507,6 +1517,53 @@ const COUNTEREXAMPLES: &[Expect] = &[
             V::Blocked("DequeEquivalentOps(q): the result of `iter(...)` (line"),
         )],
     ),
+    // `list.extend` and `list +=` ask an argument heki cannot type for its length (`__len__`,
+    // `__length_hint__`); `deque` does not.
+    (
+        "cx_extended_by_sized",
+        &[(
+            "OPT120",
+            V::Blocked(
+                "DequeEquivalentOps(q): `q` : `.extend(...)` asks the result of `Sized(...)` for its length, which a `deque` does not",
+            ),
+        )],
+    ),
+    (
+        "cx_extended_by_hinted",
+        &[(
+            "OPT120",
+            V::Blocked(
+                "DequeEquivalentOps(q): `q` : `.extend(...)` asks the result of `Hinted(...)` for its length",
+            ),
+        )],
+    ),
+    (
+        "cx_extended_by_unsized",
+        &[(
+            "OPT120",
+            V::Blocked(
+                "DequeEquivalentOps(q): `q` : `.extend(...)` asks the result of `Unsized(...)` for its length",
+            ),
+        )],
+    ),
+    (
+        "cx_added_sized",
+        &[(
+            "OPT120",
+            V::Blocked(
+                "DequeEquivalentOps(q): `q` : `+=` asks the result of `Sized(...)` for its length",
+            ),
+        )],
+    ),
+    (
+        "cx_front_insert_extended_by_sized",
+        &[(
+            "OPT121",
+            V::Blocked(
+                "DequeEquivalentOps(q): `q` : `.extend(...)` asks the result of `Sized(...)` for its length",
+            ),
+        )],
+    ),
 ];
 
 #[test]
@@ -1522,7 +1579,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 45/45"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 50/50"));
 }
 
 // ======================================================================== module-level facts

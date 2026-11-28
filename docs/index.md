@@ -4,19 +4,24 @@
   <img src="assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
 </p>
 
-🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust. It tracks side
-effects and mutations across function calls, and checks a 100,000-line project in a few seconds.
+🧱 heki (壁, Japanese for "wall") checks the semantics of Python code. It does not replace Ruff or
+your type checker (mypy, Pyright, Pyrefly, or ty): it is a third layer that runs next to them.
+Ruff checks syntax and style, and the type checkers check declared types. heki follows aliases,
+helpers, and file boundaries to find which function a call really runs, which state it changes,
+and which effects it has. It is written in Rust and checks a 100,000-line project in a few
+seconds.
 
-Ruff checks syntax and style, and mypy, Pyright, Pyrefly, and ty check types. heki checks what
-your code does: which effects a call reaches and which state it changes, across functions and
-files.
+This stops a pull request that passes the syntax checks and strict type checking but changes
+what the code does. With no configuration, `heki check` reports a shared cache changed in place,
+a read-only argument changed by a helper, a database query in a loop, a lock taken again while it
+is held, and a blocking call in `async` code. The same run enforces the rules only your project
+knows: who owns a piece of state, which change must invalidate a cache, and where I/O may happen.
 
-It works on two levels. With no configuration, it catches bugs such as blocking calls in `async`
-code, database queries in loops, and in-place changes to read-only parameters. On top of that, it
-enforces the walls your project writes as [contracts](configuration.md#contracts): which
-functions may change a field, call a function, or reach I/O.
+You write those rules as [contracts](configuration.md#contracts). A contract uses the results of
+the same analysis to decide, in every pull request, whether a change, a call, or an I/O is
+allowed. The `async` checks are one use of that analysis among the others.
 
-![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def with no configuration, and MUT201 a write to Order.items through a helper outside the functions a contract allows, each with its call chain](assets/example-check.svg)
+![heki check in a terminal: MUT114 reports, with no configuration, a dict that an lru_cache function returned and another file changes in place, and MUT201 a write to Order.items through a helper outside the functions a contract allows, with its call chain](assets/example-check.svg)
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -36,29 +41,32 @@ functions may change a field, call a function, or reach I/O.
 
 ### A bug found with no configuration
 
-Each file looks fine on its own: the bug is in the call chain.
+Each file looks fine on its own, and the types are right: the bug is in what the cache shares.
 
 ```python
-# app/users.py
-import requests
+# app/config.py
+from functools import lru_cache
 
 
-def fetch_name(user_id: int) -> str:
-    return requests.get(f"https://api.example.com/users/{user_id}", timeout=5).text
-
-
-def load_user(user_id: int) -> dict[str, str]:
-    return {"id": str(user_id), "name": fetch_name(user_id)}
+@lru_cache(maxsize=64)
+def base_headers(region: str) -> dict[str, str]:
+    return {"Accept": "application/json", "X-Region": region}
 ```
 
 ```python
 # app/api.py
-from app.users import load_user
+from app.config import base_headers
 
 
-async def get_user(user_id: int) -> dict[str, str]:
-    return load_user(user_id)
+def request_headers(region: str, token: str) -> dict[str, str]:
+    headers = base_headers(region)
+    headers["Authorization"] = f"Bearer {token}"
+    return headers
 ```
+
+`lru_cache` hands the same dict to every call with the same `region`. `request_headers` writes a
+token into it, so a later caller of `base_headers` for that region sends the token of whoever
+called `request_headers` last.
 
 ### A wall your project writes
 
@@ -108,22 +116,28 @@ def add_gift_wrap(order: Order) -> None:
     append_to(order.items, "gift-wrap")
 ```
 
-The image at the top is `heki check` on these examples: `EFF101` with no configuration, and
-`MUT201` from the contract. The same code passes mypy, Pyright, Pyrefly, and ty in strict mode
-(`mypy --strict`, Pyright's `strict`, Pyrefly's `strict` preset, every ty rule as an error), and
-Ruff with every rule on asks only for docstrings and copyright lines.
+tach and import-linter stop at the import layers, and every import here is allowed; heki follows
+the write through the helper, as it follows any change, call, or I/O across helpers and aliases.
 
-### How heki differs
+The image at the top is `heki check` on these examples: `MUT114` with no configuration, and
+`MUT201` from the contract. The same code passes Ruff, and mypy, Pyright, Pyrefly, and ty in
+strict mode (`mypy --strict`, Pyright's `strict`, Pyrefly's `strict` preset, every ty rule as an
+error). Ruff with every rule on asks only for docstrings, copyright lines, and an `__init__.py`.
+
+### Works alongside Ruff, your type checker, and import-linter
+
+heki does not replace these tools: run it next to them. Each one models one layer of the code,
+and heki checks what the code does across files.
 
 | Tool | Models | heki adds |
 | --- | --- | --- |
-| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
+| Ruff | syntax and style | the behavior behind a call, across files: the state it changes, a shared cache changed in place, a database query in a loop, a lock taken again while it is held, I/O where it should not happen, a blocking call in `async` code |
 | mypy, Pyright, Pyrefly, ty | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` / `AbstractSet` arguments |
-| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; import rules that know when each import runs (experimental); planned: reading these tools' contracts as heki contracts |
+| tach, import-linter | the import layers: which modules may import which | which functions write or read a field, call a function, or reach I/O, and which changes must invalidate a cache, through helpers and aliases; import rules that know when each import runs (experimental); planned: reading these tools' contracts as heki contracts |
 
-Use heki next to these tools; its configuration, suppression comments, and output formats follow
-Ruff's. [Design Philosophy](philosophy.md) says why heki works this way and compares its checks
-with what Rust and Haskell enforce.
+Its configuration, suppression comments, and output formats follow Ruff's.
+[Design Philosophy](philosophy.md) says why heki works this way and compares its checks with what
+Rust and Haskell enforce.
 
 ## 🧭 What heki can do
 
@@ -135,13 +149,14 @@ was checked by hand, with no false claim ([Rule precision](precision.md#certific
 
 | What goes wrong | Rule |
 | --- | --- |
-| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](rules/async-blocking-call.md) |
+| A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](rules/cached-result-mutation.md) |
+| A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) |
+| A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](rules/change-lost-on-new-object.md) |
 | A database statement on every iteration of a loop over data | [`EFF103`](rules/loop-db-query.md) |
+| A new HTTP, database, or RPC client (or a request without a session) on every iteration of a loop over data | [`EFF102`](rules/loop-unpooled-client.md) |
 | A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | [`EFF109`](rules/lock-reacquired-while-held.md) |
 | A call of a generator function whose generator nothing iterates, so its body never runs | [`EFF116`](rules/generator-never-iterated.md) |
-| A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) |
-| A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](rules/cached-result-mutation.md) |
-| A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](rules/change-lost-on-new-object.md) |
+| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](rules/async-blocking-call.md) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](rules/loop-carried-concat.md) |
 | A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` ([fixes](fixes.md)) |
 
@@ -187,7 +202,7 @@ in its instructions, but not a contract that `heki check` enforces:
 ## 🚀 Try it in 5 minutes
 
 1. In your project's root (the directory with `pyproject.toml`), run `uvx heki check`. An exact
-   error, like `EFF101` above, fails the run (exit code 1). Warnings are printed but don't fail it
+   error, like `MUT114` above, fails the run (exit code 1). Warnings are printed but don't fail it
    unless you pass `--fail-on warning`.
 
 2. Ask what fits the project with [`heki recommend`](recommend.md) (experimental). It writes no

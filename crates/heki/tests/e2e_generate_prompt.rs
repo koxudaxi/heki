@@ -206,7 +206,7 @@ targets = ["app.store.Store.items"]
     assert!(
         rules.ends_with(
             "\nThese heuristic rules are off; `--heuristic` (`lint.heuristic = true`) runs them: \
-             `EFF102`, `EFF117`, `EFF118`, `MUT118`, `OPT112`.\n"
+             `EFF117`, `EFF118`, `MUT118`, `OPT112`.\n"
         ),
         "{rules}"
     );
@@ -330,7 +330,7 @@ fn the_json_object_holds_the_same_content_and_follows_its_schema() {
     assert_eq!(listed, text_rules);
     assert_eq!(
         object["heuristic_rules_off"],
-        json!(["EFF102", "EFF117", "EFF118", "MUT118", "OPT112"])
+        json!(["EFF117", "EFF118", "MUT118", "OPT112"])
     );
     let lines = concise(&p, &[]);
     let diagnostics = &object["diagnostics"];

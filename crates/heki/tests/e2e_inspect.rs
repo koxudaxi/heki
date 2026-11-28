@@ -643,6 +643,42 @@ fn shared_state_changed_directly_through_calls_and_in_closures() {
     assert_eq!(add["changes"]["globals"][0]["direct"], true);
 }
 
+const WORKER_STATE: &str = r#"from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+
+CACHE = []
+
+
+def remember(x):
+    CACHE.append(x)
+
+
+def on_threads(ex: ThreadPoolExecutor):
+    ex.submit(remember, 1)
+
+
+def in_processes(ex: ProcessPoolExecutor):
+    ex.submit(remember, 1)
+    list(ex.map(remember, [1, 2]))
+"#;
+
+/// A worker thread changes the module state of the caller's process; a worker process changes
+/// its own.
+#[test]
+fn shared_state_a_worker_process_changes_is_its_own() {
+    let p = Project::new("inspect_worker_state");
+    p.write("m.py", WORKER_STATE);
+    let names = |r: &Value| -> Vec<String> {
+        r["changes"]["globals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(names(&report(&p, "m.on_threads")), ["CACHE"]);
+    assert!(names(&report(&p, "m.in_processes")).is_empty());
+}
+
 const HANDED: &str = r#"import os
 
 CACHE = []

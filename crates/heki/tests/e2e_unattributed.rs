@@ -1,9 +1,10 @@
 //! What a contract cannot attribute, end to end through the real binary: with
 //! `unresolved = "report"`, an effect boundary reports the calls heki cannot resolve, the bodies
 //! it does not model, and the writes of an attribute it names on an object of unknown class in
-//! its scopes' reach, each with its chain; an owner contract judges a function some code hands
-//! on as a value (a display, a class attribute, a return, an argument) in that function, as if
-//! it had no callers. Without the key, neither is reported.
+//! its scopes' reach, each with its chain, and the JSON output lists every site of such a report
+//! (`unresolved_sites`), which its baseline entry counts but does not key; an owner contract
+//! judges a function some code hands on as a value (a display, a class attribute, a return, an
+//! argument) in that function, as if it had no callers. Without the key, neither is reported.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF201`); every other line must not be.
@@ -11,7 +12,8 @@
 mod common;
 
 use common::Project;
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// `(line, rule, message)` of every report of `rules` in `path`.
 fn reported(p: &Project, path: &str, rules: &[&str]) -> Vec<(u64, String, String)> {
@@ -556,4 +558,300 @@ fn every_check_of_the_request_is_reported() {
         .collect();
     expected.sort();
     assert_eq!(lines, expected, "{found:#?}");
+}
+
+const LISTED_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "no-required"
+scopes = ["pkg.m.run", "pkg.m.single", "pkg.m.writes", "pkg.m.sets", "pkg.m.evaluates"]
+forbid = ["writes-targets"]
+write-targets = ["Field.required"]
+unresolved = "report"
+"#;
+
+const LISTED_M: &str = r#"from pkg import helpers, stubbed
+
+
+class Field:
+    def __init__(self) -> None:
+        self.required = False
+
+
+def run(text, table, fn):
+    a = text.strip()
+    b = table.get("k")
+    fn(a)
+    helpers.call(fn, b)
+    helpers.evaluated("1")
+    stubbed.go()
+    return b
+
+
+def single(handler):
+    handler()
+
+
+def writes(thing, other, name: str) -> None:
+    thing.required = True
+    other.required = False
+    setattr(thing, name, True)
+
+
+def sets(field: Field) -> None:
+    field.required = True
+
+
+def evaluates(text):
+    return eval(text)
+"#;
+
+const LISTED_HELPERS: &str = r#"def call(run, value):
+    run(value)
+    value["x"](value)
+
+
+def evaluated(text):
+    return eval(text)
+"#;
+
+fn listed_project(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write("pyproject.toml", LISTED_CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/m.py", LISTED_M);
+    p.write("pkg/helpers.py", LISTED_HELPERS);
+    p.write("pkg/stubbed.pyi", "def go() -> None: ...\n");
+    p
+}
+
+/// The JSON diagnostics of `p`, by function and target.
+fn by_report(p: &Project) -> BTreeMap<(String, String), Value> {
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let key = |d: &Value| {
+        let text = |field: &str| d[field].as_str().unwrap().to_owned();
+        (text("qualname"), text("target"))
+    };
+    diags.into_iter().map(|d| (key(&d), d)).collect()
+}
+
+/// A call site of `unresolved_sites`.
+fn call(path: &str, line: u32, column: u32, function: &str, callee: Value, reason: &str) -> Value {
+    json!({
+        "path": path,
+        "line": line,
+        "column": column,
+        "function": function,
+        "callee": callee,
+        "reason": reason,
+        "parameter": null,
+    })
+}
+
+#[test]
+fn a_report_of_what_a_boundary_cannot_judge_lists_every_site_in_the_json_output() {
+    let p = listed_project("unattributed_listed_sites");
+    let found = by_report(&p);
+    let report = |function: &str, target: &str| &found[&(function.to_owned(), target.to_owned())];
+    let with_parameter = |mut site: Value, parameter: &str| {
+        site["parameter"] = json!(parameter);
+        site
+    };
+    // Ordered by path, line, and column: the calls of the helper the scope function reaches
+    // (its own calls, not the code behind them), then the scope function's, with the bodies
+    // heki does not model or only a stub declares at the calls reaching them.
+    let calls = report("run", "no-required:unresolved-calls");
+    assert_eq!(calls["line"], 10);
+    assert_eq!(calls["sites"], 7);
+    let helper = |line, column, callee: Value, reason| {
+        call(
+            "pkg/helpers.py",
+            line,
+            column,
+            "pkg.helpers.call",
+            callee,
+            reason,
+        )
+    };
+    let own = |line, column, callee: &str, reason| {
+        call("pkg/m.py", line, column, "pkg.m.run", json!(callee), reason)
+    };
+    let parameter = "unannotated-parameter";
+    assert_eq!(
+        calls["unresolved_sites"],
+        json!([
+            with_parameter(helper(2, 5, json!("run"), parameter), "run"),
+            helper(3, 5, Value::Null, "untyped-value"),
+            with_parameter(own(10, 9, "strip", parameter), "text"),
+            with_parameter(own(11, 9, "get", parameter), "table"),
+            with_parameter(own(12, 5, "fn", parameter), "fn"),
+            own(14, 5, "pkg.helpers.evaluated", "unmodeled-body"),
+            own(15, 5, "pkg.stubbed.go", "stub-body"),
+        ])
+    );
+    // A writes report lists the attribute and the kind of each write; a name computed at run
+    // time has no attribute.
+    let write = |line, attribute: Value, kind| {
+        json!({
+            "path": "pkg/m.py",
+            "line": line,
+            "column": 5,
+            "function": "pkg.m.writes",
+            "attribute": attribute,
+            "kind": kind,
+        })
+    };
+    let required = report("writes", "no-required:unresolved-writes:required");
+    assert_eq!(required["sites"], 2);
+    assert_eq!(
+        required["unresolved_sites"],
+        json!([
+            write(24, json!("required"), "direct_attr"),
+            write(25, json!("required"), "direct_attr"),
+        ])
+    );
+    let named = report("writes", "no-required:unresolved-writes:*");
+    assert_eq!(
+        named["unresolved_sites"],
+        json!([write(26, Value::Null, "set_attr")])
+    );
+    // A report of one site lists it too, where `sites` is not written.
+    let single = report("single", "no-required:unresolved-calls");
+    assert!(single.get("sites").is_none(), "{single:#}");
+    assert_eq!(
+        single["unresolved_sites"],
+        json!([with_parameter(
+            call(
+                "pkg/m.py",
+                20,
+                5,
+                "pkg.m.single",
+                json!("handler"),
+                parameter
+            ),
+            "handler"
+        )])
+    );
+    // A scope function whose own body heki does not model is listed at its definition.
+    let own_body = report("evaluates", "no-required:unresolved-calls");
+    assert_eq!(
+        own_body["unresolved_sites"],
+        json!([call(
+            "pkg/m.py",
+            33,
+            1,
+            "pkg.m.evaluates",
+            json!("pkg.m.evaluates"),
+            "unmodeled-body"
+        )])
+    );
+    // The other reports list nothing.
+    let other = report("sets", "no-required:Field.required");
+    assert!(other.get("unresolved_sites").is_none(), "{other:#}");
+    assert_eq!(found.len(), 6, "{found:#?}");
+}
+
+#[test]
+fn a_body_reached_through_a_delivery_wrapper_is_listed_in_the_function_holding_the_call() {
+    let p = Project::new("unattributed_listed_via");
+    p.write(
+        "pyproject.toml",
+        &LISTED_CONFIG.replace("\"pkg.m.evaluates\"", "\"pkg.m.deliver_all\""),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/m.py",
+        r#"from pkg import helpers
+
+
+def deliver(items):
+    for item in items:
+        print(item)
+
+
+def deliver_all():
+    deliver(helpers.numbers())
+"#,
+    );
+    p.write("pkg/helpers.py", "def numbers():\n    yield eval(\"1\")\n");
+    let found = by_report(&p);
+    let report = &found[&(
+        "deliver_all".to_owned(),
+        "no-required:unresolved-calls".to_owned(),
+    )];
+    // The site is the call in `deliver_all`, which `deliver` runs the generator's body for.
+    assert_eq!(
+        report["unresolved_sites"],
+        json!([call(
+            "pkg/m.py",
+            10,
+            5,
+            "pkg.m.deliver_all",
+            json!("pkg.helpers.numbers"),
+            "unmodeled-body"
+        )])
+    );
+}
+
+#[test]
+fn a_baseline_keys_a_report_listing_its_sites_by_its_target_and_counts_the_sites() {
+    let p = listed_project("unattributed_listed_baseline");
+    let (code, stdout, stderr) = p.check(&["--baseline", "baseline.toml", "--update-baseline"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let baseline: toml::Table = toml::from_str(&p.read("baseline.toml")).unwrap();
+    // The key holds no site, and the count is the number of sites the report lists.
+    let entries: Vec<(String, String, i64, Vec<String>)> = baseline["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let e = e.as_table().unwrap();
+            let text = |field: &str| e[field].as_str().unwrap().to_owned();
+            let fields = e.keys().cloned().collect();
+            (
+                text("qualname"),
+                text("target"),
+                e["count"].as_integer().unwrap(),
+                fields,
+            )
+        })
+        .collect();
+    let fields: Vec<String> = [
+        "count",
+        "heuristic",
+        "path",
+        "qualname",
+        "rule_code",
+        "target",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let entry = |qualname: &str, target: &str, count| {
+        (
+            qualname.to_owned(),
+            format!("no-required:{target}"),
+            count,
+            fields.clone(),
+        )
+    };
+    assert_eq!(
+        entries,
+        vec![
+            entry("evaluates", "unresolved-calls", 1),
+            entry("run", "unresolved-calls", 7),
+            entry("sets", "Field.required", 1),
+            entry("single", "unresolved-calls", 1),
+            entry("writes", "unresolved-writes:*", 1),
+            entry("writes", "unresolved-writes:required", 2),
+        ]
+    );
+    let (code, stdout, stderr) = p.check(&["--baseline", "baseline.toml"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stdout.contains("EFF201"), "{stdout}");
 }

@@ -934,7 +934,7 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 32,
-                "`reads` reaches the blocking filesystem call `builtins.open` on the event loop",
+                "`reads` runs the blocking filesystem call `builtins.open` on the event loop",
                 &format!("{offload} use an async file API")
             ),
             (
@@ -944,12 +944,12 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 42,
-                "`requests.get` allocates an unpooled client on every loop iteration",
+                "every iteration over parameter `urls` allocates an unpooled client: `requests.get`",
                 client
             ),
             (
                 43,
-                "`app.get` allocates an unpooled client (`requests.get`) on every loop iteration",
+                "every iteration over parameter `urls` allocates an unpooled client: `requests.get` (through `app.get`)",
                 client
             ),
             (
@@ -963,6 +963,38 @@ fn each_effect_has_its_own_help() {
                 query
             ),
         ]
+    );
+}
+
+/// A helper whose handler makes the client with another API when the first constructor raised
+/// has made a client whenever it returns: the exact report names each call that may have made
+/// it.
+#[test]
+fn a_handler_making_the_client_with_another_api_names_both_calls() {
+    let p = Project::new("eff102_handler_api");
+    p.write(
+        "app.py",
+        "import sqlite3\n\nimport httpx\n\n\ndef open_client():\n    try:\n        client = sqlite3.connect(\"app.db\")\n    except sqlite3.Error:\n        client = httpx.Client()\n    return client\n\n\ndef load(names: list[str]):\n    for name in names:\n        open_client()\n",
+    );
+    let diags = diagnostics(&p, &["--select", "EFF102"]);
+    let reports: Vec<(&str, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["rule_code"].as_str().unwrap(),
+                d["certainty"].as_str().unwrap(),
+                d["message"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reports,
+        vec![(
+            "EFF102",
+            "exact",
+            "every iteration over parameter `names` allocates an unpooled client: \
+             `sqlite3.connect` (in `open_client`) or `httpx.Client` (in `open_client`)"
+        )]
     );
 }
 

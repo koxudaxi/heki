@@ -16,8 +16,9 @@
 //!   them (`crate::recommend::premises`); no output format of `heki check` writes them. The
 //!   list grows with what the homes tell apart: a cause stands for the cases its facts cannot
 //!   separate yet, and says so, rather than guessing one of them. The rules recording causes so
-//!   far are `EFF101`, `EFF103`, the eight `OPT` rewrites (a cause of "Rewrite proven safe" per
-//!   proof obligation, [`OBLIGATION_CAUSES`]), `OPT113`, `DATA101`, `MUT110`, and `MUT114`.
+//!   far are `EFF101`, `EFF105`, `EFF102`, `EFF103`, the eight `OPT` rewrites (a cause of
+//!   "Rewrite proven safe" per proof obligation, [`OBLIGATION_CAUSES`]), `OPT113`, `DATA101`,
+//!   `MUT110`, and `MUT114`.
 //! - The exact tier of a size-dependent `OPT` rewrite and of `OPT113` also asks for a
 //!   [`Condition`] that is no premise: "Trip count open" (Safety × Profitability, ADR-007 and
 //!   ADR-011: the claim holds over a loop the code counts, the change does not pay off there). A
@@ -123,6 +124,8 @@ pub const EVERY_RETURN: Premise = Premise {
     decided_in: &[
         "heki_ir::facts::paths::Paths::on_every_return",
         "heki_effect::paths::with_paths",
+        "heki_effect::CallSite::made_on_every_return",
+        "heki_effect::summary::Extractor::must_through_one_of",
         "heki_effect::callgraph::site_must_chain",
         "heki_effect::ProjectIndex::site_must_take",
     ],
@@ -224,6 +227,26 @@ pub const CONDITIONAL_WAIT: OpenCause = OpenCause {
     closer: Closer::None,
 };
 
+pub const TOUCHES_THE_FILE_SYSTEM: Premise = Premise {
+    name: "Touches the file system",
+    states: "the last call reads or changes the local file system on every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate (R6); a call in a helper whose case depends on the helper's parameter, by the value each call of the helper passes there",
+    decided_in: &[
+        "heki_kb::EcosystemEntry::case_for",
+        "heki_kb::EcosystemEntry::emits_in",
+        "heki_effect::resolver::arg_fact",
+        "heki_effect::summary::Extractor::unconditional",
+        "heki_effect::summary::Extractor::given_waits",
+        "heki_effect::guards::given",
+    ],
+};
+
+pub const CONDITIONAL_FILE_ACCESS: OpenCause = OpenCause {
+    id: "conditional-file-access",
+    premise: &TOUCHES_THE_FILE_SYSTEM,
+    states: "the catalog does not establish that the last call touches the file system on every call: a file object's member, which its buffer or the memory it wraps can answer, a call that works only once its result is iterated, does no I/O on some platforms, or goes through a file system that may be memory or the network, a reader whose source may be a URL, or an argument that may come from the caller can select a case that does not",
+    closer: Closer::None,
+};
+
 pub const SENDS: Premise = Premise {
     name: "Sends",
     states: "the last call sends a database statement on every call, as the ecosystem catalog describes it (R3)",
@@ -237,6 +260,23 @@ pub const CONDITIONAL_STATEMENT: OpenCause = OpenCause {
     id: "conditional-statement",
     premise: &SENDS,
     states: "the catalog does not establish that the last call sends a statement on every call: it sends one only in some session state, or an argument that may come from the caller can select a case that does not",
+    closer: Closer::None,
+};
+
+pub const ALLOCATES: Premise = Premise {
+    name: "Allocates",
+    states: "the last call makes a new client, session, connection, or pool on every call that returns, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate (R6)",
+    decided_in: &[
+        "heki_kb::EcosystemEntry::case_for",
+        "heki_kb::EcosystemEntry::emits_in",
+        "heki_effect::summary::Extractor::unconditional",
+    ],
+};
+
+pub const CONDITIONAL_ALLOCATION: OpenCause = OpenCause {
+    id: "conditional-allocation",
+    premise: &ALLOCATES,
+    states: "the catalog does not establish that the last call makes a client on every call: an argument that may come from the caller can select a case that does not (a client handed to `openai.OpenAI(http_client=...)`, a `data:` URL for `urlopen`)",
     closer: Closer::None,
 };
 
@@ -346,7 +386,15 @@ pub const PASSED_AS_ITSELF: Premise = Premise {
     decided_in: &[
         "heki_effect::summary::merge_phi",
         "heki_effect::summary::Extractor::build_same_objects",
+        "heki_effect::summary::Extractor::offload_target",
     ],
+};
+
+pub const MAY_RUN_ON_COPIES: OpenCause = OpenCause {
+    id: "may-run-on-copies",
+    premise: &PASSED_AS_ITSELF,
+    states: "a call of the chain hands the value to an executor that heki cannot tell a thread pool from a process pool (a value typed `concurrent.futures.Executor`, or one of a class heki does not know, given to `run_in_executor`): a process pool hands the function a copy made by pickling",
+    closer: Closer::Annotation,
 };
 
 pub const CHANGED_AT_THE_LINE: Premise = Premise {
@@ -965,7 +1013,9 @@ pub const ALL: &[&Premise] = &[
     &EVERY_RETURN,
     &EVERY_IMPLEMENTATION,
     &WAITS,
+    &TOUCHES_THE_FILE_SYSTEM,
     &SENDS,
+    &ALLOCATES,
     &EVERY_ITERATION,
     &ORIGIN,
     &LOOP_CARRIED_ON_EVERY_PATH,
@@ -1021,7 +1071,9 @@ pub const CAUSES: &[&OpenCause] = &[
     &DEFINED_TWICE,
     &WAITS_ON_ANOTHER_THREAD,
     &CONDITIONAL_WAIT,
+    &CONDITIONAL_FILE_ACCESS,
     &CONDITIONAL_STATEMENT,
+    &CONDITIONAL_ALLOCATION,
     &NOT_EVERY_ITERATION,
     &REPEATED_BY_A_BUILTIN,
     &FIXED_BY_THE_CODE,
@@ -1031,6 +1083,7 @@ pub const CAUSES: &[&OpenCause] = &[
     &PREVIOUS_VALUE_NOT_HELD,
     &RESET_ON_A_PATH,
     &NOT_THE_CATALOG_CALL,
+    &MAY_RUN_ON_COPIES,
     &NO_CHANGING_BODY,
     &NOT_A_BUILTIN_CONTAINER_CHANGE,
     &NOT_ESTABLISHED_CACHED,
@@ -1216,6 +1269,11 @@ const OPT_SCAN: &[&Premise] = &[
 pub fn of_rule(code: &str) -> &'static [&'static Premise] {
     match code {
         "EFF101" => &[&EVERY_RETURN, &EVERY_IMPLEMENTATION, &WAITS],
+        "EFF105" => &[
+            &EVERY_RETURN,
+            &EVERY_IMPLEMENTATION,
+            &TOUCHES_THE_FILE_SYSTEM,
+        ],
         "EFF109" => &[
             &NON_REENTRANT,
             &HELD,
@@ -1230,6 +1288,13 @@ pub fn of_rule(code: &str) -> &'static [&'static Premise] {
             &EVERY_RETURN,
             &EVERY_IMPLEMENTATION,
             &SENDS,
+        ],
+        "EFF102" => &[
+            &ORIGIN,
+            &EVERY_ITERATION,
+            &EVERY_RETURN,
+            &EVERY_IMPLEMENTATION,
+            &ALLOCATES,
         ],
         "DATA101" => &[
             &LOOP_CARRIED_ON_EVERY_PATH,

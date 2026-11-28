@@ -18,6 +18,7 @@ mod prompt;
 mod recommend;
 mod schemas;
 mod skill;
+mod stack;
 mod suppressed;
 mod version;
 mod watch;
@@ -105,18 +106,18 @@ enum JsonSchemaTarget {
     Error1,
 }
 
-/// `--fail-on`: the least severity whose reports make `heki check` fail.
+/// A severity on the command line (`--fail-on`, `--unmatched-paths`).
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum FailOn {
+enum SeverityArg {
     Error,
     Warning,
 }
 
-impl From<FailOn> for heki_env::Severity {
-    fn from(f: FailOn) -> Self {
-        match f {
-            FailOn::Error => Self::Error,
-            FailOn::Warning => Self::Warning,
+impl From<SeverityArg> for heki_env::Severity {
+    fn from(s: SeverityArg) -> Self {
+        match s {
+            SeverityArg::Error => Self::Error,
+            SeverityArg::Warning => Self::Warning,
         }
     }
 }
@@ -205,7 +206,7 @@ struct CheckArgs {
     /// without one, a note counts the diagnostics that would fail the run and are not shown. A
     /// configuration file (`pyproject.toml`, `heki.toml`, a file its `include` lists, the
     /// baseline) shows every diagnostic. Another TOML file is passed over, and another path that
-    /// is not an analyzed file is named in a warning.
+    /// is not an analyzed file is named in a warning (an error with `--unmatched-paths error`).
     #[arg(
         long,
         value_name = "FILE",
@@ -219,7 +220,12 @@ struct CheckArgs {
     /// `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a
     /// warning. A report of a contract with `fail = true` fails the run at either.
     #[arg(long, value_enum)]
-    fail_on: Option<FailOn>,
+    fail_on: Option<SeverityArg>,
+    /// What to do with a path given to report on (`--touched`, a file among PATHS) that names no
+    /// analyzed file: `warning` (the default) names it and goes on, `error` stops the run with
+    /// exit code 2 before it reports or rewrites anything (`lint.unmatched-paths`).
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    unmatched_paths: Option<SeverityArg>,
     /// Output format: `full`, or `github` in GitHub Actions (`GITHUB_ACTIONS=true`);
     /// `HEKI_OUTPUT_FORMAT` sets it when the option is not given.
     #[arg(
@@ -601,7 +607,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 heuristic: args.heuristic.value(),
                 ..heki_lsp::Selectors::default()
             };
-            Ok(if heki_lsp::run_stdio(selectors)? {
+            Ok(if heki_lsp::run_stdio(selectors, stack::thread_stack())? {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -832,17 +838,10 @@ fn parse_cli() -> Cli {
 static ALLOC: cap::Cap<std::alloc::System> = cap::Cap::new(std::alloc::System, usize::MAX);
 
 fn main() -> ExitCode {
-    // One thread, the main one, runs the parallel work of a counting build: a second thread's
-    // timing would move the peak between runs.
-    #[cfg(feature = "count-alloc")]
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .use_current_thread()
-        .build_global()
-        .expect("the global thread pool is built before any parallel work");
     let cli = parse_cli();
     let failures = failure::Failures::of(&cli.command);
-    let code = match run(cli) {
+    let analyzes_source = stack::analyzes_source(&cli.command);
+    let code = match stack::run(analyzes_source, move || run(cli)) {
         Ok(code) => code,
         Err(err) => {
             failures.fail(&err);

@@ -1,5 +1,6 @@
 //! `fail = true` on a contract table: its reports fail `heki check` whatever their tier and
-//! severity, and nothing else changes (end to end, through the real binary).
+//! severity, and nothing else changes but the level of their GitHub annotations, which says
+//! whether a report fails the run (end to end, through the real binary).
 
 mod common;
 
@@ -196,7 +197,7 @@ fn fail_in_a_defaults_table_applies_to_its_tables_and_their_own_fail_wins() {
 #[test]
 fn the_outputs_do_not_change_with_fail_true() {
     for kind in KINDS {
-        for format in ["json", "sarif", "github", "concise"] {
+        for format in ["json", "sarif", "concise"] {
             let without = project("fail_same", kind, "");
             let with = project("fail_same", kind, "fail = true\n");
             let (_, plain, _) = check(&without, &["--output-format", format]);
@@ -208,6 +209,46 @@ fn the_outputs_do_not_change_with_fail_true() {
         let (_, out, _) = check(&with, &["--output-format", "json"]);
         for d in reports(&out) {
             assert_eq!(d["certainty"], "heuristic", "{} {d:#}", kind.key);
+        }
+    }
+}
+
+/// A GitHub annotation says whether its report fails the run: a heuristic report of a contract
+/// is a warning, and with `fail = true` it keeps its severity. Nothing else in the line changes.
+#[test]
+fn a_github_annotation_of_a_failing_contract_keeps_its_severity() {
+    let level_and_rest = |line: &str| -> (String, String) {
+        let (level, rest) = line.strip_prefix("::").unwrap().split_once(' ').unwrap();
+        (level.to_owned(), rest.to_owned())
+    };
+    for kind in KINDS {
+        let key = kind.key;
+        let without = project("fail_github", kind, "");
+        let with = project("fail_github", kind, "fail = true\n");
+        let (_, plain, _) = check(&without, &["--output-format", "github"]);
+        let (_, failing, _) = check(&with, &["--output-format", "github"]);
+        let (_, json, _) = check(&with, &["--output-format", "json"]);
+        let severities: Vec<Value> = reports(&json)
+            .iter()
+            .map(|d| d["severity"].clone())
+            .collect();
+        assert!(!severities.is_empty(), "{key}");
+        assert_eq!(plain.lines().count(), severities.len(), "{key}: {plain}");
+        assert_eq!(
+            failing.lines().count(),
+            severities.len(),
+            "{key}: {failing}"
+        );
+        for ((plain, failing), severity) in plain.lines().zip(failing.lines()).zip(severities) {
+            let (plain_level, plain_rest) = level_and_rest(plain);
+            let (failing_level, failing_rest) = level_and_rest(failing);
+            assert_eq!(plain_rest, failing_rest, "{key}");
+            assert_eq!(plain_level, "warning", "{key}: {plain}");
+            assert_eq!(
+                failing_level,
+                severity.as_str().unwrap(),
+                "{key}: {failing}"
+            );
         }
     }
 }

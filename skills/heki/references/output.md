@@ -20,6 +20,7 @@ A list of diagnostics. Each one has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+| `unresolved_sites` | for an effect boundary's `unresolved-calls` or `unresolved-writes` report, every site it stands for, with why heki cannot judge it ([Output Formats](https://heki.koxudaxi.dev/output-formats/#what-an-effect-boundary-cannot-judge)) |
 | `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
 `severity` is `error` for a bug that can be critical (a wrong result, an exception, a lost

@@ -530,13 +530,13 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF102",
         slug: "loop-unpooled-client",
         family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         unsafe_fix: false,
         auto_fix_default: false,
-        summary: "Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.",
+        summary: "A loop over data whose every iteration makes an unpooled HTTP/DB/RPC client or a sessionless request; its heuristic reports, a loop that can make one on every iteration.",
         doc: include_str!("../rule-docs/EFF102.md"),
     },
     RuleMeta {
@@ -556,13 +556,13 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF105",
         slug: "async-blocking-fs",
         family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         unsafe_fix: false,
         auto_fix_default: false,
-        summary: "Opt-in: blocking local filesystem I/O reachable from `async def`.",
+        summary: "Opt-in: a call in `async def` that always runs blocking local filesystem I/O on the event loop; its heuristic reports, a call that can reach it.",
         doc: include_str!("../rule-docs/EFF105.md"),
     },
     RuleMeta {
@@ -1705,17 +1705,21 @@ impl<'a> CheckContext<'a> {
         )
     }
 
+    /// The lines of `path`: a checked file's, or, for a file that is not checked, built from its
+    /// text. `None` when its text cannot be read; positions in it are then `(0, 0)`.
+    pub fn lines_of(&self, path: &Path) -> Option<Cow<'a, LineIndex>> {
+        if let Some(u) = self.unit(path) {
+            return Some(Cow::Borrowed(&u.lines));
+        }
+        let text = (self.text_of?)(path)?;
+        Some(Cow::Owned(LineIndex::from_source(&text)))
+    }
+
     /// A related location at `span` of `path`.
     pub fn related_at(&self, path: &Path, span: Span, message: String) -> RelatedLocation {
-        // A file that is not checked: the position comes from its text.
         let (line, column) = self
-            .unit(path)
-            .map(|u| u.lines.line_col(span.start))
-            .or_else(|| {
-                let text = (self.text_of?)(path)?;
-                Some(LineIndex::from_source(&text).line_col(span.start))
-            })
-            .unwrap_or((0, 0));
+            .lines_of(path)
+            .map_or((0, 0), |lines| lines.line_col(span.start));
         RelatedLocation {
             path: path.to_path_buf(),
             line,
@@ -1773,6 +1777,7 @@ impl<'a> CheckContext<'a> {
             contract_locations: Vec::new(),
             fix: None,
             sites: 1,
+            unresolved_sites: Vec::new(),
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),

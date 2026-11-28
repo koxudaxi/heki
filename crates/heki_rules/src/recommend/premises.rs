@@ -426,6 +426,7 @@ mod tests {
             contract_locations: Vec::new(),
             fix: None,
             sites: 1,
+            unresolved_sites: Vec::new(),
             fold_key: None,
             open_records: open
                 .iter()
@@ -573,6 +574,6 @@ mod tests {
         assert_eq!(claim_of(&exact_tier), Some("OPT110"));
         exact_tier.certainty = Certainty::Exact;
         assert_eq!(claim_of(&exact_tier), None, "heuristic reports only");
-        assert_eq!(claim_of(&report("EFF102", 1, &[])), None, "no exact claim");
+        assert_eq!(claim_of(&report("EFF106", 1, &[])), None, "no exact claim");
     }
 }

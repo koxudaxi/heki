@@ -18,9 +18,10 @@ real code bases:
 Two measures:
 
 - `heap`, the gate of every change: the peak of the heap bytes heki asks for, counted by the
-  allocator of a `count-alloc` build, which also runs its parallel work on the main thread
-  alone. No allocator cache, memory pressure, or thread timing moves it, so every run reads the
-  same bytes and one run per mode suffices. The total of the bytes allocated is printed with it.
+  allocator of a `count-alloc` build, which also runs its parallel work on the thread running
+  the command alone. No allocator cache, memory pressure, or thread timing moves it, so every
+  run reads the same bytes and one run per mode suffices. The total of the bytes allocated is
+  printed with it.
 - `rss`, at release time: the peak memory of a release build as the system sees it, which also
   holds the allocator's fragmentation, its mappings, and the code. Each mode runs three times
   and the lowest peak counts: the physical footprint on macOS (`/usr/bin/time -l`; unlike the

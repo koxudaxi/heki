@@ -6,8 +6,8 @@
 //! command writes no file and exits with 0 once the prompt is printed.
 
 use crate::check::{
-    Touched, baseline_path, check_selectors, fail_on, load_and_index, project_wide_files,
-    show_paths, shown_dir, shown_errors, shown_text,
+    Touched, baseline_path, check_selectors, fail_on, load_and_index, show_paths, shown_dir,
+    shown_errors, shown_text,
 };
 use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
@@ -171,8 +171,7 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
         RatchetBaseline::load(path, heki_rules::reports_groups)?
             .keep_regressions(&mut diags, &baseline_key(&project.files));
     }
-    let wide = project_wide_files(&args.analysis, &project.env);
-    let touched = Touched::of(&args.touched, &paths.files, project, &wide);
+    let touched = Touched::of_run(args, &paths, project)?;
     if let Some(touched) = &touched {
         touched.warn(args.output_format);
         touched.keep(&mut diags, baseline.is_some());

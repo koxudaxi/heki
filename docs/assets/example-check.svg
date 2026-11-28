@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="927" height="637" viewBox="0 0 927 637" role="img">
+<svg xmlns="http://www.w3.org/2000/svg" width="927" height="574" viewBox="0 0 927 574" role="img">
 <title>heki check on the examples of the README</title>
 <style>
 text{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;font-size:15px;white-space:pre;fill:#d6e1e4}
@@ -9,34 +9,31 @@ text{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono
 .f12{fill:#7cc0ff}
 .f14{fill:#91ede1}
 </style>
-<rect width="927" height="637" rx="10" fill="#22323a"/>
-<path d="M0 34H927V627A10 10 0 0 1 917 637H10A10 10 0 0 1 0 627Z" fill="#172328"/>
+<rect width="927" height="574" rx="10" fill="#22323a"/>
+<path d="M0 34H927V564A10 10 0 0 1 917 574H10A10 10 0 0 1 0 564Z" fill="#172328"/>
 <circle cx="20" cy="17" r="6" fill="#ff5f57"/>
 <circle cx="40" cy="17" r="6" fill="#febc2e"/>
 <circle cx="60" cy="17" r="6" fill="#28c840"/>
 <text y="68" xml:space="preserve"><tspan x="18" textLength="9" class="f6">$</tspan><tspan x="27" textLength="99"> heki check</tspan></text>
-<text y="89" xml:space="preserve"><tspan x="18" textLength="90" class="b">app/api.py</tspan><tspan x="108" textLength="9" class="f6">:</tspan><tspan x="117" textLength="9">6</tspan><tspan x="126" textLength="9" class="f6">:</tspan><tspan x="135" textLength="18">12</tspan><tspan x="153" textLength="9" class="f6">:</tspan><tspan x="171" textLength="54" class="b f1">EFF101</tspan><tspan x="225" textLength="216"> (async-blocking-call) [</tspan><tspan x="441" textLength="45" class="b f9">error</tspan><tspan x="486" textLength="423">] `app.users.load_user` always runs the waiting</tspan></text>
-<text y="110" xml:space="preserve"><tspan x="18" textLength="603">call `requests.get` on the event loop (2 calls down, on every path)</tspan></text>
+<text y="89" xml:space="preserve"><tspan x="18" textLength="90" class="b">app/api.py</tspan><tspan x="108" textLength="9" class="f6">:</tspan><tspan x="117" textLength="9">7</tspan><tspan x="126" textLength="9" class="f6">:</tspan><tspan x="135" textLength="9">5</tspan><tspan x="144" textLength="9" class="f6">:</tspan><tspan x="162" textLength="54" class="b f1">MUT114</tspan><tspan x="216" textLength="243"> (cached-result-mutation) [</tspan><tspan x="459" textLength="45" class="b f9">error</tspan><tspan x="504" textLength="405">] `request_headers` changes in place the dict</tspan></text>
+<text y="110" xml:space="preserve"><tspan x="18" textLength="711">that `base_headers` returned; `base_headers` is cached by `functools.lru_cache`</tspan></text>
 <text y="131" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan></text>
-<text y="152" xml:space="preserve"><tspan x="18" textLength="27" class="b f12">6 |</tspan><tspan x="45" textLength="270">     return load_user(user_id)</tspan></text>
-<text y="173" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan><tspan x="153" textLength="9" class="b f9">^</tspan></text>
-<text y="194" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="90" class="b">app/api.py</tspan><tspan x="225" textLength="9" class="f6">:</tspan><tspan x="234" textLength="9">6</tspan><tspan x="243" textLength="9" class="f6">:</tspan><tspan x="252" textLength="18">12</tspan><tspan x="270" textLength="9" class="f6">:</tspan><tspan x="279" textLength="351"> `get_user` calls `app.users.load_user`</tspan></text>
-<text y="215" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="108" class="b">app/users.py</tspan><tspan x="243" textLength="9" class="f6">:</tspan><tspan x="252" textLength="18">10</tspan><tspan x="270" textLength="9" class="f6">:</tspan><tspan x="279" textLength="18">41</tspan><tspan x="297" textLength="9" class="f6">:</tspan><tspan x="306" textLength="369"> `load_user` calls `app.users.fetch_name`</tspan></text>
-<text y="236" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="108" class="b">app/users.py</tspan><tspan x="243" textLength="9" class="f6">:</tspan><tspan x="252" textLength="9">6</tspan><tspan x="261" textLength="9" class="f6">:</tspan><tspan x="270" textLength="18">12</tspan><tspan x="288" textLength="9" class="f6">:</tspan><tspan x="297" textLength="306"> `fetch_name` calls `requests.get`</tspan></text>
-<text y="257" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="36" class="b f14">help</tspan><tspan x="90" textLength="549">: offload it with `asyncio.to_thread`, or use an async client</tspan></text>
-<text y="299" xml:space="preserve"><tspan x="18" textLength="135" class="b">app/checkout.py</tspan><tspan x="153" textLength="9" class="f6">:</tspan><tspan x="162" textLength="9">7</tspan><tspan x="171" textLength="9" class="f6">:</tspan><tspan x="180" textLength="9">5</tspan><tspan x="189" textLength="9" class="f6">:</tspan><tspan x="207" textLength="54" class="b f1">MUT201</tspan><tspan x="261" textLength="234"> (write-owner-violation) [</tspan><tspan x="495" textLength="45" class="b f9">error</tspan><tspan x="540" textLength="315">, heuristic] `add_gift_wrap` writes</tspan></text>
-<text y="320" xml:space="preserve"><tspan x="18" textLength="864">`app.models.Order.items` (through a helper) via `app.util.append_to` outside the write owners of</tspan></text>
-<text y="341" xml:space="preserve"><tspan x="18" textLength="117">`order-store`</tspan></text>
-<text y="362" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan></text>
-<text y="383" xml:space="preserve"><tspan x="18" textLength="27" class="b f12">7 |</tspan><tspan x="45" textLength="360">     append_to(order.items, "gift-wrap")</tspan></text>
-<text y="404" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan><tspan x="90" textLength="9" class="b f9">^</tspan></text>
-<text y="425" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="135" class="b">app/checkout.py</tspan><tspan x="270" textLength="9" class="f6">:</tspan><tspan x="279" textLength="9">7</tspan><tspan x="288" textLength="9" class="f6">:</tspan><tspan x="297" textLength="9">5</tspan><tspan x="306" textLength="9" class="f6">:</tspan><tspan x="315" textLength="387"> `add_gift_wrap` calls `app.util.append_to`</tspan></text>
-<text y="446" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="36" class="b f14">help</tspan><tspan x="90" textLength="756">: change Order.items through app.store; allowed writers of `app.models.Order.items`:</tspan></text>
-<text y="467" xml:space="preserve"><tspan x="18" textLength="180">`app.store.add_item`</tspan></text>
-<text y="509" xml:space="preserve"><tspan x="18" textLength="315">Found 2 diagnostic(s) in 6 file(s).</tspan></text>
-<text y="530" xml:space="preserve"><tspan x="18" textLength="828">note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`</tspan></text>
-<text y="551" xml:space="preserve"><tspan x="18" textLength="441">EFF101 (async-blocking-call): `heki rule EFF101`,</tspan></text>
-<text y="572" xml:space="preserve"><tspan x="18" textLength="468">https://heki.koxudaxi.dev/rules/async-blocking-call/</tspan></text>
-<text y="593" xml:space="preserve"><tspan x="18" textLength="459">MUT201 (write-owner-violation): `heki rule MUT201`,</tspan></text>
-<text y="614" xml:space="preserve"><tspan x="18" textLength="486">https://heki.koxudaxi.dev/rules/write-owner-violation/</tspan></text>
+<text y="152" xml:space="preserve"><tspan x="18" textLength="27" class="b f12">7 |</tspan><tspan x="45" textLength="441">     headers["Authorization"] = f"Bearer {token}"</tspan></text>
+<text y="173" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan><tspan x="90" textLength="9" class="b f9">^</tspan></text>
+<text y="194" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="36" class="b f14">help</tspan><tspan x="90" textLength="333">: change a copy (`dict(...)`) instead</tspan></text>
+<text y="236" xml:space="preserve"><tspan x="18" textLength="135" class="b">app/checkout.py</tspan><tspan x="153" textLength="9" class="f6">:</tspan><tspan x="162" textLength="9">7</tspan><tspan x="171" textLength="9" class="f6">:</tspan><tspan x="180" textLength="9">5</tspan><tspan x="189" textLength="9" class="f6">:</tspan><tspan x="207" textLength="54" class="b f1">MUT201</tspan><tspan x="261" textLength="234"> (write-owner-violation) [</tspan><tspan x="495" textLength="45" class="b f9">error</tspan><tspan x="540" textLength="315">, heuristic] `add_gift_wrap` writes</tspan></text>
+<text y="257" xml:space="preserve"><tspan x="18" textLength="864">`app.models.Order.items` (through a helper) via `app.util.append_to` outside the write owners of</tspan></text>
+<text y="278" xml:space="preserve"><tspan x="18" textLength="117">`order-store`</tspan></text>
+<text y="299" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan></text>
+<text y="320" xml:space="preserve"><tspan x="18" textLength="27" class="b f12">7 |</tspan><tspan x="45" textLength="360">     append_to(order.items, "gift-wrap")</tspan></text>
+<text y="341" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan><tspan x="90" textLength="9" class="b f9">^</tspan></text>
+<text y="362" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="135" class="b">app/checkout.py</tspan><tspan x="270" textLength="9" class="f6">:</tspan><tspan x="279" textLength="9">7</tspan><tspan x="288" textLength="9" class="f6">:</tspan><tspan x="297" textLength="9">5</tspan><tspan x="306" textLength="9" class="f6">:</tspan><tspan x="315" textLength="387"> `add_gift_wrap` calls `app.util.append_to`</tspan></text>
+<text y="383" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="36" class="b f14">help</tspan><tspan x="90" textLength="756">: change Order.items through app.store; allowed writers of `app.models.Order.items`:</tspan></text>
+<text y="404" xml:space="preserve"><tspan x="18" textLength="180">`app.store.add_item`</tspan></text>
+<text y="446" xml:space="preserve"><tspan x="18" textLength="315">Found 2 diagnostic(s) in 6 file(s).</tspan></text>
+<text y="467" xml:space="preserve"><tspan x="18" textLength="828">note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`</tspan></text>
+<text y="488" xml:space="preserve"><tspan x="18" textLength="468">MUT114 (cached-result-mutation): `heki rule MUT114`,</tspan></text>
+<text y="509" xml:space="preserve"><tspan x="18" textLength="495">https://heki.koxudaxi.dev/rules/cached-result-mutation/</tspan></text>
+<text y="530" xml:space="preserve"><tspan x="18" textLength="459">MUT201 (write-owner-violation): `heki rule MUT201`,</tspan></text>
+<text y="551" xml:space="preserve"><tspan x="18" textLength="486">https://heki.koxudaxi.dev/rules/write-owner-violation/</tspan></text>
 </svg>

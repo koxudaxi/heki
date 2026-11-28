@@ -108,3 +108,15 @@ query `list` makes; `list(**kw)` and `list(*args)` block the fix (`deque` reads 
 argument as `maxlen`), and so does a list a starred target or pattern makes (`first, *q =
 items`), which has no display to rewrite. Only `q = q[1:]` is a front pop: `q[1:n]` and
 `q[1::2]` are not.
+
+`q.extend(x)` and `q += x` make the same length query of `x` (`__len__`, else
+`__length_hint__`), and their `deque` forms do not, so the fix needs an `x` whose query runs no
+code: a builtin container, a string, or a `range` (a display, `list(...)`, `range(n)`). Any
+other `x` blocks it, a generator expression and the result of a project function among them, and
+so does `q.extend(*parts)`.
+
+An operation that raises on the list raises the same exception type on the `deque`, with the
+`deque`'s message: `q[0]` of an empty queue raises `IndexError` with `deque index out of range`
+instead of `list index out of range`, and `q.remove(x)` of a missing item a `ValueError` that
+names a deque. A fix keeps the types of builtin exceptions, not their messages
+([what a fix keeps](../fixes.md#safety)).

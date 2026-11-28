@@ -391,7 +391,7 @@ heki recommend (experimental) on .: 4 file(s), 13 function(s)
 2. Smallest wall for a coding agent: the effect-boundaries table "app.report without blocking calls" (medium): 3 function(s) of app.report reach no blocking call heki sees; with fail = true, heki check fails on an edit that makes one reach a blocking call (Contract candidates; the table is in the keys at the end)
 3. Biggest blind spot: 1 call(s) of 1 library name(s) without a catalog entry, which heki takes to have no effect, such as stripe.Charge.create; an [[tool.heki.ecosystem]] entry for a name whose effects you know removes it (What heki cannot see)
 
-Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
+Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 4 heuristic rule(s) off
 
 Types the code already keeps
   2 read-only parameter group(s), exact; 2 heuristic (heki recommend app --all lists them)
@@ -408,7 +408,7 @@ Rules worth enabling here
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
   see the 2 report(s): heki check app --extend-select MUT106,OPT110
-  No reports here: 30 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 23 heuristic one(s)
+  No reports here: 29 rule(s); exact: EFF105, OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 21 heuristic one(s)
 
 What heki cannot see (no report either way)
   calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)

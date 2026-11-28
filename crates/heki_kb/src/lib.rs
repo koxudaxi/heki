@@ -253,6 +253,24 @@ impl ExecEffectKind {
         Self::BLOCKING.contains(&self)
     }
 
+    /// Whether a catalog call with the effect has had it once it was made, also when it raised:
+    /// a blocking call has waited and a statement has gone out before the call fails, and a
+    /// checkpoint is where the cancellation is raised. A constructor that raised may have made
+    /// no client, and a reallocation that raised has copied nothing.
+    pub const fn had_when_raised(self) -> bool {
+        match self {
+            Self::BlockingNet
+            | Self::BlockingDb
+            | Self::BlockingSubprocess
+            | Self::BlockingSync
+            | Self::Sleep
+            | Self::BlockingFs
+            | Self::DbQuery
+            | Self::Checkpoint => true,
+            Self::UnpooledClientAlloc | Self::QuadraticRealloc => false,
+        }
+    }
+
     /// What a blocking effect waits for; `None` for the loop-sensitive costs.
     pub const fn wait_kind(self) -> Option<WaitKind> {
         match self {
@@ -317,8 +335,9 @@ pub enum WaitKind {
 }
 
 /// When a call does its effects ([`EcosystemEntry::emits`]): for a database call, when it sends a
-/// statement or otherwise waits on the database; for any call, whether the library's
-/// configuration can make it skip them.
+/// statement or otherwise waits on the database; for a file system call, whether it can do its
+/// work without the file system; for any call, whether the library's configuration can make it
+/// skip them.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -349,6 +368,14 @@ pub enum Emits {
     /// kombu's in-memory transport publishes without the network). The configuration is not
     /// visible at the call, so no effect is certain and the call only supports heuristic reports.
     UnlessConfiguredOtherwise,
+    /// Its file system I/O (`blocking_fs`) only in a state, on a platform, or through a backend
+    /// the call does not show: a file object's member that its buffer, the memory it wraps, or
+    /// its closed state can answer; a result that does its work only once it is iterated
+    /// (`Path.iterdir` before Python 3.13); a test with no file system on POSIX
+    /// (`os.path.isjunction`); a library that reads the file system on some platforms only, or
+    /// through a backend that may be memory or the network; a reader whose source may be a URL.
+    /// Its other effects keep their own condition.
+    MayAvoidTheFileSystem,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -383,6 +410,18 @@ pub struct EcosystemEntry {
     pub effects: Vec<ExecEffectKind>,
     pub async_safe: bool,
     pub offloads_blocking_arg: Option<u8>,
+    /// With [`Self::offloads_blocking_arg`]: the worker calls the callable once per item of the
+    /// positional arguments after it, one item of each per call, as `map` does, instead of once
+    /// with them (`Executor.map(fn, *iterables)`).
+    pub offloads_per_item: bool,
+    /// With [`Self::offloads_blocking_arg`]: where the worker runs the callable, when that is
+    /// not a thread of the caller's process ([`OffloadsTo`]).
+    pub offloads_to: OffloadsTo,
+    /// With [`Self::offloads_blocking_arg`]: the position of the argument naming the executor
+    /// that runs the callable (`loop.run_in_executor(executor, f)`): `None` names the loop's
+    /// default executor, a thread pool; an executor runs it as the `submit` entry of its class
+    /// says.
+    pub offloads_executor_arg: Option<u8>,
     /// The object the call returns gives, awaited or by its `result()`, what a call of a
     /// callable it is handed returns (`asyncio.to_thread(f, *args, **kwargs)`,
     /// `loop.run_in_executor(executor, f, *args)`, `executor.submit(f, *args, **kwargs)`): it is
@@ -463,8 +502,9 @@ pub struct EcosystemEntry {
     /// Awaiting the object the call returns completes only once the future passed at this
     /// position is done (`asyncio.wrap_future(f)`).
     pub done_when_awaited: Option<u8>,
-    /// When the call's database effects (`blocking_db`, `db_query`) happen: on every call, or
-    /// only in a state of the session, connection, or receiver the call does not show.
+    /// When the call's database effects (`blocking_db`, `db_query`) and its file system I/O
+    /// (`blocking_fs`) happen: on every call, or only in a state of the session, connection, or
+    /// receiver the call does not show.
     pub emits: Emits,
     /// What the items of the call's result are, when the environment decides how many there
     /// are (the origin of a loop's items: `EFF103`).
@@ -683,12 +723,43 @@ pub struct UnawaitedCall {
     /// future, `executor.map`'s results, a `weakref.finalize` object called by hand), where it
     /// may still be iterated or awaited (`EFF116`).
     pub hands_back: bool,
-    /// Where the call runs the callable when that is not the caller's own thread (`EFF117`).
+    /// Where the call runs the callable when that is not the caller's own thread (`EFF117`): for
+    /// an offloading API naming its executor ([`EcosystemEntry::offloads_executor_arg`]), on the
+    /// default executor and a thread pool, not on a process pool.
     pub runs_on: Option<RunsOn>,
-    /// The position of the argument naming the executor that runs the callable
-    /// (`loop.run_in_executor(executor, f)`): `runs_on` holds for the default executor and a
-    /// thread pool, not for a process pool.
-    pub executor_arg: Option<u8>,
+}
+
+/// Where an offloading API's worker runs the callable it is handed
+/// ([`EcosystemEntry::offloads_to`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OffloadsTo {
+    /// On a thread of the caller's process, which shares the caller's objects
+    /// (`asyncio.to_thread`, a `ThreadPoolExecutor`).
+    #[default]
+    Thread,
+    /// In another process or interpreter, on copies of the arguments made by pickling, with
+    /// module state of its own: what it changes of them stays there (a `ProcessPoolExecutor`,
+    /// `anyio.to_process.run_sync`).
+    Process,
+    /// On a thread or in a process, which the API does not tell (`concurrent.futures.Executor`,
+    /// the base of both pools).
+    ThreadOrProcess,
+}
+
+impl OffloadsTo {
+    pub fn is_thread(&self) -> bool {
+        *self == Self::Thread
+    }
+
+    /// Where a worker runs that may be either of `self` and `other` (two pools a value may be).
+    pub fn join(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::ThreadOrProcess
+        }
+    }
 }
 
 /// Where a call runs a callable it is handed ([`UnawaitedCall::runs_on`]).
@@ -3134,13 +3205,9 @@ mod tests {
             "overlaps",
             "match",
             "max_affected",
-            "order",
-            "limit",
-            "offset",
-            "range",
-            "strip_nulls",
-            "select",
         ];
+        // The filter builder has no sorting or paging methods.
+        const SELECT_MODIFIERS: &[&str] = &["order", "limit", "offset", "range", "strip_nulls"];
         let handle = format!("{XINFERENCE_MODULE}.RESTfulModelHandle");
         let builder = |name: &str| format!("postgrest._sync.request_builder.{name}");
         let (select, filter, query, single, maybe_single, rpc, table) = (
@@ -3221,7 +3288,14 @@ mod tests {
             (
                 [&select, &filter, &rpc]
                     .iter()
-                    .flat_map(|class| with_prefix(class, FILTERS))
+                    .flat_map(|class| {
+                        let modifiers = if **class == filter {
+                            &[][..]
+                        } else {
+                            SELECT_MODIFIERS
+                        };
+                        with_prefix(class, &[FILTERS, modifiers, &["select"][..]].concat())
+                    })
                     .collect(),
                 returning(SELF_RETURN_TYPE, entry(&[])),
             ),
@@ -4294,8 +4368,6 @@ mod tests {
             (
                 s(&[
                     "anyio.to_thread.run_sync",
-                    "anyio.to_process.run_sync",
-                    "anyio.to_interpreter.run_sync",
                     "trio.to_thread.run_sync",
                     "starlette.concurrency.run_in_threadpool",
                     "fastapi.concurrency.run_in_threadpool",
@@ -4305,6 +4377,16 @@ mod tests {
                     ..offload(0)
                 },
             ),
+            // A process or an interpreter runs the callable on copies of its arguments.
+            (
+                s(&["anyio.to_process.run_sync", "anyio.to_interpreter.run_sync"]),
+                EcosystemEntry {
+                    effects: vec![Checkpoint],
+                    offloads_to: OffloadsTo::Process,
+                    ..offload(0)
+                },
+            ),
+            // The executor the first argument names runs the callable.
             (
                 with_prefix(
                     "asyncio",
@@ -4313,7 +4395,13 @@ mod tests {
                         "BaseEventLoop.run_in_executor",
                     ],
                 ),
-                returning("asyncio.Future", offload(1)),
+                returning(
+                    "asyncio.Future",
+                    EcosystemEntry {
+                        offloads_executor_arg: Some(0),
+                        ..offload(1)
+                    },
+                ),
             ),
             (
                 [
@@ -5521,6 +5609,14 @@ mod tests {
         };
         let waits = |cases: Vec<ArgCase>| with_cases(cases, entry(&[BlockingSync]));
         let queues = ["queue.Queue", "queue.LifoQueue", "queue.PriorityQueue"];
+        // A pool's `submit` runs the callable with the arguments after it, its `map` once per
+        // item of them, on a worker where the pool runs it.
+        let pool = |offloads_to, offloads_per_item| EcosystemEntry {
+            offloads_blocking_arg: Some(0),
+            offloads_per_item,
+            offloads_to,
+            ..entry(&[])
+        };
         let executors = [
             "concurrent.futures.ThreadPoolExecutor",
             "concurrent.futures.ProcessPoolExecutor",
@@ -5597,8 +5693,31 @@ mod tests {
                 waits(vec![off(0, "wait")]),
             ),
             (
-                executors.iter().map(|e| format!("{e}.submit")).collect(),
-                returning("concurrent.futures.Future", entry(&[])),
+                s(&["concurrent.futures.ThreadPoolExecutor.submit"]),
+                returning("concurrent.futures.Future", pool(OffloadsTo::Thread, false)),
+            ),
+            (
+                s(&["concurrent.futures.ProcessPoolExecutor.submit"]),
+                returning(
+                    "concurrent.futures.Future",
+                    pool(OffloadsTo::Process, false),
+                ),
+            ),
+            (
+                s(&["concurrent.futures.Executor.submit"]),
+                pool(OffloadsTo::ThreadOrProcess, false),
+            ),
+            (
+                s(&["concurrent.futures.ThreadPoolExecutor.map"]),
+                pool(OffloadsTo::Thread, true),
+            ),
+            (
+                s(&["concurrent.futures.ProcessPoolExecutor.map"]),
+                pool(OffloadsTo::Process, true),
+            ),
+            (
+                s(&["concurrent.futures.Executor.map"]),
+                pool(OffloadsTo::ThreadOrProcess, true),
             ),
         ]
     }
@@ -5755,6 +5874,33 @@ mod tests {
     /// one a parameter names.
     const SQLITE3_MEMORY: &str = "sqlite3.connect(\":memory:\")";
     const SQLITE3_FILE: &str = "sqlite3.connect(file)";
+
+    /// Whether the file system call `symbol` (`expected`) may do its work without the file
+    /// system: a file object's member, `Path.iterdir` (a generator before Python 3.13), the
+    /// junction tests (no I/O on POSIX), psutil (`/proc` on Linux only, values kept in a
+    /// `Process`), fsspec (a backend that may be memory or the network), and a reader whose
+    /// source may be a URL.
+    fn may_avoid_the_file_system(symbol: &str, expected: &EcosystemEntry) -> bool {
+        let file_member = FILE_CLASSES
+            .iter()
+            .chain(&[ANY_FILE_CLASS])
+            .any(|class| symbol.starts_with(&format!("{class}.")));
+        let reads_urls = expected
+            .cases
+            .iter()
+            .any(|c| c.effects.as_ref().is_some_and(|e| e.contains(&BlockingNet)));
+        expected.effects.contains(&BlockingFs)
+            && (file_member
+                || [
+                    "pathlib.Path.iterdir",
+                    "os.path.isjunction",
+                    "pathlib.Path.is_junction",
+                ]
+                .contains(&symbol)
+                || symbol.starts_with("psutil.")
+                || symbol.starts_with("fsspec.")
+                || reads_urls)
+    }
 
     /// The database calls that wait only in a state the call does not show.
     const CONDITIONAL_EMITTERS: &[(Emits, &[&str])] = &[
@@ -5989,10 +6135,15 @@ mod tests {
 
     /// `EFF115`: the calls of [`UNAWAITED_CALLS`] with no other fact.
     fn unawaited_calls() -> Vec<(Vec<String>, EcosystemEntry)> {
-        // Their entries carry other facts: the executors' `submit`, and the offloading APIs.
+        // Their entries carry other facts: the executors' `submit` and `map`, and the offloading
+        // APIs.
         let others = [
+            "concurrent.futures.Executor.submit",
             "concurrent.futures.ThreadPoolExecutor.submit",
             "concurrent.futures.ProcessPoolExecutor.submit",
+            "concurrent.futures.Executor.map",
+            "concurrent.futures.ThreadPoolExecutor.map",
+            "concurrent.futures.ProcessPoolExecutor.map",
             "asyncio.to_thread",
             "asyncio.AbstractEventLoop.run_in_executor",
             "asyncio.BaseEventLoop.run_in_executor",
@@ -6309,7 +6460,16 @@ mod tests {
                 let emits = CONDITIONAL_EMITTERS
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
-                    .map_or(Emits::Always, |(emits, _)| *emits);
+                    .map_or_else(
+                        || {
+                            if may_avoid_the_file_system(&symbol, &expected) {
+                                Emits::MayAvoidTheFileSystem
+                            } else {
+                                Emits::Always
+                            }
+                        },
+                        |(emits, _)| *emits,
+                    );
                 let exit_suppresses = if EXITS_NEVER_SUPPRESS.contains(&symbol.as_str()) {
                     Some(false)
                 } else {
@@ -6710,9 +6870,16 @@ mod tests {
             Emits::UnlessConnected
         );
         assert_eq!(emits("celery.Task.delay"), Emits::UnlessConfiguredOtherwise);
-        // Only database calls carry a condition on their database effects, and a call whose
-        // configuration can switch its effects off carries any.
+        // Only database calls carry a condition on their database effects, only file system
+        // calls one on their file system I/O, and a call whose configuration can switch its
+        // effects off carries any.
+        assert_eq!(emits("io.TextIOWrapper.read"), Emits::MayAvoidTheFileSystem);
+        assert_eq!(emits("builtins.open"), Emits::Always);
         for (symbol, e) in &kb.entries {
+            if e.emits == Emits::MayAvoidTheFileSystem {
+                assert!(e.effects.contains(&BlockingFs), "{symbol}");
+                continue;
+            }
             if !matches!(e.emits, Emits::Always | Emits::UnlessConfiguredOtherwise) {
                 assert!(
                     e.effects.iter().any(|k| matches!(k, BlockingDb | DbQuery)),
@@ -6807,7 +6974,6 @@ mod tests {
                     tests_result: *tests_result,
                     hands_back: *hands_back,
                     runs_on: (RUNS_ON.iter()).find(|(s, _)| s == symbol).map(|(_, r)| *r),
-                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                 })
             })
             .map(|call| (call.symbol.clone(), call))
@@ -6837,7 +7003,6 @@ mod tests {
                     arg: Some(arg),
                     hands_back: true,
                     runs_on: Some(RunsOn::Thread),
-                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                     ..UnawaitedCall::default()
                 }),
                 "{symbol}"
@@ -6852,7 +7017,6 @@ mod tests {
                 tests_result: false,
                 hands_back: false,
                 runs_on: Some(RunsOn::Thread),
-                executor_arg: None,
             })
         );
         assert_eq!(

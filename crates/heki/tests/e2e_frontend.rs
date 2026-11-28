@@ -1968,7 +1968,7 @@ fn rule_and_explain_commands() {
     // Each rule's certainty and when it runs with no configuration.
     for (code, state) in [
         ("OPT101", "[exact     on       fix=true ]"),
-        ("EFF105", "[heuristic opt-in   fix=false]"),
+        ("EFF105", "[exact     opt-in   fix=false]"),
         ("MUT114", "[exact     on       fix=false]"),
         ("MUT110", "[exact     on       fix=false]"),
         ("MUT201", "[heuristic contract fix=false]"),
