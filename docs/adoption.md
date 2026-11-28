@@ -11,6 +11,10 @@ this page shows how to adopt heki step by step:
    rules where they matter.
 4. For a library, save [effect snapshots](#effect-snapshots-mut103) of its public functions.
 
+`heki init` (experimental) does the first step in one command, and writes `heki.toml` with the
+contract candidates of `heki recommend` commented out: see
+[Set up a repository](getting-started.md#set-up-a-repository-heki-init-experimental).
+
 To have a coding agent do this, ask it to adopt heki: the [Agent Skill](coding-agents.md#agent-skill-experimental)
 carries a playbook that proposes the first one or two contracts, writes `heki.toml` with a
 `CODEOWNERS` line, the baseline, the hook and the CI job, and runs the whole project before it

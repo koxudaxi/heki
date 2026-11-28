@@ -122,7 +122,7 @@ pub(crate) fn load(
         working_dir: None,
         target_version: analysis.target_version.as_deref(),
         overrides,
-        removed: None,
+        ..ProjectOptions::default()
     })?;
     let selection = selection(selectors, &project)?;
     let snapshot = snapshot_for(
@@ -1302,8 +1302,7 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
         config: args.config.as_deref(),
         working_dir: None,
         target_version: args.target_version.as_deref(),
-        overrides: None,
-        removed: None,
+        ..ProjectOptions::default()
     })?;
     warn_files_not_analyzed(&paths, &project, OutputFormat::Full);
     let index = project.index(IndexFacts::snapshot());
@@ -1341,7 +1340,7 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
 /// Why a run that could not analyze every file keeps the `what` at `path` as it is: written
 /// from the other files, it would drop the entries of the failed ones, and a later run would
 /// compare them against nothing.
-fn not_written(what: &str, path: &Path, failed: usize) -> Problem {
+pub(crate) fn not_written(what: &str, path: &Path, failed: usize) -> Problem {
     let docs = if what == "baseline" {
         Docs::Baselines
     } else {

@@ -125,6 +125,8 @@ pub struct Advice {
     pub report: RecommendReport,
     /// With [`Request::diff`], the files the exact suggestion groups edit, by path.
     pub edited: Vec<types::EditedFile>,
+    /// The keys to add, of which the report holds the TOML and the values.
+    pub block: block::Block,
 }
 
 /// The JSON object `heki recommend --output-format json` prints.
@@ -564,8 +566,8 @@ pub fn recommend(request: Request<'_>) -> Result<Advice, RecommendError> {
         contracts_not_tried: section.not_tried,
         unmatched_entries,
         notes,
-        config: block.config,
-        config_toml: block.toml,
+        config: block.config.clone(),
+        config_toml: block.toml.clone(),
         content: String::new(),
     };
     report.content = render_text(
@@ -583,7 +585,11 @@ pub fn recommend(request: Request<'_>) -> Result<Advice, RecommendError> {
     } else {
         Vec::new()
     };
-    Ok(Advice { report, edited })
+    Ok(Advice {
+        report,
+        edited,
+        block,
+    })
 }
 
 /// The selection of the discovery run: every rule by its code ([`selection_of`]). `MUT103`

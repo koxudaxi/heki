@@ -51,7 +51,7 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         focus: args.focus.map(|RecommendFocus::Types| Focus::Types),
         diff: args.diff,
     };
-    let Advice { report, edited } = recommend(request)?;
+    let Advice { report, edited, .. } = recommend(request)?;
     if args.diff {
         // A patch tool reads stdout: no color, and the summary on stderr.
         for f in &edited {

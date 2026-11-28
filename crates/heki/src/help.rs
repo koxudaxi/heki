@@ -57,6 +57,10 @@ pub(crate) const HEKI: LongHelp = LongHelp {
         ("heki check --fix", "apply the fixes heki proves safe"),
         ("heki rule EFF101", "the documentation of one rule"),
         (
+            "heki init",
+            "set up the configuration, a baseline, and the coding agents in a few questions (experimental)",
+        ),
+        (
             "heki skill install --agent claude-code",
             "install the Agent Skill for Claude Code (experimental)",
         ),
@@ -222,6 +226,32 @@ pub(crate) const RECOMMEND: LongHelp = LongHelp {
             "the JSON Schema of that object",
         ),
     ],
+};
+
+pub(crate) const INIT: LongHelp = LongHelp {
+    reference: Some(Docs::CliInit),
+    exit_codes: &[
+        (0, "the files are written, or with `--dry-run` shown"),
+        (
+            2,
+            "a heki configuration, a baseline, or a skill is there already (pass `--force`), a question is left open while the standard input is not a terminal (pass `--yes`), or a file cannot be read, analyzed, or written",
+        ),
+    ],
+    examples: &[
+        (
+            "heki init",
+            "answer a few questions, then write the configuration and what the answers chose",
+        ),
+        (
+            "heki init --yes --dry-run",
+            "show what the default answers would write, and write nothing",
+        ),
+        (
+            "heki init --yes --skill claude-code --agents-md",
+            "the default answers, the Agent Skill for Claude Code, and a heki section in AGENTS.md",
+        ),
+    ],
+    machine_output: &[],
 };
 
 pub(crate) const VERSION: LongHelp = LongHelp {

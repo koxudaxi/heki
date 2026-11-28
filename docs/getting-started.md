@@ -94,6 +94,54 @@ so the report ends with the keys that make that a contract.
 See [Configuration Advice](recommend.md) for the whole report. To adopt heki in a repository,
 start from the [starter recipes](adoption.md#starter-recipes).
 
+## Set up a repository: `heki init` (experimental)
+
+`heki check` needs no configuration. To set heki up in a repository, `heki init` asks up to four
+questions, analyzes the project as `heki check` and `heki recommend` do, and writes:
+
+- `heki.toml`, or a `[tool.heki]` table at the end of `pyproject.toml`, with `target-version`
+  from `requires-python` and the keys `heki recommend` proposes, commented out: `heki check`
+  reports what it reported before until you remove the `#` of a key.
+- `heki-baseline.toml` and the `baseline` key, when `heki check` reports something now, so that
+  only new reports fail.
+- When you set up the coding agents, the [Agent Skill](coding-agents.md#agent-skill-experimental)
+  for Claude Code or Codex, and a short heki section in `AGENTS.md` and `CLAUDE.md` (a new
+  `AGENTS.md` when there is neither) between `<!-- heki:begin -->` and `<!-- heki:end -->`, so
+  that a second run does not add it again. A `CLAUDE.md` with an `@AGENTS.md` line reads the
+  section there.
+
+```console
+$ heki init
+heki init (experimental) in .: Enter takes the answer in capitals.
+Write the configuration to heki.toml (n: the [tool.heki] table of pyproject.toml)? [Y/n]
+Run heki recommend and add the keys it proposes to heki.toml, commented out? [Y/n]
+heki check reports 3 diagnostic(s) now: record them in a Ratchet baseline, heki-baseline.toml? [Y/n]
+Set up coding agents (the Agent Skill, AGENTS.md)? [y/N]
+Created heki.toml
+Created heki-baseline.toml (3 entries, 3 diagnostic(s))
+heki.toml holds the keys heki recommend proposes, commented out: review them (`heki recommend` shows the evidence of each) and remove the `#` of those you keep.
+Give heki.toml and heki-baseline.toml an owner in CODEOWNERS (.github/CODEOWNERS), so that a maintainer reviews every change to the walls.
+Next: `heki check`, and `heki recommend` for what else fits the project.
+```
+
+It runs and imports no project code and changes no Python file: when `heki recommend` finds
+exact type suggestions, the summary names `heki recommend --focus types --diff`, which prints
+them as a patch. A file it would replace (a heki configuration, `heki-baseline.toml`, an
+installed skill, a heki section) stops it with exit code 2, before it writes anything, unless
+`--force` is given. `--dry-run` prints the text files as diffs and writes nothing.
+
+An option answers each question, and `--yes` takes the default answer of the others; the coding
+agents are set up with `--yes` only as `--skill` and `--agents-md` say:
+
+```console
+$ heki init --yes --dry-run
+$ heki init --yes --skill claude-code --agents-md
+$ heki init --config pyproject.toml --no-recommend --no-baseline
+```
+
+When the standard input is not a terminal, as in CI, a question no option answers stops the run
+at once with exit code 2. The [CLI reference](cli-reference.md#heki-init) lists the options.
+
 ## Read a diagnostic
 
 ```console

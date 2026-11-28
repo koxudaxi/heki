@@ -552,6 +552,7 @@ dependencies = [
  "serde_json",
  "syn 3.0.10",
  "toml",
+ "toml_edit",
  "url",
 ]
 
@@ -1602,6 +1603,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
