@@ -88,6 +88,8 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 A contract names a method as `Class.method`, and a subclass that overrides the method is another function. Set `include-overrides = true` on a contract (or in its [defaults table](configuration.md#defaults-for-the-tables-of-a-kind)) and an entry naming a method in `allowed-*`, `forbidden-*`, `exempt-methods`, `invalidators`, or `exempt-writers` also names the overrides of it in the project subclasses of `Class`. The key is off by default because it allows a subclass written later to do what its base class may, with no change of the configuration. See [Allowed and forbidden functions](configuration.md#allowed-and-forbidden-functions).
 
+A value that an annotation declares as a union (`Model | Node`, `Optional[...]`, a `TypeAlias`, a `TypeVar` bound) is each of its classes when it has at most eight, and a method call on it runs the method of each. A value that different assignments join keeps at most three classes. Past the limit the value has no class, and a write on it stays an unresolved write. A loop that writes the keys of a `TypedDict` (`for name, value in td.items(): setattr(obj, name, value)`) writes the keys the class declares only when the `TypedDict` is closed (`closed=True`, PEP 728, or a base that is closed). A `TypedDict` without it is open: a subclass value may be passed where it is declared, so the write names an attribute at run time, as for a plain `dict`.
+
 `lru_cache` and `cache` results are protected without a contract. A `readonly-returns` entry adds the producers that are not cached, such as a function that returns a module-level dict.
 
 ## 🤝 Not breaking a value you borrowed or share

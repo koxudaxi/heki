@@ -2235,7 +2235,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     args: Args::None,
                 }))
             } else {
-                Ty::of_members(kept)
+                Ty::of_part(kept, members)
             }
         } else {
             let kept: Vec<Obj> = members
@@ -2244,7 +2244,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .cloned()
                 .collect();
             (!kept.is_empty() && kept.len() < members.len())
-                .then(|| Ty::of_members(kept))
+                .then(|| Ty::of_part(kept, members))
                 .flatten()
         }
     }

@@ -1657,8 +1657,11 @@ enum Items {
     /// The keys of a mapping from attributes of instances of these project classes
     /// ([`AttrName::KeyOf`]): the namespace of an instance, or the fields the class declares.
     Keys(Vec<String>),
+    /// The keys of a mapping that holds no keys but these (a `TypedDict`,
+    /// `ProjectDecls::typed_dict_keys`): each names itself ([`AttrName::OneOf`]).
+    Named(Vec<String>),
     /// `(key, value)` pairs whose keys are the boxed items: the pairs of such a mapping
-    /// (`Keys`), or pairs a generator makes of string constants
+    /// (`Keys`, `Named`), or pairs a generator makes of string constants
     /// (`Constants`: `((key, src.__dict__[key]) for key in RECORDS)`).
     Pairs(Box<Items>),
     /// Objects whose `name` is a field one of these project classes declares
@@ -1733,11 +1736,12 @@ impl<'i> Iterated<'_, 'i> {
     /// What a loop over `iterable` takes: the items of a display of string constants or of a
     /// module's tuple constant ([`TypeCtx::global_read_str_tuple`]), the keys or the pairs of a
     /// namespace (`vars(src)`, `src.__dict__`), the fields a class declares
-    /// ([`Self::declared_fields`]), a copy of a mapping (`.copy()`, `dict(...)`), its `keys()`
+    /// ([`Self::declared_fields`]), the keys or the pairs of a `TypedDict`
+    /// ([`Self::declared_keys`]), a copy of a mapping (`.copy()`, `dict(...)`), its `keys()`
     /// or `items()`, a `list`, `tuple`, or `sorted` of one of these, or a generator expression
     /// over one ([`Self::yielded`]). Each wrapper holds one value, so the walk follows one chain
-    /// to the display, the namespace, or the fields, then applies the wrappers from the inside
-    /// out.
+    /// to the display, the namespace, the fields, or the `TypedDict`, then applies the wrappers
+    /// from the inside out.
     fn items(&self, iterable: VarId) -> Option<Items> {
         const WRAPPERS: &[&str] = &[
             "builtins.list",
@@ -1751,6 +1755,10 @@ impl<'i> Iterated<'_, 'i> {
         let mut wrappers: Vec<Wrapper> = Vec::new();
         let mut cur = iterable;
         for _ in 0..=Self::MAX_WRAPPERS {
+            // A parameter has no defining instruction; its annotation types it.
+            if let Some(keys) = self.declared_keys(cur) {
+                return wrapped(&wrappers, Items::Named(keys));
+            }
             let inst = self.def(cur)?;
             let namespace = super::namespace_load(&inst.kind, |v| self.types.get(&v));
             let inner = match namespace {
@@ -1914,6 +1922,18 @@ impl<'i> Iterated<'_, 'i> {
         })
     }
 
+    /// The keys of the `TypedDict` `var` holds, sorted, when heki can list them all: those of
+    /// its class, or of each class of a union ([`ProjectDecls::typed_dict_keys`]).
+    fn declared_keys(&self, var: VarId) -> Option<Vec<String>> {
+        let project = self.cx.project;
+        let classes = Some(self.types.get(&var)?.instance_classes()).filter(|c| !c.is_empty())?;
+        let mut keys = BTreeSet::new();
+        for class in classes {
+            keys.extend(project.typed_dict_keys(&project.canonical(class))?);
+        }
+        Some(keys.into_iter().collect())
+    }
+
     /// The project classes (canonical) of the instance `var` holds: one, or each of a union.
     fn instances(&self, var: VarId) -> Option<Vec<String>> {
         use crate::resolver::Val;
@@ -1962,7 +1982,8 @@ enum Yielded {
 /// What a call around an iterable gives a loop over its result ([`Iterated::items`]).
 #[derive(Debug, Clone, Copy)]
 enum Wrapper {
-    /// `ns.keys()`, `ns.copy()`: the keys of a namespace or of a mapping of fields.
+    /// `ns.keys()`, `ns.copy()`: the keys of a namespace, of a mapping of fields, or of a
+    /// `TypedDict`.
     Keys,
     /// `ns.items()`: its pairs.
     Pairs,
@@ -1978,13 +1999,13 @@ enum Wrapper {
 impl Wrapper {
     fn apply(self, inner: Items) -> Option<Items> {
         match (self, inner) {
-            (Self::Keys | Self::Dict, Items::Keys(classes)) => Some(Items::Keys(classes)),
-            (Self::Pairs, Items::Keys(classes)) => {
-                Some(Items::Pairs(Box::new(Items::Keys(classes))))
+            (Self::Keys | Self::Dict, keys @ (Items::Keys(_) | Items::Named(_))) => Some(keys),
+            (Self::Pairs, keys @ (Items::Keys(_) | Items::Named(_))) => {
+                Some(Items::Pairs(Box::new(keys)))
             }
             (Self::Dict, Items::Pairs(keys)) => Some(*keys),
             (Self::Same, items) => Some(items),
-            (Self::Keyed, keys @ (Items::Constants(_) | Items::Keys(_))) => {
+            (Self::Keyed, keys @ (Items::Constants(_) | Items::Keys(_) | Items::Named(_))) => {
                 Some(Items::Pairs(Box::new(keys)))
             }
             _ => None,
@@ -2003,8 +2024,10 @@ impl Wrapper {
 /// `src.__dict__.items()`, also through a copy, `list`, `tuple`, or `sorted`) names an attribute
 /// that object has, and one it takes from the fields a class declares (`type(src).model_fields`
 /// and its keys or pairs as for a namespace, the `name` of each of `dataclasses.fields(src)`)
-/// names an attribute the class declares. A key built at run time names one with the constant
-/// text at its ends ([`built_name`]). Any other key may be any name.
+/// names an attribute the class declares. One it takes from a `TypedDict` heki lists the keys of
+/// (`for key, value in td.items()`, `for key in td`) names one of its keys. A key built at run
+/// time names one with the constant text at its ends ([`built_name`]). Any other key may be any
+/// name.
 pub(crate) fn key_name<'i>(
     cx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -2046,7 +2069,7 @@ pub(crate) fn key_name<'i>(
         _ => None,
     };
     match items {
-        Some(Items::Constants(names)) => AttrName::OneOf(names),
+        Some(Items::Constants(names) | Items::Named(names)) => AttrName::OneOf(names),
         Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
         Some(Items::Pairs(_) | Items::Fields(_)) | None => built_name(f, key, def, &constant),
     }
@@ -2225,8 +2248,9 @@ fn skip_nested(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, open: char,
 /// What the keys of `other` name, stored by `ns.update(other)` (as for [`key_name`]): those of
 /// the namespace of an object, of its copy, or of its `items()`, name attributes that object
 /// has, and those of the fields a class declares attributes the class declares
-/// ([`AttrName::KeyOf`]); those of the pairs a generator makes of string constants name these
-/// ([`AttrName::OneOf`]); any others may be any names.
+/// ([`AttrName::KeyOf`]); those of the pairs a generator makes of string constants, and those of
+/// a `TypedDict` heki lists the keys of, name these ([`AttrName::OneOf`]); any others may be any
+/// names.
 pub(crate) fn update_keys<'i>(
     cx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -2246,12 +2270,12 @@ pub(crate) fn update_keys<'i>(
     // (`ns.update(["ab"])` stores `a`).
     let keys = match loops.items(other) {
         Some(Items::Pairs(keys)) => Some(*keys),
-        Some(keys @ Items::Keys(_)) => Some(keys),
+        Some(keys @ (Items::Keys(_) | Items::Named(_))) => Some(keys),
         _ => None,
     };
     match keys {
         Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
-        Some(Items::Constants(names)) => AttrName::OneOf(names),
+        Some(Items::Constants(names) | Items::Named(names)) => AttrName::OneOf(names),
         _ => AttrName::Unknown,
     }
 }

@@ -4268,6 +4268,218 @@ fn a_copy_of_the_declared_fields_is_a_write_named_at_run_time() {
     );
 }
 
+const TYPED_DICT_MODEL: &str = r#"from typing import Generic, TypedDict, TypeVar
+
+import typing_extensions
+
+T = TypeVar("T")
+
+
+class Field:
+    def __init__(self) -> None:
+        self.name = ""
+        self.alias = ""
+        self.kind = ""
+
+
+class Identity(TypedDict, closed=True):
+    name: str
+    alias: str
+
+
+class Named(TypedDict, closed=True):
+    name: str
+
+
+class Kinded(Named):
+    kind: str
+
+
+class Held(TypedDict, Generic[T], closed=True):
+    name: T
+
+
+class Partial(TypedDict, total=False):
+    name: str
+
+
+class Closed(typing_extensions.TypedDict, closed=True):
+    name: str
+    alias: str
+
+
+class ClosedChild(Closed):
+    kind: str
+
+
+class Open(TypedDict):
+    name: str
+    alias: str
+
+
+class OpenChild(Open):
+    kind: str
+
+
+class Extra(typing_extensions.TypedDict, extra_items=str):
+    name: str
+
+
+class Helped(TypedDict, closed=True):
+    name: str
+
+    def helper(self) -> None: ...
+"#;
+
+const TYPED_DICT_PASSES: &str = r#"from typing import Any
+
+from pkg.model import Closed, ClosedChild, Extra, Field, Held, Helped, Identity, Kinded, Named, Open, OpenChild, Partial
+
+
+def over_the_items(field: Field, identity: Identity) -> None:
+    for attribute, value in identity.items():
+        setattr(field, attribute, value)
+
+
+def over_the_keys(field: Field, identity: Identity) -> None:
+    for attribute in identity.keys():
+        setattr(field, attribute, identity[attribute])
+
+
+def into_the_namespace(field: Field, identity: Identity) -> None:
+    for attribute in sorted(identity):
+        field.__dict__[attribute] = identity[attribute]
+
+
+def updated(field: Field, identity: Identity) -> None:
+    vars(field).update(identity)
+
+
+def over_a_union(field: Field, value: Named | Identity) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def over_inherited_keys(field: Field, value: Kinded) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def over_a_generic(field: Field, value: Held[str]) -> None:
+    for attribute, item in ((key, value[key]) for key in value):
+        setattr(field, attribute, item)
+
+
+def not_total(field: Field, value: Partial) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def closed(field: Field, value: Closed) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def closed_child(field: Field, value: ClosedChild) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def open_dict(field: Field, value: Open) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def open_child(field: Field, value: OpenChild) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def with_extra_items(field: Field, value: Extra) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def with_a_method(field: Field, value: Helped) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+
+
+def over_a_dict(field: Field, value: dict[str, Any]) -> None:
+    for attribute in value:
+        setattr(field, attribute, value[attribute])
+"#;
+
+/// A loop over a closed `TypedDict`'s keys or items (`closed=True`, or a base that is closed;
+/// also through `sorted`, a generator of its pairs, and `vars(obj).update(td)`) writes exactly
+/// the keys the class and its bases declare: a write of `Field.alias` where the keys name it,
+/// none where they do not, for a generic `TypedDict` and a union of them too. An open
+/// `TypedDict` (a value of a subclass is a value of it), one passing `extra_items=`, one whose
+/// body binds a method (even a closed one), and a plain `dict` may hold any key: their writes stay named at run
+/// time. The `items()` and `keys()` calls themselves are calls heki
+/// cannot resolve: a method of a `TypedDict` value is looked up on its `TypedDict` base.
+#[test]
+fn a_loop_over_a_typed_dict_writes_its_keys() {
+    let p = Project::new("typed_dict_keys");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\nrequires-python = \">=3.12\"\n\n[tool.heki.lint]\n\
+             select = [\"MUT201\", \"MUT205\", \"EFF201\"]\n\n{}\
+             [[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"pkg.passes.*\"]\n\
+             forbid = [\"writes-targets\"]\nwrite-targets = [\"Field.alias\"]\n\
+             unresolved = \"report\"\n",
+            write_owner(
+                "aliases",
+                "pkg.model.Field.alias",
+                "pkg.store:*",
+                "unresolved = \"report\"\n",
+            ),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", TYPED_DICT_MODEL)
+    .write("pkg/passes.py", TYPED_DICT_PASSES);
+    let u = "pkg/passes.py";
+    let diags = diagnostics(&p, &[]);
+    let alias = |line, qualname| {
+        [
+            d(u, line, "EFF201", qualname, "pure:Field.alias"),
+            d(u, line, "MUT201", qualname, "pkg.model.Field.alias"),
+        ]
+    };
+    let any_name = |line, qualname| {
+        [
+            d(u, line, "EFF201", qualname, "pure:unresolved-writes:*"),
+            d(u, line, "MUT205", qualname, "Field"),
+        ]
+    };
+    let mut expected = vec![d(u, 7, "EFF201", "over_the_items", "pure:unresolved-calls")];
+    expected.extend(alias(8, "over_the_items"));
+    expected.push(d(u, 12, "EFF201", "over_the_keys", "pure:unresolved-calls"));
+    expected.extend(alias(13, "over_the_keys"));
+    expected.extend(alias(18, "into_the_namespace"));
+    expected.extend(alias(22, "updated"));
+    expected.extend(alias(27, "over_a_union"));
+    expected.extend(any_name(42, "not_total"));
+    expected.extend(alias(47, "closed"));
+    expected.extend(alias(52, "closed_child"));
+    expected.extend(any_name(57, "open_dict"));
+    expected.extend(any_name(62, "open_child"));
+    expected.extend(any_name(67, "with_extra_items"));
+    expected.extend(any_name(72, "with_a_method"));
+    expected.extend(any_name(77, "over_a_dict"));
+    assert_eq!(found(&diags), expected);
+    let mut1 = diags
+        .iter()
+        .find(|x| x["rule_code"] == "MUT201" && x["line"] == 8)
+        .unwrap();
+    assert_eq!(
+        mut1["message"],
+        "`over_the_items` writes `pkg.model.Field.alias` (with `setattr`) outside the write owners of `aliases`"
+    );
+}
+
 const CHANGED_DISPLAYS: &str = r#"from pkg.model import Field
 
 

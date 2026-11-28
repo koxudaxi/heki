@@ -246,6 +246,8 @@ Found 1 diagnostic(s) in 3 file(s).
 
 The run exits with code 1. `forbid` takes tokens such as `blocking`, `blocking-net`, `blocking-db`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, and `reads-environment`. [`effect-boundaries`](configuration.md#effect-boundaries) lists them all with their extra keys.
 
+A value that an annotation declares as a union of up to eight classes is each of them, so a call on it reaches the method of each class; a union that different assignments join keeps three. A loop over a `TypedDict`'s keys or items that calls `setattr(obj, name, value)` writes the keys the class declares only for a closed `TypedDict` (`closed=True`, or a base that is closed). For an open one the write stays an attribute named at run time (`unresolved-writes`), because a subclass value may carry more keys.
+
 A `scopes` or `allowed-callees` entry naming a method (`Class.method`) names that method only. With `include-overrides = true` in the boundary (or in its [defaults table](configuration.md#defaults-for-the-tables-of-a-kind)) it also names the overrides in the project subclasses of `Class`, nested scopes included, so a subclass written later is in scope or allowed with no change of the configuration. The key is off by default for that reason.
 
 ## 📸 Public API effect changes across pull requests

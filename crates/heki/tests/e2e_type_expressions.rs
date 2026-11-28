@@ -554,6 +554,217 @@ fn the_request_resolves_the_alias_and_the_subscripted_class() {
     assert_eq!(reported(&p), marked(REQUEST_PASSES));
 }
 
+const DECLARED_MODEL: &str = r#"from typing import TypeAlias, TypeVar, Union
+
+
+class Field:
+    def __init__(self) -> None:
+        self.required = False
+
+
+class Added:
+    def apply_to(self, field: Field) -> None:
+        field.required = True
+
+
+class Removed:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Renamed:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Moved:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Split:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Merged:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Dropped:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Kept:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Extra:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Overridden:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+class Twice(Overridden):
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+Seven: TypeAlias = Added | Removed | Renamed | Moved | Split | Merged | Dropped
+type Eight = Added | Removed | Renamed | Moved | Split | Merged | Dropped | Kept
+Nine: TypeAlias = Union[Added, Removed, Renamed, Moved, Split, Merged, Dropped, Kept, Extra]
+Crowded: TypeAlias = Added | Removed | Renamed | Moved | Split | Merged | Dropped | Overridden
+Constrained = TypeVar("Constrained", Added, Removed, Renamed, Moved)
+
+
+class Holder:
+    operation: Seven
+
+
+def made(operation: object) -> Seven:
+    return operation  # type: ignore[return-value]
+"#;
+
+const DECLARED_PASSES: &str = r#"from typing import Optional, Union
+
+from pkg.model import (
+    Added,
+    Constrained,
+    Crowded,
+    Eight,
+    Extra,
+    Field,
+    Holder,
+    Kept,
+    Moved,
+    Nine,
+    Removed,
+    Renamed,
+    Seven,
+    Split,
+    made,
+)
+
+
+def through_an_alias_of_seven(field: Field, operation: Seven) -> None:
+    operation.apply_to(field)  # writes
+
+
+def through_a_statement_of_eight(field: Field, operation: Eight) -> None:
+    operation.apply_to(field)  # writes
+
+
+def written_out(field: Field, operation: Added | Removed | Renamed | Moved) -> None:
+    operation.apply_to(field)  # writes
+
+
+def spelled_with_none(field: Field, operation: Optional[Union[Added, Removed, Renamed, Moved]]) -> None:
+    if operation is not None:
+        operation.apply_to(field)  # writes
+
+
+def an_alias_and_a_class(field: Field, operation: Seven | Kept) -> None:
+    operation.apply_to(field)  # writes
+
+
+def a_constrained_variable(field: Field, operation: Constrained) -> None:
+    operation.apply_to(field)  # writes
+
+
+def over_the_items(field: Field, operations: list[Seven]) -> None:
+    for operation in operations:
+        operation.apply_to(field)  # writes
+
+
+def through_an_attribute(field: Field, holder: Holder) -> None:
+    holder.operation.apply_to(field)  # writes
+
+
+def through_a_return(field: Field, value: object) -> None:
+    made(value).apply_to(field)  # writes
+
+
+def a_store_of_a_member(field: Field, operation: Seven, flag: bool) -> None:
+    if flag:
+        operation = Removed()
+    operation.apply_to(field)  # writes
+
+
+def narrowed_away(field: Field, operation: Seven) -> None:
+    if isinstance(operation, Added):
+        return
+    operation.apply_to(field)
+
+
+def narrowed_to_four(field: Field, operation: Seven) -> None:
+    if isinstance(operation, (Removed, Renamed, Moved, Split)):
+        operation.apply_to(field)
+
+
+def three_stores(field: Field, flag: int) -> None:
+    if flag == 1:
+        operation = Added()
+    elif flag == 2:
+        operation = Removed()
+    else:
+        operation = Renamed()
+    operation.apply_to(field)  # writes
+
+
+def nine_classes(field: Field, operation: Nine) -> None:
+    operation.apply_to(field)  # unknown
+
+
+def an_alias_and_two_classes(field: Field, operation: Seven | Kept | Extra) -> None:
+    operation.apply_to(field)  # unknown
+
+
+def more_targets_than_the_limit(field: Field, operation: Crowded) -> None:
+    operation.apply_to(field)  # unknown
+
+
+def a_store_of_another_class(field: Field, operation: Seven, flag: bool) -> None:
+    if flag:
+        operation = Kept()
+    operation.apply_to(field)  # unknown
+
+
+def four_stores(field: Field, flag: int) -> None:
+    if flag == 1:
+        operation = Added()
+    elif flag == 2:
+        operation = Removed()
+    elif flag == 3:
+        operation = Renamed()
+    else:
+        operation = Moved()
+    operation.apply_to(field)  # unknown
+"#;
+
+/// A union an annotation declares keeps up to eight classes (`resolver::CHA_CANDIDATE_LIMIT`),
+/// written out, spelled with `Union` and `None`, through a `TypeAlias`, a `type` statement, an
+/// alias joined with a class, a constrained `TypeVar`, a container's items, an attribute's
+/// annotation, and a return annotation: a call on it runs each member's method. A store of one
+/// of its classes keeps it, and `isinstance` keeps the part it lets through. Nine classes, a
+/// union whose calls run more than eight methods (a subclass overrides one), and a store of
+/// another class have no tracked type. Unions joined from stores keep at most three classes.
+#[test]
+fn a_declared_union_keeps_up_to_the_candidate_limit() {
+    let p = Project::new("type_expressions_declared_unions");
+    p.write("pyproject.toml", CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", DECLARED_MODEL)
+        .write("pkg/passes.py", DECLARED_PASSES);
+    assert_eq!(reported(&p), marked(DECLARED_PASSES));
+}
+
 /// A parameter annotated with an alias of an iterator is a single-pass iterator, as one annotated
 /// with the iterator itself (`MUT106`); an alias of a list is not.
 const ROWS: &str = r#"from collections.abc import Iterator

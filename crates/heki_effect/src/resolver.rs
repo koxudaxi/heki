@@ -840,6 +840,14 @@ pub struct ClassDecl {
     /// the metaclass makes of the class ([`ProjectDecls::attr_write_stores_value`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub passes_keywords: bool,
+    /// The `closed=` keyword of the class statement (PEP 728): `Some(true)` only for the literal
+    /// `True`; any other value, one heki cannot read included, is `Some(false)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_keyword: Option<bool>,
+    /// The class statement passes a keyword other than `metaclass=`, `closed=`, and `total=`
+    /// (`extra_items=`, an unpacked mapping): a `TypedDict` it builds may hold other keys.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub opens_typed_dict_keys: bool,
     /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
     /// builds): `Some(frozen_default)`.
     pub transform: Option<bool>,
@@ -2047,7 +2055,7 @@ impl ModuleDecls {
     }
 
     /// The members of a union annotation other than `None`: one type, or instances of at most
-    /// [`crate::types::MAX_UNION`] classes.
+    /// [`crate::types::MAX_DECLARED_UNION`] classes.
     fn union_annotation(&self, members: &[&str], locals: &LocalNames) -> Option<Ty> {
         if let [one] = members {
             return self.resolve_annotation_ty_in(one, locals);
@@ -2060,7 +2068,7 @@ impl ModuleDecls {
             }
             objs.extend(t.members().iter().cloned());
         }
-        Ty::of_members(objs)
+        Ty::of_declared(objs)
     }
 
     /// Whether the subscripted head `head` is `type` or `typing.Type` (an unresolved `Type`
@@ -2580,6 +2588,15 @@ pub(crate) fn transform_decorator(
 /// Bases that make a class a `NamedTuple` (frozen) or a `TypedDict`.
 const NAMED_TUPLE_BASES: &[&str] = &["typing.NamedTuple", "typing_extensions.NamedTuple"];
 const TYPED_DICT_BASES: &[&str] = &["typing.TypedDict", "typing_extensions.TypedDict"];
+
+/// The bases outside the project a `TypedDict` may list: they declare no key
+/// ([`ProjectDecls::typed_dict_keys`]).
+const TYPED_DICT_KEYLESS_BASES: &[&str] = &[
+    "typing.TypedDict",
+    "typing_extensions.TypedDict",
+    "typing.Generic",
+    "typing_extensions.Generic",
+];
 
 /// Keys into the project declarations: what one analysis read of them
 /// ([`ProjectDecls::record`]), or what an update changed in them ([`DeclPasses`]). An analysis
@@ -4882,6 +4899,40 @@ impl ProjectDecls {
         self.typed_dicts.contains(class)
     }
 
+    /// The keys a value of the project `TypedDict` `class` holds, sorted: the names the class
+    /// bodies along its MRO declare ([`ClassDecl::members`]; a `TypedDict` body declares its keys
+    /// and nothing else). `None` when such a value may hold keys none of them names or heki
+    /// cannot list them: the class is open (a value of a `TypedDict` with more keys, such as a
+    /// subclass, is a value of it), which only PEP 728's `closed=True` on the class or the first
+    /// base that sets `closed=` prevents; a class along the MRO passes `extra_items=` or another
+    /// keyword, names a metaclass, binds a name of its body to code (a method, a call:
+    /// [`ClassDecl::code_attrs`]), or is no project `TypedDict` (besides `TypedDict` and
+    /// `Generic` themselves).
+    pub(crate) fn typed_dict_keys(&self, class: &str) -> Option<Vec<String>> {
+        if !self.is_typed_dict(class) {
+            return None;
+        }
+        let mro = self.mro(class);
+        // The first `closed=` class keyword along the MRO decides.
+        let closed = mro.iter().find_map(|c| self.class(c)?.closed_keyword);
+        if !closed.unwrap_or(false) {
+            return None;
+        }
+        let mut keys = BTreeSet::new();
+        for c in mro {
+            if TYPED_DICT_KEYLESS_BASES.contains(&c.as_str()) {
+                continue;
+            }
+            let decl = self.class(&c).filter(|_| self.is_typed_dict(&c))?;
+            let binds_code = decl.members.iter().any(|m| decl.code_attrs.contains(m));
+            if decl.opens_typed_dict_keys || decl.custom_metaclass || binds_code {
+                return None;
+            }
+            keys.extend(decl.members.iter().cloned());
+        }
+        Some(keys.into_iter().collect())
+    }
+
     /// The small display the module global `fqn` of a project module holds
     /// (`ModuleDecls::small_globals`), through re-exports ([`Self::canonical_value`]), when no
     /// other module changes it
@@ -6463,7 +6514,7 @@ impl ProjectDecls {
                 None => objs.push(canonical(o)?),
             }
         }
-        Ty::of_members(objs)
+        Ty::of_declared(objs)
     }
 
     /// The type the project name `fqn` names ([`ModuleDecls::type_names`]): that of the first
@@ -7905,6 +7956,11 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             });
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
         let passes_keywords = class.keywords.iter().any(|(k, _)| k != "metaclass");
+        let closed_keyword = keyword("closed").map(|v| bool_literal(v) == Some(true));
+        let opens_typed_dict_keys = class
+            .keywords
+            .iter()
+            .any(|(k, _)| !matches!(k.as_str(), "metaclass" | "closed" | "total"));
         if in_module_body && let Some(params) = class_type_params(class, &bases) {
             type_params.insert(&class.qualname, params);
         }
@@ -7928,6 +7984,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             c.custom_metaclass = custom_metaclass;
             c.frozen_keyword = frozen_keyword;
             c.passes_keywords = passes_keywords;
+            c.closed_keyword = closed_keyword;
+            c.opens_typed_dict_keys = opens_typed_dict_keys;
             c.members = members;
         }
     }
@@ -10816,7 +10874,7 @@ pub enum Val {
     Class(String),
     /// `super()` inside a method of class `fqn`.
     Super(String),
-    /// An instance of one of two or three classes (sorted).
+    /// An instance of one of the classes of a [`Ty::Union`] (sorted).
     Union(Vec<String>),
     /// One of several named objects ([`Ty::OneOf`]).
     OneOf(Vec<String>),

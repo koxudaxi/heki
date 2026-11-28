@@ -374,7 +374,7 @@ the targets of write and read boundaries.
 | Priority | Source | Confidence | Example |
 |---|---|---|---|
 | 1 | Local constructors and direct imports (relative imports, source roots, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
-| 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
+| 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions (up to eight classes an annotation declares, up to three that stores join) | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` or `__post_init__`, and module globals the module body binds, each the join of what every store of it binds | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` (a class with `typing.Protocol` or `typing_extensions.Protocol` among its bases, also through a project module re-exporting it: `ProjectDecls::is_protocol`) dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
@@ -570,7 +570,12 @@ without the catalog), are catalog rows (4.2: `_replace`, `_make`, `_asdict`, `_f
   subclass declares as the catalog's `[[declared_fields]]` keep them (the keys of
   `type(other).model_fields`, the `name` of each of `dataclasses.fields(other)`), binds any
   value too, but adds no attribute an instance did not have or the class does not declare: only
-  the others set `ClassDecl::adds_unnamed_attrs`, which the unmatched contract entries read.
+  the others set `ClassDecl::adds_unnamed_attrs`, which the unmatched contract entries read. A
+  store under a key of a project `TypedDict` (`for key, value in td.items()`, `for key in td`,
+  its `keys()`, a copy, `list`, `tuple`, or `sorted` of them, `update(td)`) is a store of each key
+  the class and its bases declare (`ProjectDecls::typed_dict_keys`), unless a class along its
+  MRO passes a class keyword (`total=False`, `closed=`, `extra_items=`), binds a method or a call
+  in its body, or has a base that is no `TypedDict`: such a value may hold other keys.
 - **Globals the module may rebind.** In a module whose globals `globals()` or `exec` may change,
   every store of a global binds a value of unknown type. A module-body store does too when a star
   import that runs (not one under `if TYPE_CHECKING:`) may bind the name after it: the store comes
@@ -634,7 +639,11 @@ without the catalog), are catalog rows (4.2: `_replace`, `_make`, `_asdict`, `_f
   declaration.
 
 Stores of two or three classes give a union, on which a call dispatches as on any union (one of
-`httpx.Client` and `httpx.AsyncClient` leaves `get` unresolved). A store through a receiver
+`httpx.Client` and `httpx.AsyncClient` leaves `get` unresolved). An annotation declares a union of
+up to eight classes (`types::MAX_DECLARED_UNION`, as many targets as a call through the class
+hierarchy follows; a call on it that would run more is unresolved): a store of one of its classes
+keeps it, an `isinstance` test keeps the part it lets through, and a join that needs more than
+three classes and than either side has gives no type. A store through a receiver
 whose type the inference does not know (`def configure(obj): obj.client = ...`) is not one of
 them, nor is one through a receiver read from an attribute or a global of another module
 (declarations of pass 1 type neither while a module's stores are decided), nor one into a class

@@ -9222,12 +9222,13 @@ fn lsp_diagnostics_equal_a_full_check_as_a_queue_changes_its_extend_argument() {
 // a table of functions (`ModuleDecls::tables`, what other modules change in place in
 // `ModuleDecls::stores_elsewhere`), a class attribute bound to a `staticmethod`
 // (`ClassDecl::named_attrs`, a subclass binding the name to a method), a function returning a
-// module it imports (`FunctionDecl::returned_import`), and the type a `TypeVar`'s bound or a
-// type alias names (`ModuleDecls::type_names`), also through a module re-exporting the alias.
+// module it imports (`FunctionDecl::returned_import`), the type a `TypeVar`'s bound or a type
+// alias names (`ModuleDecls::type_names`, a union of up to eight classes), also through a module
+// re-exporting the alias, and the keys of a `TypedDict` (`ProjectDecls::typed_dict_keys`).
 const BOUND_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"uses\"\nscopes = [\"pkg.use_*.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\n";
 const BOUND_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n";
 const BOUND_HELPERS: &str = "from pkg.model import Field\n\n\ndef require(field: Field):\n    field.required = True\n\n\ndef skip(field: Field):\n    pass\n";
-const BOUND_DEFS: &str = "from typing import Protocol, TypeAlias, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n\n\nclass Writer:\n    def touch(self, field: Field):\n        field.required = True\n\n\nclass Reader:\n    def touch(self, field: Field):\n        pass\n\n\nTouching: TypeAlias = Writer | Reader\nTouchers = list[Writer]\n";
+const BOUND_DEFS: &str = "from typing import Protocol, TypeAlias, TypedDict, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n\n\nclass Writer:\n    def touch(self, field: Field):\n        field.required = True\n\n\nclass Reader:\n    def touch(self, field: Field):\n        pass\n\n\nTouching: TypeAlias = Writer | Reader\nTouchers = list[Writer]\n\n\nclass Identity(TypedDict, closed=True):\n    name: str\n";
 const BOUND_TABLE_USE: &str =
     "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
 const BOUND_ALIAS_USE: &str =
@@ -9247,6 +9248,12 @@ const BOUND_LISTED: &str = "from pkg.model import Field\n\n\nclass Model:\n    d
 const BOUND_LIST_USE: &str = "from pkg.listed import Model\n\n\ndef use(model: Model):\n    for field in model.fields:\n        field.required = True\n";
 const BOUND_APPENDING: &str = "from pkg.listed import Model\nfrom pkg.model import Field\n\n\ndef add(model: Model, field: Field):\n    model.fields.append(field)\n";
 const BOUND_REGISTERING: &str = "from pkg.defs import TABLE\nfrom pkg.helpers import require\n\n\ndef register():\n    TABLE[\"other\"] = require\n";
+// Subclasses of `Reader` that define no `touch` of their own, for a union alias of more classes
+// than a join of stores keeps (`Ty::of_declared`).
+const BOUND_READERS: &str = "class R0(Reader):\n    pass\n\n\nclass R1(Reader):\n    pass\n\n\nclass R2(Reader):\n    pass\n\n\nclass R3(Reader):\n    pass\n\n\nclass R4(Reader):\n    pass\n\n\nclass R5(Reader):\n    pass\n\n\nclass R6(Reader):\n    pass\n\n\n";
+// The keys of a `TypedDict` another module declares name what a loop over it sets
+// (`ProjectDecls::typed_dict_keys`).
+const BOUND_TYPED_DICT_USE: &str = "from pkg.defs import Identity\nfrom pkg.model import Field\n\n\ndef use(field: Field, identity: Identity):\n    for name in identity:\n        setattr(field, name, identity[name])\n";
 
 #[test]
 fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
@@ -9439,6 +9446,67 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
             vec![save("pkg/register.py", BOUND_REGISTERING)],
         )
         .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "the type alias names four classes, the writer among them",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace(
+                    "Touching: TypeAlias = Writer | Reader",
+                    &format!("{BOUND_READERS}Touching: TypeAlias = Writer | Reader | R0 | R1"),
+                ),
+            )],
+        )
+        .present(&[("pkg/use_type_alias.py", "EFF201")]),
+        Step::new(
+            "it names nine classes",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace(
+                    "Touching: TypeAlias = Writer | Reader",
+                    &format!(
+                        "{BOUND_READERS}Touching: TypeAlias = Writer | Reader | R0 | R1 | R2 | R3 | R4 | R5 | R6"
+                    ),
+                ),
+            )],
+        )
+        .absent(&[("pkg/use_type_alias.py", "EFF201")]),
+        Step::new(
+            "a module sets the keys of a TypedDict the other module declares",
+            vec![
+                save("pkg/defs.py", BOUND_DEFS),
+                Action::Create("pkg/use_typed_dict.py", BOUND_TYPED_DICT_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/use_type_alias.py", "EFF201")])
+        .absent(&[("pkg/use_typed_dict.py", "EFF201")]),
+        Step::new(
+            "the TypedDict declares the key the boundary forbids",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("    name: str\n", "    name: str\n    required: bool\n"),
+            )],
+        )
+        .present(&[("pkg/use_typed_dict.py", "EFF201")]),
+        Step::new(
+            "it is no longer closed, so a value may hold any key",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS
+                    .replace("    name: str\n", "    name: str\n    required: bool\n")
+                    .replace("(TypedDict, closed=True)", "(TypedDict)"),
+            )],
+        )
+        .absent(&[("pkg/use_typed_dict.py", "EFF201")]),
+        Step::new(
+            "it declares the key again",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("    name: str\n", "    name: str\n    required: bool\n"),
+            )],
+        )
+        .present(&[("pkg/use_typed_dict.py", "EFF201")]),
+        Step::new("it drops the key", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .absent(&[("pkg/use_typed_dict.py", "EFF201")]),
     ];
     run_steps(s, &steps);
 }
