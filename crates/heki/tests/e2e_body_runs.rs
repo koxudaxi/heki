@@ -1642,3 +1642,132 @@ fn builtins_call_a_callable_once_per_item() {
          calls it with"
     );
 }
+
+const POOL_ITEMS: &str = r#"import asyncio
+import functools
+import sqlite3
+import time
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
+
+import requests
+
+
+def fetch(url):
+    with requests.Session() as s:
+        return s.get(url)
+
+
+def load(conn: sqlite3.Connection, i):
+    return conn.execute("SELECT * FROM t WHERE id = ?", (i,)).fetchone()
+
+
+def pause(delay):
+    time.sleep(delay)
+
+
+def direct(urls):
+    for u in urls:
+        fetch(u)  # EFF102
+
+
+def submitted(urls):
+    with ThreadPoolExecutor() as ex:
+        for u in urls:
+            ex.submit(fetch, u)  # EFF102
+
+
+def mapped(urls):
+    with ThreadPoolExecutor() as ex:
+        return list(ex.map(fetch, urls))  # EFF102
+
+
+def in_processes(urls):
+    with ProcessPoolExecutor() as ex:
+        futures = [ex.submit(fetch, u) for u in urls]  # EFF102
+        return futures, list(ex.map(fetch, urls))  # EFF102
+
+
+def any_executor(ex: Executor, urls):
+    for u in urls:
+        ex.submit(fetch, u)  # EFF102
+    return ex.map(fetch, urls)  # EFF102
+
+
+async def run_in_executor(urls):
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor() as ex:
+        for u in urls:
+            await loop.run_in_executor(ex, fetch, u)  # EFF102
+
+
+def unknown_executor(ex, urls):
+    for u in urls:
+        ex.submit(fetch, u)
+    return ex.map(fetch, urls)
+
+
+def fixed_items():
+    with ThreadPoolExecutor() as ex:
+        ex.submit(fetch, "https://a")
+        return list(ex.map(fetch, ("https://a", "https://b")))
+
+
+def queries(conn: sqlite3.Connection, ids):
+    with ThreadPoolExecutor() as ex:
+        for i in ids:
+            load(conn, i)  # EFF103
+            ex.submit(load, conn, i)  # EFF103 [heuristic]
+        list(ex.map(functools.partial(load, conn), ids))  # EFF103 [heuristic]
+        return list(ex.map(load, [conn] * len(ids), ids))  # EFF103 [heuristic]
+
+
+async def offloaded_sleeps(ex: ThreadPoolExecutor, delays):
+    for d in delays:
+        ex.submit(pause, d)
+    ex.map(pause, delays)
+    pause(0.1)  # EFF101
+"#;
+
+/// A pool runs a function it is handed on a worker: `submit` once per call, as a direct call
+/// does, and `map` once per item of its iterables, which are sized as a `for` loop's. The
+/// executor's class decides it: one heki cannot type runs nothing it knows. A query a pool runs
+/// is heuristic (it runs after the call returns), and blocking work on a worker does not block
+/// the event loop.
+#[test]
+fn pools_run_a_callable_per_call_or_per_item() {
+    let files = [("pkg/pools.py", POOL_ITEMS)];
+    let (reported, marked) =
+        reported_and_marked("pool_items", &files, &["EFF101", "EFF102", "EFF103"]);
+    assert_eq!(reported, marked);
+
+    let p = Project::new("pool_item_messages");
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/pools.py", POOL_ITEMS);
+    let diags = diagnostics(&p, &["--select", "EFF102,EFF103"]);
+    let at = |code: &str| {
+        POOL_ITEMS
+            .lines()
+            .position(|l| l.contains(code))
+            .map(|i| i as u64 + 1)
+            .unwrap()
+    };
+    assert_eq!(
+        message(&diags, "pkg/pools.py", at("ex.submit(fetch, u)  #")),
+        "`pkg.pools.fetch` allocates an unpooled client (`requests.Session`) on every loop \
+         iteration"
+    );
+    assert_eq!(
+        message(&diags, "pkg/pools.py", at("list(ex.map(fetch, urls))  #")),
+        "`pkg.pools.fetch` allocates an unpooled client (`requests.Session`) for every item \
+         `concurrent.futures.ThreadPoolExecutor.map` calls it with"
+    );
+    assert_eq!(
+        message(
+            &diags,
+            "pkg/pools.py",
+            at("ex.map(functools.partial(load, conn), ids)")
+        ),
+        "`pkg.pools.load` runs a database query (`sqlite3.Connection.execute`) for every item \
+         `concurrent.futures.ThreadPoolExecutor.map` calls it with"
+    );
+}

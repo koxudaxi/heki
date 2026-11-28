@@ -76,6 +76,7 @@ Each diagnostic has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+| `unresolved_sites` | for an effect boundary's `unresolved-calls` or `unresolved-writes` report, every site it stands for, with why heki cannot judge it ([Output Formats](output-formats.md#what-an-effect-boundary-cannot-judge)) |
 | `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
@@ -144,6 +145,10 @@ fail = true
 Put the contracts and the baseline path in `heki.toml`, and give that file an owner
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
+
+CODEOWNERS protects the file, not the code around it. Run `heki check --report-suppressed <PATH>` in CI
+to list every inline `# heki: ignore` and `# noqa` that silences a report, so an agent cannot quietly
+go around a wall either ([review checklist](#review-a-contract-change-from-an-agent)).
 
 ```text
 # .github/CODEOWNERS
@@ -357,6 +362,9 @@ baseline, the workflow, the hook, or the agent instructions is a change to a pro
 When a diagnostic or a question is about one function, `heki inspect` says what it reaches,
 changes, keeps, and returns, with the call chains, without reading its callees. Run it when a
 function's effects are in question, not before every edit.
+
+The text form is the one to read in a terminal; it needs no configuration. A sample is in
+[Getting Started](getting-started.md#look-at-one-function).
 
 ```console
 $ heki inspect app.users.load_user --output-format json

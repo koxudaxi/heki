@@ -124,6 +124,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("lint.fail", r#"["IMP101"]"#),
     ("lint.report-unused-suppressions", "true"),
     ("lint.require-suppression-codes", "true"),
+    ("lint.unmatched-paths", r#""error""#),
     ("lint.unmatched-contract-entries", r#""error""#),
     ("name", r#""generation-store""#),
     ("targets", r#"["pkg.model.DataModel.fields"]"#),

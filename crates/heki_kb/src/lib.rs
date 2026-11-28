@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+pub mod stubs;
+pub use stubs::{StubCall, StubKind, StubMember, StubTable};
+
 /// Embedded Layer 1 files (`kb/soundness/*.toml`): `(path relative to the repository, contents)`.
 const SOUNDNESS_KB_FILES: &[(&str, &str)] = &[(
     "kb/soundness/builtins.toml",
@@ -410,6 +413,18 @@ pub struct EcosystemEntry {
     pub effects: Vec<ExecEffectKind>,
     pub async_safe: bool,
     pub offloads_blocking_arg: Option<u8>,
+    /// With [`Self::offloads_blocking_arg`]: the worker calls the callable once per item of the
+    /// positional arguments after it, one item of each per call, as `map` does, instead of once
+    /// with them (`Executor.map(fn, *iterables)`).
+    pub offloads_per_item: bool,
+    /// With [`Self::offloads_blocking_arg`]: where the worker runs the callable, when that is
+    /// not a thread of the caller's process ([`OffloadsTo`]).
+    pub offloads_to: OffloadsTo,
+    /// With [`Self::offloads_blocking_arg`]: the position of the argument naming the executor
+    /// that runs the callable (`loop.run_in_executor(executor, f)`): `None` names the loop's
+    /// default executor, a thread pool; an executor runs it as the `submit` entry of its class
+    /// says.
+    pub offloads_executor_arg: Option<u8>,
     /// The object the call returns gives, awaited or by its `result()`, what a call of a
     /// callable it is handed returns (`asyncio.to_thread(f, *args, **kwargs)`,
     /// `loop.run_in_executor(executor, f, *args)`, `executor.submit(f, *args, **kwargs)`): it is
@@ -711,12 +726,43 @@ pub struct UnawaitedCall {
     /// future, `executor.map`'s results, a `weakref.finalize` object called by hand), where it
     /// may still be iterated or awaited (`EFF116`).
     pub hands_back: bool,
-    /// Where the call runs the callable when that is not the caller's own thread (`EFF117`).
+    /// Where the call runs the callable when that is not the caller's own thread (`EFF117`): for
+    /// an offloading API naming its executor ([`EcosystemEntry::offloads_executor_arg`]), on the
+    /// default executor and a thread pool, not on a process pool.
     pub runs_on: Option<RunsOn>,
-    /// The position of the argument naming the executor that runs the callable
-    /// (`loop.run_in_executor(executor, f)`): `runs_on` holds for the default executor and a
-    /// thread pool, not for a process pool.
-    pub executor_arg: Option<u8>,
+}
+
+/// Where an offloading API's worker runs the callable it is handed
+/// ([`EcosystemEntry::offloads_to`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OffloadsTo {
+    /// On a thread of the caller's process, which shares the caller's objects
+    /// (`asyncio.to_thread`, a `ThreadPoolExecutor`).
+    #[default]
+    Thread,
+    /// In another process or interpreter, on copies of the arguments made by pickling, with
+    /// module state of its own: what it changes of them stays there (a `ProcessPoolExecutor`,
+    /// `anyio.to_process.run_sync`).
+    Process,
+    /// On a thread or in a process, which the API does not tell (`concurrent.futures.Executor`,
+    /// the base of both pools).
+    ThreadOrProcess,
+}
+
+impl OffloadsTo {
+    pub fn is_thread(&self) -> bool {
+        *self == Self::Thread
+    }
+
+    /// Where a worker runs that may be either of `self` and `other` (two pools a value may be).
+    pub fn join(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::ThreadOrProcess
+        }
+    }
 }
 
 /// Where a call runs a callable it is handed ([`UnawaitedCall::runs_on`]).
@@ -1566,9 +1612,10 @@ impl EffectiveEcosystemKb {
         let read = serde_json::to_string(&attributes).unwrap_or_default();
         let class_read = serde_json::to_string(&class_attributes).unwrap_or_default();
         let provided = serde_json::to_string(&provides).unwrap_or_default();
+        let stubs = blake3::hash(StubTable::text().as_bytes()).to_hex();
         kb.digest = blake3::hash(
             format!(
-                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{class_read}|{provided}",
+                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{class_read}|{provided}|{stubs}",
                 kb.digest
             )
             .as_bytes(),
@@ -1775,6 +1822,12 @@ impl EffectiveEcosystemKb {
                 .rsplit_once('.')
                 .is_some_and(|(_, name)| name == attr)
         })
+    }
+
+    /// The types the standard library's stubs declare for call results and attribute reads
+    /// (Layer 2 only: the Soundness lane never reaches this table).
+    pub fn stubs(&self) -> &'static StubTable {
+        StubTable::embedded()
     }
 
     /// The class of what reading `attr` on an instance of exactly the library class `class`
@@ -4325,8 +4378,6 @@ mod tests {
             (
                 s(&[
                     "anyio.to_thread.run_sync",
-                    "anyio.to_process.run_sync",
-                    "anyio.to_interpreter.run_sync",
                     "trio.to_thread.run_sync",
                     "starlette.concurrency.run_in_threadpool",
                     "fastapi.concurrency.run_in_threadpool",
@@ -4336,6 +4387,16 @@ mod tests {
                     ..offload(0)
                 },
             ),
+            // A process or an interpreter runs the callable on copies of its arguments.
+            (
+                s(&["anyio.to_process.run_sync", "anyio.to_interpreter.run_sync"]),
+                EcosystemEntry {
+                    effects: vec![Checkpoint],
+                    offloads_to: OffloadsTo::Process,
+                    ..offload(0)
+                },
+            ),
+            // The executor the first argument names runs the callable.
             (
                 with_prefix(
                     "asyncio",
@@ -4344,7 +4405,13 @@ mod tests {
                         "BaseEventLoop.run_in_executor",
                     ],
                 ),
-                returning("asyncio.Future", offload(1)),
+                returning(
+                    "asyncio.Future",
+                    EcosystemEntry {
+                        offloads_executor_arg: Some(0),
+                        ..offload(1)
+                    },
+                ),
             ),
             (
                 [
@@ -5552,6 +5619,14 @@ mod tests {
         };
         let waits = |cases: Vec<ArgCase>| with_cases(cases, entry(&[BlockingSync]));
         let queues = ["queue.Queue", "queue.LifoQueue", "queue.PriorityQueue"];
+        // A pool's `submit` runs the callable with the arguments after it, its `map` once per
+        // item of them, on a worker where the pool runs it.
+        let pool = |offloads_to, offloads_per_item| EcosystemEntry {
+            offloads_blocking_arg: Some(0),
+            offloads_per_item,
+            offloads_to,
+            ..entry(&[])
+        };
         let executors = [
             "concurrent.futures.ThreadPoolExecutor",
             "concurrent.futures.ProcessPoolExecutor",
@@ -5628,8 +5703,31 @@ mod tests {
                 waits(vec![off(0, "wait")]),
             ),
             (
-                executors.iter().map(|e| format!("{e}.submit")).collect(),
-                returning("concurrent.futures.Future", entry(&[])),
+                s(&["concurrent.futures.ThreadPoolExecutor.submit"]),
+                returning("concurrent.futures.Future", pool(OffloadsTo::Thread, false)),
+            ),
+            (
+                s(&["concurrent.futures.ProcessPoolExecutor.submit"]),
+                returning(
+                    "concurrent.futures.Future",
+                    pool(OffloadsTo::Process, false),
+                ),
+            ),
+            (
+                s(&["concurrent.futures.Executor.submit"]),
+                pool(OffloadsTo::ThreadOrProcess, false),
+            ),
+            (
+                s(&["concurrent.futures.ThreadPoolExecutor.map"]),
+                pool(OffloadsTo::Thread, true),
+            ),
+            (
+                s(&["concurrent.futures.ProcessPoolExecutor.map"]),
+                pool(OffloadsTo::Process, true),
+            ),
+            (
+                s(&["concurrent.futures.Executor.map"]),
+                pool(OffloadsTo::ThreadOrProcess, true),
             ),
         ]
     }
@@ -6047,10 +6145,15 @@ mod tests {
 
     /// `EFF115`: the calls of [`UNAWAITED_CALLS`] with no other fact.
     fn unawaited_calls() -> Vec<(Vec<String>, EcosystemEntry)> {
-        // Their entries carry other facts: the executors' `submit`, and the offloading APIs.
+        // Their entries carry other facts: the executors' `submit` and `map`, and the offloading
+        // APIs.
         let others = [
+            "concurrent.futures.Executor.submit",
             "concurrent.futures.ThreadPoolExecutor.submit",
             "concurrent.futures.ProcessPoolExecutor.submit",
+            "concurrent.futures.Executor.map",
+            "concurrent.futures.ThreadPoolExecutor.map",
+            "concurrent.futures.ProcessPoolExecutor.map",
             "asyncio.to_thread",
             "asyncio.AbstractEventLoop.run_in_executor",
             "asyncio.BaseEventLoop.run_in_executor",
@@ -6881,7 +6984,6 @@ mod tests {
                     tests_result: *tests_result,
                     hands_back: *hands_back,
                     runs_on: (RUNS_ON.iter()).find(|(s, _)| s == symbol).map(|(_, r)| *r),
-                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                 })
             })
             .map(|call| (call.symbol.clone(), call))
@@ -6911,7 +7013,6 @@ mod tests {
                     arg: Some(arg),
                     hands_back: true,
                     runs_on: Some(RunsOn::Thread),
-                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                     ..UnawaitedCall::default()
                 }),
                 "{symbol}"
@@ -6926,7 +7027,6 @@ mod tests {
                 tests_result: false,
                 hands_back: false,
                 runs_on: Some(RunsOn::Thread),
-                executor_arg: None,
             })
         );
         assert_eq!(

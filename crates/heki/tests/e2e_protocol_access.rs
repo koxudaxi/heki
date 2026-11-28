@@ -70,45 +70,76 @@ def write_through_protocol(h: Host) -> None:
     h._m = 3
 "#;
 
-#[test]
-fn accesses_through_a_protocol_declaring_the_member_are_judged_by_the_protocol() {
-    let p = Project::new("protocol_access");
+/// `(line, column, code, qualname)` of every report in `pkg/use.py` ([`USE`]) with `host` as
+/// `pkg/host.py`, beside the `extra` files.
+fn use_reports(name: &str, host: &str, extra: &[(&str, &str)]) -> Vec<(u64, u64, String, String)> {
+    let p = Project::new(name);
     p.write("pyproject.toml", CONFIG)
         .write("pkg/__init__.py", "")
-        .write("pkg/host.py", HOST)
+        .write("pkg/host.py", host)
         .write("pkg/use.py", USE);
+    for (path, text) in extra {
+        p.write(path, text);
+    }
     let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
     assert_eq!(code, 1, "{stdout}{stderr}");
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    let found: Vec<(u64, u64, &str, &str)> = diags
+    diags
         .iter()
         .map(|d| {
             (
                 d["line"].as_u64().unwrap(),
                 d["column"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap(),
-                d["qualname"].as_str().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                d["qualname"].as_str().unwrap().to_owned(),
             )
         })
-        .collect();
-    assert_eq!(
-        found,
-        vec![
-            // `Host` declares `_m` and `_helper`, and `Concrete` is the one class implementing
-            // it: reading and calling them through it are accesses of `Concrete`'s, while what
-            // `Concrete._helper` reads inside stays with it.
-            (5, 12, "MUT203", "through_protocol"),
-            (5, 19, "MUT204", "through_protocol"),
-            // `_n` is no member of `Host`: the read is one of the class implementing it.
-            (9, 12, "MUT203", "undeclared"),
-            // Through the class itself, every access counts.
-            (13, 12, "MUT203", "direct"),
-            (13, 19, "MUT203", "direct"),
-            (13, 19, "MUT204", "direct"),
-            // A write through the protocol changes the implementation's attribute.
-            (17, 5, "MUT201", "write_through_protocol"),
-        ]
-    );
+        .collect()
+}
+
+/// What [`USE`] reports when `Host` is a protocol.
+const THROUGH_HOST: &[(u64, u64, &str, &str)] = &[
+    // `Host` declares `_m` and `_helper`, and `Concrete` is the one class implementing it:
+    // reading and calling them through it are accesses of `Concrete`'s, while what
+    // `Concrete._helper` reads inside stays with it.
+    (5, 12, "MUT203", "through_protocol"),
+    (5, 19, "MUT204", "through_protocol"),
+    // `_n` is no member of `Host`: the read is one of the class implementing it.
+    (9, 12, "MUT203", "undeclared"),
+    // Through the class itself, every access counts.
+    (13, 12, "MUT203", "direct"),
+    (13, 19, "MUT203", "direct"),
+    (13, 19, "MUT204", "direct"),
+    // A write through the protocol changes the implementation's attribute.
+    (17, 5, "MUT201", "write_through_protocol"),
+];
+
+fn through_host() -> Vec<(u64, u64, String, String)> {
+    (THROUGH_HOST.iter())
+        .map(|&(line, column, code, qualname)| (line, column, code.to_owned(), qualname.to_owned()))
+        .collect()
+}
+
+#[test]
+fn accesses_through_a_protocol_declaring_the_member_are_judged_by_the_protocol() {
+    assert_eq!(use_reports("protocol_access", HOST, &[]), through_host());
+}
+
+/// `Protocol` imported from a project module re-exporting it, also one choosing it in a `try`
+/// statement, makes `Host` the protocol `typing.Protocol` does.
+#[test]
+fn a_protocol_base_a_project_module_re_exports_makes_a_protocol() {
+    let host = HOST.replace("from typing import", "from pkg.compat import");
+    for (name, compat) in [
+        ("protocol_access_compat", "from typing import Protocol\n"),
+        (
+            "protocol_access_compat_tried",
+            "try:\n    from typing import Protocol\nexcept ImportError:\n    from typing_extensions import Protocol\n",
+        ),
+    ] {
+        let found = use_reports(name, &host, &[("pkg/compat.py", compat)]);
+        assert_eq!(found, through_host(), "{compat}");
+    }
 }
 
 const CACHED: &str = r#"from functools import cached_property

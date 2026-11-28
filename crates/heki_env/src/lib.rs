@@ -149,6 +149,10 @@ pub struct LintConfig {
     pub report_unused_suppressions: Option<bool>,
     /// Report `# heki: ignore` comments that name no rule. Defaults to `false`.
     pub require_suppression_codes: Option<bool>,
+    /// What `heki check` does with a path it is given to report on (`--touched`, a file among
+    /// PATHS) that names no analyzed file: `warning` (the default) names it and goes on, `error`
+    /// stops the run with exit code 2 before it reports.
+    pub unmatched_paths: Option<Severity>,
     /// What `heki check` does with a contract entry that matches nothing in the analyzed files.
     /// Unset, a run over the whole project warns about them.
     pub unmatched_contract_entries: Option<UnmatchedEntries>,
@@ -158,6 +162,11 @@ impl LintConfig {
     /// `fail-on`, or its default `error`.
     pub fn fail_on_severity(&self) -> Severity {
         self.fail_on.unwrap_or(Severity::Error)
+    }
+
+    /// `unmatched-paths`, or its default `warning`.
+    pub fn unmatched_paths_severity(&self) -> Severity {
+        self.unmatched_paths.unwrap_or(Severity::Warning)
     }
 }
 

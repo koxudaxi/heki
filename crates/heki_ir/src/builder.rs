@@ -1,9 +1,10 @@
 use crate::facts::{LoopHint, SMALL_MAX};
 use crate::walk::FnShape;
 use crate::{
-    A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, Conversion,
-    DictEntry, FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
-    LoopCarriedInfo, ModuleIr, NaturalLoop, ParamInfo, PhiNode, Terminator, UnaryOpKind, VarId,
+    A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, ClassPattern, CompareOpKind,
+    ConstLiteral, Conversion, DictEntry, FunctionId, FunctionKind, Inst, InstKind, IrFunction,
+    LocalAnnotation, LoopBound, LoopCarriedInfo, ModuleIr, NaturalLoop, ParamInfo, PhiNode,
+    Terminator, UnaryOpKind, VarId,
 };
 use heki_ast::raw_ast::{self as ast, Expr, Pattern, Stmt};
 use heki_ast::{ParsedModule, Ranged, Span};
@@ -243,6 +244,7 @@ fn release_spare_capacity(f: &mut IrFunction) {
     f.pattern_subjects.shrink_to_fit();
     f.str_heads.shrink_to_fit();
     f.str_tails.shrink_to_fit();
+    f.class_patterns.shrink_to_fit();
     for bb in &mut f.blocks {
         bb.insts.shrink_to_fit();
         bb.phis.shrink_to_fit();
@@ -480,6 +482,7 @@ impl<'a> ModuleLowerer<'a> {
             pattern_subjects: Vec::new(),
             str_heads: Vec::new(),
             str_tails: Vec::new(),
+            class_patterns: Vec::new(),
             finally_bodies: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
@@ -791,6 +794,8 @@ struct FnBuilder<'m, 'a> {
     str_heads: Vec<(VarId, String)>,
     /// `IrFunction::str_tails`.
     str_tails: Vec<(VarId, String)>,
+    /// `IrFunction::class_patterns`.
+    class_patterns: Vec<ClassPattern>,
     /// `IrFunction::finally_bodies`.
     finally_bodies: Vec<Span>,
     /// The statement uses of the function (`ModuleIr::statement_uses`).
@@ -894,6 +899,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             class_bases: Vec::new(),
             str_heads: Vec::new(),
             str_tails: Vec::new(),
+            class_patterns: Vec::new(),
             finally_bodies: Vec::new(),
             statement_uses: Vec::new(),
             annotations: Vec::new(),
@@ -2853,9 +2859,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 }
             }
             Pattern::MatchClass(mc) => {
-                let value = self.lower_expr(&mc.cls);
-                self.note_statement_use(value, &mc.cls);
-                self.structural_test(fail, span);
+                let class = self.lower_expr(&mc.cls);
+                self.note_statement_use(class, &mc.cls);
+                let test = self.emit_const(ConstLiteral::Other, span);
+                self.class_patterns.push(ClassPattern {
+                    test,
+                    subject,
+                    class,
+                });
+                self.branch_on_test(test, fail, span);
                 // A positional sub-pattern reads the attribute `__match_args__` names, which
                 // the IR does not know.
                 let positional = mc
@@ -4121,6 +4133,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.class_bases.clear();
         self.str_heads.clear();
         self.str_tails.clear();
+        self.class_patterns.clear();
         self.finally_bodies.clear();
         self.statement_uses.clear();
         self.annotations.clear();
@@ -4226,6 +4239,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             pattern_subjects: self.pattern_subjects,
             str_heads: self.str_heads,
             str_tails: self.str_tails,
+            class_patterns: self.class_patterns,
             finally_bodies: self.finally_bodies,
             blocks: self.blocks,
             loops: self.finished_loops,

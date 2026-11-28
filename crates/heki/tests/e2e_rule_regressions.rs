@@ -2183,11 +2183,9 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
     assert!(help("inner_changed").starts_with(
         "if `events` is the same collection, with the same keys, on every iteration of the outer loop, "
     ));
-    // The pieces of a string constant are a new list of `str` on every outer iteration.
-    assert!(
-        help("constant_words")
-            .starts_with("if the keys are hashable, group the elements of `text.split()`")
-    );
+    // The pieces of a string constant are a new list of `str` on every outer iteration, and
+    // `str.split` declares `str` items, which are hashable.
+    assert!(help("constant_words").starts_with("group the elements of `text.split()`"));
     // A store into the compared key of an inner item would leave an index built once stale.
     assert!(help("rekeyed").starts_with(
         "if `ys` is the same collection, with the same keys, on every iteration of the outer loop"

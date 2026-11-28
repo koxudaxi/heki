@@ -3185,6 +3185,69 @@ fn steps_module_members() -> Vec<Step> {
     ]
 }
 
+/// The facts of a project enumeration that callers in other modules read: its members, the data
+/// type it mixes in (the class of `value`), and a `__new__` that may give the value another
+/// class. A call on `Version.B.value` is unresolved while the enumeration has no member `B`, and
+/// both calls are while it mixes in no `str` or binds `__new__`; the unresolved calls of the
+/// boundary are what the step compares between the server and `heki check`.
+fn steps_enum_facts() -> Vec<Step> {
+    const KINDS: &str = "from enum import Enum\n\n\nclass Version(str, Enum):\n    A = \"3.12\"\n";
+    const USE: &str = "from pkg.enum_kinds import Version\n\n\ndef first():\n    return Version.A.value.split(\".\")\n\n\ndef second():\n    return Version.B.value.split(\".\")\n";
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"enum-calls\"\nscopes = [\"pkg.enum_use.*\"]\nforbid = [\"writes-targets\"]\nwrite-targets = [\"Ledger.rows\"]\nunresolved = \"report\"\n"
+    );
+    let with_member = KINDS.replace("\"3.12\"\n", "\"3.12\"\n    B = \"3.13\"\n");
+    let without_mixin = with_member.replace("(str, Enum)", "(Enum)");
+    let with_new = format!(
+        "{with_member}\n    def __new__(cls, value):\n        member = str.__new__(cls, value)\n        member._value_ = len(value)\n        return member\n"
+    );
+    let both: Reported = &[(5, "EFF201"), (9, "EFF201")];
+    vec![
+        Step::new(
+            "a function calls a method on the value of a member the enumeration lacks",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/enum_kinds.py", KINDS.to_owned()),
+                Action::Create("pkg/enum_use.py", USE.to_owned()),
+            ],
+        )
+        .reported("pkg/enum_use.py", &[(9, "EFF201")]),
+        Step::new(
+            "the enumeration gains the member",
+            vec![save("pkg/enum_kinds.py", &with_member)],
+        )
+        .reported("pkg/enum_use.py", &[]),
+        Step::new(
+            "it mixes in no data type",
+            vec![save("pkg/enum_kinds.py", &without_mixin)],
+        )
+        .reported("pkg/enum_use.py", both),
+        Step::new(
+            "it mixes in `str` again",
+            vec![save("pkg/enum_kinds.py", &with_member)],
+        )
+        .reported("pkg/enum_use.py", &[]),
+        Step::new(
+            "it binds `__new__`",
+            vec![save("pkg/enum_kinds.py", &with_new)],
+        )
+        .reported("pkg/enum_use.py", both),
+        Step::new(
+            "it binds no `__new__` again",
+            vec![save("pkg/enum_kinds.py", &with_member)],
+        )
+        .reported("pkg/enum_use.py", &[]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/enum_use.py"),
+                Action::Delete("pkg/enum_kinds.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
 /// comes from a decorator in another module, and the in-place change from a helper in a third.
 /// The helper then moves the change of the field to a function of its own and back while its
@@ -6470,17 +6533,28 @@ fn steps_attribute_types() -> Vec<Step> {
 
 /// The receivers whose class the language or the standard library fixes: an instance's
 /// namespace is a dict while reading it runs no code of its class, a `NamedTuple` instance has
-/// `_replace`, and a `ContextVar[T]` gives a `T`, each decided by declarations in another module.
+/// `_replace`, and a `ContextVar[T]` gives a `T`, each decided by declarations in another module;
+/// a value typed with a protocol keeps its namespace open, and a compatibility module
+/// re-exporting `typing.Protocol` or defining a class of that name decides whether its class is
+/// one.
 fn steps_builtin_receivers() -> Vec<Step> {
     const MODEL: &str = "from contextvars import ContextVar\nfrom typing import NamedTuple\n\n\nclass Holder:\n    def __init__(self) -> None:\n        self.required = False\n\n\nclass Memo:\n    def bump(self, h: Holder) -> None:\n        pass\n\n\nclass Spot(NamedTuple):\n    module: str\n\n\nMEMO: ContextVar[Memo] = ContextVar(\"memo\")\n";
     const PEEK: &str = "from pkg.rcv_model import Holder\n\n\ndef peek(h: Holder) -> object:\n    return h.__dict__.get(\"x\")\n";
     const MOVED: &str = "from pkg.rcv_model import Spot\n\n\ndef moved(s: Spot) -> Spot:\n    return s._replace(module=\"m\")\n";
     const BUMPED: &str = "from pkg.rcv_model import MEMO, Holder\n\n\ndef bumped(h: Holder) -> None:\n    MEMO.get().bump(h)\n";
+    // A base named `Protocol` that a compatibility module may define or re-export.
+    const OWN_PROTOCOL: &str = "class Protocol:\n    pass\n";
     const ALL: &[(&str, &str)] = &[
         ("pkg/rcv_peek.py", "EFF201"),
         ("pkg/rcv_moved.py", "EFF201"),
         ("pkg/rcv_bumped.py", "EFF201"),
     ];
+    let through_compat = MODEL
+        .replace(
+            "from typing import NamedTuple\n",
+            "from typing import NamedTuple\n\nfrom pkg.rcv_compat import Protocol\n",
+        )
+        .replace("class Holder:", "class Holder(Protocol):");
     let boundary = format!(
         "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"receivers\"\nscopes = [\"pkg.rcv_peek\", \"pkg.rcv_moved\", \"pkg.rcv_bumped\"]\nwrite-universe = [\"Holder.required\"]\nallow-writes = []\nunresolved = \"report\"\n"
     );
@@ -6528,6 +6602,25 @@ fn steps_builtin_receivers() -> Vec<Step> {
         .present(&[("pkg/rcv_bumped.py", "EFF201")])
         .absent(&[("pkg/rcv_peek.py", "EFF201"), ("pkg/rcv_moved.py", "EFF201")]),
         Step::new(
+            "the class names a base a compatibility module defines",
+            vec![
+                Action::Create("pkg/rcv_compat.py", OWN_PROTOCOL.to_owned()),
+                save("pkg/rcv_model.py", &through_compat),
+            ],
+        )
+        .absent(ALL),
+        Step::new(
+            "the compatibility module re-exports `typing.Protocol`: the class is a protocol",
+            vec![save("pkg/rcv_compat.py", "from typing import Protocol\n")],
+        )
+        .present(&[("pkg/rcv_peek.py", "EFF201")])
+        .absent(&[("pkg/rcv_moved.py", "EFF201"), ("pkg/rcv_bumped.py", "EFF201")]),
+        Step::new(
+            "the compatibility module defines the base again: the class is no protocol",
+            vec![save("pkg/rcv_compat.py", OWN_PROTOCOL)],
+        )
+        .absent(ALL),
+        Step::new(
             "the declarations are as before",
             vec![save("pkg/rcv_model.py", MODEL)],
         )
@@ -6535,6 +6628,7 @@ fn steps_builtin_receivers() -> Vec<Step> {
         Step::new(
             "the files and the boundary are removed",
             vec![
+                Action::Delete("pkg/rcv_compat.py"),
                 Action::Delete("pkg/rcv_peek.py"),
                 Action::Delete("pkg/rcv_moved.py"),
                 Action::Delete("pkg/rcv_bumped.py"),
@@ -8546,6 +8640,7 @@ sessions!(editing, Session::start, {
     callee_globs: steps_callee_globs,
     unbound_helpers: steps_unbound_helpers,
     module_members: steps_module_members,
+    enum_facts: steps_enum_facts,
     environment: steps_environment,
     outside_targets: steps_outside_targets,
     glob_members: steps_glob_members,
@@ -9076,6 +9171,47 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
             vec![Action::Delete("src/__init__.py")],
         )
         .absent(&[("b_func.py", "OPT113")]),
+    ];
+    run_steps(s, &steps);
+}
+
+// ------------------------------------------------------------- a queue's extend argument
+
+// `list.extend` asks its argument for its length and a `deque` does not, so `OPT120` offers its
+// fix for a display and not for an instance of a class with `__len__`: the oracle compares the
+// help, which carries that verdict. A project of its own: the main one patches `builtins`, which
+// keeps the Soundness lane out of every module.
+const QUEUE_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"OPT120\", \"OPT121\"]\n";
+
+fn queue_drain(extended_by: &str) -> String {
+    format!(
+        "class Sized:\n    def __iter__(self):\n        return iter([1])\n\n    def __len__(self):\n        return 1\n\n\ndef drain(items):\n    q = list(items)\n    out = []\n    while q:\n        out.append(q.pop(0))\n        if not out[-1]:\n            q.extend({extended_by})\n    return out\n"
+    )
+}
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_as_a_queue_changes_its_extend_argument() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/drain_queue.py", queue_drain("[1, 2]")),
+    ];
+    let s = Session::start_with("lsp_oracle_queue_extend", QUEUE_CONFIG, files, false);
+    let drained: &[(&str, &str)] = &[("pkg/drain_queue.py", "OPT120")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(drained),
+        Step::new(
+            "the queue is extended by an object whose class defines __len__",
+            vec![save("pkg/drain_queue.py", &queue_drain("Sized()"))],
+        )
+        .present(drained)
+        .cutoff(),
+        Step::new(
+            "the queue is extended by a list display again",
+            vec![save("pkg/drain_queue.py", &queue_drain("[1, 2]"))],
+        )
+        .present(drained)
+        .cutoff(),
     ];
     run_steps(s, &steps);
 }

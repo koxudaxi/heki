@@ -117,11 +117,7 @@ pub(super) fn named_value(
     decls: &ModuleDecls,
     stores: &GlobalStores<'_>,
 ) -> Option<String> {
-    let global = |var: VarId| match shape.inst(shape.copy_root(var)).map(|i| &i.kind) {
-        Some(InstKind::LoadGlobal { name, .. }) => Some(name.as_str()),
-        _ => None,
-    };
-    if let Some(name) = global(value) {
+    if let Some(name) = module_read(shape, value) {
         let own = if decls.classes.contains_key(name) || decls.functions.contains_key(name) {
             stores.once(name)
         } else {
@@ -133,9 +129,22 @@ pub(super) fn named_value(
         return decls.fixed_import(name).cloned();
     }
     match shape.inst(shape.copy_root(value)).map(|i| &i.kind) {
-        Some(InstKind::AttrLoad { obj, attr, .. }) => {
-            Some(format!("{}.{attr}", decls.fixed_import(global(*obj)?)?))
-        }
+        Some(InstKind::AttrLoad { obj, attr, .. }) => Some(format!(
+            "{}.{attr}",
+            decls.fixed_import(module_read(shape, *obj)?)?
+        )),
+        _ => None,
+    }
+}
+
+/// The module-level name `var` reads: a global, or in a class body a name the body binds but
+/// has not bound on the way to the read, or deleted (`copy = staticmethod(partial(copy))`).
+/// A class body looks such a name up in the module's globals, then the builtins, never in an
+/// enclosing function. In a function body the same read is of an unbound local.
+fn module_read<'s>(shape: &FnShape<'s>, var: VarId) -> Option<&'s str> {
+    match shape.inst(shape.copy_root(var)).map(|i| &i.kind) {
+        Some(InstKind::LoadGlobal { name, .. }) => Some(name.as_str()),
+        Some(InstKind::LoadName { name, .. }) if shape.f.is_class_body => Some(name.as_str()),
         _ => None,
     }
 }
@@ -523,10 +532,7 @@ fn partial_of(
             star_from: None,
             ..
         }) => {
-            let module = match shape.inst(shape.copy_root(*recv)).map(|i| &i.kind) {
-                Some(InstKind::LoadGlobal { name, .. }) => decls.fixed_import(name)?,
-                _ => return None,
-            };
+            let module = decls.fixed_import(module_read(shape, *recv)?)?;
             (format!("{module}.{method}"), args, kwargs)
         }
         _ => return None,
@@ -556,14 +562,10 @@ fn called_name(
             ..
         }) => named_value(shape, *callee, decls, stores),
         // A name of an imported module (`models.CharField(...)`).
-        Some(InstKind::MethodCall { recv, method, .. }) => {
-            match shape.inst(shape.copy_root(*recv)).map(|i| &i.kind) {
-                Some(InstKind::LoadGlobal { name, .. }) => {
-                    Some(format!("{}.{method}", decls.fixed_import(name)?))
-                }
-                _ => None,
-            }
-        }
+        Some(InstKind::MethodCall { recv, method, .. }) => Some(format!(
+            "{}.{method}",
+            decls.fixed_import(module_read(shape, *recv)?)?
+        )),
         _ => None,
     }
 }

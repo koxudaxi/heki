@@ -3954,7 +3954,7 @@ impl CallParts<'_> {
 /// which a resolution with the function's inferred values would not see. `worker`: instead
 /// the callable an offloading API runs on a worker thread (`asyncio.to_thread(grow, acc)` runs
 /// `grow(acc)`), which takes the positional arguments after it, keyword arguments left
-/// unbound.
+/// unbound; not one it runs once per item of them (`ex.map(grow, accs)`).
 pub(crate) fn site_call<'i>(
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
     sites: FnSites<'_, 'i>,
@@ -3968,7 +3968,10 @@ pub(crate) fn site_call<'i>(
         heki_effect::Runner::Caller
     };
     let site = sites.at(inst.span).iter().find(|s| {
-        s.role == SiteRole::Call && s.runner == runner && !s.project_callees().is_empty()
+        s.role == SiteRole::Call
+            && s.runner == runner
+            && (!worker || s.per_item.is_none())
+            && !s.project_callees().is_empty()
     })?;
     if wraps_call_at_own_span(def, inst, &call) {
         return None;
@@ -4761,10 +4764,12 @@ impl<'a> Mut202Fn<'a> {
             });
         }
         // Passing a read-only value to a project function that mutates that parameter, also
-        // through an offloading API that calls it on a worker thread.
+        // through an offloading API that calls it on a worker thread. A worker in another
+        // process changes a copy.
         let def = |v| self.ix.shape.inst(v);
         let call = site_call(&def, self.sites, inst, false)
-            .or_else(|| site_call(&def, self.sites, inst, true))?;
+            .or_else(|| site_call(&def, self.sites, inst, true))
+            .filter(|call| !call.site.is_some_and(CallSite::passes_copies))?;
         for (key, _, pos, var) in call.bound_arguments(self.cx) {
             let Some(r) = self.ro.get(&var) else {
                 continue;

@@ -462,12 +462,19 @@ the run now.
         sarif_file: heki.sarif
     ```
 
-Each annotation is one workflow command at the reported location: its body is the message followed by one
+Each annotation is one workflow command at the reported location: its title names the rule
+(`heki EFF101`, `heki EFF101 (heuristic)` for a heuristic report), and its body is the message followed by one
 `related: <path>:<line>:<col>: <message>` line per related location (the hops of a call chain, in order).
 
-Warnings and heuristic reports become annotations without failing the step (a heuristic report
-of an `error` rule is an `error` annotation); `fail-on = "warning"` in `[tool.heki.lint]` (or
-`--fail-on warning`) makes them fail it, as in pre-commit.
+The level of an annotation says whether its report fails the run. A report that fails it keeps
+its severity, `error` or `warning`; one that does not is a `warning`, so an annotation reads as
+a failure only when the step fails on it. Warnings and heuristic reports do not fail the step:
+by default a heuristic report of an `error` rule is a `warning` annotation. `fail-on =
+"warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit,
+and the heuristic `error` is then an `error` annotation; so are the reports of a contract with
+[`fail = true`](configuration.md#failing-on-a-contract) and of a rule
+[`lint.fail`](configuration.md#rule-selection-toolhekilint) names. The JSON, SARIF, and text
+formats give each report its severity.
 
 In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
@@ -490,7 +497,12 @@ pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 `'*.toml'` takes in every configuration file, also one listed in
 [`include`](configuration.md#several-configuration-files) under another name; heki passes over a
 TOML file that is not part of its configuration. `--diff-filter=d` leaves out deleted files, and
-`xargs -r` skips the run when no Python, stub, or TOML file changed.
+`xargs -r` skips the run when no Python, stub, or TOML file changed. A path that names no
+analyzed file (a typo, a file outside the analyzed directories, an excluded one) is named in a
+warning, and the run goes on with the others. With `--unmatched-paths error` (or
+[`unmatched-paths = "error"`](configuration.md#rule-selection-toolhekilint) in `[tool.heki.lint]`),
+it stops the run with exit code 2 instead, so a wrong path fails the job rather than passing it on
+nothing.
 
 A deleted path has nothing to touch: `--touched` names it in a warning and shows nothing for it,
 though deleting a configuration file, a stub, or a module can change reports elsewhere. A pull

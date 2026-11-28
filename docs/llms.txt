@@ -5,7 +5,7 @@
 
 ## Docs
 
-- [Overview](https://heki.koxudaxi.dev/): 🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust
+- [Overview](https://heki.koxudaxi.dev/): 🧱 heki (壁, Japanese for "wall") checks the semantics of Python code
 - [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable: its Python package ships only that executable and installs no Python dependencies into your environment
 - [Getting Started](https://heki.koxudaxi.dev/getting-started/): This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules
 - [Rules](https://heki.koxudaxi.dev/rules/): heki has 55 rules in four families

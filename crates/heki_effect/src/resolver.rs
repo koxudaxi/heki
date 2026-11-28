@@ -18,7 +18,7 @@ use crate::decorators;
 use crate::only_read::{LiteralAnnotation, ParamAnnotation};
 use crate::ownership;
 use crate::readonly::{ContainerFamily, ContainerKind, FamilyLevel, FamilyRole};
-use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
+use crate::types::{Added, Args, Elem, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
@@ -71,6 +71,7 @@ struct Indexes {
     frozen: FxHashSet<String>,
     built: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
+    protocol_classes: FxHashSet<String>,
     protocols: FxHashMap<String, Option<Vec<String>>>,
     grown_elsewhere: FxHashSet<String>,
     rebound_elsewhere: FxHashSet<String>,
@@ -128,6 +129,28 @@ const IMPLICIT_MEMBERS: &[&str] = &[
     "__qualname__",
     "__slots__",
     "__static_attributes__",
+];
+
+/// The enumeration classes of the standard library.
+const ENUMS: &[&str] = &[
+    "enum.Enum",
+    "enum.IntEnum",
+    "enum.StrEnum",
+    "enum.Flag",
+    "enum.IntFlag",
+    "enum.ReprEnum",
+];
+
+/// The data types an enumeration's members' values may be instances of, by a class along its
+/// MRO that mixes it in: the builtin type itself, or a standard enumeration deriving from it.
+const ENUM_MIXINS: &[(&str, &str)] = &[
+    ("builtins.str", "builtins.str"),
+    ("builtins.int", "builtins.int"),
+    ("builtins.float", "builtins.float"),
+    ("builtins.bytes", "builtins.bytes"),
+    ("enum.StrEnum", "builtins.str"),
+    ("enum.IntEnum", "builtins.int"),
+    ("enum.IntFlag", "builtins.int"),
 ];
 
 /// CHA fan-out limit: more candidates than this leave the call unresolved (`unknown_calls`).
@@ -849,9 +872,6 @@ pub struct ClassDecl {
     /// any other `__init__`, and without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plain_init: Option<Box<PlainInit>>,
-    /// `typing.Protocol` is one of the bases (PEP 544: the class is a protocol, not an
-    /// implementation of one).
-    pub is_protocol: bool,
     /// The names the class defines: class-body names (methods, annotations, assignments) and
     /// the attributes its methods set or annotate on `self` (structural typing, `Protocol`).
     pub members: BTreeSet<String>,
@@ -1959,12 +1979,6 @@ impl ModuleDecls {
             return None;
         }
         let args = split_top_level(inner, ',');
-        let elem = |i: usize| {
-            Elem::of(
-                args.get(i)
-                    .and_then(|a| self.resolve_annotation_ty_in(a, locals)),
-            )
-        };
         let args = match generic(&class) {
             // Whether the class is a project class with type parameters is decided across the
             // project (`ProjectDecls::declared_ty`).
@@ -1976,28 +1990,17 @@ impl ModuleDecls {
                     })
                     .collect(),
             ),
-            Some(Generic::Items) => Args::items(elem(0)),
-            Some(Generic::Map) => Args::map(elem(0), elem(1)),
-            Some(Generic::Pairs) => Args::items(Elem::Of(Ty::container(
-                "builtins.tuple",
-                Args::Tuple(vec![elem(0), elem(1)]),
-            ))),
-            Some(Generic::Counter) => Args::map(elem(0), Elem::Of(Ty::inst("builtins.int"))),
-            // `tuple[()]` is the empty tuple, `tuple[T, ...]` a tuple of any length.
-            Some(Generic::Tuple) => match args.as_slice() {
-                ["()"] => Args::Tuple(Vec::new()),
-                [_, "..."] => Args::items(elem(0)),
-                _ => Args::Tuple((0..args.len()).map(elem).collect()),
-            },
-            Some(Generic::Held) => Args::result(elem(0)),
-            // `Callable[[A, B], T]`, `Callable[..., T]`: a result that may be `None` is no
-            // instance of a class, though the annotation reads `T | None` as `T`.
-            Some(Generic::Returns) => match args.as_slice() {
-                [_, result] if !self.admits_none_in(result, locals) => {
-                    Args::returns(self.resolve_annotation_ty_in(result, locals))
-                }
-                _ => Args::None,
-            },
+            Some(kind) => crate::types::generic_args(
+                kind,
+                &args,
+                |a| Elem::of(self.resolve_annotation_ty_in(a, locals)),
+                // A result that may be `None` is no instance of a class, though the annotation
+                // reads `T | None` as `T`.
+                |result| match self.admits_none_in(result, locals) {
+                    true => Args::None,
+                    false => Args::returns(self.resolve_annotation_ty_in(result, locals)),
+                },
+            ),
         };
         Some(Ty::container(&class, args))
     }
@@ -2132,7 +2135,7 @@ fn special_form(class: &str) -> bool {
 }
 
 /// Split at `sep` outside brackets / parentheses, trimming parts.
-fn split_top_level(text: &str, sep: char) -> Vec<&str> {
+pub(crate) fn split_top_level(text: &str, sep: char) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
@@ -2176,7 +2179,7 @@ fn annotation_allows_none(text: &str) -> bool {
 }
 
 /// `Head[inner]` -> `(Head, inner)`.
-fn subscript(text: &str) -> Option<(&str, &str)> {
+pub(crate) fn subscript(text: &str) -> Option<(&str, &str)> {
     let open = text.find('[')?;
     let inner = text.strip_suffix(']')?.get(open + 1..)?;
     Some((text[..open].trim(), inner))
@@ -2601,7 +2604,8 @@ pub struct DeclKeys {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub alias_names: BTreeSet<String>,
     /// Classes whose project-wide derived facts were looked up: whether they are frozen (a
-    /// `dataclass_transform` or a base in another module can make them so) or a `TypedDict`.
+    /// `dataclass_transform` or a base in another module can make them so), a `TypedDict`, or a
+    /// protocol (a module re-exporting `Protocol` can make them one).
     pub class_facts: BTreeSet<String>,
     /// Protocols whose structural implementations were listed (a class in any module can start
     /// or stop satisfying one).
@@ -2791,6 +2795,8 @@ pub struct ProjectDecls {
     frozen: FxHashSet<String>,
     /// Every project class a PEP 681 `dataclass_transform` builds (`Self::transform_builds`).
     built: FxHashSet<String>,
+    /// Every project protocol ([`Self::is_protocol`]).
+    protocol_classes: FxHashSet<String>,
     /// Every project protocol with the project classes implementing it structurally
     /// (`Self::protocol_implementations`), `None` past `CHA_CANDIDATE_LIMIT`.
     protocols: FxHashMap<String, Option<Vec<String>>>,
@@ -2896,9 +2902,10 @@ pub struct ReadOnlyAttr {
     pub typed_read_only: bool,
 }
 
-/// The bases outside the project a read-only view may have: they define no attribute of its
-/// instances ([`ProjectDecls::is_readonly_view`]).
-const VIEW_BASES: &[&str] = &[
+/// The bases outside the project that define no attribute of their subclasses' instances: a
+/// read-only view may have them ([`ProjectDecls::is_readonly_view`]), and reading an attribute
+/// every object has finds it past them ([`ProjectDecls::object_attr_read_runs_no_code`]).
+const NO_ATTRIBUTE_BASES: &[&str] = &[
     "object",
     "builtins.object",
     "abc.ABC",
@@ -2907,6 +2914,9 @@ const VIEW_BASES: &[&str] = &[
     "typing.Protocol",
     "typing_extensions.Protocol",
 ];
+
+/// The bases that make a class a protocol (PEP 544, [`ProjectDecls::is_protocol`]).
+const PROTOCOL_BASES: &[&str] = &["typing.Protocol", "typing_extensions.Protocol"];
 
 /// Where an import looks for the modules under a package ([`ProjectDecls::search_under`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3168,8 +3178,8 @@ impl ProjectDecls {
 
     /// What differs in the derived indexes between `before` (an earlier version,
     /// [`Self::indexes`]) and now: the classes whose direct subclasses changed, the property
-    /// names that appeared or disappeared, and the classes that became or stopped being frozen
-    /// or a `TypedDict`.
+    /// names that appeared or disappeared, and the classes that became or stopped being frozen,
+    /// a `TypedDict`, or a protocol.
     fn index_changes(&self, before: &Indexes) -> DeclKeys {
         let mut out = DeclKeys::default();
         for class in before.subclasses.keys().chain(self.subclasses.keys()) {
@@ -3187,6 +3197,8 @@ impl ProjectDecls {
         out.class_facts.extend(differ(&before.built, &self.built));
         out.class_facts
             .extend(differ(&before.typed_dicts, &self.typed_dicts));
+        out.class_facts
+            .extend(differ(&before.protocol_classes, &self.protocol_classes));
         for p in before.protocols.keys().chain(self.protocols.keys()) {
             if before.protocols.get(p) != self.protocols.get(p) {
                 out.protocols.insert(p.clone());
@@ -3236,6 +3248,7 @@ impl ProjectDecls {
             frozen: self.frozen.clone(),
             built: self.built.clone(),
             typed_dicts: self.typed_dicts.clone(),
+            protocol_classes: self.protocol_classes.clone(),
             protocols: self.protocols.clone(),
             grown_elsewhere: self.grown_elsewhere.clone(),
             rebound_elsewhere: self.rebound_elsewhere.clone(),
@@ -3336,6 +3349,7 @@ impl ProjectDecls {
             .flat_map(|b| self.subclasses_of(b))
             .collect();
         (self.frozen, self.built) = self.transform_builds();
+        self.protocol_classes = self.declared_protocols();
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
@@ -3629,9 +3643,9 @@ impl ProjectDecls {
         let mut protocols = Vec::new();
         let mut classes = Vec::new();
         for m in self.modules.values() {
-            for (q, c) in &m.classes {
+            for q in m.classes.keys() {
                 let fqn = format!("{}.{q}", m.module_name);
-                if c.is_protocol {
+                if self.protocol_classes.contains(&fqn) {
                     protocols.push(fqn);
                 } else {
                     classes.push(fqn);
@@ -3647,7 +3661,7 @@ impl ProjectDecls {
             let mut names = FxHashSet::default();
             for c in self.mro(fqn) {
                 if let Some(d) = self.class(&c)
-                    && (!only_protocols || d.is_protocol)
+                    && (!only_protocols || self.protocol_classes.contains(&c))
                 {
                     names.extend(d.members.iter().map(String::as_str));
                 }
@@ -3693,13 +3707,38 @@ impl ProjectDecls {
     /// its protocol bases: an access through a value typed with it is an access of the
     /// protocol's member, whatever class implements it.
     pub fn protocol_declares(&self, class: &str, name: &str) -> bool {
-        // The class's own declaration tells whether it is a protocol: its implementations,
-        // which any module can change, do not matter here.
-        self.class(class).is_some_and(|d| d.is_protocol)
+        // Whether the class is a protocol decides, not its implementations, which any module
+        // can change (`Self::protocol`).
+        self.is_protocol(class)
             && self.mro(class).iter().any(|c| {
-                self.class(c)
-                    .is_some_and(|d| d.is_protocol && d.members.contains(name))
+                self.class(c).is_some_and(|d| d.members.contains(name)) && self.is_protocol(c)
             })
+    }
+
+    /// Whether the canonical project class `class` is a protocol (PEP 544): one of its bases
+    /// is `typing.Protocol` or `typing_extensions.Protocol` (also `Protocol[T]`), through
+    /// re-exports. A project module re-exporting it (a compatibility module importing it from
+    /// `typing` or `typing_extensions`) decides, so the answer is a class fact of the class.
+    pub fn is_protocol(&self, class: &str) -> bool {
+        self.read(|k| note(&mut k.class_facts, class));
+        self.protocol_classes.contains(class)
+    }
+
+    /// [`Self::protocol_classes`]: the classes with a base [`PROTOCOL_BASES`] lists, through
+    /// re-exports.
+    fn declared_protocols(&self) -> FxHashSet<String> {
+        let mut out = FxHashSet::default();
+        for m in self.modules.values() {
+            for (q, c) in &m.classes {
+                if c.bases
+                    .iter()
+                    .any(|b| PROTOCOL_BASES.contains(&self.canonical(b).as_str()))
+                {
+                    out.insert(format!("{}.{q}", m.module_name));
+                }
+            }
+        }
+        out
     }
 
     /// `Some` when the project class `class` is a protocol: with the project classes
@@ -4934,13 +4973,14 @@ impl ProjectDecls {
     /// not, that defines, with every project class along its MRO, nothing but properties without
     /// a setter or deleter (`@property` getters), at least one; no plain attribute, method, or
     /// `__setattr__`, no metaclass heki does not know, and no other base than those defining no
-    /// attribute ([`VIEW_BASES`]). Code holding a value through such a class can only read it.
+    /// attribute ([`NO_ATTRIBUTE_BASES`]). Code holding a value through such a class can only
+    /// read it.
     fn is_readonly_view(&self, mro: &[String]) -> bool {
         let mut getters = false;
         let views = mro.iter().all(|c| {
             self.read(|k| note(&mut k.class_facts, c));
             let Some(decl) = self.class(c) else {
-                return VIEW_BASES.contains(&c.as_str());
+                return NO_ATTRIBUTE_BASES.contains(&c.as_str());
             };
             getters |= decl.only_getters;
             !decl.custom_metaclass && (decl.only_getters || decl.members.is_empty())
@@ -5486,10 +5526,13 @@ impl ProjectDecls {
     /// Whether reading `attr`, an attribute every object has (`__class__`, `__dict__`), on a
     /// value of the project class `class` runs no code but finding it, on every class the value
     /// may be under R2: none binds the name, defines `__getattribute__`, or has a metaclass heki
-    /// does not know, and every base outside the project is a plain base or one
-    /// `catalog_stores` accepts (a base whose `__setattr__` the catalog says stores on the
-    /// instance, R3). Kept per class and name for the life of the indexes, so the reads of one
-    /// class's namespace walk its subclasses once; the catalog is fixed while the indexes are.
+    /// does not know, and every base outside the project is a plain base, one defining no
+    /// attribute of its instances ([`NO_ATTRIBUTE_BASES`]: the `Protocol` of a protocol along
+    /// the MRO), or one `catalog_stores` accepts (a base whose `__setattr__` the catalog says
+    /// stores on the instance, R3). A value of a protocol may be of any class that has its
+    /// members, which R2 does not cover. Kept per class and name for the life of the indexes,
+    /// so the reads of one class's namespace walk its subclasses once; the catalog is fixed
+    /// while the indexes are.
     pub(crate) fn object_attr_read_runs_no_code(
         &self,
         class: &str,
@@ -5500,10 +5543,12 @@ impl ProjectDecls {
         self.object_attr_reads
             .ask(self, (class.clone(), attr.to_owned()), || {
                 let read = self.attr_read(&class, attr);
-                read.binders.is_empty()
+                let known_base = |b: &str| NO_ATTRIBUTE_BASES.contains(&b) || catalog_stores(b);
+                !self.is_protocol(&class)
+                    && read.binders.is_empty()
                     && !read.runs_hook(false)
                     && !self.bound_after_body(&["__getattribute__"])
-                    && (read.bases_known || self.binds_none_of(&class, &[], catalog_stores))
+                    && (read.bases_known || self.binds_none_of(&class, &[], known_base))
             })
     }
 
@@ -6097,14 +6142,6 @@ impl ProjectDecls {
     /// decorator's or an `__init_subclass__`'s store on the class it is handed), or it is an
     /// enumeration (`Color("red")` returns a member).
     pub fn may_reuse_instances(&self, class: &str) -> bool {
-        const ENUMS: &[&str] = &[
-            "enum.Enum",
-            "enum.IntEnum",
-            "enum.StrEnum",
-            "enum.Flag",
-            "enum.IntFlag",
-            "enum.ReprEnum",
-        ];
         let mro = self.mro(class);
         mro.iter().any(|c| {
             self.read(|k| note(&mut k.class_facts, c));
@@ -6113,6 +6150,43 @@ impl ProjectDecls {
                 || (self.class(c)).is_some_and(|decl| decl.members.contains("__new__"))
         }) || self.lookup_rebound(&mro, "__new__")
             || self.bound_after_body(&["__new__"])
+    }
+
+    /// The class of the value of a member of the project enumeration `class` (`value`,
+    /// `_value_`): the data type the enumeration mixes in (`class Version(str, Enum)`, an
+    /// `IntEnum`), which the members' values are instances of. `None` without such a mixin, and
+    /// when a project class along the MRO binds `__new__`, which may give the value another
+    /// class.
+    pub(crate) fn enum_value_class(&self, class: &str) -> Option<&'static str> {
+        let mro = self.mro(class);
+        let mut is_enum = false;
+        let mut mixin = None;
+        for c in &mro {
+            self.read(|k| note(&mut k.class_facts, c));
+            if (self.class(c)).is_some_and(|decl| decl.members.contains("__new__")) {
+                return None;
+            }
+            is_enum |= ENUMS.contains(&c.as_str());
+            mixin = mixin.or_else(|| ENUM_MIXINS.iter().find(|(m, _)| m == c).map(|(_, t)| *t));
+        }
+        is_enum.then_some(mixin).flatten()
+    }
+
+    /// Whether reading `attr` on the class object of the project enumeration `class` gives one
+    /// of its members, an instance of `class`: its own body binds the name to a value, not to a
+    /// function, a nested class, or a `__dunder__` or `_sunder_` name, which stay what they are.
+    pub(crate) fn enum_member(&self, class: &str, attr: &str) -> bool {
+        let reserved = attr.starts_with('_') && attr.ends_with('_');
+        if reserved || !(self.class(class)).is_some_and(|decl| decl.members.contains(attr)) {
+            return false;
+        }
+        let mro = self.mro(class);
+        for c in &mro {
+            self.read(|k| note(&mut k.class_facts, c));
+        }
+        mro.iter().any(|c| ENUMS.contains(&c.as_str()))
+            && self.own_method(class, attr).is_none()
+            && self.class(&format!("{class}.{attr}")).is_none()
     }
 
     /// The MRO of `class` as a [`crate::ClassLine`], one copy shared by every site and fact
@@ -7666,7 +7740,7 @@ fn class_type_params<'c>(class: &'c ClassInfo, bases: &[String]) -> Option<&'c [
             .map(|(_, args)| args.as_slice())
     };
     passed_to(&["typing.Generic", "typing_extensions.Generic"])
-        .or_else(|| passed_to(&["typing.Protocol", "typing_extensions.Protocol"]))
+        .or_else(|| passed_to(PROTOCOL_BASES))
 }
 
 /// Whether the module body runs the `class` statement `class` itself: the nearest block around
@@ -7843,9 +7917,6 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             });
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
         let passes_keywords = class.keywords.iter().any(|(k, _)| k != "metaclass");
-        let is_protocol = bases
-            .iter()
-            .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
         if in_module_body && let Some(params) = class_type_params(class, &bases) {
             type_params.insert(&class.qualname, params);
         }
@@ -7869,7 +7940,6 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             c.custom_metaclass = custom_metaclass;
             c.frozen_keyword = frozen_keyword;
             c.passes_keywords = passes_keywords;
-            c.is_protocol = is_protocol;
             c.members = members;
         }
     }
@@ -11404,14 +11474,20 @@ impl<'a> TypeCtx<'a> {
             ));
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`,
-        // `boto3.client`, `open`).
-        let entry = self.catalog(fqn)?;
+        // `boto3.client`, `open`), else what the standard library's stubs declare.
+        let declared = || crate::stub_types::function_result(self.kb.stubs(), fqn);
+        let Some(entry) = self.catalog(fqn) else {
+            return declared();
+        };
         if let Some(rt) = entry.result_class(arg) {
             return Some(Ty::inst(rt));
         }
-        (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
-            && !entry.effects.contains(&ExecEffectKind::BlockingNet))
-        .then(|| Ty::inst(fqn))
+        if entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
+            && !entry.effects.contains(&ExecEffectKind::BlockingNet)
+        {
+            return Some(Ty::inst(fqn));
+        }
+        declared()
     }
 
     /// Resolve calling a value (`f(...)`).

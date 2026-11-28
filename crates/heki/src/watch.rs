@@ -221,12 +221,15 @@ impl Watcher<'_> {
         // As `heki check` prints them: across every file.
         heki_rules::fold_root_causes(&mut all);
         let failures = crate::check::shown_failures(report.errors.values());
+        let no_config = LintConfig::default();
+        let lint = ws.map_or(&no_config, |ws| &ws.env.cfg.lint);
+        let fail_on = crate::check::fail_on(self.args, lint);
         print!(
             "{}",
             render(
                 &all,
                 &failures,
-                crate::check::format_of(self.args.output_format),
+                crate::check::format_of(self.args.output_format, fail_on),
                 self.styles,
                 &heki_diagnostics::file_line
             )
@@ -255,9 +258,7 @@ impl Watcher<'_> {
         if matches!(self.args.output_format, OutputFormat::Full) {
             crate::check::rule_pages(&all);
         }
-        let no_config = LintConfig::default();
-        let lint = ws.map_or(&no_config, |ws| &ws.env.cfg.lint);
-        crate::check::any_failing(&all, crate::check::fail_on(self.args, lint))
+        crate::check::any_failing(&all, fail_on)
     }
 }
 

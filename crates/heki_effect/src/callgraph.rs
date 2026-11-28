@@ -1508,6 +1508,7 @@ fn apply_edge(
     transfer(index, target, local, &edge, &lead, rewrite);
     target.join_removes_kept(facts.removes_kept());
     if index.typed_writes == crate::TypedWrites::Propagated
+        && !site.passes_copies()
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {
         // The functions the chains gain at this call: the callee, and the one iterating it.
@@ -1616,13 +1617,6 @@ fn transfer(
     //    so its blocking effects never reach the caller.
     t.offloads_blocking_params |= caller_params(facts.offloads_blocking_params, bc);
 
-    // Shared state that outlives the call.
-    if facts.changes_globals() && !t.changes_globals() {
-        t.change_shared_state(|f| f.globals = true);
-    }
-    add_cell_changes(t, local, site, bc, facts);
-    add_handed_changes(t, local, site, bc, facts);
-
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the
     //    callee's undecided tests of caller inputs (except of an attribute the caller assigns
@@ -1671,6 +1665,19 @@ fn transfer(
             }
         }
     }
+
+    // A worker in another process changes copies of the arguments and module state of its own:
+    // only what it runs reaches the caller.
+    if site.passes_copies() {
+        return;
+    }
+
+    // Shared state that outlives the call.
+    if facts.changes_globals() && !t.changes_globals() {
+        t.change_shared_state(|f| f.globals = true);
+    }
+    add_cell_changes(t, local, site, bc, facts);
+    add_handed_changes(t, local, site, bc, facts);
 
     // c. Mutation & state effects.
     if site.recv_is_self && callee.owner_class_qualname.is_some() {

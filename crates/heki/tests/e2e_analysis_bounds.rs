@@ -332,6 +332,26 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     assert_eq!(blocking(check_linear(30, shape)), 0);
 }
 
+/// A loop rebinding a string to a chain of `links` library calls, each on the declared result of
+/// the one before (`text.strip().lower()...`, `kb/ecosystem/typeshed_stdlib.tsv`).
+fn chain_of_declared_results(links: usize) -> String {
+    let chain = ".strip().lower()".repeat(links);
+    format!(
+        "def chain(text: str, items: list[str]) -> str:\n    for _ in items:\n        text = text{chain}\n    return text\n"
+    )
+}
+
+/// Each declared result is one lookup of a row along a precomputed MRO: the steps grow with
+/// the chain, not faster.
+#[test]
+fn declared_results_of_a_long_chain_take_linear_steps() {
+    check_linear(50, |links| {
+        let p = Project::new(&format!("bounds_declared_{links}"));
+        p.write("m.py", &chain_of_declared_results(links));
+        p
+    });
+}
+
 /// A class whose `__init__` binds an attribute to a client, then `links` attributes in turn each
 /// to the one before, and an `async def` calling the client's blocking method through the last.
 fn attribute_chain_before_blocking_call(links: usize) -> String {

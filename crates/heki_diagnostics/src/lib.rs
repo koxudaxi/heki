@@ -97,6 +97,80 @@ pub struct AllowedExample {
     pub path: PathBuf,
 }
 
+/// A site an effect boundary with `unresolved = "report"` cannot judge, one of those its
+/// `unresolved-calls` or `unresolved-writes` report stands for.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(untagged)]
+pub enum UnresolvedSite {
+    Call(UnresolvedCall),
+    Write(UnresolvedWrite),
+}
+
+/// A call whose code heki does not follow: a call it resolves to no function, or a call of a
+/// function whose body it does not model or only a stub declares.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
+pub struct UnresolvedCall {
+    /// The file, as reports print paths.
+    #[serde(serialize_with = "report_path")]
+    #[schemars(with = "String")]
+    pub path: PathBuf,
+    /// The 1-based line of the call.
+    pub line: u32,
+    /// The 1-based byte column of the call.
+    pub column: u32,
+    /// The function holding the call, by fully qualified name; the scope function itself, at
+    /// its definition, when its own body is the one heki does not follow.
+    pub function: String,
+    /// The method or value called (`get` of `table.get(...)`, `handler` of `handler(...)`),
+    /// `null` for a value computed in place (`make()(...)`); for a body heki does not follow,
+    /// that function, by fully qualified name.
+    pub callee: Option<String>,
+    /// Why heki does not follow it: the reasons `heki recommend` gives for a call it resolves
+    /// to no function (`unannotated-parameter`, `callable-value`, `call-result`,
+    /// `unknown-member`, ...), `unmodeled-body` for a body heki does not model (`eval`, a body
+    /// too large), or `stub-body` for a function only a stub declares.
+    pub reason: String,
+    /// The parameter the reason is about (`unannotated-parameter`, `unresolved-annotation`).
+    pub parameter: Option<String>,
+}
+
+/// A write, on an object of unknown class, of an attribute the boundary names.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
+pub struct UnresolvedWrite {
+    /// The file, as reports print paths.
+    #[serde(serialize_with = "report_path")]
+    #[schemars(with = "String")]
+    pub path: PathBuf,
+    /// The 1-based line of the write.
+    pub line: u32,
+    /// The 1-based byte column of the write.
+    pub column: u32,
+    /// The function holding the write, by fully qualified name.
+    pub function: String,
+    /// The attribute written; `null` for a name computed at run time (`setattr(obj, name, v)`).
+    pub attribute: Option<String>,
+    /// How it is written, as `heki inspect` names write kinds (`direct_attr`, `set_attr`,
+    /// `container_mut`, ...).
+    pub kind: String,
+}
+
+impl UnresolvedSite {
+    pub fn path_mut(&mut self) -> &mut PathBuf {
+        match self {
+            Self::Call(c) => &mut c.path,
+            Self::Write(w) => &mut w.path,
+        }
+    }
+}
+
 /// Minimal byte-span text edit (preserves formatting and comments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -211,6 +285,12 @@ pub struct Diagnostic {
     /// only when above 1.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub sites: u32,
+    /// Every site of an effect boundary's `unresolved-calls` or `unresolved-writes` report
+    /// (`sites` counts them), ordered by path, line, and column: those the walk from the scope
+    /// function records, not the code behind them, which heki does not follow. Written to JSON
+    /// only when not empty; no other output writes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_sites: Vec<UnresolvedSite>,
     /// What the report shares with others that output may fold into one: the blocking root cause
     /// and effect of an `async def` boundary (`EFF101` / `EFF105`), with the blocking call a
     /// helper on its chain makes, so that sites reaching the API through different helpers stay
@@ -375,7 +455,10 @@ pub enum OutputFormat {
     Full,
     Concise,
     Json,
-    Github,
+    /// GitHub Actions workflow commands, for a run that fails on reports at `fail_on`.
+    Github {
+        fail_on: Severity,
+    },
     Sarif,
 }
 
@@ -435,7 +518,7 @@ pub fn render(
             s.push('\n');
             s
         }
-        OutputFormat::Github => render_github(diags),
+        OutputFormat::Github { fail_on } => render_github(diags, fail_on),
         OutputFormat::Sarif => {
             let mut s = serde_json::to_string_pretty(&sarif(diags, failures, source_line))
                 .expect("a `serde_json::Value` always serializes");
@@ -673,9 +756,17 @@ fn gh_escape(s: &str, property: bool) -> String {
     out
 }
 
-fn render_github(diags: &[Diagnostic]) -> String {
+/// One workflow command per report. Its level is the report's severity when the report fails the
+/// run at `fail_on` ([`Diagnostic::fails_run`]), and `warning` when it does not: GitHub shows an
+/// `error` annotation as a failure, which such a report does not cause.
+fn render_github(diags: &[Diagnostic], fail_on: Severity) -> String {
     let mut out = String::new();
     for d in diags {
+        let level = if d.fails_run(fail_on) {
+            d.severity
+        } else {
+            Severity::Warning
+        };
         let label = d.certainty.label().map(|l| format!(" ({l})"));
         let mut body = d.message.clone();
         for r in &d.related {
@@ -691,7 +782,7 @@ fn render_github(diags: &[Diagnostic]) -> String {
         let _ = writeln!(
             out,
             "::{} file={},line={},col={},title={}::{}",
-            d.severity.word(),
+            level.word(),
             gh_escape(&path_text(&d.path), true),
             d.line,
             d.column,
@@ -1467,6 +1558,11 @@ fn counted_by(
 mod tests {
     use super::*;
 
+    /// The `github` format of a run with the default `fail-on`.
+    const GITHUB: OutputFormat = OutputFormat::Github {
+        fail_on: Severity::Error,
+    };
+
     fn key(path: &str, qualname: &str, target: &str) -> BaselineKey {
         BaselineKey {
             path: path.into(),
@@ -1502,6 +1598,7 @@ mod tests {
             contract_locations: Vec::new(),
             fix: None,
             sites: 1,
+            unresolved_sites: Vec::new(),
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
@@ -1856,7 +1953,7 @@ mod tests {
             },
         ];
         let none = |_: &Path, _: u32| None;
-        let out = render(&[d], &[], OutputFormat::Github, &Stylesheet::plain(), &none);
+        let out = render(&[d], &[], GITHUB, &Stylesheet::plain(), &none);
         assert_eq!(
             out,
             "::error file=src/a.py,line=2,col=5,title=heki EFF101::calls `f`\
@@ -1874,7 +1971,7 @@ mod tests {
         d.path = PathBuf::from("src/x,y:z.py");
         let none = |_: &Path, _: u32| None;
         assert_eq!(
-            render(&[d], &[], OutputFormat::Github, &Stylesheet::plain(), &none),
+            render(&[d], &[], GITHUB, &Stylesheet::plain(), &none),
             "::error file=src/x%2Cy%3Az.py,line=2,col=5,title=heki EFF101::a: b, c\n"
         );
     }
@@ -1903,13 +2000,7 @@ mod tests {
             "src/a.py:2:5: MUT201 write, outside: owners\nsecond\n"
         );
         assert_eq!(
-            render(
-                &diags,
-                &[],
-                OutputFormat::Github,
-                &Stylesheet::plain(),
-                &line
-            ),
+            render(&diags, &[], GITHUB, &Stylesheet::plain(), &line),
             "::error file=src/a.py,line=2,col=5,title=heki MUT201::write, outside: owners%0Asecond%0Arelated: src/b.py:3:1: calls helper\n"
         );
         let json: Vec<Diagnostic> = serde_json::from_str(&render(
@@ -1971,16 +2062,24 @@ mod tests {
             ),
             "src/a.py:2:5: EFF102 [heuristic] m\nsrc/a.py:3:5: MUT201 m\n"
         );
+        // A heuristic report fails the run only at `fail-on = "warning"`.
         assert_eq!(
+            render(&diags, &[], GITHUB, &Stylesheet::plain(), &none),
+            "::warning file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n\
+             ::error file=src/a.py,line=3,col=5,title=heki MUT201::m\n"
+        );
+        let failing_on_warnings = OutputFormat::Github {
+            fail_on: Severity::Warning,
+        };
+        assert!(
             render(
                 &diags,
                 &[],
-                OutputFormat::Github,
+                failing_on_warnings,
                 &Stylesheet::plain(),
                 &none
-            ),
-            "::error file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n\
-             ::error file=src/a.py,line=3,col=5,title=heki MUT201::m\n"
+            )
+            .starts_with("::error file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n")
         );
         let json: serde_json::Value = serde_json::from_str(&render(
             &diags,
