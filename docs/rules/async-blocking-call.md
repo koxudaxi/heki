@@ -116,6 +116,16 @@ It does not report:
 - private coroutine functions that only run through a synchronous driver without an event loop
   (`.send(None)`, a `run_sync` function); `asyncio.run(...)` runs its coroutine on an event loop,
   where blocking stops the tasks it starts;
+- calls in the `async def` that cannot run: behind a branch the code decides against (a
+  literal, or a module constant: `if _IS_SYNC:` with `_IS_SYNC = False`), in the body of a loop
+  or comprehension over an iterable that yields no item whatever the input (`()`, `""`,
+  `range(0)`, a name bound to an empty tuple, an empty clause of a nested comprehension), and in
+  the `else` of a loop whose every iteration leaves it (`break`, `return`, `raise`) over an
+  iterable that yields an item whatever the input (a tuple display or a string constant with
+  one, such a module constant, `range` of constants that is not empty, or a list, set, or dict
+  display with one that only the loop reads). The `else` of a loop over an empty iterable runs,
+  and so does the `else` of a loop that may finish without leaving: they are reported, and so is
+  a loop over a list or another container that code elsewhere may fill or empty;
 - CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
   (as pytest finds them: `test_*` functions and the functions nested in them, `test_*.py` and
   `*_test.py` files, and files under `test/` or `tests/`; see the option below).

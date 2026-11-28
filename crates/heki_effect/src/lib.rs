@@ -482,9 +482,10 @@ pub struct OnEveryReturn {
     pub called: bool,
     /// The call returned.
     pub returned: bool,
-    /// Some path reaches the call: it is not behind a branch the code decides against
-    /// (`if not _IS_SYNC:` with `_IS_SYNC = False`).
-    pub live: bool,
+    /// No path reaches the call: it is behind a branch the code decides against (`if
+    /// _IS_SYNC:` with `_IS_SYNC = False`, a loop over an empty iterable). Set only where the
+    /// path facts establish it, so a site they do not place counts as reached.
+    pub unreached: bool,
 }
 
 /// The bit of `e` in a mask of execution effects (`CallTarget::Layer2::unconditional`).

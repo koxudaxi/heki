@@ -119,7 +119,6 @@ fn chain_open_premises(
     gaps.iter()
         .map(|g| {
             let (cause, about): (&'static OpenCause, Option<&FuncKey>) = match &g.gap {
-                MustGap::NotReached => (&premises::NEVER_REACHED, None),
                 MustGap::NeverReturns => (&premises::NEVER_RETURNS, None),
                 MustGap::NotOnEveryReturn => (&premises::NOT_MADE_ON_EVERY_RETURN, None),
                 MustGap::IncompleteTargets => (&premises::INCOMPLETE_TARGETS, None),

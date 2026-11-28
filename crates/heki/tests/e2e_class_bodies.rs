@@ -316,7 +316,8 @@ async def handle_branch(flag: bool) -> None:
 /// A function has made a call of a class body whenever it returns only when it has run the
 /// `class` statement to its end whenever it returns: not behind a branch, not where the body may
 /// raise into a handler that goes on, and for a nested class, the statements around it too. A
-/// class statement in a `finally` body runs on the way out of the `try`.
+/// class statement in a `finally` body runs on the way out of the `try`, and one no path
+/// reaches never runs its body: its call is not reported.
 #[test]
 fn a_class_body_call_runs_on_every_return_only_with_its_class_statement() {
     assert_eq!(
@@ -328,8 +329,6 @@ fn a_class_body_call_runs_on_every_return_only_with_its_class_statement() {
             (59, "EFF101".to_owned()),
             (60, "EFF101 [heuristic]".to_owned()),
             (61, "EFF101".to_owned()),
-            // No path reaches the class statement.
-            (67, "EFF101 [heuristic]".to_owned()),
             // The reported call is the class body's own: it waits whenever it returns.
             (73, "EFF101".to_owned()),
         ]

@@ -138,13 +138,6 @@ pub const NOT_MADE_ON_EVERY_RETURN: OpenCause = OpenCause {
     closer: Closer::Code,
 };
 
-pub const NEVER_REACHED: OpenCause = OpenCause {
-    id: "never-reached",
-    premise: &EVERY_RETURN,
-    states: "no path reaches the reported call: it is behind a branch the code decides against, and heki claims nothing about a call that never runs",
-    closer: Closer::None,
-};
-
 pub const NEVER_RETURNS: OpenCause = OpenCause {
     id: "never-returns",
     premise: &EVERY_RETURN,
@@ -1054,7 +1047,6 @@ const MUT101_CLAIM: &[&Premise] = &[
 /// Every open cause, once, in the order of their premises in [`ALL`].
 pub const CAUSES: &[&OpenCause] = &[
     &NOT_MADE_ON_EVERY_RETURN,
-    &NEVER_REACHED,
     &NEVER_RETURNS,
     &INCOMPLETE_TARGETS,
     &IMPLEMENTATION_WITHOUT_THE_FACT,

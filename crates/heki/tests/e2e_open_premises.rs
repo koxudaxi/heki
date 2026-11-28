@@ -95,20 +95,6 @@ fn a_helper_that_returns_before_the_wait_leaves_every_return_open() {
 }
 
 #[test]
-fn a_call_behind_a_branch_the_code_decides_against_is_never_reached() {
-    let open = "import time\n\n_IS_SYNC = False\n\n\nasync def handle():\n    if _IS_SYNC:\n        time.sleep(1)\n";
-    heuristic(
-        "op_never_reached",
-        EFF101,
-        open,
-        "EFF101",
-        &[("Every return", "never-reached")],
-    );
-    let closed = open.replace("_IS_SYNC = False", "_IS_SYNC = True");
-    exact("op_never_reached_closed", EFF101, &closed, "EFF101");
-}
-
-#[test]
 fn a_helper_that_always_raises_never_returns() {
     let open = "import time\n\n\ndef fail():\n    time.sleep(1)\n    raise ValueError(\"x\")\n\n\nasync def handle():\n    fail()\n";
     heuristic(

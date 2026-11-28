@@ -408,7 +408,7 @@ fn run_through(point: OnEveryReturn, body: OnEveryReturn) -> OnEveryReturn {
     OnEveryReturn {
         called: point.called && body.returned,
         returned: point.returned && body.returned,
-        live: point.live && body.live,
+        unreached: point.unreached || body.unreached,
     }
 }
 
@@ -1061,6 +1061,9 @@ struct Extractor<'a> {
     /// Per call instruction, whether the function has made it whenever it returns normally
     /// (filled before the visit when an enabled rule reads [`EffectSummary::must_exec`]).
     must_run: FxHashMap<(BlockId, usize), OnEveryReturn>,
+    /// The blocks no path reaches (filled with [`Self::must_run`]): a site made in one never
+    /// runs ([`OnEveryReturn::unreached`]), whatever instruction it is made at.
+    dead_blocks: FxHashSet<BlockId>,
     /// Per class body a `class` statement of the function runs, [`Self::must_run`] of that
     /// statement as a call of the body (filled with it).
     class_runs: FxHashMap<FunctionId, OnEveryReturn>,
@@ -1474,6 +1477,7 @@ impl<'a> Extractor<'a> {
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
+            dead_blocks: FxHashSet::default(),
             class_runs: FxHashMap::default(),
             returned_calls: Vec::new(),
             key_facts: OnceCell::new(),
@@ -4519,7 +4523,10 @@ impl<'a> Extractor<'a> {
             }
         }
         let base = self.sites.len();
-        for (k, (site, at)) in extra.into_iter().enumerate() {
+        for (k, (mut site, at)) in extra.into_iter().enumerate() {
+            // The body runs at `at`, which the call making the object reaches first.
+            site.on_every_return.unreached |=
+                at.is_some_and(|(b, _)| self.dead_blocks.contains(&b));
             if let (Some(events), Some((b, i))) = (self.events.as_mut(), at) {
                 events.calls.push((b, i, base + k));
             }
@@ -5607,7 +5614,7 @@ impl<'a> Extractor<'a> {
                         args: std::slice::from_ref(index),
                         ..Passed::NOTHING
                     };
-                    self.external_call(bb, symbol.clone(), passed, false, span);
+                    self.external_call(bb, symbol.clone(), passed, false, span, true);
                     self.note_returned_realloc(&symbol, Some(*dst), std::slice::from_ref(index));
                 }
             }
@@ -5934,21 +5941,26 @@ impl<'a> Extractor<'a> {
             // iteration starts (`child_iteration`).
             InstKind::MakeIter {
                 iterable, is_async, ..
-            } if self.f.var_name(*iterable) != Some(".0") => {
-                self.protocol_call(bb, *iterable, iteration_protocol(*is_async), false, span)
-            }
+            } if self.f.var_name(*iterable) != Some(".0") => self.protocol_call(
+                bb,
+                *iterable,
+                iteration_protocol(*is_async),
+                false,
+                span,
+                true,
+            ),
             InstKind::EnterWith {
                 mgr,
                 is_async: false,
                 ..
-            } => self.protocol_call(bb, *mgr, "__enter__", false, span),
+            } => self.protocol_call(bb, *mgr, "__enter__", false, span, true),
             // Entering an async context manager awaits its `__aenter__` (a lock's acquisition).
             InstKind::EnterWith {
                 mgr,
                 is_async: true,
                 ..
             } if self.opt_in.checkpoints => {
-                self.protocol_call(bb, *mgr, "__aenter__", true, span);
+                self.protocol_call(bb, *mgr, "__aenter__", true, span, true);
             }
             _ => {}
         }
@@ -6096,7 +6108,8 @@ impl<'a> Extractor<'a> {
     /// The comprehension or generator expression `child` created here iterates `iterable`
     /// (its outermost one) at once, as its first clause does (`__iter__`, or `__aiter__` for an
     /// `async for`): [`Self::protocol_call`]. A later `async for` clause does not change how the
-    /// first one starts.
+    /// first one starts. The creating instruction calls the child, which runs only its own code:
+    /// what it tells of its targets is not of the iterable's `__iter__`.
     fn child_iteration(&mut self, bb: BlockId, child: FunctionId, iterable: VarId, span: Span) {
         let first_is_async = self
             .cx
@@ -6110,7 +6123,14 @@ impl<'a> Extractor<'a> {
                 _ => None,
             });
         if let Some(is_async) = first_is_async {
-            self.protocol_call(bb, iterable, iteration_protocol(is_async), false, span);
+            self.protocol_call(
+                bb,
+                iterable,
+                iteration_protocol(is_async),
+                false,
+                span,
+                false,
+            );
         }
     }
 
@@ -6119,7 +6139,8 @@ impl<'a> Extractor<'a> {
     /// `list(...)` iterates it; `__enter__` when a `with` enters it): the catalog's entry for
     /// it is a call at `span` (`for row in session.query(User):` runs the query,
     /// `with fsspec.open(path):` opens the file; `__aenter__`, awaited, when an `async with`
-    /// enters it). Project classes' special methods are not followed.
+    /// enters it). Project classes' special methods are not followed. `own` as for
+    /// [`Self::external_call`].
     fn protocol_call(
         &mut self,
         bb: BlockId,
@@ -6127,6 +6148,7 @@ impl<'a> Extractor<'a> {
         protocol: &str,
         is_awaited: bool,
         span: Span,
+        own: bool,
     ) {
         let Some(Val::Inst(class, _)) = self.val(value) else {
             return;
@@ -6136,7 +6158,7 @@ impl<'a> Extractor<'a> {
         }
         let symbol = format!("{class}.{protocol}");
         if self.cx.catalog(&symbol).is_some() {
-            self.external_call(bb, symbol, Passed::NOTHING, is_awaited, span);
+            self.external_call(bb, symbol, Passed::NOTHING, is_awaited, span, own);
         }
     }
 
@@ -7563,10 +7585,18 @@ impl<'a> Extractor<'a> {
                     call.passed(),
                     call.is_awaited,
                     call.span,
+                    true,
                 );
                 // `list(query)` iterates the query as a `for` loop does.
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
-                    self.protocol_call(bb, iterable, iteration_protocol(false), false, call.span);
+                    self.protocol_call(
+                        bb,
+                        iterable,
+                        iteration_protocol(false),
+                        false,
+                        call.span,
+                        true,
+                    );
                 }
                 self.note_returned_realloc(symbol, call.dst, call.args);
                 // A project class without a project `__init__` (a dataclass, a pydantic model),
@@ -7857,7 +7887,7 @@ impl<'a> Extractor<'a> {
                         star_from: None,
                         recv: None,
                     };
-                    self.external_call(bb, symbol, passed, call.is_awaited, call.span);
+                    self.external_call(bb, symbol, passed, call.is_awaited, call.span, true);
                 }
                 // The site the hand-overs above name comes first; the worker's follows it.
                 if callees.is_empty() {
@@ -8441,9 +8471,15 @@ impl<'a> Extractor<'a> {
     fn site(&self, bb: BlockId, target: CallTarget, is_awaited: bool, span: Span) -> CallSite {
         let cx = self.guard_inputs();
         let (complete, on_every_return) = if self.opt_in.site_paths() {
+            // A site made at an instruction that is no call (a `with` entering a catalogued
+            // manager, the creation of a generator expression) has only its reachability.
+            let placed = OnEveryReturn {
+                unreached: self.dead_blocks.contains(&self.pos.0),
+                ..OnEveryReturn::default()
+            };
             (
                 self.targets_complete(),
-                self.must_run.get(&self.pos).copied().unwrap_or_default(),
+                self.must_run.get(&self.pos).copied().unwrap_or(placed),
             )
         } else {
             (false, OnEveryReturn::default())
@@ -8563,8 +8599,8 @@ impl<'a> Extractor<'a> {
         self.f.params.iter().any(|p| p.var == v)
     }
 
-    /// [`Self::must_run`], [`Self::class_runs`], [`Self::takes_on_every_return`], and
-    /// [`MustExec::never_returns`], from the path facts of the function with what the catalog
+    /// [`Self::must_run`], [`Self::dead_blocks`], [`Self::class_runs`],
+    /// [`Self::takes_on_every_return`], and [`MustExec::never_returns`], from the path facts of the function with what the catalog
     /// and the project's declarations know: the members of modules and the context managers
     /// whose exit never suppresses an exception.
     fn path_facts(&mut self) {
@@ -8579,8 +8615,19 @@ impl<'a> Extractor<'a> {
         };
         let locks = self.opt_in.locks;
         let mut takes = FxHashSet::default();
-        let (must_run, class_runs, never_returns, must_reads) =
+        let (must_run, dead_blocks, class_runs, never_returns, must_reads) =
             crate::with_paths(self.cx, f, &self.types, owner, |paths, _| {
+                // A point is reached exactly when the head of its block is: the head always
+                // reaches the tail.
+                let dead_blocks: FxHashSet<BlockId> = f
+                    .blocks
+                    .iter()
+                    .filter(|bb| {
+                        paths.on_every_return((bb.id, 0), Progress::Called)
+                            == Answer::Known(Must::Dead)
+                    })
+                    .map(|bb| bb.id)
+                    .collect();
                 let mut must_run = FxHashMap::default();
                 let mut class_runs: FxHashMap<FunctionId, OnEveryReturn> = FxHashMap::default();
                 for bb in &f.blocks {
@@ -8596,20 +8643,23 @@ impl<'a> Extractor<'a> {
                         if class_body.is_none() && !crate::anchors_call_site(&inst.kind) {
                             continue;
                         }
-                        let called = paths.on_every_return(at, Progress::Called);
                         let run = OnEveryReturn {
-                            called: every(called),
+                            called: every(paths.on_every_return(at, Progress::Called)),
                             returned: every(paths.on_every_return(at, Progress::Returned)),
-                            live: called.is_open() || called != Answer::Known(Must::Dead),
+                            unreached: dead_blocks.contains(&bb.id),
                         };
                         match class_body {
                             // A `class` statement in a `finally` body is made once per way out
-                            // of its `try`: the body has run when one of them has.
+                            // of its `try`: the body has run when one of them has, and is
+                            // reached when one of them is.
                             Some(id) => {
-                                let any = class_runs.entry(id).or_default();
+                                let any = class_runs.entry(id).or_insert(OnEveryReturn {
+                                    unreached: true,
+                                    ..OnEveryReturn::default()
+                                });
                                 any.called |= run.called;
                                 any.returned |= run.returned;
-                                any.live |= run.live;
+                                any.unreached &= run.unreached;
                             }
                             None => {
                                 must_run.insert(at, run);
@@ -8645,12 +8695,13 @@ impl<'a> Extractor<'a> {
                         }
                     }
                 }
-                (must_run, class_runs, never_returns, must_reads)
+                (must_run, dead_blocks, class_runs, never_returns, must_reads)
             });
         if !must_reads.is_empty() {
             self.summary.kept_mut().must_read_self_attrs = must_reads;
         }
         self.must_run = must_run;
+        self.dead_blocks = dead_blocks;
         self.class_runs = class_runs;
         self.takes_on_every_return = takes;
         if never_returns && self.opt_in.must_effects {
@@ -9022,6 +9073,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The call of the library's `symbol` at `span`; `own` when the instruction at [`Self::pos`]
+    /// makes it, whose targets are then complete when the instruction's are
+    /// ([`Self::targets_complete`]).
     fn external_call(
         &mut self,
         bb: BlockId,
@@ -9029,6 +9083,7 @@ impl<'a> Extractor<'a> {
         passed: Passed<'_>,
         is_awaited: bool,
         span: Span,
+        own: bool,
     ) {
         let args = passed.args;
         if symbol == "builtins.setattr" || symbol == "builtins.object.__setattr__" {
@@ -9197,7 +9252,8 @@ impl<'a> Extractor<'a> {
         }
         // The catalog describes the library's class: a project subclass may override the
         // method, and then the call runs no catalogued implementation.
-        let unconditional = if self.opt_in.must_effects && self.targets_complete() {
+        let complete = own && self.targets_complete();
+        let unconditional = if self.opt_in.must_effects && complete {
             self.unconditional(entry, case, passed, &effects)
         } else {
             0
@@ -9207,7 +9263,7 @@ impl<'a> Extractor<'a> {
             .copied()
             .filter(|e| unconditional & crate::effect_bit(*e) != 0)
             .collect();
-        let given = if self.opt_in.must_effects && self.targets_complete() && case.is_none() {
+        let given = if self.opt_in.must_effects && complete && case.is_none() {
             self.given_waits(&symbol, entry, passed, &effects, unconditional)
         } else {
             Vec::new()
@@ -9221,7 +9277,8 @@ impl<'a> Extractor<'a> {
             async_safe: entry.async_safe,
             unconditional,
         };
-        let site = self.site(bb, target, is_awaited, span);
+        let mut site = self.site(bb, target, is_awaited, span);
+        site.complete &= own;
         if let Some(hop) = hop {
             for e in must {
                 if site.made_on_every_return(e) {
@@ -9894,7 +9951,10 @@ fn role_site(
         // An iterated generator or an awaited coroutine runs, there, the bodies of the call's
         // targets: the call's targets are theirs.
         complete: runs_bodies_here && site.complete,
-        on_every_return: crate::OnEveryReturn::default(),
+        on_every_return: crate::OnEveryReturn {
+            unreached: site.on_every_return.unreached,
+            ..crate::OnEveryReturn::default()
+        },
         made_by: Some(site.span),
         module_member: None,
         cleanup: site.cleanup,

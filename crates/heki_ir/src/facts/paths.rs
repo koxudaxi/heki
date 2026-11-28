@@ -6,7 +6,10 @@
 //! - **Decided branches** ([`Decided`]): a test of a literal or of a module constant
 //!   ([`ModuleConstants::ints`], `strs`, `bools`, `typing.TYPE_CHECKING` included), through
 //!   `not`, comparisons of two such values, and the phis of `and` / `or` along the edges that can
-//!   run, never takes its other side. The code only that side reaches is dead for every fact.
+//!   run, never takes its other side. So does the header of a `for` loop (or comprehension
+//!   clause) whose iterable decides it whatever the input: one over an empty display never
+//!   enters its body, and one over an iterable that yields an item, with no edge back to the
+//!   header, never takes its `else`. The code only that side reaches is dead for every fact.
 //! - **Exceptions**: an instruction raises into its block's handler unless the assumptions every
 //!   exact claim states rule it out ([`PathReader::raises`]). A handler's type is not matched, so
 //!   any handler may take any exception. A `with` body's exception goes on past the `with` (the
@@ -198,11 +201,13 @@ fn decided_truth(
 impl<'a> FnIndex<'a> {
     /// The branches the code of this function decides ([`Decided`]), computed once in one pass
     /// in reverse postorder: a value's definition comes before its uses there, except a phi's
-    /// inputs along back edges, which leave the phi undecided.
+    /// inputs along back edges, which leave the phi undecided. The header of a `for` loop is
+    /// decided by its iterable ([`Self::loop_header_decisions`]).
     pub fn decided(&self) -> &Decided {
         self.decided.get_or_init(|| {
             let shape = &self.shape;
             let n = self.f.blocks.len();
+            let by_size = self.loop_header_decisions();
             let mut live = vec![false; n];
             let mut never_taken: Vec<Option<BlockId>> = vec![None; n];
             let mut judged = vec![false; n];
@@ -265,12 +270,53 @@ impl<'a> FnIndex<'a> {
                     never_taken[bi] = match truths.get(&cond) {
                         Some(true) => Some(else_bb),
                         Some(false) => Some(then_bb),
-                        None => None,
+                        None => by_size[bi],
                     };
                 }
             }
             Decided { live, never_taken }
         })
+    }
+
+    /// Per block, the side of a `for` loop's header (a loop's, or a comprehension clause's,
+    /// whose branch tests what `IterNext` gave) the loop's iterable rules out
+    /// ([`Self::yields_an_item`], whatever the input): the body when it yields no item, and the
+    /// `else` (or the exit) when it yields one and no edge leads back to the header, so that the
+    /// first item enters the body and every iteration leaves the loop. The size walks are not
+    /// read: they ask the path facts, which ask [`Self::decided`].
+    fn loop_header_decisions(&self) -> Vec<Option<BlockId>> {
+        let mut out = vec![None; self.f.blocks.len()];
+        for (li, lp) in self.f.loops.iter().enumerate() {
+            let header = self.f.block(lp.header);
+            let (
+                Some(InstKind::IterNext { dst, .. }),
+                Terminator::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                },
+            ) = (header.insts.first().map(|i| &i.kind), &header.terminator)
+            else {
+                continue;
+            };
+            let leaves_every_iteration = || {
+                !self
+                    .shape
+                    .preds(lp.header)
+                    .iter()
+                    .any(|p| self.shape.in_loop(li, *p))
+            };
+            let yields = self
+                .loop_iterable(lp)
+                .filter(|_| dst == cond)
+                .and_then(|it| self.yields_an_item(it));
+            out[lp.header.0 as usize] = match yields {
+                Some(false) => Some(*then_bb),
+                Some(true) if leaves_every_iteration() => Some(*else_bb),
+                _ => None,
+            };
+        }
+        out
     }
 }
 
