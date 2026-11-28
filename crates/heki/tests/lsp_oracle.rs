@@ -6470,17 +6470,28 @@ fn steps_attribute_types() -> Vec<Step> {
 
 /// The receivers whose class the language or the standard library fixes: an instance's
 /// namespace is a dict while reading it runs no code of its class, a `NamedTuple` instance has
-/// `_replace`, and a `ContextVar[T]` gives a `T`, each decided by declarations in another module.
+/// `_replace`, and a `ContextVar[T]` gives a `T`, each decided by declarations in another module;
+/// a value typed with a protocol keeps its namespace open, and a compatibility module
+/// re-exporting `typing.Protocol` or defining a class of that name decides whether its class is
+/// one.
 fn steps_builtin_receivers() -> Vec<Step> {
     const MODEL: &str = "from contextvars import ContextVar\nfrom typing import NamedTuple\n\n\nclass Holder:\n    def __init__(self) -> None:\n        self.required = False\n\n\nclass Memo:\n    def bump(self, h: Holder) -> None:\n        pass\n\n\nclass Spot(NamedTuple):\n    module: str\n\n\nMEMO: ContextVar[Memo] = ContextVar(\"memo\")\n";
     const PEEK: &str = "from pkg.rcv_model import Holder\n\n\ndef peek(h: Holder) -> object:\n    return h.__dict__.get(\"x\")\n";
     const MOVED: &str = "from pkg.rcv_model import Spot\n\n\ndef moved(s: Spot) -> Spot:\n    return s._replace(module=\"m\")\n";
     const BUMPED: &str = "from pkg.rcv_model import MEMO, Holder\n\n\ndef bumped(h: Holder) -> None:\n    MEMO.get().bump(h)\n";
+    // A base named `Protocol` that a compatibility module may define or re-export.
+    const OWN_PROTOCOL: &str = "class Protocol:\n    pass\n";
     const ALL: &[(&str, &str)] = &[
         ("pkg/rcv_peek.py", "EFF201"),
         ("pkg/rcv_moved.py", "EFF201"),
         ("pkg/rcv_bumped.py", "EFF201"),
     ];
+    let through_compat = MODEL
+        .replace(
+            "from typing import NamedTuple\n",
+            "from typing import NamedTuple\n\nfrom pkg.rcv_compat import Protocol\n",
+        )
+        .replace("class Holder:", "class Holder(Protocol):");
     let boundary = format!(
         "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"receivers\"\nscopes = [\"pkg.rcv_peek\", \"pkg.rcv_moved\", \"pkg.rcv_bumped\"]\nwrite-universe = [\"Holder.required\"]\nallow-writes = []\nunresolved = \"report\"\n"
     );
@@ -6528,6 +6539,25 @@ fn steps_builtin_receivers() -> Vec<Step> {
         .present(&[("pkg/rcv_bumped.py", "EFF201")])
         .absent(&[("pkg/rcv_peek.py", "EFF201"), ("pkg/rcv_moved.py", "EFF201")]),
         Step::new(
+            "the class names a base a compatibility module defines",
+            vec![
+                Action::Create("pkg/rcv_compat.py", OWN_PROTOCOL.to_owned()),
+                save("pkg/rcv_model.py", &through_compat),
+            ],
+        )
+        .absent(ALL),
+        Step::new(
+            "the compatibility module re-exports `typing.Protocol`: the class is a protocol",
+            vec![save("pkg/rcv_compat.py", "from typing import Protocol\n")],
+        )
+        .present(&[("pkg/rcv_peek.py", "EFF201")])
+        .absent(&[("pkg/rcv_moved.py", "EFF201"), ("pkg/rcv_bumped.py", "EFF201")]),
+        Step::new(
+            "the compatibility module defines the base again: the class is no protocol",
+            vec![save("pkg/rcv_compat.py", OWN_PROTOCOL)],
+        )
+        .absent(ALL),
+        Step::new(
             "the declarations are as before",
             vec![save("pkg/rcv_model.py", MODEL)],
         )
@@ -6535,6 +6565,7 @@ fn steps_builtin_receivers() -> Vec<Step> {
         Step::new(
             "the files and the boundary are removed",
             vec![
+                Action::Delete("pkg/rcv_compat.py"),
                 Action::Delete("pkg/rcv_peek.py"),
                 Action::Delete("pkg/rcv_moved.py"),
                 Action::Delete("pkg/rcv_bumped.py"),

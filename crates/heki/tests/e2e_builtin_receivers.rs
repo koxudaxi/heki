@@ -267,6 +267,61 @@ def typed_with_the_protocol(obj: Nullable) -> object:
     return obj.__dict__.get("x")  # unresolved
 "#;
 
+/// A compatibility module re-exporting `Protocol`, and one choosing it in a `try` statement.
+const COMPAT: &str = "from typing import Protocol\n";
+const COMPAT_TRIED: &str = r#"try:
+    from typing import Protocol
+except ImportError:
+    from typing_extensions import Protocol
+"#;
+
+const COMPAT_MODEL: &str = r#"from typing import TypeVar
+
+from pkg.compat import Protocol
+from pkg.compat_tried import Protocol as TriedProtocol
+
+T = TypeVar("T")
+
+
+class Exported(Protocol):
+    def is_null(self) -> bool: ...
+
+
+class ExportedGeneric(Protocol[T]):
+    def get(self) -> T: ...
+
+
+class Tried(TriedProtocol):
+    def is_null(self) -> bool: ...
+
+
+class Implements(Exported):
+    def is_null(self) -> bool:
+        return False
+"#;
+
+/// A base a project module re-exports from `typing` is `typing.Protocol`: a value typed with
+/// the class may be of any class that has its members, and a subclass naming the protocol is a
+/// class like any other.
+const COMPAT_PROTOCOLS: &str = r#"from pkg.compat_model import Exported, ExportedGeneric, Implements, Tried
+
+
+def typed_with_the_protocol(obj: Exported) -> object:
+    return obj.__dict__.get("x")  # unresolved
+
+
+def generic(obj: ExportedGeneric[int]) -> object:
+    return vars(obj).get("x")  # unresolved
+
+
+def tried(obj: Tried) -> object:
+    return obj.__dict__.get("x")  # unresolved
+
+
+def implements(obj: Implements) -> object:
+    return obj.__dict__.get("x"), vars(obj).get("y")
+"#;
+
 /// `_replace` copies the instance and `_make` builds one of the class it is called on (also on
 /// an instance), so a method called on their result is the class's; `_asdict()` is a new dict,
 /// `_fields` a tuple, `_field_defaults` a dict. A subclass defining `_replace` again runs its
@@ -427,6 +482,19 @@ fn an_instance_namespace_is_a_dict_where_reading_it_runs_no_code() {
 #[test]
 fn a_protocol_base_reads_the_namespace_like_any_class() {
     check_marks("protocols", &[("pkg/passes/protocols.py", PROTOCOLS)]);
+}
+
+#[test]
+fn a_protocol_base_a_project_module_re_exports_is_a_protocol() {
+    check_marks(
+        "compat_protocols",
+        &[
+            ("pkg/compat.py", COMPAT),
+            ("pkg/compat_tried.py", COMPAT_TRIED),
+            ("pkg/compat_model.py", COMPAT_MODEL),
+            ("pkg/passes/compat_protocols.py", COMPAT_PROTOCOLS),
+        ],
+    );
 }
 
 #[test]
