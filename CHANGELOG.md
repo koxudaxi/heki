@@ -7,6 +7,169 @@ configuration keys, diagnostics, and output formats, except what the
 [stability policy](docs/adoption.md#stability-on-the-way-to-10) keeps stable; each change is listed
 under "Breaking changes".
 
+## [0.12.0] - 2026-11-28
+
+### Breaking changes
+
+- `EFF102` (`loop-unpooled-client`) is on by default (see Changed), so a default run can show new
+  reports: 54 on the corpus of 378 projects. Its reports are warnings. To turn it off, write
+  `ignore = ["EFF102"]` in `[tool.heki.lint]`, or run with `--ignore EFF102`.
+- On the corpus of 378 projects, the default output of 0.12.0 has 475 reports where 0.11.0 had
+  275, and none of 0.11.0's go away: 54 `EFF102` reports, 142 more `EFF101` reports that output no
+  longer folds into another one (a helper reaching the same blocking call is a root cause of its
+  own, see Fixed), and 4 more `EFF103` reports on Django managers; 6 `EFF101` reports show another
+  chain. 82 of the projects (22 %) get at least one default report, 75 (20 %) with 0.11.0. With
+  every rule selected, exact reports go from 367 to 2,539 (1,972 of them `EFF105`, which stays
+  opt-in) and heuristic ones from 17,038 to 16,979. Every exact report 0.12.0 adds or changes on
+  the corpus was read before the release, and each one holds.
+
+### Added
+
+- Django's `Model.objects`, and the managers a model's body declares (`objects = StreamManager()`),
+  are `Manager`s: a manager's `get`, `count`, `get_or_create` and the other query methods send a
+  statement on every call, so `EFF103` reports them per loop item, and its lazy methods (`filter`,
+  `exclude`, `all`) give a `QuerySet` that sends nothing. A new catalog table,
+  `[[class_attributes]]`, gives the attributes a library base gives the class objects deriving from
+  it. (#444)
+- `IMP101`, `IMP102`, `IMP201` (with `reach = "import-time"`), `IMP301` and `IMP302` name in their
+  help the one import every cycle or every chain of the report goes through, when there is one:
+  moved into the functions that use it, or made `lazy` from Python 3.15 on where Python allows the
+  keyword, it takes the report away. heki names it only after one search of the import graph without
+  it shows the cycle or the chain gone, and only when no code that runs while its module loads (the
+  module body, its class bodies, decorators, defaults, bases and evaluated annotations, the
+  functions they call, and `__all__`) reads what it binds, and no other project module takes that
+  name from the module while it loads (by a `from` import, a star import, an attribute read off the
+  module, or the module object passed elsewhere, also through a package re-exporting it, unless the
+  module rebinds the name later with no code run in between); a read in another module's function
+  leaves only `lazy`. Otherwise the help is as before. (#562)
+- Reports of `effect-boundaries` (`EFF201`), `invalidation` (`MUT208`), and `import-boundaries`
+  (`IMP201`) point at the entry their access matched, in `contract_locations`, SARIF related
+  locations, and the language server's related information: a `call-targets`, `read-targets`,
+  `write-targets`, or `write-universe` entry or a `forbid` token of a boundary, a `targets` entry of
+  an invalidation contract, and a `forbidden-imports` or `relative-imports` pattern, glob or module
+  part included, in the main file, an included file, or a group. An access several entries match
+  points at the first, the one the report's target names. Baseline keys do not change. (#649)
+- `heki recommend --focus types` prints the suggestions alone, with every exact group (`--all` adds
+  the heuristic ones); with `--output-format json`, `suggestions.groups` holds every exact group
+  past the cap of 50, and the object keeps every other field. `heki recommend --focus types --diff`
+  prints the exact groups as one unified diff of annotations and the imports they name, which `git
+  apply` or `patch -p1` applies from the same directory; it keeps each file's line breaks and
+  declared encoding, leaves heuristic groups out, and still writes nothing and exits with 0. The
+  default text names both commands under "Types the code already keeps".
+- `EFF105` has an exact tier: a call in `async def` that, whenever it returns, has run blocking
+  local file system I/O on the event loop, with the premises Every return, Every implementation, and
+  Touches the file system. A heuristic report records the premise it leaves open (`heki recommend`,
+  `heki dump-open-premises`). The catalog marks the calls that can do their work without the file
+  system (`emits = "may-avoid-the-file-system"`: file object members, `Path.iterdir`, the junction
+  tests, psutil, fsspec, and readers whose source may be a URL); their reports stay heuristic.
+  `EFF105` stays opt-in.
+- `EFF102` has an exact tier: a loop over data whose every iteration makes a new client, session,
+  connection, or pool, decided as `EFF103` decides a query on every iteration, with the premises
+  Origin, Every iteration, Every return, Every implementation, and Allocates. A heuristic report
+  records the premise it leaves open.
+- The catalog knows the synchronous `xinference_client.RESTfulClient` (its constructor, its calls,
+  and the model handles `get_model` returns) and the supabase-py / postgrest sync client
+  (`table(...)` queries and their `execute()`) as calls that wait on the network:
+  `async-blocking-call` and `loop-db-query` report them. (#666)
+- `loop-carried-concat` also reports an array rebuilt through `numpy.r_[...]` and `numpy.c_[...]` on
+  every iteration. (#666)
+
+### Changed
+
+- The general `IMP302` help no longer reads as if catching `ImportError` at the module's import were
+  a fix of its own: it says to import the module inside the functions that use it, where a handler
+  can name the extra to install. (#562)
+- `EFF102` is a default exact rule at warning severity, like `EFF103`: its exact reports show in a
+  default run, and its heuristic reports (a loop that can make a client on every iteration) with
+  `--heuristic`, as before.
+
+### Fixed
+
+- `heki check`, `inspect`, `recommend`, `snapshot`, `--watch` and the language server no longer
+  overflow the stack on deep expressions: a chain of thousands of operators (`a + a + ...`, a union
+  `C | C | ...` of thousands of classes) or calls and subscripts nested as deep aborted a debug
+  build under a 1 MiB stack (a Windows main thread) from about 150 operands, and a release build
+  somewhat later. heki now parses and analyzes on threads of its own with a 256 MiB stack, which the
+  platforms map only as it is used, so the main thread's stack and `RUST_MIN_STACK` no longer
+  matter; a parsed module is taken apart without recursion when dropped. (#422)
+- `MUT101` reports a write in a Django model exact where nothing else is open: the catalog now says
+  `django.db.models.Model` defines no attribute hooks (`plain_attributes_except`; its `pk` property
+  stays open), so a store of an attribute the model's code sets is a plain one. A class-body field
+  (`models.DateTimeField()`) stays a descriptor to heki. (#444)
+- A static or class method a project protocol declares, called on a value typed with the protocol
+  (`h.build()` with `h: Host`), is now matched like an instance method: a `call-owners` target
+  `Impl.build` and an effect boundary's `call-targets` cover the call when `Impl` and its subclasses
+  alone implement the protocol, and `allowed-protocols` naming the protocol allows the call, and a
+  reference handing the method on, also for a generic protocol (`Host[T]`). heki took the protocol
+  from the method's first parameter, which a static method does not have and a class method binds to
+  the class; it now takes it from the receiver. (#635)
+- A call of a class or function whose name may hold another object (a star import after the
+  definition, `Base = make()`, `f = deco(f)`, `globals()` or `exec` in the module, a store from
+  another module) is no longer typed as the definition's instance or declared return: it gives
+  either class's instance when a star import binds the name to another project class, and no known
+  value otherwise, so a method called on the result is no longer claimed exactly to run the
+  definition's method. The same holds for the fields a frozen dataclass or `NamedTuple` call binds,
+  for a member called on the class through its name (`Base.create()`), and for the completeness of
+  such member calls. Another module changing the object a name holds in place
+  (`lib.Client.register(x)`) no longer counts as binding the name again. (#653)
+- `OPT103` reports `self.text += piece` for more pieces: `"".join(...)`, `"...".format(...)` with
+  text beside its field, `"..." % scalar`, and `str`, `repr`, `ascii`, or `format` of a value of a
+  builtin type are exact `str` values. `str(x)`, `repr(x)`, `ascii(x)`, `format(x)` of a value of
+  unknown type, a lone-field `"{}".format(x)`, an f-string field, and concatenations of such pieces
+  are reported at the heuristic tier: another class's `__str__` / `__format__` may return a `str`
+  subclass that overrides `__radd__`, which the open premise `exact-type` names. The same exact
+  types apply wherever the Soundness lane reads the piece, for example the right operand of `OPT103`
+  on a local `bytes` or `tuple`, and `OPT101` / `OPT102` operand checks. (#655)
+- `MUT112` follows a value stored at a constant key of a builtin `dict` or `list` and read back, as
+  it follows a variable: `kwargs["headers"] = headers or {}`, then `kwargs["headers"]["X"] = "1"`,
+  is reported, also through a display (`{"headers": headers or {}}`), `kwargs.get("headers")`, and
+  branches. A store with another key, a deletion, a changing method, or a call the container is
+  handed to between the store and the read leaves the read the container's item as before, and so
+  does any call when others may hold the container (a parameter, or one stored elsewhere). A new
+  object stored at a key of the caller's container where the key is missing (`if "s" not in opts:
+  opts["s"] = {}`) stays the caller's state on every path and is not reported, like `rows =
+  table[key] = []`. (#656)
+- heki no longer claims a Django query exactly (`EFF103` and the other rules reading a call's
+  catalog effects) when project code runs under it. A project `QuerySet` subclass that binds a name
+  a query method looks up on the queryset (`get` reaches `filter`, `_fetch_all`, `__len__`; `acount`
+  calls `count`) makes that method heuristic on any `QuerySet`, and a model whose `save` (or a
+  method `save` reaches) may return without calling `super().save(...)` makes `create` and `acreate`
+  heuristic. A subclass that only adds methods, and a `save` calling `super().save(...)` on every
+  path, keep the exact claims. `models.QuerySet` and `django.db.models.manager.Manager` are now the
+  catalog's `QuerySet` and `Manager`, so subclasses spelled that way are seen, and calls on their
+  instances use the catalog's rows. (#683)
+- `EFF101` / `EFF105`: the chain a report shows (`related`) takes a branch the call's arguments
+  allow: an `isinstance` dispatch on an argument that is a constant, an instance of exactly a class,
+  or a value typed with a class no longer shows the branch the argument rules out (the MRO never
+  decides a test of an ABC or a protocol against an argument). A call on the normal path is shown
+  before one in an `except` handler or a `finally` body. The reports and their tiers do not change.
+  (#642)
+- `EFF101` / `EFF105`: output folds reports into one only when they reach the same blocking call;
+  different helpers calling the same API are separate root causes; direct calls of the API still
+  fold together. (#602)
+- `heki check --diff` wrote the lines of a file declared Latin-1 (PEP 263) in UTF-8, so `git apply`
+  and `patch` rejected a hunk holding a character outside ASCII; it now writes them in the file's
+  encoding, as `--fix` writes the file.
+- `EFF114` no longer reports a cycle closed by a call heki could not resolve: each call of a cycle
+  has as its targets every implementation it can run. A method found only by its name, such as a
+  member of a protocol the receiver is typed with, closes no cycle any more, so a property that
+  reads the same attribute of another object is not reported as a recursion. The way down from the
+  `try` body to a cycle may still go through such a call.
+- `unshielded-cleanup-checkpoint` takes a cancel scope named by the module that defines it
+  (`anyio._core._tasks.CancelScope`, `trio._core._run.CancelScope`, and the `move_on_*` and `fail_*`
+  functions there) as the shield the public name is. (#666)
+- A function that rebinds a function of another module through an import of its own (`import
+  helpers` in the function, then `helpers.identity = list`) is seen rebinding it, as through an
+  import of the module body: facts that need the function to stay as written (that it returns its
+  argument) are no longer used. (#623)
+- A `with` block between the read of an attribute and the `return` that gives it counts as code that
+  may rebind the attribute (`__enter__` and `__exit__` run there), so the function is no longer
+  taken to return the attribute itself. (#626)
+- A star import after a definition, or on a path where the module leaves the name unbound, binds the
+  name again when the imported module may define it (its `__all__`, or its public names; any name
+  for a module heki does not read): calls and constructions through the name are no longer exact.
+  (#653)
+
 ## [0.11.0] - 2026-11-28
 
 ### Breaking changes
