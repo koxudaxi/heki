@@ -9304,6 +9304,68 @@ fn subclass_needs_on_two_parameters_stay_bounded_down_a_long_chain() {
     );
 }
 
+/// The ways a witness is chosen among (`EffectSummary::witness_ways`): `n` helpers, each
+/// dispatching on `isinstance` of the parameter it hands on to the one below (four classes in
+/// turn), so the sets of tests the ways are behind grow past `WITNESS_LIMIT`, the most kept per
+/// effect, and a chain past the per-way length drops its tests.
+#[test]
+fn witness_ways_behind_isinstance_tests_stay_bounded_down_a_long_chain() {
+    let shape = |n: usize| {
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class A:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class B:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class C:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class D:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "def h0(x):".to_owned(),
+            "    time.sleep(1)".to_owned(),
+        ];
+        for k in 1..n {
+            let class = ["A", "B", "C", "D"][k % 4];
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def h{k}(x):"),
+                format!("    if isinstance(x, {class}):"),
+                format!("        return h{}(x)", k - 1),
+                format!("    return h{}(x)", k - 1),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "async def top():".to_owned(),
+            format!("    h{}(A())", n - 1),
+        ]);
+        let p = Project::new(&format!("bounds_witness_ways_{n}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(2000, shape);
+    assert_eq!(
+        eff101_callers(&found),
+        [("top".to_owned(), "heuristic".to_owned())]
+    );
+}
+
 /// The values constructions bind to the read-only container fields of a frozen class
 /// (`ModuleDecls::field_values`): `n` functions, each making an instance of a frozen dataclass of
 /// eight fields with a read-only view in each, and replacing one; a function in another module

@@ -973,6 +973,12 @@ const WIT_FETCH_REMOTE: &str =
     "from pkg.wit_repo import Remote\n\n\ndef fetch(r: Remote, key):\n    return r.get(key)\n";
 const WIT_MID: &str =
     "from pkg.wit_fetch import fetch\n\n\ndef load(r):\n    return fetch(r, \"k\")\n";
+const WSEL_KINDS: &str = "class Request:\n    pass\n\n\nclass Response:\n    pass\n";
+const WSEL_KINDS_PROTOCOL: &str = "from typing import Protocol, runtime_checkable\n\n\nclass Request:\n    pass\n\n\n@runtime_checkable\nclass Response(Protocol):\n    def render(self) -> str: ...\n";
+const WSEL_RENDER: &str = "import time\n\nfrom pkg.wsel_kinds import Response\n\n\ndef wait(item):\n    time.sleep(1)\n\n\ndef request_segments(item):\n    wait(item)\n\n\ndef response_segments(item):\n    time.sleep(1)\n\n\ndef append(item):\n    if isinstance(item, Response):\n        return response_segments(item)\n    return request_segments(item)\n";
+const WSEL_RETRY: &str = "import time\n\n\ndef retry(send):\n    try:\n        send()\n        time.sleep(0.1)\n    except OSError:\n        time.sleep(1)\n";
+const WSEL_RETRY_IN_HANDLER: &str = "import time\n\n\ndef retry(send):\n    try:\n        send()\n    except OSError:\n        time.sleep(1)\n";
+const WSEL_SERVE: &str = "from pkg.wsel_kinds import Request\nfrom pkg.wsel_render import append\nfrom pkg.wsel_retry import retry\n\n\nasync def compact():\n    append(Request())\n\n\nasync def send():\n    retry(print)\n";
 const WIT_SERVE: &str = "from pkg.wit_mid import load\nfrom pkg.wit_repo import Repo\n\n\nasync def serve(r: Repo):\n    load(r)\n";
 
 // Queue capacities (a heuristic `EFF101` on `queue.Queue.put`, a wait on another thread): a queue one module builds and another
@@ -1442,6 +1448,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/wit_fetch.py", WIT_FETCH),
         ("pkg/wit_mid.py", WIT_MID),
         ("pkg/wit_serve.py", WIT_SERVE),
+        ("pkg/wsel_kinds.py", WSEL_KINDS),
+        ("pkg/wsel_render.py", WSEL_RENDER),
+        ("pkg/wsel_retry.py", WSEL_RETRY),
+        ("pkg/wsel_serve.py", WSEL_SERVE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -2735,6 +2745,35 @@ fn steps_helper_witnesses() -> Vec<Step> {
         )
         .present(&[("pkg/wit_serve.py", "EFF101")])
         .absent(&[("pkg/wit_serve.py", "EFF101 [heuristic]")]),
+    ]
+}
+
+/// The chain a report shows when another module changes what it is chosen by: the class an
+/// `isinstance` dispatch names turns into a protocol (an exact instance of another class no
+/// longer rules out its branch) and back, and the normal path of a helper stops reaching the
+/// effect (the handler's call is the witness) and reaches it again.
+fn steps_witness_ways() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the dispatch class becomes a protocol",
+            vec![save("pkg/wsel_kinds.py", WSEL_KINDS_PROTOCOL)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "it is a plain class again",
+            vec![save("pkg/wsel_kinds.py", WSEL_KINDS)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the helper waits only in its handler",
+            vec![save("pkg/wsel_retry.py", WSEL_RETRY_IN_HANDLER)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "it waits on the normal path again",
+            vec![save("pkg/wsel_retry.py", WSEL_RETRY)],
+        )
+        .present(&[("pkg/wsel_serve.py", "EFF101 [heuristic]")]),
     ]
 }
 
@@ -8430,6 +8469,7 @@ sessions!(editing, Session::start, {
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,
+    witness_ways: steps_witness_ways,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,
     exact_instances: steps_exact_instances,

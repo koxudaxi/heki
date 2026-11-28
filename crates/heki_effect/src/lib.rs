@@ -61,6 +61,7 @@ pub mod resolver;
 mod scc;
 mod summary;
 pub mod types;
+mod witness;
 
 pub use cache_flow::{
     CacheEvent, CacheFlow, FlowBlock, InPlaceChange, KeptRemoval, SelfAttrWrite, attr_writes,
@@ -250,6 +251,25 @@ pub struct Provided {
 
 /// [`EffectSummary::provided_effects`].
 pub type ProvidedEffects = BTreeMap<ExecEffectKind, Vec<Provided>>;
+
+/// One way a function reaches an execution effect, kept for the chain a report shows
+/// ([`EffectSummary::witness_ways`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessWay {
+    /// The `isinstance` tests of the function's parameters the way's calls are behind, sorted:
+    /// a call whose arguments decide one against the way does not take it.
+    pub needs: Vec<InputGuard>,
+    /// A call on the chain is in an `except` handler or a `finally` body: the way is cleanup
+    /// after an error, not the work the function does.
+    pub cleanup: bool,
+    pub chain: SharedChain,
+}
+
+/// [`EffectSummary::witness_ways`].
+pub type WitnessWays = BTreeMap<ExecEffectKind, Vec<WitnessWay>>;
+
+/// Most ways one execution effect keeps for its witness ([`EffectSummary::witness_ways`]).
+pub const WITNESS_LIMIT: usize = 8;
 
 /// Most ways one execution effect is kept as reached only through subclasses' implementations
 /// ([`EffectSummary::provided_effects`]), and most calls on the chain of one way: past either,
@@ -1170,8 +1190,18 @@ pub struct EffectSummary {
     // Family 2: Execution Effect
     pub direct_exec_effects: BTreeSet<ExecEffectKind>,
     pub transitive_exec_effects: BTreeSet<ExecEffectKind>,
-    /// Shortest known call chain reaching each effect (direct or transitive).
+    /// The call chain a report shows for each effect (direct or transitive) when it knows
+    /// nothing of the arguments: one on the normal path before one through cleanup code, then
+    /// the shortest, the first found among equals ([`Self::witness_ways`]).
     pub exec_chains: BTreeMap<ExecEffectKind, SharedChain>,
+    /// The ways to an effect a call may choose its witness among, kept only when the chain of
+    /// [`Self::exec_chains`] alone does not tell: some way is behind `isinstance` tests of the
+    /// parameters (`if isinstance(item, Response): ...`), or the kept chain runs through cleanup
+    /// code. Per effect, the best chain of each set of tests (the empty set included); a way
+    /// with no more tests and no worse chain than another leaves no room for it. A call whose
+    /// arguments decide a test against a way takes another one (`witness::ways_at_call`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_ways: Option<Box<WitnessWays>>,
     /// The execution effects reached only through implementations that subclasses of a
     /// parameter's class give a call on the parameter (a mixin method's
     /// `self.execute_command()`, `helper(notes: Notes)` calling `notes.preview()`): per effect,
@@ -1579,8 +1609,8 @@ pub enum GuardTest {
     Truthy,
     /// `if x is None:` (`x == None`).
     IsNone,
-    /// `isinstance(x, C)` / `isinstance(x, (C, D))`: the fully qualified classes, sorted.
-    IsInstance(Vec<String>),
+    /// `isinstance(x, C)` / `isinstance(x, (C, D))`.
+    IsInstance(InstanceTest),
     /// `hasattr(x, "name")` with a string literal.
     HasAttr(String),
     /// What the catalog says a call the function makes with the value does ([`ValueTest`]).
@@ -1595,6 +1625,18 @@ impl GuardTest {
             _ => None,
         }
     }
+}
+
+/// The classes an `isinstance` test names ([`GuardTest::IsInstance`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct InstanceTest {
+    /// The fully qualified classes, sorted.
+    pub classes: Vec<String>,
+    /// Every class is a project class whose MRO holds only project classes and `object` and
+    /// names no metaclass: an object is an instance of one exactly when one is on its class's
+    /// MRO (no ABC registration, protocol, or `__instancecheck__` answers otherwise), so an
+    /// instance of exactly a class without them on its MRO fails the test.
+    pub nominal: bool,
 }
 
 /// A test of a value by the catalog's facts on a call made with it, for one effect of that
@@ -1925,6 +1967,12 @@ impl EffectSummary {
         self.direct_exec_effects.retain(|e| !hidden.contains(e));
         self.transitive_exec_effects.retain(|e| !hidden.contains(e));
         self.exec_chains.retain(|e, _| !hidden.contains(e));
+        if let Some(w) = &mut self.witness_ways {
+            w.retain(|e, _| !hidden.contains(e));
+            if w.is_empty() {
+                self.witness_ways = None;
+            }
+        }
         if let Some(r) = &mut self.provided_effects {
             r.retain(|e, _| !hidden.contains(e));
             if r.is_empty() {
@@ -1967,6 +2015,14 @@ impl EffectSummary {
             .flatten()
         {
             zero_hop_spans(&mut provided.chain);
+        }
+        for way in out
+            .witness_ways
+            .iter_mut()
+            .flat_map(|w| w.values_mut())
+            .flatten()
+        {
+            zero_hop_spans(&mut way.chain);
         }
         out.typed_field_write_sites = out
             .typed_field_write_sites
@@ -2362,11 +2418,16 @@ pub struct ArgOrigin {
     pub retyped: bool,
     /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
     pub fresh: bool,
-    /// The class the argument is exactly an instance of, never a subclass's: the caller
-    /// constructs it by calling the class by name (`resolver::Val::Inst`), or it is the object a
-    /// construction of the class named so binds to its `__init__`.
+    /// The class the caller types the argument with (`resolver::Val::Inst`: a construction, a
+    /// call's annotated result, a copy), with its MRO: the argument is an instance of it or of a
+    /// subclass. `None` for the caller's parameter passed as itself, whose callers decide.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exact: Option<SharedLine>,
+    pub class: Option<SharedLine>,
+    /// The argument is an instance of exactly [`Self::class`], never a subclass's: the caller
+    /// constructs it by calling the class by name, or it is the object a construction of the
+    /// class named so binds to its `__init__`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
     /// Where the argument comes from among the objects that existed before the call (`MUT208`;
     /// only computed when an `invalidation` contract is configured).
     pub reach: Reach,
@@ -2615,6 +2676,11 @@ pub struct CallSite {
     /// Whether the caller has made the call whenever it returns normally (computed when an
     /// enabled rule reads [`EffectSummary::must_exec`]).
     pub on_every_return: OnEveryReturn,
+    /// The call is in an `except` handler (reached only through an exception edge) or a
+    /// `finally` body: cleanup code, a witness only where no call on the normal path reaches
+    /// the effect ([`EffectSummary::witness_ways`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup: bool,
     /// For a site of the object a call returns (where it is iterated, returned, handed to a
     /// project call, or awaited): the span of that call. `None` for a call's own site.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -673,9 +673,8 @@ impl ParamCapacities {
             for &e in &w.wait.effects {
                 let had = !s.direct_exec_effects.insert(e);
                 guards::add_occurrence(&mut s.exec_guards, e, had, &w.guards);
-                s.exec_chains
-                    .entry(e)
-                    .or_insert_with(|| vec![Arc::new(w.hop.clone())]);
+                let needs = crate::witness::needs_of(&w.guards.inputs);
+                s.add_way(e, needs, false, vec![Arc::new(w.hop.clone())], false);
             }
         }
     }

@@ -38,6 +38,7 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::types::{Held, Ty};
+use crate::witness;
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
     CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
@@ -442,9 +443,7 @@ fn absorb_class_body(
     into.direct_exec_effects.extend(body.direct_exec_effects);
     into.transitive_exec_effects
         .extend(body.transitive_exec_effects);
-    for (k, chain) in body.exec_chains {
-        into.exec_chains.entry(k).or_insert(chain);
-    }
+    into.add_ways_of(&body.exec_chains, body.witness_ways.as_deref());
     into.typed_field_write_sites
         .extend(body.typed_field_write_sites);
     into.typed_field_read_sites
@@ -583,9 +582,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
     into.direct_exec_effects.extend(other.direct_exec_effects);
     into.transitive_exec_effects
         .extend(other.transitive_exec_effects);
-    for (k, chain) in other.exec_chains {
-        into.exec_chains.entry(k).or_insert(chain);
-    }
+    into.add_ways_of(&other.exec_chains, other.witness_ways.as_deref());
     into.must_exec = Some(Box::new(MustExec::of_name_bound_twice()));
     into.mutates_params |= other.mutates_params;
     // Typed only where both definitions type it.
@@ -989,6 +986,8 @@ struct Extractor<'a> {
     returned: FxHashMap<VarId, ReturnStep>,
     /// Position (block, instruction index) of the instruction being visited.
     pos: (BlockId, usize),
+    /// The blocks the entry reaches without an exception edge (`Self::in_cleanup`).
+    normal_blocks: OnceCell<Vec<bool>>,
     /// The class line of the method's own class (`Self::own_line`).
     own_line: OnceCell<Option<SharedLine>>,
     /// How many lambdas the function makes (`Self::shares_its_name`).
@@ -1443,6 +1442,7 @@ impl<'a> Extractor<'a> {
             contracts,
             returned: FxHashMap::default(),
             pos: (BlockId(0), 0),
+            normal_blocks: OnceCell::new(),
             events: contracts
                 .filter(|c| c.invalidations() > 0)
                 .map(|_| Events::default()),
@@ -2934,10 +2934,18 @@ impl<'a> Extractor<'a> {
     }
 
     /// The class line of the class `var` is exactly an instance of ([`ArgOrigin::exact`]).
-    fn exact_line(&self, var: VarId) -> Option<SharedLine> {
-        match self.val(var)? {
-            Val::Inst(class, true) => Some(self.cx.project.lineage(class, false)),
-            _ => None,
+    /// The class `var` is an instance of, with whether it is exactly that class
+    /// ([`ArgOrigin::class`], [`ArgOrigin::exact`]).
+    ///
+    /// A parameter passed as itself has no class here: a test of it is its callers' to decide,
+    /// and the call sites stay those of the function whatever its annotations say.
+    fn class_line(&self, var: VarId) -> (Option<SharedLine>, bool) {
+        if matches!(self.param_alias.get(&var), Some((_, None))) {
+            return (None, false);
+        }
+        match self.val(var) {
+            Some(Val::Inst(class, exact)) => (Some(self.cx.project.lineage(class, false)), *exact),
+            _ => (None, false),
         }
     }
 
@@ -2955,6 +2963,7 @@ impl<'a> Extractor<'a> {
     }
 
     fn origin(&self, var: VarId) -> ArgOrigin {
+        let (class, exact) = self.class_line(var);
         let field = self.obj_attr_alias.get(&var);
         let typed_field = field
             .filter(|a| a.classes.len() == 1)
@@ -2984,7 +2993,8 @@ impl<'a> Extractor<'a> {
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             retyped: self.retyped.contains(&var),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
-            exact: self.exact_line(var),
+            class,
+            exact,
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
@@ -4234,6 +4244,7 @@ impl<'a> Extractor<'a> {
             on_every_return: OnEveryReturn::default(),
             made_by: None,
             module_member: None,
+            cleanup: self.in_cleanup(self.pos.0, span),
         }
     }
 
@@ -7172,6 +7183,31 @@ impl<'a> Extractor<'a> {
         self.container_mut(recv, method, true, None, item_key, span);
     }
 
+    /// Whether code in block `bb` at `span` is cleanup code: in an `except` handler (the block
+    /// is reached only through an exception edge) or in a `finally` body.
+    fn in_cleanup(&self, bb: BlockId, span: Span) -> bool {
+        let normal = self.normal_blocks.get_or_init(|| {
+            let mut seen = vec![false; self.f.blocks.len()];
+            let budget = Budget::of_function("summary::cleanup_blocks", self.f);
+            // One step per block: the function's budget holds them all.
+            let _ = heki_ir::walk::reach(
+                &budget,
+                [BlockId(0)],
+                |b, next| next.extend(self.f.block(b).terminator.successors()),
+                |b| {
+                    if let Some(slot) = seen.get_mut(b.0 as usize) {
+                        *slot = true;
+                    }
+                    heki_ir::walk::Visit::<()>::Expand
+                },
+            );
+            seen
+        });
+        !normal.get(bb.0 as usize).copied().unwrap_or(true)
+            || (self.f.finally_bodies.iter())
+                .any(|body| body.start <= span.start && span.end <= body.end)
+    }
+
     fn hop(&self, callee: String, span: Span) -> CallHop {
         CallHop {
             caller: self.key.clone(),
@@ -7570,6 +7606,7 @@ impl<'a> Extractor<'a> {
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
                         module_member: None,
+                        cleanup: self.in_cleanup(bb, call.span),
                     });
                 }
                 if self.opt_in.unawaited_handoffs {
@@ -7651,6 +7688,7 @@ impl<'a> Extractor<'a> {
                         let receiver = if decl.is_classmethod {
                             ArgOrigin::default()
                         } else if let Some(new) = new_recv {
+                            let made = call.dst.map_or((None, false), |made| self.class_line(made));
                             ArgOrigin {
                                 new_object: if new {
                                     NewArg::New {
@@ -7660,7 +7698,8 @@ impl<'a> Extractor<'a> {
                                 } else {
                                     NewArg::Old
                                 },
-                                exact: call.dst.and_then(|made| self.exact_line(made)),
+                                class: made.0,
+                                exact: made.1,
                                 ..ArgOrigin::default()
                             }
                         } else {
@@ -8446,6 +8485,7 @@ impl<'a> Extractor<'a> {
             on_every_return,
             made_by: None,
             module_member: None,
+            cleanup: self.in_cleanup(bb, span),
         }
     }
 
@@ -9079,7 +9119,9 @@ impl<'a> Extractor<'a> {
             let had = !self.summary.direct_exec_effects.insert(*e);
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &guards);
             let chain = vec![Arc::new(self.hop(api.clone(), span))];
-            self.summary.exec_chains.insert(*e, chain);
+            let needs = witness::needs_of(&guards.inputs);
+            let cleanup = self.in_cleanup(bb, span);
+            self.summary.add_way(*e, needs, cleanup, chain, true);
         }
         for w in while_full.iter().filter(|_| own_param.is_none()) {
             for e in &w.effects {
@@ -9286,7 +9328,7 @@ impl<'a> Extractor<'a> {
                 &crate::EffectGuards::default(),
             );
             let chain = vec![Arc::new(self.hop(fqn.clone(), self.f.span))];
-            self.summary.exec_chains.insert(e, chain);
+            self.summary.add_way(e, Vec::new(), false, chain, true);
         }
         if let Some(k) = entry.offloads_blocking_arg {
             let bound_first =
@@ -9787,6 +9829,7 @@ fn role_site(
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
         module_member: None,
+        cleanup: site.cleanup,
     }
 }
 
