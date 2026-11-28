@@ -321,7 +321,8 @@ fn output_formats_and_config_selection() {
             "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"src/pkg/legacy.py\" = [\"EFF\"] }\n\n[tool.heki.lint.severity]\nEFF101 = \"error\"\n",
         );
     // The message is one sentence; the help is a line of its own in `full`, a field in JSON,
-    // the result's `properties.help` in SARIF, and left out of `concise` and `github`.
+    // the result's `properties.help` in SARIF, and left out of `concise` and `github`. `github` lists the
+    // related locations after the message.
     let message = "`handler` runs the waiting call `time.sleep` on the event loop";
     let help = "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`";
     let (code, stdout, _) = p.heki(&["--output-format", "github"]);
@@ -329,7 +330,7 @@ fn output_formats_and_config_selection() {
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
+            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}%0Arelated: src/pkg/api.py:4:5: `handler` calls `time.sleep`"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
@@ -1268,6 +1269,65 @@ fn sites(stdout: &str) -> Vec<&str> {
         .lines()
         .map(|l| l.split_once(": ").map_or(l, |(site, _)| site))
         .collect()
+}
+
+const CHAIN_API: &str = "from app.service import load_user\n\n\nasync def get_user(user_id: int) -> dict[str, str]:\n    return load_user(user_id)\n";
+const CHAIN_SERVICE: &str = "from app.users import fetch_name\n\n\ndef load_user(user_id: int) -> dict[str, str]:\n    return {\"id\": str(user_id), \"name\": fetch_name(user_id)}\n";
+const CHAIN_USERS: &str = "import requests\n\n\ndef fetch_name(user_id: int) -> str:\n    return requests.get(f\"https://fixture.example/users/{user_id}\", timeout=5).text\n";
+const CHAIN_USERS_PURE: &str = "def fetch_name(user_id: int) -> str:\n    return str(user_id)\n";
+
+fn chain_project(name: &str, users: &str) -> Project {
+    let p = Project::new(name);
+    p.write("app/__init__.py", "")
+        .write("app/api.py", CHAIN_API)
+        .write("app/service.py", CHAIN_SERVICE)
+        .write("app/users.py", users);
+    p
+}
+
+#[test]
+fn github_annotation_lists_the_related_locations_of_a_touched_chain() {
+    let github = |p: &Project, touched: &str| {
+        p.heki(&[
+            "app",
+            "--select",
+            "EFF101",
+            "--output-format",
+            "github",
+            "--touched",
+            touched,
+        ])
+    };
+    let p = chain_project("github_related", CHAIN_USERS);
+    let (code, stdout, stderr) = github(&p, "app/users.py");
+    assert_eq!(code, 1, "{stderr}");
+    let commands: Vec<&str> = stdout.lines().filter(|l| l.starts_with("::")).collect();
+    assert_eq!(commands.len(), 1, "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let (head, body) = commands[0]
+        .split_once("::")
+        .unwrap()
+        .1
+        .split_once("::")
+        .unwrap();
+    assert!(
+        head.starts_with("error file=app/api.py,line=5,col=12,"),
+        "{head}"
+    );
+    let body = body.replace("%0A", "\n");
+    let related: Vec<&str> = body.lines().skip(1).collect();
+    assert_eq!(related.len(), 3, "{body}");
+    assert!(related[0].starts_with("related: app/api.py:"), "{body}");
+    assert!(related[1].starts_with("related: app/service.py:"), "{body}");
+    assert!(related[2].starts_with("related: app/users.py:"), "{body}");
+    assert!(related[2].contains("requests.get"), "{body}");
+
+    let pure = chain_project("github_related_pure", CHAIN_USERS_PURE);
+    let (code, stdout, stderr) = github(&pure, "app/users.py");
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
+
+    let (code, stdout, stderr) = github(&p, "app/__init__.py");
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
 }
 
 #[test]

@@ -677,6 +677,17 @@ fn render_github(diags: &[Diagnostic]) -> String {
     let mut out = String::new();
     for d in diags {
         let label = d.certainty.label().map(|l| format!(" ({l})"));
+        let mut body = d.message.clone();
+        for r in &d.related {
+            let _ = write!(
+                body,
+                "\nrelated: {}:{}:{}: {}",
+                path_text(&r.path),
+                r.line,
+                r.column,
+                r.message
+            );
+        }
         let _ = writeln!(
             out,
             "::{} file={},line={},col={},title={}::{}",
@@ -688,7 +699,7 @@ fn render_github(diags: &[Diagnostic]) -> String {
                 &format!("heki {}{}", d.rule_code, label.unwrap_or_default()),
                 true
             ),
-            gh_escape(&d.message, false)
+            gh_escape(&body, false)
         );
     }
     out
@@ -1826,6 +1837,49 @@ mod tests {
     }
 
     #[test]
+    fn github_body_lists_related_locations_on_one_command_line() {
+        let mut d = diag(2, "EFF101", "calls `f`");
+        d.related = vec![
+            RelatedLocation {
+                path: PathBuf::from("src/b\r\n::error::x.py"),
+                line: 3,
+                column: 1,
+                span: Span { start: 0, end: 0 },
+                message: "100% a\r\n::error file=z::forged".into(),
+            },
+            RelatedLocation {
+                path: PathBuf::from("src/c.py"),
+                line: 4,
+                column: 2,
+                span: Span { start: 0, end: 0 },
+                message: "then `g`".into(),
+            },
+        ];
+        let none = |_: &Path, _: u32| None;
+        let out = render(&[d], &[], OutputFormat::Github, &Stylesheet::plain(), &none);
+        assert_eq!(
+            out,
+            "::error file=src/a.py,line=2,col=5,title=heki EFF101::calls `f`\
+             %0Arelated: src/b%0D%0A::error::x.py:3:1: 100%25 a%0D%0A::error file=z::forged\
+             %0Arelated: src/c.py:4:2: then `g`\n"
+        );
+        assert_eq!(out.lines().count(), 1);
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn github_without_related_entries_prints_the_message_alone() {
+        let mut d = diag(2, "EFF101", "a: b, c");
+        d.related.clear();
+        d.path = PathBuf::from("src/x,y:z.py");
+        let none = |_: &Path, _: u32| None;
+        assert_eq!(
+            render(&[d], &[], OutputFormat::Github, &Stylesheet::plain(), &none),
+            "::error file=src/x%2Cy%3Az.py,line=2,col=5,title=heki EFF101::a: b, c\n"
+        );
+    }
+
+    #[test]
     fn formats_render_every_style() {
         let mut diags = vec![diag(2, "MUT201", "write, outside: owners\nsecond")];
         diags[0].help = Some("use the store".into());
@@ -1856,7 +1910,7 @@ mod tests {
                 &Stylesheet::plain(),
                 &line
             ),
-            "::error file=src/a.py,line=2,col=5,title=heki MUT201::write, outside: owners%0Asecond\n"
+            "::error file=src/a.py,line=2,col=5,title=heki MUT201::write, outside: owners%0Asecond%0Arelated: src/b.py:3:1: calls helper\n"
         );
         let json: Vec<Diagnostic> = serde_json::from_str(&render(
             &diags,
