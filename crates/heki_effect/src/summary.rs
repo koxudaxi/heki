@@ -35,7 +35,7 @@ use crate::readonly::{
 use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
     self, Callee, Constructor, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
-    is_generator_function, self_aliases,
+    is_generator_function, is_overload, self_aliases,
 };
 use crate::types::{Held, Ty};
 use crate::witness;
@@ -494,11 +494,6 @@ fn add_state_changes(into: &mut EffectSummary, other: Option<&SharedStateFacts>)
         f.changed.extend(other.changed.iter().cloned());
         f.handed.extend(other.handed.iter().cloned());
     });
-}
-
-/// A `@typing.overload` signature.
-fn is_overload(f: &IrFunction) -> bool {
-    f.has_decorator(&["overload"])
 }
 
 /// Building by pushes leaves spare capacity in the call-site containers, and a file's summary
@@ -7320,8 +7315,9 @@ impl<'a> Extractor<'a> {
 
     /// [`Self::call`] for a `Call` / `MethodCall` instruction at `(bb, index)`, or a property
     /// read, of the method or attribute `name` or the value whose source text `name` is: its
-    /// callee is kept for the iteration flow, and a project call is remembered for the sites of
-    /// the object it returns.
+    /// callee, past the targets the call cannot take ([`Self::callable_targets`]), is kept for
+    /// the iteration flow, and a project call is remembered for the sites of the object it
+    /// returns.
     fn call_inst(
         &mut self,
         (bb, index): (BlockId, usize),
@@ -7329,6 +7325,7 @@ impl<'a> Extractor<'a> {
         callee: Callee,
         call: &Call<'_>,
     ) {
+        let callee = self.callable_targets(callee, call);
         if self.opt_in.blind_spots {
             self.note_blind(bb, name, &callee, call);
         }

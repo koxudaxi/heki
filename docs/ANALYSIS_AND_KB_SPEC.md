@@ -378,6 +378,19 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` or `__post_init__`, and module globals the module body binds, each the join of what every store of it binds | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` (a class with `typing.Protocol` or `typing_extensions.Protocol` among its bases, also through a project module re-exporting it: `ProjectDecls::is_protocol`) dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
+A call with several candidates (Priority 4, the members of a union, the objects a value may be)
+follows only those its arguments can bind (`Extractor::callable_targets`, before the call's site,
+its blind spots, and the callees the function's own analyses read): a function the call raises
+`TypeError` for instead of running (`Bindings::raises`, section 2.2) runs nothing there. A function
+is judged by its declaration only when it is called as defined (no decorator that may replace it)
+and no other definition of its name, past `typing.overload` signatures, takes other parameters or
+is decorated otherwise (`FunctionDecl::definitions_differ`: which one runs depends on the path that
+bound the name). A construction keeps its `__init__` candidates, since a metaclass's `__call__`
+may pass them other arguments, and a call no candidate can take keeps them all. A callable handed
+to a library that calls it (`map`, a worker) keeps every candidate: what the library passes is the
+catalog's model. `CHA_CANDIDATE_LIMIT` and the protocol listing count the candidates before the
+selection.
+
 A module global the module body binds to a value of known type, and an instance attribute
 `__init__` or `__post_init__` binds to one through `self`, have the join of what every store of
 the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`,
@@ -1425,7 +1438,8 @@ unresolved. A callee the call raises `TypeError` for instead of running
 (`Bindings::raises`: two keywords of one name, a parameter bound twice, a keyword without
 `**kwargs`, a position past the parameters without `*args`, a parameter without a default left
 unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
-`required_keyword_only` in the work of the call's arguments) is passed nothing. The constants are
+`required_keyword_only` in the work of the call's arguments) is passed nothing, and one of several
+candidates is not followed (section 2.1). The constants are
 literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean constants
 (`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
 `TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the

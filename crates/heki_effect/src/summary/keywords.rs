@@ -1,12 +1,13 @@
 //! The keywords a call passes by name, and the constants it passes for the parameters an
 //! argument list names (`CallSite::arguments`): written, or the entries of a mapping the function
 //! builds and unpacks with `**` (a dict display, a merge of displays, `dict(...)`, `a | b`, or
-//! one of several on different paths), and the field values a library API builds its receiver's
-//! class from (`EcosystemEntry::builds_receiver`).
+//! one of several on different paths), the field values a library API builds its receiver's
+//! class from (`EcosystemEntry::builds_receiver`), and the targets of a call its arguments can
+//! bind.
 
 use super::{Bindings, Call, Extractor};
 use crate::resolver::{self, Callee, FunctionDecl, Val};
-use crate::{ArgValue, ArgumentValues};
+use crate::{ArgValue, ArgumentValues, FuncKey};
 use heki_ir::walk::{Answer, Def, Facts, Join, Sparse, Use, Visit, fixpoint, reach};
 use heki_ir::{BinOpKind, DictEntry, InstKind, VarId};
 use heki_kb::FieldValues;
@@ -319,6 +320,44 @@ impl<'a> Extractor<'a> {
         offset: usize,
     ) -> Bindings<'c> {
         self.bind(call, decl, offset, self.passed_keywords(call))
+    }
+
+    /// The targets of `call` (`callee`, which it resolves to) without the project functions the
+    /// call raises `TypeError` for instead of running ([`Bindings::raises`]): such a function
+    /// runs nothing there. A function is judged by its declaration only when that lists the
+    /// parameters every call of it binds: it is called as defined, no other definition of the
+    /// name differs ([`FunctionDecl::definitions_differ`]), and it is no `__init__`, which a
+    /// construction passes what the metaclass's `__call__` passes. A call no target can take
+    /// keeps them all: what it resolves to is then all heki has of what it runs.
+    pub(super) fn callable_targets(&self, callee: Callee, call: &Call<'_>) -> Callee {
+        let Callee::Project(keys, binds_recv) = callee else {
+            return callee;
+        };
+        // One target is kept whether or not the call can take it.
+        if keys.len() < 2 {
+            return Callee::Project(keys, binds_recv);
+        }
+        let passed = self.passed_keywords(call);
+        let takes = |key: &FuncKey| {
+            self.cx.project.function_decl(key).is_none_or(|decl| {
+                let offset = usize::from(binds_recv && !decl.is_staticmethod);
+                let judged = decl.called_as_defined
+                    && !decl.definitions_differ
+                    && key.qualname.rsplit('.').next() != Some("__init__");
+                if !judged {
+                    return true;
+                }
+                let bindings = self.bind(call, decl, offset, passed.clone());
+                !bindings.raises(decl, offset)
+            })
+        };
+        let kept: Vec<bool> = keys.iter().map(takes).collect();
+        if kept.iter().all(|&k| k) || !kept.contains(&true) {
+            return Callee::Project(keys, binds_recv);
+        }
+        let mut kept = kept.into_iter();
+        let keys = keys.into_iter().filter(|_| kept.next() == Some(true));
+        Callee::Project(keys.collect(), binds_recv)
     }
 
     /// [`Self::bindings`] with the keywords `passed`.
