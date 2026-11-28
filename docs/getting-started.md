@@ -118,6 +118,34 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` alwa
 `heki rule EFF101` explains the rule, its exclusions, and what to do instead. The
 [rules reference](rules/index.md) has the same text for every rule.
 
+## Look at one function
+
+`heki inspect` (experimental) answers "what does this function do, and who depends on it?" for
+one function. It needs no configuration. Name the function as `module.Class.method`, a suffix
+such as `Cart.add`, or `path.py:LINE`:
+
+```text
+$ heki inspect app.store.Cart.add
+Cart.add  (app.store)
+  app/store.py:10-13  method
+  impure: effects, changes_self, changes_globals
+effects
+  blocking_net (called), 2 calls down, whenever it runs
+    store.py:13         Cart.notify
+    store.py:16         requests.post
+changes
+  self.items     directly
+  global _CACHE  directly: store.py:12
+callers   1
+  web.handle  web.py:7  (in a loop)
+reports   none
+```
+
+The sections are what it reaches (`effects`, with the chain of calls to each), what it changes,
+who calls it, and what `heki check` reports in it. `--callers --depth 3` follows the callers up,
+and `--output-format json` gives every field. [Coding agents](coding-agents.md#what-a-function-does-heki-inspect-experimental)
+lists them all.
+
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and

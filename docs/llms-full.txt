@@ -197,6 +197,8 @@ See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every ke
 in its instructions, but not a contract that `heki check` enforces:
 
 - List `heki.toml` and `heki-baseline.toml` in `CODEOWNERS`: moving a wall takes a review.
+- Run `heki check --report-suppressed <PATH>` in CI: it lists every inline `# heki: ignore` and `# noqa`
+  that silences a report, so a change that goes around a wall shows in review ([details](https://heki.koxudaxi.dev/adoption/#auditing-inline-suppressions)).
 - A contract's `message` starts the help line of its reports, so the agent reads it as the fix.
 - A [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code) sends a failing check back before
   the agent ends its turn.
@@ -454,6 +456,34 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` alwa
 
 `heki rule EFF101` explains the rule, its exclusions, and what to do instead. The
 [rules reference](https://heki.koxudaxi.dev/rules/) has the same text for every rule.
+
+## Look at one function
+
+`heki inspect` (experimental) answers "what does this function do, and who depends on it?" for
+one function. It needs no configuration. Name the function as `module.Class.method`, a suffix
+such as `Cart.add`, or `path.py:LINE`:
+
+```text
+$ heki inspect app.store.Cart.add
+Cart.add  (app.store)
+  app/store.py:10-13  method
+  impure: effects, changes_self, changes_globals
+effects
+  blocking_net (called), 2 calls down, whenever it runs
+    store.py:13         Cart.notify
+    store.py:16         requests.post
+changes
+  self.items     directly
+  global _CACHE  directly: store.py:12
+callers   1
+  web.handle  web.py:7  (in a loop)
+reports   none
+```
+
+The sections are what it reaches (`effects`, with the chain of calls to each), what it changes,
+who calls it, and what `heki check` reports in it. `--callers --depth 3` follows the callers up,
+and `--output-format json` gives every field. [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
+lists them all.
 
 ## Fix what heki can prove
 
@@ -2245,6 +2275,10 @@ Put the contracts and the baseline path in `heki.toml`, and give that file an ow
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
 
+CODEOWNERS protects the file, not the code around it. Run `heki check --report-suppressed <PATH>` in CI
+to list every inline `# heki: ignore` and `# noqa` that silences a report, so an agent cannot quietly
+go around a wall either ([review checklist](https://heki.koxudaxi.dev/coding-agents/#review-a-contract-change-from-an-agent)).
+
 ```text
 # .github/CODEOWNERS
 /heki.toml           @your-org/maintainers
@@ -2457,6 +2491,9 @@ baseline, the workflow, the hook, or the agent instructions is a change to a pro
 When a diagnostic or a question is about one function, `heki inspect` says what it reaches,
 changes, keeps, and returns, with the call chains, without reading its callees. Run it when a
 function's effects are in question, not before every edit.
+
+The text form is the one to read in a terminal; it needs no configuration. A sample is in
+[Getting Started](https://heki.koxudaxi.dev/getting-started/#look-at-one-function).
 
 ```console
 $ heki inspect app.users.load_user --output-format json
