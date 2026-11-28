@@ -13,6 +13,8 @@ import re
 
 EXACT_RULES = (
     "EFF101",
+    "EFF105",
+    "EFF102",
     "EFF103",
     "EFF109",
     "EFF116",
@@ -45,6 +47,8 @@ OPT_TYPE_RULES = {
 }
 CATALOG_ROOTS = (
     "time.",
+    "os.",
+    "pathlib.",
     "requests.",
     "sqlite3.",
     "socket.",
@@ -482,6 +486,9 @@ class Planner:
         claim["witnesses"] = witnesses(report)
         return True
 
+    def _eff105(self, claim, source, pos, report):
+        return self._eff101(claim, source, pos, report)
+
     def _eff109(self, claim, source, pos, report):
         self._site(claim, pos)
         return True
@@ -504,6 +511,9 @@ class Planner:
         claim["loop"] = self._loop(claim, source, loop)
         claim["witnesses"] = witnesses(report)
         return True
+
+    def _eff102(self, claim, source, pos, report):
+        return self._eff103(claim, source, pos, report)
 
     def _data101(self, claim, source, pos, report):
         loop = _choose_loop(source, pos, report["message"])

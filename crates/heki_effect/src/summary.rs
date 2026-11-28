@@ -1064,6 +1064,11 @@ struct Extractor<'a> {
     /// Per class body a `class` statement of the function runs, [`Self::must_run`] of that
     /// statement as a call of the body (filled with it).
     class_runs: FxHashMap<FunctionId, OnEveryReturn>,
+    /// The catalog calls with an effect they have on every call that returns, and only then
+    /// ([`ExecEffectKind::had_when_raised`]), that have not returned whenever the function
+    /// returns: several of them may have together ([`Self::must_through_one_of`]). Each with
+    /// the effect, the call's position, and its hop.
+    returned_calls: Vec<(ExecEffectKind, Position, Arc<CallHop>)>,
     /// [`KeyFacts`], built on first use.
     key_facts: OnceCell<KeyFacts<'a>>,
     /// The changes of checked containers of `self` the visit finds, recorded after it
@@ -1470,6 +1475,7 @@ impl<'a> Extractor<'a> {
             opt_in,
             must_run: FxHashMap::default(),
             class_runs: FxHashMap::default(),
+            returned_calls: Vec::new(),
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
             builtin_methods: FxHashMap::default(),
@@ -3233,6 +3239,7 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
+        self.must_through_one_of();
         if self.contracts.is_some_and(|c| c.import_probes()) {
             self.import_probes();
         }
@@ -8654,6 +8661,58 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The must-facts of the effects that only several of [`Self::returned_calls`] establish:
+    /// every path on which the function returns normally passes a return of one of its calls
+    /// with the effect (a handler that makes the client another way when the first constructor
+    /// raised). The chain goes through the first such call; with calls of more than one API,
+    /// the first call of each is a witness.
+    fn must_through_one_of(&mut self) {
+        let calls = std::mem::take(&mut self.returned_calls);
+        let has = |m: &MustExec, e: ExecEffectKind| m.never_returns || m.effects.get(&e).is_some();
+        let mut open: Vec<ExecEffectKind> = calls
+            .iter()
+            .map(|(e, ..)| *e)
+            .filter(|e| calls.iter().filter(|(k, ..)| k == e).nth(1).is_some())
+            .filter(|e| self.summary.must_exec.as_ref().is_none_or(|m| !has(m, *e)))
+            .collect();
+        open.sort_unstable();
+        open.dedup();
+        if open.is_empty() {
+            return;
+        }
+        let owner = "heki_effect::summary::Extractor::must_through_one_of";
+        let established: Vec<ExecEffectKind> =
+            crate::with_paths(self.cx, self.f, &self.types, owner, |paths, _| {
+                open.into_iter()
+                    .filter(|e| {
+                        let points: Vec<Position> = (calls.iter())
+                            .filter(|(k, ..)| k == e)
+                            .map(|(_, at, _)| *at)
+                            .collect();
+                        paths.on_every_return_passes_one_of(&points, Progress::Returned)
+                            == Answer::Known(true)
+                    })
+                    .collect()
+            });
+        for e in established {
+            let hops: Vec<&Arc<CallHop>> = (calls.iter())
+                .filter(|(k, ..)| *k == e)
+                .map(|(.., hop)| hop)
+                .collect();
+            let mut witnesses: Vec<Arc<CallHop>> = Vec::new();
+            for hop in &hops {
+                if witnesses.iter().all(|w| w.callee != hop.callee) {
+                    witnesses.push(Arc::clone(hop));
+                }
+            }
+            let facts = self.summary.must_exec.get_or_insert_with(Box::default);
+            facts.effects.insert(e, vec![Arc::clone(hops[0])]);
+            if witnesses.len() > 1 {
+                facts.alternatives.insert(e, witnesses);
+            }
+        }
+    }
+
     /// The thread locks the function holds, by its own acquisitions and releases: the facts of
     /// its callees are not known yet ([`guarded::LockPoints::of`]).
     fn thread_lock_points(&self) -> &guarded::LockPoints {
@@ -9163,15 +9222,22 @@ impl<'a> Extractor<'a> {
             unconditional,
         };
         let site = self.site(bb, target, is_awaited, span);
-        if let Some(hop) = hop.filter(|_| site.made_on_every_return()) {
-            let facts = self.summary.must_exec.get_or_insert_with(Box::default);
+        if let Some(hop) = hop {
             for e in must {
-                facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
+                if site.made_on_every_return(e) {
+                    let facts = self.summary.must_exec.get_or_insert_with(Box::default);
+                    facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
+                } else if site.progress_for(e) == Progress::Returned {
+                    self.returned_calls.push((e, self.pos, Arc::clone(&hop)));
+                }
             }
             for (e, param, test) in given {
-                facts
-                    .given
-                    .insert(e, vec![(param, test)], vec![Arc::clone(&hop)], Vec::new());
+                if site.made_on_every_return(e) {
+                    let facts = self.summary.must_exec.get_or_insert_with(Box::default);
+                    facts
+                        .given
+                        .insert(e, vec![(param, test)], vec![Arc::clone(&hop)], Vec::new());
+                }
             }
         }
         let queues = while_full.map(|w| {
@@ -9492,12 +9558,13 @@ const MAX_RECEIVER_CALLS: usize = 8;
 
 /// Whether a catalog call that does its effects as `emits` says has effect `e` on every call:
 /// a database effect only where it is done on every call, except that a SQLite connection that
-/// may be in memory sends its statements without waiting; nothing a configuration can switch
-/// off.
+/// may be in memory sends its statements without waiting; file system I/O only where the call
+/// cannot do its work without it; nothing a configuration can switch off.
 fn on_every_call(emits: heki_kb::Emits, e: ExecEffectKind) -> bool {
     match emits {
         heki_kb::Emits::Always => true,
         heki_kb::Emits::IfOnDisk => e != ExecEffectKind::BlockingDb,
+        heki_kb::Emits::MayAvoidTheFileSystem => e != ExecEffectKind::BlockingFs,
         heki_kb::Emits::UnlessConfiguredOtherwise => false,
         _ => !matches!(e, ExecEffectKind::BlockingDb | ExecEffectKind::DbQuery),
     }

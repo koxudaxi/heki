@@ -2823,13 +2823,23 @@ impl CallSite {
         self.role == SiteRole::Call && self.runner == Runner::Caller
     }
 
-    /// Whether the caller has made the call whenever it returns normally, as its must-facts
-    /// take it: a Layer 2 call also when it raised (its effect ran), a project call only when it
-    /// returned (a callee that raised may not have run its effect).
-    pub fn made_on_every_return(&self) -> bool {
+    /// How far the call has to get for the caller to have had its effect `e`: a Layer 2 call
+    /// once it was made where a raised call has had it ([`ExecEffectKind::had_when_raised`]),
+    /// any other call once it returned (a project callee that raised may not have run its
+    /// effect).
+    pub fn progress_for(&self, e: ExecEffectKind) -> heki_ir::Progress {
         match self.target {
-            CallTarget::Layer2 { .. } => self.on_every_return.called,
-            CallTarget::Project(_) => self.on_every_return.returned,
+            CallTarget::Layer2 { .. } if e.had_when_raised() => heki_ir::Progress::Called,
+            _ => heki_ir::Progress::Returned,
+        }
+    }
+
+    /// Whether the caller has had the call's effect `e` whenever it returns normally, as its
+    /// must-facts take it ([`Self::progress_for`]).
+    pub fn made_on_every_return(&self, e: ExecEffectKind) -> bool {
+        match self.progress_for(e) {
+            heki_ir::Progress::Called => self.on_every_return.called,
+            heki_ir::Progress::Returned => self.on_every_return.returned,
         }
     }
 

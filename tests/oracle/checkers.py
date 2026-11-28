@@ -10,8 +10,11 @@ The claims, as the rule pages state them:
 
 - `EFF101`: whenever the reported call returns, a waiting call has run during it, one the report
   names (a call that raised still ran).
+- `EFF105`: whenever the reported call returns, a call that touched the file system has run
+  during it, one the report names.
 - `EFF103`: every iteration of the loop that completes sends a database statement, one the report
   names.
+- `EFF102`: every iteration of the loop that completes makes a new client, one the report names.
 - `EFF109`: whenever the reported call runs, the function holds a lock, and the call attempts
   to take that lock again without returning first (the fakes record the blocking attempt on a
   lock the run holds, then end it); a call that returned normally without such an attempt
@@ -212,9 +215,68 @@ def _evaluable(expr, tree, line):
 
 
 # ---------------------------------------------------------------------------------------------
-# EFF103
+# EFF105
+# ---------------------------------------------------------------------------------------------
+def check_eff105(claim, runs, sources=None):
+    result = Result(claim)
+    named = set(claim.get("witnesses") or ())
+    for run in valid_runs(runs):
+        events = run["events"]
+        fakes = _of(events, "fake")
+        for call in _of(events, "call", claim["site"]):
+            if call[5] != "ok":
+                continue
+            result.checked += 1
+            inside = [f for f in _inside(fakes, call[3], call[4]) if f[3] == "fs"]
+            touched = [f for f in inside if f[4]]
+            if touched:
+                if named and not any(normalize_api(f[2]) in named for f in touched):
+                    result.refute(
+                        "witness",
+                        "Touches the file system: the file system call that ran is not the one named",
+                        run,
+                        {"named": sorted(named), "ran": [_brief(f) for f in touched]},
+                    )
+                continue
+            detail = {"ran": [_brief(f) for f in inside], "named": sorted(named)}
+            premise = (
+                "Touches the file system: the catalog call ran without the file system"
+                if inside
+                else "Every return / Every implementation: the call returned without a file system call"
+            )
+            result.refute("no-file-system", premise, run, detail)
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
+# EFF103 and EFF102
 # ---------------------------------------------------------------------------------------------
 def check_eff103(claim, runs, sources=None):
+    return _every_iteration_has(
+        claim,
+        runs,
+        kind="db_stmt",
+        refutation="no-statement",
+        premise="Sends",
+        what=("the statement sent", "a statement", "before sending"),
+    )
+
+
+def check_eff102(claim, runs, sources=None):
+    return _every_iteration_has(
+        claim,
+        runs,
+        kind="client",
+        refutation="no-client",
+        premise="Allocates",
+        what=("the client made", "a new client", "before making a client"),
+    )
+
+
+def _every_iteration_has(claim, runs, kind, refutation, premise, what):
+    """Every iteration of the claim's loop that completes runs a fake of `kind`, one the report
+    names; `what` words the refutations (the event, its absence, a raise before it)."""
+    event, absent, raised = what
     result = Result(claim)
     named = set(claim.get("witnesses") or ())
     for run in valid_runs(runs):
@@ -227,28 +289,26 @@ def check_eff103(claim, runs, sources=None):
             result.checked += 1
             start, end = it[4], it[5]
             inside = _inside(fakes, start, end)
-            statements = [f for f in inside if f[3] == "db_stmt"]
-            if statements:
-                if named and not any(normalize_api(f[2]) in named for f in statements):
+            done = [f for f in inside if f[3] == kind]
+            if done:
+                if named and not any(normalize_api(f[2]) in named for f in done):
                     result.refute(
                         "witness",
-                        "Sends: the statement sent is not the one named",
+                        f"{premise}: {event} is not the one named",
                         run,
-                        {"named": sorted(named), "ran": [_brief(f) for f in statements]},
+                        {"named": sorted(named), "ran": [_brief(f) for f in done]},
                     )
                 continue
             ran = [c for c in calls if start < c[3] < end]
             if not ran:
-                premise = "Every iteration: the reported call did not run on this iteration"
+                stated = "Every iteration: the reported call did not run on this iteration"
             elif any(c[5] == "ok" for c in ran):
-                premise = "Every return / Every implementation / Sends: the call returned without a statement"
+                stated = f"Every return / Every implementation / {premise}: the call returned without {absent}"
             else:
-                premise = (
-                    "Every iteration: the reported call raised before sending, and the iteration went on"
-                )
+                stated = f"Every iteration: the reported call raised {raised}, and the iteration went on"
             result.refute(
-                "no-statement",
-                premise,
+                refutation,
+                stated,
                 run,
                 {"ran": [_brief(f) for f in inside], "named": sorted(named), "calls": [c[5] for c in ran]},
             )
@@ -930,6 +990,8 @@ def _check_same_collection(result, run, traversals, exhausted):
 
 CHECKERS = {
     "EFF101": check_eff101,
+    "EFF105": check_eff105,
+    "EFF102": check_eff102,
     "EFF103": check_eff103,
     "EFF109": check_eff109,
     "EFF116": check_eff116,

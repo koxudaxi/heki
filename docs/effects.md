@@ -6,14 +6,15 @@ An effect is what a call does besides returning a value: it waits on the network
 
 ## 🔍 What runs without configuration
 
-Two rules are exact and run by default, and two more are exact by default and are described with the problems they belong to. Their reports show the call chain, and an error fails `heki check`.
+Three rules are exact and run by default, and two more are exact by default and are described with the problems they belong to. Their reports show the call chain, and an error fails `heki check`.
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF101`](rules/async-blocking-call.md) | a call in an `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop, however many helpers below | exact, default |
+| [`EFF102`](rules/loop-unpooled-client.md) | a loop over data whose every iteration makes an HTTP, database, or RPC client, or a sessionless request | exact, default |
 | [`EFF103`](rules/loop-db-query.md) | a loop over data whose every iteration sends a database statement | exact, default |
 
-`EFF103` also has heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration). They appear with `--heuristic`.
+`EFF102` and `EFF103` also have heuristic reports, where a premise of the claim is open (a loop that can make a client or run a query on every iteration). They appear with `--heuristic`.
 
 `EFF103` knows Django's model managers from the ecosystem catalog. `Model.objects`, read on a model class or on `cls`, is the `Manager` Django adds, or the manager the model's body declares (`objects = StreamManager()`, a project subclass of `models.Manager`). Its query methods (`get`, `count`, `create`, `get_or_create`, `update`, ...) send a statement on every call, so calling one per item of a loop over data is an exact, default `EFF103` report; `filter`, `exclude`, and `all` only build a `QuerySet`. A method the manager adds is followed as project code. Some managers keep the report heuristic (with `--heuristic`) or unknown:
 
@@ -24,13 +25,7 @@ Two rules are exact and run by default, and two more are exact by default and ar
 
 `EFF109` (a lock taken again while it is held) is under [Exclusive use and lock safety](#a-lock-taken-again-while-it-is-held), and `EFF116` (a generator that nothing iterates) is on [State Ownership and Mutation](ownership.md#a-generator-that-is-never-iterated). Both are exact and run by default.
 
-One more rule runs by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because it can be wrong about the code:
-
-| Rule | Reports | Tier |
-| --- | --- | --- |
-| [`EFF102`](rules/loop-unpooled-client.md) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
-
-Two more rules that run the same way are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](#resource-and-cancellation-lifetimes).
+Two rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code. They are about locks and cancellation: `EFF117` is under [Exclusive use and lock safety](#exclusive-use-and-lock-safety), and `EFF118` under [Resource and cancellation lifetimes](#resource-and-cancellation-lifetimes).
 
 The knowledge base names the calls that wait. Besides `requests` and `httpx.Client`, it lists the synchronous clients of Xinference (`xinference_client.RESTfulClient` and the handles of its models) and of Supabase and PostgREST (`supabase.Client`, `postgrest.SyncPostgrestClient`): building a table query, including through `.not_`, sends nothing, and `execute()` waits for the server, so `EFF101` and `EFF103` report it there. Tier: exact, default ([`EFF101`](rules/async-blocking-call.md), [`EFF103`](rules/loop-db-query.md)).
 
@@ -52,7 +47,7 @@ extend-select = ["EFF105", "EFF107"]
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
-| [`EFF105`](rules/async-blocking-fs.md) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
+| [`EFF105`](rules/async-blocking-fs.md) | a call in an `async def` that always runs blocking local file I/O on the event loop | exact, opt-in |
 | [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result bound to a local variable that is never awaited, returned, or stored; a call whose result is discarded is not reported | heuristic, opt-in |
 | [`EFF112`](rules/set-order-output.md) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
 | [`EFF114`](rules/recursion-error-as-value.md) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |

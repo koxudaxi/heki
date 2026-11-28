@@ -137,6 +137,7 @@ was checked by hand, with no false claim
 | What goes wrong | Rule |
 | --- | --- |
 | A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` |
+| A new HTTP, database, or RPC client (or a request without a session) on every iteration of a loop over data | `EFF102` |
 | A database statement on every iteration of a loop over data | `EFF103` |
 | A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | `EFF109` |
 | A call of a generator function whose generator nothing iterates, so its body never runs | `EFF116` |

@@ -47,7 +47,7 @@ def _raising_guard(sc):
 
 
 # ---------------------------------------------------------------------------------------------
-# EFF101 and EFF103: helpers down to a library call
+# EFF101, EFF105, EFF102, and EFF103: helpers down to a library call
 # ---------------------------------------------------------------------------------------------
 EVERY_RETURN_WAYS = ["early", "handler", "suppressed", "loop", "branch"]
 
@@ -197,6 +197,36 @@ def eff101(sc, strip):
     _add_inputs(sc, entry, lambda k: [])
 
 
+def _file_system_leaf(sc, strip):
+    sc.imports("import os")
+    if strip == "Touches the file system":
+        # No I/O on POSIX: the catalog marks it as a call that can work without the file system.
+        return ['v = os.path.isjunction("data_s0.txt")']
+    lines, imports = sc.pick(
+        [
+            (['v = os.path.isfile("data_s0.txt")'], []),
+            (['v = os.path.getsize("data_s0.txt")'], []),
+            (['v = pathlib.Path("data_s0.txt").read_text()'], ["import pathlib"]),
+        ]
+    )
+    for imp in imports:
+        sc.imports(imp)
+    return lines
+
+
+def eff105(sc, strip):
+    params = sc.params
+    sc.dispatch = None
+    leaf = _file_system_leaf(sc, strip)
+    call = _chain(sc, leaf, strip, params, CONTROLS)
+    entry = sc.name("handle")
+    signature = params
+    if sc.dispatch:
+        signature = f"obj: {sc.dispatch[0]}, {params}"
+    sc.define(block(f"async def {entry}({signature}):", [f"return {call}"]))
+    _add_inputs(sc, entry, lambda k: [])
+
+
 def _add_inputs(sc, entry, extra):
     inputs = []
     for k, controls in enumerate(sc.control_inputs(8)):
@@ -256,6 +286,55 @@ def eff103(sc, strip):
                 )
         else:
             inputs.append({"args": [*base, *controls], "rows": 1})
+    sc.entries.append({"module": sc.main_module, "func": entry, "inputs": inputs})
+
+
+def eff102(sc, strip):
+    params = sc.params
+    sc.dispatch = None
+    if strip == "Allocates":
+        # The caller passes the URL, and every input passes a `data:` URL, which opens nothing.
+        sc.imports("import urllib.request")
+        statement = "v = urllib.request.urlopen(u)"
+    else:
+        sc.imports("import requests")
+        statement = sc.pick([f"v = requests.get(URL_{sc.ns})", "v = requests.Session()"])
+    call = _chain(sc, [statement], strip, f"u, x, {params}", f"u, x, {CONTROLS}", prefix="c")
+    body = [f"v = {call}"]
+    if strip == "Every iteration":
+        way = sc.pick(["skip", "handler", "branch"])
+        if way == "skip":
+            body = block('if x == "skip":', ["continue"]) + body
+        elif way == "handler":
+            body = block("try:", ["v = int(x)"]) + block("except ValueError:", ["continue"]) + body
+        else:
+            body = block("if flag:", body)
+    origin = (
+        sc.pick(["range(3)", '["1", "2"]'])
+        if strip == "Origin"
+        else sc.pick(["items", "sorted(items)", "list(items)"])
+    )
+    entry = sc.name("fetch")
+    signature = f"u: str, items: list[str], {params}"
+    if sc.dispatch:
+        signature = f"u: str, items: list[str], obj: {sc.dispatch[0]}, {params}"
+    sc.define(
+        block(
+            f"def {entry}({signature}):",
+            ["v = None", "out = []"]
+            + block(f"for x in {origin}:", body + ["out.append(x)"])
+            + ["return out"],
+        )
+    )
+    url = "data:,x" if strip == "Allocates" else "http://example.com/u"
+    inputs = []
+    for k, controls in enumerate(sc.control_inputs(8)):
+        base = [url, list(ITEMS[k % len(ITEMS)])]
+        if sc.dispatch:
+            for klass in sc.dispatch[1]:
+                inputs.append({"args": [*base, {"$obj": [f"{sc.main_module}:{klass}", [], {}]}, *controls]})
+        else:
+            inputs.append({"args": [*base, *controls]})
     sc.entries.append({"module": sc.main_module, "func": entry, "inputs": inputs})
 
 
@@ -1270,6 +1349,8 @@ def eff116(sc, strip):
 
 BUILDERS = {
     "EFF101": eff101,
+    "EFF105": eff105,
+    "EFF102": eff102,
     "EFF103": eff103,
     "EFF109": eff109,
     "EFF116": eff116,
@@ -1295,6 +1376,8 @@ BUILDERS = {
 # from the rule page, counted apart.
 STRIPS = {
     "EFF101": ["Every return", "Every implementation", "Waits"],
+    "EFF105": ["Every return", "Every implementation", "Touches the file system"],
+    "EFF102": ["Origin", "Every iteration", "Every return", "Every implementation", "Allocates"],
     "EFF103": ["Origin", "Every iteration", "Every return", "Every implementation", "Sends"],
     "EFF109": ["Non-reentrant", "Held", "Same lock", "Every implementation", "Every return"],
     "EFF116": ["Generator function", "Every implementation", "Never iterated"],
@@ -1341,7 +1424,7 @@ RELEVANCE = {("MUT114", "Keyed"), ("OPT113", "Steps through inputs")}
 
 # The exact rules whose heuristic reports record the premises they leave open
 # (`heki dump-open-premises`). With a premise stripped, such a report has to name it among them.
-OPEN_PREMISE_RULES = frozenset({"EFF101", "EFF103", "DATA101", "MUT110", "MUT114", *OPT_PATTERNS, "OPT113"})
+OPEN_PREMISE_RULES = frozenset({"EFF101", "EFF105", "EFF102", "EFF103", "DATA101", "MUT110", "MUT114", *OPT_PATTERNS, "OPT113"})
 
 
 class TableError(Exception):

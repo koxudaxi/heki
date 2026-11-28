@@ -10,11 +10,14 @@ Every event carries:
 - `api`: the catalog symbol of the call (`time.sleep`, `sqlite3.Cursor.execute`);
 - `kind`: `sleep`, `net`, `subprocess`, `db_stmt` (a statement sent to a database), `db_other`
   (a database call that sends no statement), `thread` (a wait on another thread), `realloc`
-  (a call that copies its inputs into a new array or frame), or `lock` (a `threading.Lock` or
-  `asyncio.Lock` taken, given back, or waited for);
+  (a call that copies its inputs into a new array or frame), `lock` (a `threading.Lock` or
+  `asyncio.Lock` taken, given back, or waited for), `fs` (a call on the local file system), or
+  `client` (a new client, session, or connection a call made: `requests.get`, `requests.Session()`,
+  `urlopen` of a URL that is no `data:` URL);
 - `waits`: whether this call waited on the calling thread for input or output as `EFF101` means
   it (a nonzero sleep, the network, a child process, a database file); a wait on another thread
-  is not such a wait;
+  is not such a wait; for `fs`, whether the call touched the file system (`EFF105`); never for
+  `client`;
 - `detail`: the argument that decided `waits`, for the report; for a lock, `[identity of the
   lock, what happened]` (`taken`, `released`, `busy`: a non-blocking or timed attempt that failed,
   or `self`: a blocking attempt on a lock the run holds);
@@ -26,6 +29,8 @@ from __future__ import annotations
 import _thread
 import asyncio as _asyncio
 import ipaddress
+import os as _os
+import pathlib as _pathlib
 import queue as _queue
 import socket as _socket
 import sqlite3 as _sqlite3
@@ -132,6 +137,8 @@ class FakeResponse:
 
 def fake_urlopen(url, data=None, timeout=None, **kwargs):
     text = url if isinstance(url, str) else getattr(url, "full_url", str(url))
+    if not text.startswith("data:"):
+        _record("urllib.request.urlopen", "client", False, repr(text))
     _record("urllib.request.urlopen", "net", not text.startswith("data:"), repr(text))
     if "fail" in text:
         raise OSError(f"cannot reach {text}")
@@ -166,6 +173,8 @@ def _request(api, method, url, **kwargs):
 
 def _requests_function(method):
     def call(url, *args, **kwargs):
+        # A module-level helper makes a session of its own for the one request.
+        _record(f"requests.{method}", "client", False, repr(url))
         return _request(f"requests.{method}", method, url, **kwargs)
 
     call.__name__ = method
@@ -173,6 +182,9 @@ def _requests_function(method):
 
 
 class FakeSession:
+    def __init__(self):
+        _record("requests.Session", "client", False)
+
     def _call(self, method, url, **kwargs):
         return _request(f"requests.Session.{method}", method, url, **kwargs)
 
@@ -219,6 +231,30 @@ def _requests_module():
     exceptions.HTTPError = HTTPError
     module.exceptions = exceptions
     return module, exceptions
+
+
+# ---------------------------------------------------------------------------------------------
+# the file system: the calls the programs make answer without it
+# ---------------------------------------------------------------------------------------------
+def fake_isfile(path):
+    _record("os.path.isfile", "fs", True, repr(path))
+    return True
+
+
+def fake_getsize(path):
+    _record("os.path.getsize", "fs", True, repr(path))
+    return 3
+
+
+def fake_isjunction(path):
+    # `posixpath.isjunction` answers without the file system: POSIX has no junctions.
+    _record("os.path.isjunction", "fs", _os.name == "nt", repr(path))
+    return False
+
+
+def fake_read_text(self, encoding=None, errors=None, newline=None):
+    _record("pathlib.Path.read_text", "fs", True, repr(str(self)))
+    return "1\n"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -637,6 +673,10 @@ def install(recorder):
     _socket.gethostbyname = fake_gethostbyname
     _socket.getfqdn = fake_getfqdn
     _urllib_request.urlopen = fake_urlopen
+    _os.path.isfile = fake_isfile
+    _os.path.getsize = fake_getsize
+    _os.path.isjunction = fake_isjunction
+    _pathlib.Path.read_text = fake_read_text
     _sqlite3.connect = fake_sqlite_connect
     _queue.Queue = FakeQueue
     _threading.Lock = FakeLock

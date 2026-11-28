@@ -56,8 +56,9 @@ baseline; the CI step checks the whole project. Both fail on new exact errors.
 
 ### An async web or database service
 
-`EFF101` (a blocking call that holds up the event loop), `EFF103` (a query on every iteration
-of a loop), and `EFF109` (a lock taken again while it is held) are exact and run by default.
+`EFF101` (a blocking call that holds up the event loop), `EFF102` (a new HTTP or database
+client on every iteration of a loop), `EFF103` (a query on every iteration of a loop), and
+`EFF109` (a lock taken again while it is held) are exact and run by default.
 Add the checks that fit the service:
 
 ```toml
@@ -72,12 +73,12 @@ extend-select = [
 
 | Rule | Certainty | Add it when the service |
 | ---- | --------- | ----------------------- |
-| [`EFF105`](rules/async-blocking-fs.md) | heuristic | reads or writes files, templates, or static assets in `async def` handlers |
+| [`EFF105`](rules/async-blocking-fs.md) | exact | reads or writes files, templates, or static assets in `async def` handlers |
 | [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic | holds a `threading` lock or a database transaction around network I/O or an `await` |
 | [`EFF107`](rules/unretained-async-task.md) | heuristic | starts background work with `asyncio.create_task` |
 | [`EFF110`](rules/exclusive-object-fanout.md) | heuristic, experimental | shares a connection, a stream, or a WebSocket between tasks started with `asyncio.gather` or a task group |
 | [`EFF115`](rules/async-def-as-sync-callback.md) | heuristic, experimental | hands `async def` functions to threads, executors, or signal handlers |
-| [`EFF102`](rules/loop-unpooled-client.md), [`EFF117`](rules/unlocked-write-of-guarded-state.md) | heuristic | creates HTTP or database clients in loops, or changes state its threads share without the lock its other writers hold; these two are not opt-in and run with `--heuristic` |
+| [`EFF117`](rules/unlocked-write-of-guarded-state.md) | heuristic | changes state its threads share without the lock its other writers hold; it is not opt-in and runs with `--heuristic` |
 
 Their reports can be wrong about the code: they are printed, and fail the run only with
 `fail-on = "warning"`. A [contract](configuration.md#contracts) can make its own reports fail it with
@@ -584,7 +585,8 @@ features can change in any release: `heki recommend`, `heki inspect`, `heki skil
 
     | Rule | Certainty | Turn it on for |
     | ---- | --------- | -------------- |
-    | [`EFF105`](rules/async-blocking-fs.md), [`EFF107`](rules/unretained-async-task.md) | heuristic | async services |
+    | [`EFF105`](rules/async-blocking-fs.md) | exact | async services |
+    | [`EFF107`](rules/unretained-async-task.md) | heuristic | async services |
     | [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic | threaded code, and code that holds database transactions |
     | [`MUT103`](rules/summary-effect-regression.md) | heuristic | library APIs (with [effect snapshots](#effect-snapshots-mut103)) |
     | [`MUT106`](rules/iterator-double-consumption.md) | heuristic | code that passes iterators and generators around |

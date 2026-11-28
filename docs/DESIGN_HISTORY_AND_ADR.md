@@ -587,6 +587,9 @@ first, then a convention the code follows, then a contract.
       `build_docs.py` exempts rules of consequence `MinorBug` and the rules certified before
       this amendment. *Rejected*: adding packages to the census for such a rule (a source scan
       of 143 packages found no report for a shape mature code no longer has).
+      *Amended on 2026-11-28*: `EFF102` runs by default on its exact tier, certified in 0.12.0:
+      15 of its 54 census reports and 21 of its 30 holdout reports were of real harm. `EFF105`'s
+      exact tier, certified with it, stays opt-in, as local file I/O is usually fast.
 - **Status**: the certainty and activation of every rule, a report's own certainty (the `OPT`
   reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
   withholding of an exact rule's heuristic reports, the note, the labels in every output, the

@@ -160,7 +160,10 @@ fn src_lists_the_source_roots() {
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
     assert!(
-        stdout.contains("backend/server.py:6:9: EFF102 [heuristic] `config.net.client` allocates"),
+        stdout.contains(&format!(
+            "backend/server.py:6:9: EFF102 {} (through `config.net.client`)",
+            "every iteration over parameter `items` allocates an unpooled client: `httpx.Client`"
+        )),
         "{stdout}"
     );
 
@@ -174,7 +177,10 @@ fn src_lists_the_source_roots() {
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
     assert!(
-        stdout.contains("lib/pkg/server.py:6:9: EFF102 [heuristic] `pkg.net.client` allocates"),
+        stdout.contains(&format!(
+            "lib/pkg/server.py:6:9: EFF102 {} (through `pkg.net.client`)",
+            "every iteration over parameter `items` allocates an unpooled client: `httpx.Client`"
+        )),
         "{stdout}"
     );
 }

@@ -10,6 +10,8 @@ use serde_json::Value;
 
 const EFF101: &str = "EFF101";
 const EFF103: &str = "EFF103";
+const EFF105: &str = "EFF105";
+const EFF102: &str = "EFF102";
 
 /// The reports `heki dump-open-premises` prints for `app.py` holding `source`.
 fn reports(name: &str, select: &str, source: &str) -> Vec<Value> {
@@ -1695,4 +1697,214 @@ fn a_join_over_a_capped_loop_leaves_the_trip_count_open() {
             + 1
     );
     exact("cond_opt113_closed", "OPT113", &closed, "OPT113");
+}
+
+// --------------------------------------------------------------------------- EFF105's claim
+
+#[test]
+fn a_file_object_read_may_be_answered_by_its_buffer() {
+    let open = "import io\n\n\nasync def handle(f: io.TextIOWrapper):\n    return f.read()\n";
+    let report = heuristic(
+        "op_fs_buffered",
+        EFF105,
+        open,
+        "EFF105",
+        &[("Touches the file system", "conditional-file-access")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("none".to_owned(), Some(5), None)
+    );
+    let closed =
+        "import pathlib\n\n\nasync def handle(path: pathlib.Path):\n    return path.read_text()\n";
+    exact("op_fs_buffered_closed", EFF105, closed, "EFF105");
+}
+
+#[test]
+fn calls_that_can_work_without_the_file_system_leave_it_open() {
+    // A junction test does no I/O on POSIX, `iterdir` is a generator before Python 3.13, and a
+    // reader's source heki cannot evaluate may be a URL.
+    for (name, call) in [
+        ("op_fs_junction", "os.path.isjunction(p)"),
+        ("op_fs_iterdir", "list(pathlib.Path(p).iterdir())"),
+        ("op_fs_reader", "pd.read_csv(p)"),
+    ] {
+        let source = format!(
+            "import os\nimport pathlib\n\nimport pandas as pd\n\n\nasync def handle(p):\n    return {call}\n"
+        );
+        heuristic(
+            name,
+            EFF105,
+            &source,
+            "EFF105",
+            &[("Touches the file system", "conditional-file-access")],
+        );
+    }
+    let closed = "import os\n\n\nasync def handle(p):\n    return os.path.isdir(p)\n";
+    exact("op_fs_conditional_closed", EFF105, closed, "EFF105");
+}
+
+#[test]
+fn a_helper_that_returns_before_the_file_access_leaves_every_return_open() {
+    let open = "import os\n\n\ndef check(p, flag):\n    if flag:\n        return None\n    return os.stat(p)\n\n\nasync def handle(p, flag):\n    return check(p, flag)\n";
+    let report = heuristic(
+        "op_fs_every_return",
+        EFF105,
+        open,
+        "EFF105",
+        &[("Every return", "not-made-on-every-return")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("code".to_owned(), Some(7), None)
+    );
+    let closed = open.replace("    if flag:\n        return None\n", "");
+    exact("op_fs_every_return_closed", EFF105, &closed, "EFF105");
+}
+
+#[test]
+fn a_file_access_through_a_protocol_leaves_the_targets_incomplete() {
+    let open = "import pathlib\nfrom typing import Protocol\n\n\nclass Source(Protocol):\n    def load(self, p): ...\n\n\nclass Disk:\n    def load(self, p):\n        return pathlib.Path(p).read_bytes()\n\n\nasync def handle(src: Source, p):\n    return src.load(p)\n";
+    heuristic(
+        "op_fs_protocol",
+        EFF105,
+        open,
+        "EFF105",
+        &[("Every implementation", "incomplete-targets")],
+    );
+    let closed = open.replace("src: Source", "src: Disk");
+    exact("op_fs_protocol_closed", EFF105, &closed, "EFF105");
+}
+
+// --------------------------------------------------------------------------- EFF102's claim
+
+#[test]
+fn a_client_the_caller_hands_in_may_be_reused() {
+    let open = "import openai\n\n\ndef ask(prompts: list[str], http):\n    for p in prompts:\n        openai.OpenAI(http_client=http)\n";
+    let report = heuristic(
+        "op_client_conditional",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Allocates", "conditional-allocation")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("none".to_owned(), Some(6), None)
+    );
+    let closed = open.replace("openai.OpenAI(http_client=http)", "openai.OpenAI()");
+    exact("op_client_conditional_closed", EFF102, &closed, "EFF102");
+}
+
+#[test]
+fn a_branch_around_the_client_leaves_every_iteration_open() {
+    let open = "import requests\n\n\ndef fetch(urls: list[str], flag):\n    for url in urls:\n        if flag:\n            requests.get(url)\n";
+    heuristic(
+        "op_client_every_iteration",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Every iteration", "not-every-iteration")],
+    );
+    let closed = open.replace(
+        "        if flag:\n            requests.get(url)\n",
+        "        requests.get(url)\n",
+    );
+    exact(
+        "op_client_every_iteration_closed",
+        EFF102,
+        &closed,
+        "EFF102",
+    );
+}
+
+#[test]
+fn a_client_call_that_raised_into_a_handler_has_made_no_client() {
+    // A constructor that raised may have made nothing: only a call that returned counts, where
+    // a statement counts once the call is made (`EFF103`).
+    let open = "import requests\n\n\ndef fetch(urls: list[str]):\n    for url in urls:\n        try:\n            requests.get(url)\n        except OSError:\n            continue\n";
+    heuristic(
+        "op_client_raised",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Every iteration", "not-every-iteration")],
+    );
+    let closed = open.replace("            continue\n", "            raise\n");
+    exact("op_client_raised_closed", EFF102, &closed, "EFF102");
+}
+
+#[test]
+fn a_helper_whose_client_call_raised_into_a_handler_has_made_no_client() {
+    // The helper returns normally after the constructor raised, so an iteration completes
+    // without a client. Re-raising, or making the client another way in the handler, leaves no
+    // such path.
+    let open = "import sqlite3\n\n\ndef open_db():\n    try:\n        conn = sqlite3.connect(\"app.db\")\n    except sqlite3.Error:\n        return None\n    return conn\n\n\ndef load(names: list[str]):\n    for name in names:\n        open_db()\n";
+    heuristic(
+        "op_client_helper_raised",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Every return", "not-made-on-every-return")],
+    );
+    let reraised = open.replace("        return None\n", "        raise\n");
+    exact("op_client_helper_reraised", EFF102, &reraised, "EFF102");
+    let another_way = open.replace(
+        "        return None\n",
+        "        conn = sqlite3.connect(\":memory:\")\n",
+    );
+    exact(
+        "op_client_helper_another_way",
+        EFF102,
+        &another_way,
+        "EFF102",
+    );
+}
+
+#[test]
+fn a_loop_over_an_attribute_has_items_not_from_the_data() {
+    let open = "import requests\n\n\nclass Fetcher:\n    def run(self):\n        for url in self.urls:\n            requests.get(url)\n";
+    heuristic(
+        "op_client_origin",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Origin", "items-not-from-the-data")],
+    );
+    let closed = open.replace(
+        "def run(self):\n        for url in self.urls:",
+        "def run(self, urls: list[str]):\n        for url in urls:",
+    );
+    exact("op_client_origin_closed", EFF102, &closed, "EFF102");
+}
+
+#[test]
+fn a_helper_that_returns_before_the_client_leaves_every_return_open() {
+    let open = "import requests\n\n\ndef get(url, text):\n    try:\n        v = int(text)\n    except ValueError:\n        return None\n    return requests.get(url)\n\n\ndef fetch(urls: list[str], text: str):\n    for url in urls:\n        get(url, text)\n";
+    heuristic(
+        "op_client_every_return",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Every return", "not-made-on-every-return")],
+    );
+    let closed = open.replace(
+        "    try:\n        v = int(text)\n    except ValueError:\n        return None\n",
+        "",
+    );
+    exact("op_client_every_return_closed", EFF102, &closed, "EFF102");
+}
+
+#[test]
+fn a_client_through_a_protocol_leaves_the_targets_incomplete() {
+    let open = "import httpx\nfrom typing import Protocol\n\n\nclass Maker(Protocol):\n    def make(self): ...\n\n\nclass Real:\n    def make(self):\n        return httpx.Client()\n\n\ndef fetch(m: Maker, urls: list[str]):\n    for url in urls:\n        m.make()\n";
+    heuristic(
+        "op_client_protocol",
+        EFF102,
+        open,
+        "EFF102",
+        &[("Every implementation", "incomplete-targets")],
+    );
+    let closed = open.replace("m: Maker", "m: Real");
+    exact("op_client_protocol_closed", EFF102, &closed, "EFF102");
 }

@@ -39,7 +39,7 @@ use std::sync::{Arc, LazyLock};
 /// The rules whose reports are split by the must-facts of execution effects
 /// (`heki_effect::EffectSummary::must_exec`): an established report is exact, the rest
 /// heuristic.
-pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF103", "DATA101"];
+pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF105", "EFF102", "EFF103", "DATA101"];
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
@@ -74,10 +74,10 @@ fn boundary_code(r: &BoundaryReport) -> &'static str {
     }
 }
 
-/// The tier of an `EFF101` report: exact when whenever the call returns it has run a wait for
-/// input or output (`BoundaryReport::must`).
+/// The tier of an `EFF101` or `EFF105` report: exact when whenever the call returns it has run
+/// a wait for input or output (`BoundaryReport::must`), for `EFF105` on the file system.
 fn boundary_tier(r: &BoundaryReport) -> Certainty {
-    premises::tier("EFF101", r.must.is_some() && waits_for_io(r.effect))
+    premises::tier(boundary_code(r), r.must.is_some() && waits_for_io(r.effect))
 }
 
 /// The half of `EFF101`'s "Waits" the effect decides: a wait for input or output, not for
@@ -86,25 +86,30 @@ fn waits_for_io(effect: ExecEffectKind) -> bool {
     effect.wait_kind() == Some(WaitKind::Io)
 }
 
-/// The premises of `EFF101`'s claim a heuristic report leaves open: the steps of its must-fact
-/// that do not hold along its chain (`BoundaryReport::gaps`), and the effect when it is no wait
-/// for input or output.
+/// The premises of `EFF101`'s or `EFF105`'s claim a heuristic report leaves open: the steps of
+/// its must-fact that do not hold along its chain (`BoundaryReport::gaps`), and the effect when
+/// it is no wait for input or output.
 fn boundary_open_premises(cx: &CheckContext<'_>, r: &BoundaryReport) -> Vec<OpenPremise> {
-    let mut open = chain_open_premises(cx, &premises::CONDITIONAL_WAIT, &r.chain, &r.gaps);
+    let conditional = match boundary_code(r) {
+        "EFF105" => &premises::CONDITIONAL_FILE_ACCESS,
+        _ => &premises::CONDITIONAL_WAIT,
+    };
+    let mut open = chain_open_premises(cx, conditional, &r.chain, &r.gaps);
     if !waits_for_io(r.effect) {
         let last = r.chain.last().map(|h| cx.hop_location(h));
         open.push(premises::WAITS_ON_ANOTHER_THREAD.open_at(last, None));
     }
     debug_assert!(
         !open.is_empty(),
-        "a heuristic EFF101 report records why it is not exact"
+        "a heuristic boundary report records why it is not exact"
     );
     open
 }
 
 /// The open premises the gaps of a must-fact along `chain` stand for (each at its hop), with
 /// `conditional` the cause of a last call whose effect the catalog makes conditional: "Waits"
-/// for `EFF101`, "Sends" for `EFF103`.
+/// for `EFF101`, "Touches the file system" for `EFF105`, "Sends" for `EFF103`, "Allocates" for
+/// `EFF102`.
 fn chain_open_premises(
     cx: &CheckContext<'_>,
     conditional: &'static OpenCause,
@@ -132,16 +137,17 @@ fn chain_open_premises(
         .collect()
 }
 
-/// The message of an `EFF101` report: the waiting call the reported call is, the one it always
-/// runs through helpers, or the one each implementation runs.
-fn always_waits(function: &str, must: &SiteMust) -> String {
+/// The message of an exact `EFF101` or `EFF105` report: the call of `kind` (a waiting call, a
+/// blocking filesystem call) the reported call is, the one it always runs through helpers, or
+/// the one each implementation runs.
+fn always_waits(function: &str, kind: &str, must: &SiteMust) -> String {
     match (must.chain.as_slice(), must.witnesses.as_slice()) {
         ([] | [_], _) => format!(
-            "`{function}` runs the waiting call `{}` on the event loop",
+            "`{function}` runs the {kind} `{}` on the event loop",
             must.target()
         ),
         ([first, ..], [witness]) => format!(
-            "`{}` always runs the waiting call `{}` on the event loop ({} down, on every path)",
+            "`{}` always runs the {kind} `{}` on the event loop ({} down, on every path)",
             first.callee,
             witness.callee,
             match must.chain.len() - 1 {
@@ -152,7 +158,7 @@ fn always_waits(function: &str, must: &SiteMust) -> String {
         ([first, ..], witnesses) => {
             let method = first.callee.rsplit('.').next().unwrap_or(&first.callee);
             format!(
-                "`{method}` always runs a waiting call on the event loop: {}",
+                "`{method}` always runs a {kind} on the event loop: {}",
                 each_witness(witnesses)
             )
         }
@@ -204,10 +210,10 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     for (code, reports) in [("EFF101", eff101), ("EFF105", eff105)] {
         for r in &reports {
             let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
-            let what = if code == "EFF105" {
-                "the blocking filesystem call"
+            let (what, claimed) = if code == "EFF105" {
+                ("the blocking filesystem call", "blocking filesystem call")
             } else {
-                "the blocking call"
+                ("the blocking call", "waiting call")
             };
             // A call chain starts at a call or a property read; an iteration is named, as the
             // hop shows it as a call of the generator function.
@@ -215,17 +221,13 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 Some(h) if r.iterates => format!(" by iterating `{}`", h.callee),
                 _ => String::new(),
             };
-            // `EFF105` has no exact tier.
-            let tier = match code {
-                "EFF101" => boundary_tier(r),
-                _ => Certainty::Heuristic,
-            };
+            let tier = boundary_tier(r);
             // An exact report names and folds by the call it claims: the end of the chain every
             // implementation runs, not of the shortest chain the heuristic tier found. It keys by
             // the shortest chain's call, as that tier does.
             let (message, chain, target) = match &r.must {
                 Some(must) if tier == Certainty::Exact => (
-                    always_waits(&r.function.qualname, must),
+                    always_waits(&r.function.qualname, claimed, must),
                     must.related(),
                     must.target(),
                 ),
@@ -256,12 +258,11 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            let open_premises =
-                if cx.open_premises && code == "EFF101" && tier == Certainty::Heuristic {
-                    boundary_open_premises(cx, r)
-                } else {
-                    Vec::new()
-                };
+            let open_premises = if cx.open_premises && tier == Certainty::Heuristic {
+                boundary_open_premises(cx, r)
+            } else {
+                Vec::new()
+            };
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -426,7 +427,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
         // An iteration shares its span with the call producing the iterable: one report.
         let mut seen: FxHashSet<Span> = FxHashSet::default();
-        let mut queries: Vec<LoopQuery<'_>> = Vec::new();
+        let mut calls: Vec<LoopCall<'_>> = Vec::new();
         for bb in &f.blocks {
             let depth = shape.loop_depth(bb.id);
             if depth == 0 && !per_item_calls {
@@ -500,60 +501,42 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         })
                         .min_by_key(|(chain, _, _)| chain.len())
                 };
-                if let Some((chain, repeats, _)) =
-                    per_iteration(ExecEffectKind::UnpooledClientAlloc)
-                {
-                    let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
-                    cx.emit(
-                        out,
-                        "EFF102",
-                        unit,
-                        inst.span,
-                        &key.qualname,
-                        root.clone(),
-                        format!(
-                            "`{}` allocates an unpooled client{} {}",
-                            chain[0].callee,
-                            through_helpers(chain),
-                            repeats.every()
-                        ),
-                        Some(format!(
-                            "create one client or session before the {} and reuse it (a reused \
-                             client keeps state such as cookies from call to call)",
-                            repeats.ahead_of()
-                        )),
-                        chain,
-                    );
-                }
-                if let Some((chain, repeats, chain_site)) = per_iteration(ExecEffectKind::DbQuery) {
-                    queries.push(LoopQuery {
-                        at: (bb.id, index),
-                        span: inst.span,
-                        chain: chain.to_vec(),
-                        chain_site,
-                        repeats,
-                        sites: list,
-                    });
+                // The allocations go first: a call reported by both rules keeps the order of
+                // its reports.
+                for claim in [&CLIENT_PER_ITERATION, &QUERY_PER_ITERATION] {
+                    if let Some((chain, repeats, chain_site)) = per_iteration(claim.effect) {
+                        calls.push(LoopCall {
+                            claim,
+                            at: (bb.id, index),
+                            span: inst.span,
+                            chain: chain.to_vec(),
+                            chain_site,
+                            repeats,
+                            sites: list,
+                        });
+                    }
                 }
             }
         }
-        if queries.is_empty() {
+        if calls.is_empty() {
             continue;
         }
         let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
-        let verdicts = established_queries(cx, unit, &tcx, f, origins, &queries);
-        for (q, verdict) in queries.iter().zip(verdicts) {
-            let tier = premises::tier("EFF103", verdict.exact.is_some());
+        let verdicts = established_loop_calls(cx, unit, &tcx, f, origins, &calls);
+        for (q, verdict) in calls.iter().zip(verdicts) {
+            let code = q.claim.code;
+            let tier = premises::tier(code, verdict.exact.is_some());
             // An exact report names the call it claims, and keys by the shortest chain's call, as
             // the heuristic tier does.
             let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             let (target, message, chain) = match &verdict.exact {
-                Some(e) => (e.must.target(), e.message(), e.must.related()),
+                Some(e) => (e.must.target(), e.message(q.claim), e.must.related()),
                 None => (
                     root.clone(),
                     format!(
-                        "`{}` runs a database query{} {}",
+                        "`{}` {}{} {}",
                         q.chain[0].callee,
+                        q.claim.heuristic_verb,
                         through_helpers(&q.chain),
                         q.repeats.every()
                     ),
@@ -563,33 +546,71 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             let d = cx
                 .emit(
                     out,
-                    "EFF103",
+                    code,
                     unit,
                     q.span,
                     &key.qualname,
                     target,
                     message,
-                    Some(query_help(&q.repeats)),
+                    Some((q.claim.help)(&q.repeats)),
                     &chain,
                 )
-                .expect("the rule runs on the unit: it returned at its start otherwise");
+                .expect("the rule runs on the unit: it found no call otherwise");
             d.certainty = tier.at_most(d.certainty);
             d.key_target = (d.target != root).then_some(root);
             debug_assert!(
                 !cx.open_premises || tier == Certainty::Exact || !verdict.open.is_empty(),
-                "a heuristic EFF103 report records why it is not exact"
+                "a heuristic {code} report records why it is not exact"
             );
             d.open_records = verdict.open.into_iter().map(OpenRecord::from).collect();
         }
     }
 }
 
-/// A call in a loop that may run a database query on every iteration (`EFF103`).
-struct LoopQuery<'s> {
+/// What `EFF102` or `EFF103` claims of a call in a loop over data: that every iteration has the
+/// effect, which the call has whenever it returns.
+struct LoopClaim {
+    code: &'static str,
+    effect: ExecEffectKind,
+    /// The cause of a last call whose effect the catalog makes conditional.
+    conditional: &'static OpenCause,
+    /// What the call does, in a heuristic report ("runs a database query").
+    heuristic_verb: &'static str,
+    /// What every iteration does, in an exact report ("sends a database statement").
+    exact_verb: &'static str,
+    help: fn(&Repeats<'_>) -> String,
+}
+
+/// `EFF102`'s claim: a client made on every iteration. A constructor that raised may have made
+/// nothing, so only a call that returned counts (`ExecEffectKind::had_when_raised`).
+const CLIENT_PER_ITERATION: LoopClaim = LoopClaim {
+    code: "EFF102",
+    effect: ExecEffectKind::UnpooledClientAlloc,
+    conditional: &premises::CONDITIONAL_ALLOCATION,
+    heuristic_verb: "allocates an unpooled client",
+    exact_verb: "allocates an unpooled client",
+    help: client_help,
+};
+
+/// `EFF103`'s claim: a statement sent on every iteration. A library call counts once it is
+/// made, also when it raised: the statement goes out before the database answers.
+const QUERY_PER_ITERATION: LoopClaim = LoopClaim {
+    code: "EFF103",
+    effect: ExecEffectKind::DbQuery,
+    conditional: &premises::CONDITIONAL_STATEMENT,
+    heuristic_verb: "runs a database query",
+    exact_verb: "sends a database statement",
+    help: query_help,
+};
+
+/// A call in a loop that may have the effect of its claim on every iteration (`EFF102`,
+/// `EFF103`).
+struct LoopCall<'s> {
+    claim: &'static LoopClaim,
     /// The call's instruction (block, index).
     at: (BlockId, usize),
     span: Span,
-    /// The shortest chain to the query.
+    /// The shortest chain to the effect.
     chain: Vec<CallHop>,
     /// The call site `chain` starts at.
     chain_site: &'s CallSite,
@@ -598,17 +619,17 @@ struct LoopQuery<'s> {
     sites: &'s [&'s CallSite],
 }
 
-/// What establishes an `EFF103` report: the origins of the items the loop steps through, and
-/// what the call has sent whenever it returns.
-struct EstablishedQuery {
+/// What establishes an `EFF102` or `EFF103` report: the origins of the items the loop steps
+/// through, and what the call has done whenever it returns.
+struct EstablishedLoopCall {
     origins: DataOrigins,
     must: SiteMust,
 }
 
-/// The decision on one `EFF103` claim ([`established_queries`]): established, or, when the run
-/// records them ([`CheckContext::open_premises`]), the premises it leaves open.
-struct QueryVerdict {
-    exact: Option<EstablishedQuery>,
+/// The decision on one `EFF102` or `EFF103` claim ([`established_loop_calls`]): established,
+/// or, when the run records them ([`CheckContext::open_premises`]), the premises it leaves open.
+struct LoopVerdict {
+    exact: Option<EstablishedLoopCall>,
     open: Vec<OpenPremise>,
 }
 
@@ -679,8 +700,8 @@ impl DataOrigins {
     }
 }
 
-impl EstablishedQuery {
-    fn message(&self) -> String {
+impl EstablishedLoopCall {
+    fn message(&self, claim: &LoopClaim) -> String {
         let what = match (self.must.witnesses.as_slice(), self.must.chain.as_slice()) {
             ([witness], [first, _, ..]) => {
                 format!("`{}` (through `{}`)", witness.callee, first.callee)
@@ -689,31 +710,33 @@ impl EstablishedQuery {
             (witnesses, _) => each_witness(witnesses),
         };
         format!(
-            "{}{} sends a database statement: {what}",
+            "{}{} {}: {what}",
             self.origins.every_iteration(),
-            self.origins.clause_end()
+            self.origins.clause_end(),
+            claim.exact_verb
         )
     }
 }
 
-/// Which of `queries` in `f` are established (`EFF103`): the call sends a statement whenever it
-/// returns ([`heki_effect::ProjectIndex::site_must`]) and runs on every iteration that completes
-/// of a loop around it, exception edges included, whose items the data decides: a parameter or a
-/// part of one, or a catalog call's rows, lines, directory entries, or the lines of its text
-/// (`heki_kb::EcosystemEntry::items`). A loop whose trip count the code fixes is not one, at any
-/// count. When the run records open premises, a claim that is not established says which, from
-/// the same steps: those of the must-fact along the reported chain, and those of the loop around
-/// the call that leaves the fewest open (the first such).
-fn established_queries(
+/// Which of `calls` in `f` are established (`EFF102`, `EFF103`): the call has its claim's
+/// effect whenever it returns ([`heki_effect::ProjectIndex::site_must`]: makes a client, sends a
+/// statement) and runs on every iteration that completes of a loop around it, exception edges
+/// included, whose items the data decides: a parameter or a part of one, or a catalog call's
+/// rows, lines, directory entries, or the lines of its text (`heki_kb::EcosystemEntry::items`).
+/// A loop whose trip count the code fixes is not one, at any count. When the run records open
+/// premises, a claim that is not established says which, from the same steps: those of the
+/// must-fact along the reported chain, and those of the loop around the call that leaves the
+/// fewest open (the first such).
+fn established_loop_calls(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
     tcx: &TypeCtx<'_>,
     f: &IrFunction,
     origins: &ItemOrigins<'_>,
-    queries: &[LoopQuery<'_>],
-) -> Vec<QueryVerdict> {
+    calls: &[LoopCall<'_>],
+) -> Vec<LoopVerdict> {
     let types = tcx.infer(f);
-    let owner = "heki_rules::eff_rules::established_queries";
+    let owner = "heki_rules::eff_rules::established_loop_calls";
     let budget = Budget::of_function(owner, f);
     let path = &unit.input.path;
     with_paths(tcx, f, &types, owner, |paths, ix| {
@@ -751,7 +774,7 @@ fn established_queries(
         let loops_around =
             |at: (BlockId, usize)| (0..f.loops.len()).filter(move |&li| ix.shape.in_loop(li, at.0));
         // The open premises of the loop around `q` that leaves the fewest open.
-        let loop_open_premises = |q: &LoopQuery<'_>, progress: Progress| {
+        let loop_open_premises = |q: &LoopCall<'_>, progress: Progress| {
             let mut fewest: Option<Vec<OpenPremise>> = None;
             for li in loops_around(q.at) {
                 let mut open: Vec<OpenPremise> = Vec::new();
@@ -777,49 +800,51 @@ fn established_queries(
             }
             fewest.unwrap_or_default()
         };
-        queries
+        calls
             .iter()
             .map(|q| {
                 if let Some(by) = q.repeats.0 {
                     let open = cx.open_premises.then(|| {
-                        let mut open = query_chain_open_premises(cx, path, q);
+                        let mut open = loop_chain_open_premises(cx, path, q);
                         let at = cx.related_at(path, q.span, "the call".to_owned());
                         let builtin = format!("`{}`", by.api);
                         open.push(premises::REPEATED_BY_A_BUILTIN.open_at(Some(at), Some(builtin)));
                         open
                     });
-                    return QueryVerdict {
+                    return LoopVerdict {
                         exact: None,
                         open: open.unwrap_or_default(),
                     };
                 }
-                let established = q.sites.iter().find_map(|s| {
-                    cx.index
-                        .site_must(path, s, ExecEffectKind::DbQuery)
-                        .map(|m| (*s, m))
-                });
+                let established = q
+                    .sites
+                    .iter()
+                    .find_map(|s| cx.index.site_must(path, s, q.claim.effect).map(|m| (*s, m)));
                 let Some((site, must)) = established else {
                     let open = cx.open_premises.then(|| {
-                        let mut open = query_chain_open_premises(cx, path, q);
-                        open.extend(loop_open_premises(q, progress_of(q.chain_site)));
+                        let mut open = loop_chain_open_premises(cx, path, q);
+                        open.extend(loop_open_premises(
+                            q,
+                            q.chain_site.progress_for(q.claim.effect),
+                        ));
                         open
                     });
-                    return QueryVerdict {
+                    return LoopVerdict {
                         exact: None,
                         open: open.unwrap_or_default(),
                     };
                 };
+                let progress = site.progress_for(q.claim.effect);
                 let exact = loops_around(q.at).find_map(|li| {
-                    let origins =
-                        loop_steps(li, q.at, progress_of(site), &mut |_| ControlFlow::Break(()))?;
-                    Some(EstablishedQuery {
+                    let origins = loop_steps(li, q.at, progress, &mut |_| ControlFlow::Break(()))?;
+                    Some(EstablishedLoopCall {
                         origins,
                         must: must.clone(),
                     })
                 });
-                let open = (exact.is_none() && cx.open_premises)
-                    .then(|| loop_open_premises(q, progress_of(site)));
-                QueryVerdict {
+                let open =
+                    (exact.is_none() && cx.open_premises).then(|| loop_open_premises(q, progress));
+                LoopVerdict {
                     exact,
                     open: open.unwrap_or_default(),
                 }
@@ -828,29 +853,20 @@ fn established_queries(
     })
 }
 
-/// How far a call has to get for what it sends to count: a Layer 2 call when it is made (its
-/// statement went out also when it raised), a project call when it returned.
-fn progress_of(site: &CallSite) -> Progress {
-    match site.target {
-        CallTarget::Layer2 { .. } => Progress::Called,
-        CallTarget::Project(_) => Progress::Returned,
-    }
-}
-
-/// The premises of `EFF103`'s claim the must-fact of the query `q` leaves open along its chain
-/// (`heki_effect::MustExplainer::gaps_along`).
-fn query_chain_open_premises(
+/// The premises of `EFF102`'s or `EFF103`'s claim the must-fact of `q` leaves open along its
+/// chain (`heki_effect::MustExplainer::gaps_along`).
+fn loop_chain_open_premises(
     cx: &CheckContext<'_>,
     path: &Path,
-    q: &LoopQuery<'_>,
+    q: &LoopCall<'_>,
 ) -> Vec<OpenPremise> {
     let gaps = cx
         .must_explainer
         .as_ref()
         .map_or_else(Vec::new, |explainer| {
-            explainer.gaps_along(path, q.chain_site, ExecEffectKind::DbQuery, &q.chain)
+            explainer.gaps_along(path, q.chain_site, q.claim.effect, &q.chain)
         });
-    chain_open_premises(cx, &premises::CONDITIONAL_STATEMENT, &q.chain, &gaps)
+    chain_open_premises(cx, q.claim.conditional, &q.chain, &gaps)
 }
 
 /// How a report names `origin` when the data decides the number of its items, and whether only
@@ -910,6 +926,15 @@ pub(crate) fn data_origin(
         ItemSource::Fixed => return Err(&premises::FIXED_BY_THE_CODE),
     };
     Ok((named, counted))
+}
+
+/// The advice of an `EFF102` report, which its message leaves out.
+fn client_help(repeats: &Repeats<'_>) -> String {
+    format!(
+        "create one client or session before the {} and reuse it (a reused client keeps state \
+         such as cookies from call to call)",
+        repeats.ahead_of()
+    )
 }
 
 /// The advice of an `EFF103` report, which its message leaves out.
