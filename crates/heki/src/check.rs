@@ -14,7 +14,7 @@ use heki_diagnostics::{
     fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::ProjectIndex;
-use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
+use heki_env::{Docs, LintConfig, Problem, Setting, Severity, UnmatchedEntries};
 use heki_rules::project::{
     CommandPaths, Facts, FileError, Hidden, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv,
     ProjectOptions, RulesRun, baseline_key, canonical, canonical_allowing_missing,
@@ -58,6 +58,13 @@ pub(crate) fn selection(selectors: &Selectors, project: &Project) -> Result<Rule
 pub(crate) fn fail_on(args: &CheckArgs, lint: &LintConfig) -> Severity {
     args.fail_on
         .map_or_else(|| lint.fail_on_severity(), Severity::from)
+}
+
+/// `--unmatched-paths` over `lint.unmatched-paths`: what a run does with a path it is given to
+/// report on that names no analyzed file ([`Touched::of_run`]).
+pub(crate) fn unmatched_paths(args: &CheckArgs, lint: &LintConfig) -> Severity {
+    args.unmatched_paths
+        .map_or_else(|| lint.unmatched_paths_severity(), Severity::from)
 }
 
 /// Whether one of the reports `diags` makes the run fail (exit code 1) at `fail_on`
@@ -194,8 +201,7 @@ fn analyze(
         selection,
         snapshot,
     } = indexed;
-    let wide = project_wide_files(&args.analysis, &project.env);
-    let touched = Touched::of(&args.touched, &paths.files, &project, &wide);
+    let touched = Touched::of_run(args, paths, &project)?;
     Ok(Analyzed {
         project,
         index,
@@ -376,6 +382,33 @@ impl Touched {
         })
     }
 
+    /// The files a `heki check` run with `args` over `paths` reports on in `project`. A given path
+    /// that names no analyzed file stops the run when [`unmatched_paths`] is an error, before it
+    /// prints a report, a diff, or a prompt, or rewrites a file: a gate given a wrong path would
+    /// pass on nothing. Otherwise [`Self::warn`] names it.
+    pub(crate) fn of_run(
+        args: &CheckArgs,
+        paths: &CommandPaths,
+        project: &Project,
+    ) -> Result<Option<Self>> {
+        let wide = project_wide_files(&args.analysis, &project.env);
+        let touched = Self::of(&args.touched, &paths.files, project, &wide);
+        let lint = &project.env.cfg.lint;
+        let unmatched = touched.as_ref().map(Self::unmatched).unwrap_or_default();
+        if unmatched.is_empty() || unmatched_paths(args, lint) == Severity::Warning {
+            return Ok(touched);
+        }
+        let problem = Problem::new(unmatched.join("; "))
+            .help("name the Python files the run analyzes: below PATHS, and not left out by `exclude` or `extend-exclude`")
+            .docs(Docs::CliCheck);
+        // A path is an error only by the setting: the error shows the key that made it one.
+        Err(match (args.unmatched_paths, lint.unmatched_paths) {
+            (None, Some(_)) => problem.setting(Setting::of_context("lint.unmatched-paths", None)),
+            _ => problem,
+        }
+        .into())
+    }
+
     /// These files as the run reports on them: `None` when a named file selects every report.
     pub(crate) fn selecting(touched: Option<&Self>) -> Option<&Self> {
         touched.filter(|t| !t.every_report)
@@ -477,31 +510,37 @@ impl Touched {
         }
     }
 
-    /// Warn once about the given paths that name no analyzed file.
-    pub(crate) fn warn(&self, format: OutputFormat) {
-        let listed = |paths: &[PathBuf]| -> Vec<String> {
-            paths
-                .iter()
+    /// What the given paths that name no analyzed file are: one sentence for the files of PATHS,
+    /// one for the paths of `--touched`, and none when every path names one.
+    fn unmatched(&self) -> Vec<String> {
+        let listed = |paths: &[PathBuf]| -> String {
+            (paths.iter())
                 .map(|p| format!("`{}`", path_text(p)))
-                .collect()
+                .collect::<Vec<_>>()
+                .join(", ")
         };
+        let mut sentences = Vec::new();
         if !self.unknown_files.is_empty() {
-            let paths = listed(&self.unknown_files);
-            log!(
-                format,
-                "warning: PATHS name {} file(s) that are not among the analyzed files (not a Python file of the project or below the directories given, or excluded): {}",
-                paths.len(),
-                paths.join(", ")
-            );
+            sentences.push(format!(
+                "PATHS name {} file(s) that are not among the analyzed files (not a Python file of the project or below the directories given, or excluded): {}",
+                self.unknown_files.len(),
+                listed(&self.unknown_files)
+            ));
         }
         if !self.unknown.is_empty() {
-            let paths = listed(&self.unknown);
-            log!(
-                format,
-                "warning: `--touched` names {} path(s) that are not among the analyzed files (missing, not a Python file under PATHS, or excluded): {}",
-                paths.len(),
-                paths.join(", ")
-            );
+            sentences.push(format!(
+                "`--touched` names {} path(s) that are not among the analyzed files (missing, not a Python file under PATHS, or excluded): {}",
+                self.unknown.len(),
+                listed(&self.unknown)
+            ));
+        }
+        sentences
+    }
+
+    /// Warn once about the given paths that name no analyzed file.
+    pub(crate) fn warn(&self, format: OutputFormat) {
+        for sentence in self.unmatched() {
+            log!(format, "warning: {sentence}");
         }
     }
 }
@@ -1105,7 +1144,7 @@ fn report(
         render(
             &diags,
             &failures,
-            format_of(args.output_format),
+            format_of(args.output_format, fail_on),
             styles,
             &source_line
         )
@@ -1444,12 +1483,13 @@ pub(crate) fn stdout_styles(choice: ColorChoice) -> Stylesheet {
     Stylesheet::styled()
 }
 
-pub(crate) fn format_of(f: OutputFormat) -> heki_diagnostics::OutputFormat {
+/// `f` as `heki_diagnostics` renders it, `github` with the `fail_on` of the run.
+pub(crate) fn format_of(f: OutputFormat, fail_on: Severity) -> heki_diagnostics::OutputFormat {
     match f {
         OutputFormat::Full => heki_diagnostics::OutputFormat::Full,
         OutputFormat::Concise => heki_diagnostics::OutputFormat::Concise,
         OutputFormat::Json => heki_diagnostics::OutputFormat::Json,
-        OutputFormat::Github => heki_diagnostics::OutputFormat::Github,
+        OutputFormat::Github => heki_diagnostics::OutputFormat::Github { fail_on },
         OutputFormat::Sarif => heki_diagnostics::OutputFormat::Sarif,
     }
 }

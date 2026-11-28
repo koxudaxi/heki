@@ -478,6 +478,45 @@ fn watch_reports_what_check_reports() {
     assert_eq!(json(&watch.stdout), json(check.as_bytes()));
 }
 
+/// `--watch` writes the GitHub annotations `heki check` writes, each at the level that says
+/// whether its report fails the run: a heuristic `error` fails it only at `fail-on = "warning"`.
+#[test]
+fn watch_writes_the_annotation_levels_check_writes() {
+    let p = Project::new("watch_github_levels");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/maybe.py",
+            "import time\n\n\ndef pause(seconds: float) -> None:\n    if seconds > 0:\n        time.sleep(seconds)\n\n\nasync def handler(seconds: float) -> None:\n    pause(seconds)\n",
+        )
+        .write(
+            "app/jobs.py",
+            "import time\n\n\nasync def handler():\n    time.sleep(1)\n",
+        );
+    for (fail_on, maybe) in [("error", "::warning "), ("warning", "::error ")] {
+        let args = [
+            "--heuristic",
+            "--output-format",
+            "github",
+            "--fail-on",
+            fail_on,
+        ];
+        let (_, check, _) = p.heki(&[&["check"][..], &args].concat());
+        assert!(check.starts_with("::error file=app/jobs.py,"), "{check}");
+        assert!(
+            check.contains(&format!("\n{maybe}file=app/maybe.py,")),
+            "{fail_on}: {check}"
+        );
+        let watch = common::heki_command()
+            .args(["check", "--watch"])
+            .args(args)
+            .current_dir(&p.dir)
+            .env("HEKI_WATCH_MAX_RUNS", "0")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(watch.stdout).unwrap(), check, "{fail_on}");
+    }
+}
+
 /// `--watch` colors its reports as `heki check` colors them.
 #[test]
 fn watch_colors_its_reports_like_check() {

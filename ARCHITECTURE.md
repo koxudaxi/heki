@@ -757,7 +757,7 @@ heki/
 
 ## 9. CLI, configuration, and Ratchet baseline (one interface with Ruff and `t-linter`)
 
-### 9.1 Commands (exit codes: `0` clean, or only warnings and heuristic reports / `1` exact errors, any report with `--fail-on warning`, the reports of a contract with `fail = true`, and the reports of the rules `lint.fail` lists / `2` configuration, I/O, or syntax errors)
+### 9.1 Commands (exit codes: `0` clean, or only warnings and heuristic reports / `1` exact errors, any report with `--fail-on warning`, the reports of a contract with `fail = true`, and the reports of the rules `lint.fail` lists / `2` configuration, path, I/O, or syntax errors)
 ```bash
 heki check [PATHS...]                         # semantic diagnostics (MUT, EFF / DATA, OPT)
 heki check FILE...                            # the project of the files, showing what touches them (as ROOT --touched FILE...)
@@ -772,6 +772,7 @@ heki check --color auto|always|never          # colored full / concise / --diff 
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused; entries of files PATHS leave out stay)
 heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one (every Ratchet regression; every report for a configuration file)
+heki check --touched FILE... --unmatched-paths error   # a FILE (or file PATH) that names no analyzed file stops the run with 2 (lint.unmatched-paths = "error"); default: a warning
 heki check --watch [PATHS...]                 # re-check on file changes
 
 heki server                                   # incremental LSP server (alias: heki lsp)
@@ -797,6 +798,7 @@ ignore = []
 heuristic = true                     # prefixes and the defaults also select the heuristic rules
 fail-on = "warning"                  # warnings and heuristic reports fail heki check too (default: "error")
 fail = ["IMP101"]                    # the reports of these rules fail heki check whatever their tier (default: none)
+unmatched-paths = "error"            # a --touched path or file PATH that names no analyzed file stops heki check (default: "warning")
 
 [tool.heki.lint.severity]
 MUT101 = "warning"

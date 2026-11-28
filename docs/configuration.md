@@ -240,6 +240,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](adoption.md#ratchet-baselines) records or an inline [suppression](#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
+| `unmatched-paths` | `"warning"` | `"warning"` or `"error"`: what `heki check` does with a path it is given to report on, in [`--touched`](cli-reference.md#heki-check) or as a file among PATHS, that names no analyzed file: a missing file, a directory, a file that is not Python, one outside the directories given, or an excluded one. A warning names the paths and the run goes on, and passes when nothing it shows fails it. An error stops the run with exit code 2 before it reports, prints a diff or a prompt, or rewrites a file, so that a CI job given a wrong path fails. A TOML file that is no configuration file is passed over either way, as the pre-commit hook passes every staged one. `--unmatched-paths` overrides it. |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](#entries-that-match-nothing). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
@@ -1389,8 +1390,11 @@ fail = true
 ```
 
 - Other warnings and heuristic reports stay advisory: `fail = true` does not change `fail-on`,
-  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF, GitHub
-  annotations) are the same with and without it.
+  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF) are the same
+  with and without it. Only the level of a GitHub annotation, which says whether its report
+  fails the run, follows it: an `error` report of a contract is an `error` annotation with
+  `fail = true` and a `warning` one without it (see
+  [Continuous integration](adoption.md#continuous-integration)).
 - A report that several contracts find stands for each of them, and fails the run when one of
   them has `fail = true`. A `MUT202` report is of the `readonly-returns` tables naming a producer
   the changed value may come from: all of them when the change reaches the producer's result
