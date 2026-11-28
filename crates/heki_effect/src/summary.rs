@@ -3039,6 +3039,7 @@ impl<'a> Extractor<'a> {
             binding: None,
             new_object: NewArg::Old,
             origins: None,
+            handed: false,
         };
         let instances: Vec<&String> = origin.instance_classes().collect();
         origin.targets = self.arg_targets(origin.typed_field.as_ref(), &instances);
@@ -7474,12 +7475,30 @@ impl<'a> Extractor<'a> {
                     }),
             },
         };
+        let params =
+            (call.value.filter(|_| call.recv_var.is_none())).map_or(0, |v| self.one_of_params(v));
         self.blind.push(BlindCall {
             span: call.span,
             loop_depth: self.shape.loop_depth(bb),
             is_awaited: call.is_awaited,
             blind,
+            params,
         });
+    }
+
+    /// The parameters `var` is one of on every path ([`Self::exact_param`]), itself or as a
+    /// choice of them (`fn = key if node_of is None else node_of`); `0` when it may be another
+    /// value.
+    fn one_of_params(&self, var: VarId) -> u64 {
+        let exact = self.exact_param(var);
+        if exact != 0 {
+            return exact;
+        }
+        let root = self.shape.copy_root(var);
+        let phi = (self.f.blocks.iter().flat_map(|b| &b.phis)).find(|p| p.dst == root);
+        let each = |(_, v): &(BlockId, VarId)| Some(self.exact_param(*v)).filter(|m| *m != 0);
+        let params = phi.and_then(|p| p.incoming.iter().map(each).try_fold(0, |m, b| Some(m | b?)));
+        params.unwrap_or(0)
     }
 
     /// Why heki resolves a call on `subject` (its receiver, or the value it calls) to no
@@ -7655,7 +7674,7 @@ impl<'a> Extractor<'a> {
                 if self.opt_in.unawaited_handoffs {
                     self.unawaited_handoff(symbol, call);
                 }
-                self.handed_callable(bb, symbol, call);
+                self.handed_callable(bb, Handing::Api(symbol), call);
                 None
             }
             Callee::Project(keys, binds_recv) => {
@@ -7688,6 +7707,9 @@ impl<'a> Extractor<'a> {
                     .map(|_| self.keyword_ways(call))
                     .filter(|ways| ways.len() > 1);
                 let mut handed_state: Vec<HandedState> = Vec::new();
+                // `(callee index, parameter, argument, awaited)` of the callables the callees run
+                // of what the call hands them.
+                let mut run_handed: Vec<(usize, u8, VarId, bool)> = Vec::new();
                 // A constructor call binds the object it creates, unless the class may return
                 // an existing instance.
                 let new_recv = call
@@ -7825,6 +7847,23 @@ impl<'a> Extractor<'a> {
                     while params.last().is_some_and(ArgOrigin::is_empty) {
                         params.pop();
                     }
+                    // The callables the callee calls of what it is handed run at the call, when
+                    // its body does (`Self::handed_callable`).
+                    let calls_handed = decl.calls_params | decl.awaits_params;
+                    if calls_handed != 0
+                        && !offloaded
+                        && !decl.is_generator
+                        && (!decl.is_async || call.is_awaited)
+                    {
+                        let awaits = |slot: u8| decl.awaits_params & (1u64 << slot) != 0;
+                        run_handed.extend(
+                            (bound.iter())
+                                .filter(|(slot, _)| {
+                                    *slot < 64 && calls_handed & (1u64 << slot) != 0
+                                })
+                                .map(|&(slot, a)| (callees.len(), slot, a, awaits(slot))),
+                        );
+                    }
                     self.bind_captured(key, decl, &mut params);
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_args));
@@ -7960,6 +7999,17 @@ impl<'a> Extractor<'a> {
                 });
                 let at = self.sites.len() - 1;
                 self.worker_site(bb, on_worker, call);
+                for (ci, slot, value, awaited) in run_handed {
+                    let ran = self.handed_callable(bb, Handing::Param { value, awaited }, call);
+                    if ran.is_some_and(|(_, complete)| complete)
+                        && let Some(arg) =
+                            (self.sites[at].project_callees_mut()).and_then(|callees| {
+                                callees.get_mut(ci)?.params.get_mut(usize::from(slot))
+                            })
+                    {
+                        arg.handed = true;
+                    }
+                }
                 Some((at, bindings))
             }
             Callee::TooMany | Callee::Unresolved => {
@@ -8106,46 +8156,66 @@ impl<'a> Extractor<'a> {
         });
     }
 
-    /// A callable a library API runs at the call, when it is a project function (or, but for an
-    /// offloading API that passes it the call's own arguments, a `functools.partial` of one,
-    /// which passes the arguments it holds first): an offloading
-    /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`,
-    /// `ex.submit(f, *args)`) on a worker, with the positional arguments after it (keyword
-    /// arguments are left unbound: some APIs forward them, others take their own), or once per
-    /// item of them (`ex.map(f, xs)`); a sync-facade API's
-    /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and
-    /// the arguments left unbound; and the one a builtin calls once per item (`map(f, xs)`,
-    /// `sorted(xs, key=f)`) on the caller's thread. A callable run per item takes the items as
-    /// its arguments (`Self::passed_items`).
-    fn handed_callable(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
-        let facade = || {
-            let k = usize::from(self.cx.catalog(symbol)?.sync_facade_arg?);
-            if call.star_from.is_some_and(|s| usize::from(s) <= k) {
-                return None;
+    /// A callable the callees of `call` run at the call ([`Handing`]), when it is a project
+    /// function, a bound method, a nested function or lambda of a name of its own, or (but for an
+    /// offloading API that passes it the call's own arguments) a `functools.partial` of one, which
+    /// passes the arguments it holds first: an offloading API's (`asyncio.to_thread(f, *args)`,
+    /// `loop.run_in_executor(None, f, *args)`, `ex.submit(f, *args)`) on a worker, with the
+    /// positional arguments after it (keyword arguments are left unbound: some APIs forward them,
+    /// others take their own), or once per item of them (`ex.map(f, xs)`); a sync-facade API's
+    /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and the
+    /// arguments left unbound; the one a builtin calls once per item (`map(f, xs)`, `sorted(xs,
+    /// key=f)`) on the caller's thread; and the one a project callee calls through the parameter
+    /// it binds (`Runner::Helper`), with its arguments unknown, awaited when the callee awaits it,
+    /// when calling it runs its bodies (no generator function, no `async def` the callee does not
+    /// await). A callable run per item takes the items as its arguments (`Self::passed_items`). A
+    /// class run per item or handed to a project function constructs objects there, which is not
+    /// modeled. Returns the site and whether it names every function the value can be.
+    fn handed_callable(
+        &mut self,
+        bb: BlockId,
+        handing: Handing<'_>,
+        call: &Call<'_>,
+    ) -> Option<(usize, bool)> {
+        let (callable, passed, runner, per_item, api, awaited) = match handing {
+            Handing::Param { value, awaited } => {
+                (value, &[][..], Runner::Helper, None, "", awaited)
             }
-            Some(*call.args.get(k)?)
+            Handing::Api(symbol) => {
+                let facade = || {
+                    let k = usize::from(self.cx.catalog(symbol)?.sync_facade_arg?);
+                    if call.star_from.is_some_and(|s| usize::from(s) <= k) {
+                        return None;
+                    }
+                    Some(*call.args.get(k)?)
+                };
+                let per_item_call = || {
+                    let (args, kwargs) = (call.args, call.kwargs);
+                    crate::consumption::per_item_callable(symbol, args, kwargs, call.star_from)
+                };
+                let (callable, passed, runner, per_item) =
+                    match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
+                        Some(Offloaded::Call(callable, first)) => {
+                            (callable, &call.args[first..], Runner::Worker, None)
+                        }
+                        Some(Offloaded::PerItem(p)) => {
+                            (p.callable, &[][..], Runner::Worker, Some(p))
+                        }
+                        None => match facade() {
+                            Some(callable) => (callable, &[][..], Runner::SyncFacade, None),
+                            None => {
+                                let p = per_item_call()?;
+                                (p.callable, &[][..], Runner::PerItem, Some(p))
+                            }
+                        },
+                    };
+                (callable, passed, runner, per_item, symbol, false)
+            }
         };
-        let per_item_call = || {
-            crate::consumption::per_item_callable(symbol, call.args, call.kwargs, call.star_from)
-        };
-        let (callable, passed, runner, per_item) =
-            match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
-                Some(Offloaded::Call(callable, first)) => {
-                    (callable, &call.args[first..], Runner::Worker, None)
-                }
-                Some(Offloaded::PerItem(p)) => (p.callable, &[][..], Runner::Worker, Some(p)),
-                None => match facade() {
-                    Some(callable) => (callable, &[][..], Runner::SyncFacade, None),
-                    None => match per_item_call() {
-                        Some(p) => (p.callable, &[][..], Runner::PerItem, Some(p)),
-                        None => return,
-                    },
-                },
-            };
-        let position = call
-            .args
-            .iter()
-            .position(|a| *a == callable)
+        // An API's callable is one of the call's arguments.
+        let position = (runner != Runner::Helper)
+            .then(|| call.args.iter().position(|a| *a == callable))
+            .flatten()
             .and_then(|i| u8::try_from(i).ok());
         // The site of a worker that takes the call's own arguments after the callable is matched
         // again to them (`MUT202`, `heki_rules::mut_rules::site_call`), which the arguments a
@@ -8153,18 +8223,28 @@ impl<'a> Extractor<'a> {
         let takes_call_args = runner == Runner::Worker && per_item.is_none();
         let partial = (!takes_call_args).then(|| self.partial(callable)).flatten();
         let target = partial.as_ref().map_or(callable, |p| p.callable);
-        // A class run per item is constructed once per item: what the API returns is not the
-        // new object, and that construction is not modeled. The facts of a lambda that shares
-        // its name are those of every lambda of the name.
-        if per_item.is_some()
+        // A class run per item, or handed to a project function, constructs objects there: what
+        // the call returns is not the new object, and that construction is not modeled. The
+        // facts of a lambda that shares its name are those of every lambda of the name.
+        if (per_item.is_some() || runner == Runner::Helper)
             && (self.class_called(target).is_some() || self.shares_its_name(target))
         {
-            return;
+            return None;
         }
         let (callee, recv_var) = self.callable_callee(target);
-        let Callee::Project(..) = &callee else {
-            return;
+        let Callee::Project(targets, _) = &callee else {
+            return None;
         };
+        // A generator function's body runs where what it returns is iterated, and an `async
+        // def`'s where its coroutine is awaited: a callee calling it without awaiting runs neither.
+        let body_runs = |key: &FuncKey| {
+            (self.cx.project.function_decl(key))
+                .is_some_and(|d| !d.is_generator && (!d.is_async || awaited))
+        };
+        if runner == Runner::Helper && !targets.iter().all(body_runs) {
+            return None;
+        }
+        let complete = self.callable_targets_complete(target, &callee);
         let (recv, recv_is_self) = match recv_var {
             Some(r) => {
                 let (origin, is_self) = self.receiver(r, bb);
@@ -8216,7 +8296,7 @@ impl<'a> Extractor<'a> {
             // A worker's arguments are the call's own after the callable; the others are the
             // arguments a partial holds.
             args_at: takes_call_args.then_some(after),
-            is_awaited: false,
+            is_awaited: awaited,
             recv_is_self,
             constructs: None,
             per_item: items.as_ref(),
@@ -8225,23 +8305,33 @@ impl<'a> Extractor<'a> {
         };
         let per_item = per_item.map(|p| {
             Box::new(PerItem {
-                api: symbol.to_owned(),
+                api: api.to_owned(),
                 items: p.items,
             })
         });
         let offloads_to = match runner {
-            Runner::Worker => (self.cx.kb.lookup(symbol))
+            Runner::Worker => (self.cx.kb.lookup(api))
                 .map_or(OffloadsTo::Thread, |entry| self.offload_target(entry, call)),
             _ => OffloadsTo::Thread,
         };
-        if let Some((site, _)) = self.call(bb, &callee, &handed) {
-            let site = &mut self.sites[site];
-            site.runner = runner;
-            site.handed_callable = position;
-            site.per_item = per_item;
-            site.offloads_to = offloads_to;
-            bind_pickled_copies(site);
+        let (site, _) = self.call(bb, &callee, &handed)?;
+        let handed_site = &mut self.sites[site];
+        handed_site.runner = runner;
+        handed_site.handed_callable = position;
+        handed_site.per_item = per_item;
+        handed_site.offloads_to = offloads_to;
+        bind_pickled_copies(handed_site);
+        // The callables the callees call of what they are handed run where the callees run.
+        if runner == Runner::Worker {
+            for run_by_callee in &mut self.sites[site + 1..] {
+                if run_by_callee.runner == Runner::Helper {
+                    run_by_callee.runner = Runner::Worker;
+                    run_by_callee.offloads_to = offloads_to;
+                    bind_pickled_copies(run_by_callee);
+                }
+            }
         }
+        Some((site, complete))
     }
 
     /// A project function handed to the library call `call` of `symbol` that calls it without
@@ -10463,4 +10553,12 @@ fn or_bits(map: &mut FxHashMap<VarId, u64>, var: VarId, bits: u64) -> bool {
     let grown = *slot | bits != *slot;
     *slot |= bits;
     grown
+}
+
+/// What hands a callable to the callees of a call ([`Extractor::handed_callable`]).
+enum Handing<'s> {
+    /// A library API (its symbol) that runs one of the call's arguments.
+    Api(&'s str),
+    /// A project callee calling the parameter the call binds to `value` (and awaiting it).
+    Param { value: VarId, awaited: bool },
 }

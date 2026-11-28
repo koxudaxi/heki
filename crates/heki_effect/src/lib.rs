@@ -2447,6 +2447,11 @@ pub struct ArgOrigin {
     /// arguments have one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origins: Option<Box<LocalOrigins>>,
+    /// The argument is a function the callee calls through this parameter
+    /// ([`resolver::FunctionDecl::calls_params`]), every function it can be known: the call's
+    /// sites of handed callables run them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handed: bool,
 }
 
 /// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
@@ -2465,6 +2470,13 @@ pub struct ArgTargets {
 impl ArgOrigin {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The argument is the constant `None` (passed, or a default the call leaves): calling it
+    /// raises `TypeError` before any function runs.
+    pub fn is_none(&self) -> bool {
+        let fact = self.binding.as_ref().and_then(|b| b.fact.as_deref());
+        fact.is_some_and(|f| f.exact && f.class.as_deref() == Some(ConstClass::None.name()))
     }
 
     /// The argument as a callee run in another process gets it: a copy made by pickling, of the
@@ -2797,6 +2809,11 @@ pub enum Runner {
     /// `sorted(xs, key=f)`: [`CallSite::per_item`]). The items are its arguments, none of them a
     /// value of the caller.
     PerItem,
+    /// On the caller's thread, by a project callee it is handed to, through the parameter that
+    /// callee calls (`each(xs, visit)` calling `visit`): whether, on which paths, and how often
+    /// the callee calls it are the callee's, so no fact of the site holds on every path. A callee
+    /// run on a worker runs it there (`Runner::Worker`).
+    Helper,
 }
 
 /// A builtin or a pool calling the callees of a site once per item ([`CallSite::per_item`]):
@@ -2841,8 +2858,8 @@ impl CallSite {
     }
 
     /// Whether the targets' bodies run at the call, on the caller's thread: a callable an API
-    /// runs (on a worker, once per item) does not, nor does what a call returns when it is
-    /// iterated or handed on. Only such a site's completeness and paths ([`Self::complete`],
+    /// runs (on a worker, once per item) or a project callee calls ([`Runner::Helper`]) does
+    /// not, nor does what a call returns when it is iterated or handed on. Only such a site's completeness and paths ([`Self::complete`],
     /// [`Self::on_every_return`]) are about those bodies.
     pub fn runs_targets_here(&self) -> bool {
         self.role == SiteRole::Call && self.runner == Runner::Caller
@@ -2889,7 +2906,7 @@ impl CallSite {
             return self.runner == Runner::Worker || !self.shield.is_unshielded();
         }
         match self.runner {
-            Runner::Caller | Runner::PerItem => false,
+            Runner::Caller | Runner::PerItem | Runner::Helper => false,
             Runner::Worker => e.blocks(),
             Runner::SyncFacade => e == ExecEffectKind::BlockingDb,
         }

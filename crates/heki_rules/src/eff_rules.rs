@@ -1786,9 +1786,6 @@ impl<'a> Reach<'a> {
             if runs_body {
                 reach.collect_external(cx, b, i, &func);
             }
-            if b.report_unresolved && runs_body {
-                reach.collect_unjudged(cx, i, &func);
-            }
             for &(path, site) in own {
                 let hop = |caller: &FuncKey, callee: String| CallHop {
                     caller: caller.clone(),
@@ -1851,6 +1848,15 @@ impl<'a> Reach<'a> {
                 }
             }
             i += 1;
+        }
+        // The calls it cannot judge, once every followed call into each node is known: a call of
+        // a parameter runs what they bind there.
+        if b.report_unresolved {
+            let bound = reach.bound_callables(cx);
+            for (i, _) in bodies.iter().enumerate().filter(|(_, body)| **body) {
+                let func = reach.nodes[i].0.clone();
+                reach.collect_unjudged(cx, i, &func, bound[i]);
+            }
         }
         // The writes, once every followed call into each node is known: a write to the object a
         // parameter holds constructs it when every one of them hands it a new object.
@@ -2411,11 +2417,74 @@ impl<'a> Reach<'a> {
         }
     }
 
+    /// By node: the parameters of its function that every followed call into it binds to
+    /// functions all known (`ArgOrigin::handed`, whose sites the reach follows), to `None`
+    /// (calling it runs nothing), or to a parameter of the caller bound so itself (a cell of one,
+    /// for a nested function). The complement of what reaches the node unbound: every parameter
+    /// of the scope function (its callers are outside the reach), and what a call binds to
+    /// anything else, handed on down the calls passing the caller's parameter; one visit per node
+    /// and parameter.
+    fn bound_callables(&self, cx: &CheckContext<'_>) -> Vec<u64> {
+        // By edge: the caller's parameter each callee parameter the call binds holds, or `None`
+        // for a binding to known functions or `None`; the others are unbound.
+        let bindings: Vec<FxHashMap<u8, Option<u8>>> = (self.edges.iter())
+            .map(|e| {
+                let decl = cx.decls.function_decl(&e.bc.callee);
+                let first = decl
+                    .and_then(|d| d.captured_params.as_deref())
+                    .map(|c| c.first);
+                let first = first.map_or(usize::MAX, usize::from);
+                (e.bc.params.iter().enumerate().take(64))
+                    .filter_map(|(k, arg)| {
+                        let caller = match arg.param {
+                            Some((q, None)) => Some(q),
+                            None if k >= first && arg.may_params.count_ones() == 1 => {
+                                u8::try_from(arg.may_params.trailing_zeros()).ok()
+                            }
+                            _ => None,
+                        };
+                        let known = arg.handed || arg.is_none();
+                        let k = u8::try_from(k).ok()?;
+                        (known || caller.is_some()).then_some((k, caller.filter(|_| !known)))
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        for (e, edge) in self.edges.iter().enumerate() {
+            out_edges[edge.from].push(e);
+        }
+        let mut unbound: Vec<(usize, u8)> = (0..64).map(|k| (0, k)).collect();
+        for (e, edge) in self.edges.iter().enumerate() {
+            unbound.extend(
+                (0..64u8)
+                    .filter(|k| !bindings[e].contains_key(k))
+                    .map(|k| (edge.to, k)),
+            );
+        }
+        let handed_on = |(i, q): (usize, u8), out: &mut Vec<(usize, u8)>| {
+            for &e in &out_edges[i] {
+                let passed = bindings[e].iter().filter(|(_, caller)| **caller == Some(q));
+                out.extend(passed.map(|(k, _)| (self.edges[e].to, *k)));
+            }
+        };
+        let mut bound = vec![u64::MAX; self.nodes.len()];
+        // The budget is unmetered: one visit per node and parameter.
+        let budget = Budget::unmetered("eff_rules::Reach::bound_callables");
+        let _ = walk::reach(&budget, unbound, handed_on, |(i, k)| {
+            bound[i] &= !(1u64 << k);
+            walk::Visit::<()>::Expand
+        })
+        .open_means(None);
+        bound
+    }
+
     /// The calls the boundary cannot judge in node `i`'s own body (`unresolved = "report"`):
-    /// those heki resolves to no function (the blind spots of `heki recommend`), and a body it
-    /// does not model or that only a stub declares (`EffectSummary::unknown_calls` without such
-    /// a call, as `heki inspect`'s `purity.unknown_reach` lists it).
-    fn collect_unjudged(&mut self, cx: &CheckContext<'_>, i: usize, func: &FuncKey) {
+    /// those heki resolves to no function (the blind spots of `heki recommend`), but a call of
+    /// parameters the followed calls bind to known functions (`bound`, [`Self::bound_callables`]),
+    /// and a body it does not model or that only a stub declares (`EffectSummary::unknown_calls`
+    /// without such a call, as `heki inspect`'s `purity.unknown_reach` lists it).
+    fn collect_unjudged(&mut self, cx: &CheckContext<'_>, i: usize, func: &FuncKey, bound: u64) {
         // The node runs its body: the function has a summary, kept with its file.
         let path = cx.index.file_of(func).expect("summarized");
         let summary = cx.index.summary(func);
@@ -2426,6 +2495,9 @@ impl<'a> Reach<'a> {
                 continue;
             };
             unresolved = true;
+            if call.params != 0 && call.params & !bound == 0 {
+                continue;
+            }
             let nodes = &self.nodes;
             note_listed(
                 &mut self.unjudged,

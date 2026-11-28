@@ -9182,13 +9182,15 @@ fn forwarding_fan_out(branches: usize) -> String {
 }
 
 /// Every visit of a function is charged its calls, so a fan-out of forwarding calls past the
-/// module's budget answers open instead of reading the calls once per resolving callee.
+/// module's budget answers open instead of reading the calls once per resolving callee; the
+/// calls hand the parameter on too, and the same holds for what the functions call of it.
 #[test]
 fn a_fan_out_of_forwarding_calls_is_charged_for_each_visit() {
     check_past_budgets(
         3000,
         &[
             "heki_effect::resolver::forwarded",
+            "heki_effect::resolver::handed",
             "heki_effect::summary::Extractor::path_facts",
         ],
         |n| {
@@ -9197,6 +9199,123 @@ fn a_fan_out_of_forwarding_calls_is_charged_for_each_visit() {
             p
         },
     );
+}
+
+/// `h{k}(fn)` handing `fn` to `h{k-1}`, and `h0` calling it: `use` hands `h{n-1}` a function
+/// that sleeps, and `top`, an effect boundary's scope, its own parameter, which the reach binds
+/// to nothing along the chain.
+fn handing_chain(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_handing_chain_{n}"));
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"top\"\nscopes = [\"m.top\"]\nwrite-universe = [\"Node.*\"]\nunresolved = \"report\"\n",
+    );
+    let mut lines = vec![
+        "import time".to_owned(),
+        String::new(),
+        String::new(),
+        "def blocking():".to_owned(),
+        "    time.sleep(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def h0(fn):".to_owned(),
+        "    fn()".to_owned(),
+    ];
+    for k in 1..n {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{k}(fn):"),
+            format!("    h{}(fn)", k - 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def use():".to_owned(),
+        format!("    h{}(blocking)", n - 1),
+        String::new(),
+        String::new(),
+        "def top(fn):".to_owned(),
+        format!("    h{}(fn)", n - 1),
+    ]);
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// A long chain of functions handing a parameter on to the one calling it: completing the
+/// declarations visits each function a bounded number of times, and so does the reach deciding
+/// what the scope's calls bind.
+#[test]
+fn a_parameter_handed_down_a_long_chain_of_calls_is_decided_in_linear_time() {
+    let found = check_linear(4000, handing_chain);
+    assert_eq!(blocking_callers(&found), ["use"]);
+    let unjudged = (found.iter()).filter(|d| {
+        d["rule_code"] == "EFF201" && d["message"].as_str().unwrap().contains("cannot resolve")
+    });
+    assert_eq!(unjudged.count(), 1);
+}
+
+/// `a(fn)` handing `fn` to `branches` functions `g{i}`, each handing it to `h`, which calls it:
+/// `a` is read again each time one of them grows.
+fn handing_fan_out(branches: usize) -> Project {
+    let p = Project::new(&format!("bounds_handing_fan_out_{branches}"));
+    let mut lines = vec!["def h(fn):".to_owned(), "    fn()".to_owned()];
+    lines.extend([String::new(), String::new(), "def a(fn):".to_owned()]);
+    lines.extend((0..branches).map(|i| format!("    g{i}(fn)")));
+    for i in 0..branches {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def g{i}(fn):"),
+            "    h(fn)".to_owned(),
+        ]);
+    }
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Every visit of a function is charged its calls, so a fan-out of handing calls past the
+/// module's budget leaves the facts open instead of reading the calls once per callee that grows.
+#[test]
+fn a_fan_out_of_handing_calls_is_charged_for_each_visit() {
+    check_past_budgets(3000, &["heki_effect::resolver::handed"], handing_fan_out);
+}
+
+/// `h(fn)` copying its parameter down a chain (`f1 = f0`, `f2 = f1`, ...) and calling the last
+/// copy once per copy, and `use` handing it a function that sleeps.
+fn handing_copy_chain(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_handing_copy_chain_{n}"));
+    let mut lines = vec![
+        "import time".to_owned(),
+        String::new(),
+        String::new(),
+        "def blocking():".to_owned(),
+        "    time.sleep(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def h(fn):".to_owned(),
+        "    f0 = fn".to_owned(),
+    ];
+    lines.extend((1..n).map(|i| format!("    f{i} = f{}", i - 1)));
+    lines.extend((0..n).map(|_| format!("    f{}()", n - 1)));
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def use():".to_owned(),
+        "    h(blocking)".to_owned(),
+    ]);
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Recording which parameters a function calls finds each value's copy root once, so calls
+/// through the last of a long chain of copies take time linear in the function, and the call
+/// handing the helper a function runs it.
+#[test]
+fn calls_through_a_long_copy_chain_of_a_parameter_find_its_root_once() {
+    let found = check_linear(4000, handing_copy_chain);
+    assert_eq!(blocking_callers(&found), ["use"]);
 }
 
 /// `a1` and `a2`, each returning one of `branches` calls of functions returning their
@@ -9234,6 +9353,7 @@ fn a_module_reading_calls_past_its_budget_stops_reading_them() {
         3000,
         &[
             "heki_effect::resolver::forwarded",
+            "heki_effect::resolver::handed",
             "heki_effect::summary::Extractor::path_facts",
         ],
         forwarding_fan_outs,
@@ -9280,9 +9400,10 @@ fn many_returns_of_one_attribute_read_share_one_walk() {
     );
 }
 
-/// A chain of modules, each function returning what the one of the module before returns: each
-/// module's completion walks the rest of the chain, within a budget proportional to the module,
-/// past which it decides nothing. A chain a size smaller is decided.
+/// A chain of modules, each function returning what the one of the module before returns, and
+/// so handing its parameter on: each module's completion of both facts walks the rest of the
+/// chain, within a budget proportional to the module, past which it decides nothing. A chain a
+/// size smaller is decided.
 fn forwarding_modules(n: usize) -> Project {
     let p = Project::new(&format!("bounds_forwarding_modules_{n}"));
     p.write("c/__init__.py", "")
@@ -9308,9 +9429,12 @@ fn forwarding_modules(n: usize) -> Project {
 
 #[test]
 fn a_parameter_returned_across_a_long_chain_of_modules_stays_within_the_budgets() {
-    let owner = "heki_effect::resolver::forwarded";
+    let owners = [
+        "heki_effect::resolver::forwarded",
+        "heki_effect::resolver::handed",
+    ];
     let n = 2000;
-    let found = check_past_budgets(n, &[owner], forwarding_modules);
+    let found = check_past_budgets(n, &owners, forwarding_modules);
     assert_eq!(mut110_callers(&found), []);
     assert_eq!(
         mut110_callers(&check(&forwarding_modules(n / SCALE))),
