@@ -983,18 +983,44 @@ impl ContainerFamily {
     }
 }
 
-/// A function whose results a `functools` cache keeps and hands to every later call with the
-/// same arguments (`MUT114`'s producer): decorated with `functools.cache`, or with
-/// `functools.lru_cache` whose `maxsize` is left out, `None`, or a literal number above 0,
-/// resolved through the module's imports, and otherwise only with `staticmethod` / `classmethod`; it takes a parameter besides
-/// a method's `self` / `cls`, so the cache keys its results; and every return a run can reach
-/// hands out a builtin container of one kind, established by its return annotation (R2) or by
-/// construction (a display, a comprehension, `list(...)` / `dict(...)` / `set(...)` /
-/// `sorted(...)`, `str.split`).
+/// What keeps a function's results and hands the same object to every later call with the same
+/// arguments (`MUT202`'s and `MUT114`'s producer). A local fact of the function's summary,
+/// never propagated: callers read it through the index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultCache {
+    /// A decorator named `lru_cache` or `cache` (`ModuleDecls::decorator_is`): the body does not
+    /// run on a call that finds its arguments kept, so the whole result is the kept object.
+    Decorator,
+    /// A container the function fills and reads back itself ([`crate::cache_flow::hand_memo`]).
+    Memo(Box<crate::cache_flow::HandMemo>),
+}
+
+impl ResultCache {
+    /// What a call's result shares with the object the cache keeps.
+    pub fn shared(&self) -> Shared {
+        match self {
+            Self::Decorator => Shared::produced(true),
+            Self::Memo(memo) => memo.shared,
+        }
+    }
+}
+
+/// A function whose results a cache keeps and hands to every later call with the same
+/// arguments (`MUT114`'s exact producer), each a builtin container of one kind.
+///
+/// Kept by `functools.cache`, or by `functools.lru_cache` whose `maxsize` is left out, `None`,
+/// or a literal number above 0, resolved through the module's imports, and otherwise decorated
+/// only with `staticmethod` / `classmethod`; it takes a parameter besides a method's `self` /
+/// `cls`, so the cache keys its results; and every return a run can reach hands out a builtin
+/// container of one kind, established by its return annotation (R2) or by construction (a
+/// display, a comprehension, `list(...)` / `dict(...)` / `set(...)` / `sorted(...)`,
+/// `str.split`).
+///
+/// Or kept by a memo the function fills itself ([`Keeper::Memo`], [`memo_cached_result`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedResult {
-    /// `"lru_cache"` or `"cache"`.
-    pub decorator: CacheDecorator,
+    pub keeper: Keeper,
     pub kind: ContainerKind,
     /// Every returned value is built in the function as the builtin itself (a display, a
     /// comprehension, `list(...)`), not only named by the return annotation, which under R2
@@ -1005,18 +1031,41 @@ pub struct CachedResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CacheDecorator {
+pub enum Keeper {
     LruCache,
     Cache,
+    /// The container [`ResultCache::Memo`] names.
+    Memo,
 }
 
-impl CacheDecorator {
-    pub fn fqn(self) -> &'static str {
+impl Keeper {
+    /// The decorator that keeps the results; none for a memo the function fills.
+    pub fn decorator(self) -> Option<&'static str> {
         match self {
-            Self::LruCache => "functools.lru_cache",
-            Self::Cache => "functools.cache",
+            Self::LruCache => Some("functools.lru_cache"),
+            Self::Cache => Some("functools.cache"),
+            Self::Memo => None,
         }
     }
+}
+
+/// The [`CachedResult`] of a function whose every return hands out the object a memo it fills
+/// keeps, from one container named as a cache or memo under one key
+/// ([`crate::cache_flow::MemoFound::exact`]): decorated only as a cache may be, and its return
+/// annotation names a container kind (R2). The value a call finding its key kept returns was
+/// built by an earlier call or put there by other code, so construction establishes no kind.
+pub(crate) fn memo_cached_result(f: &IrFunction, module: &ModuleDecls) -> Option<CachedResult> {
+    let beside_cache = |d: &String| crate::decorators::is(d, module, |k| k.beside_cache);
+    if !f.decorators.iter().all(beside_cache) {
+        return None;
+    }
+    let resolve = |text: &str| module.resolve_dotted(text, false);
+    let kind = annotated_kind(f.return_annotation.as_deref()?, &resolve)?;
+    Some(CachedResult {
+        keeper: Keeper::Memo,
+        kind,
+        built: false,
+    })
 }
 
 /// The function's [`CachedResult`], when it is one. `module` describes the function's module,
@@ -1033,7 +1082,7 @@ pub(crate) fn cached_result<'t>(
     {
         return None;
     }
-    let decorator = cache_decorator(&f.decorators, module)?;
+    let keeper = cache_decorator(&f.decorators, module)?;
     let resolve = |text: &str| module.resolve_dotted(text, false);
     let receiver = f.owner_class_qualname.is_some() && !f.has_decorator(&["staticmethod"]);
     if f.params.len() <= usize::from(receiver) {
@@ -1058,7 +1107,7 @@ pub(crate) fn cached_result<'t>(
     };
     let kind = built.or_else(annotated)?;
     Some(CachedResult {
-        decorator,
+        keeper,
         kind,
         built: built.is_some(),
     })
@@ -1090,7 +1139,7 @@ fn annotated_kind(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Opti
 /// The one `functools` cache among the decorators of a function of `module`, when every other
 /// one keeps the cache's results ([`crate::decorators::Decorator::beside_cache`]) and the cache
 /// keeps results (no `maxsize` of the literal `0`).
-fn cache_decorator(decorators: &[String], module: &ModuleDecls) -> Option<CacheDecorator> {
+fn cache_decorator(decorators: &[String], module: &ModuleDecls) -> Option<Keeper> {
     let mut found = None;
     for d in decorators {
         let args = match d.split_once('(') {
@@ -1098,8 +1147,8 @@ fn cache_decorator(decorators: &[String], module: &ModuleDecls) -> Option<CacheD
             None => None,
         };
         let decorator = match module.decorator_symbol(d).as_deref() {
-            Some("functools.lru_cache") => CacheDecorator::LruCache,
-            Some("functools.cache") if args.is_none() => CacheDecorator::Cache,
+            Some("functools.lru_cache") => Keeper::LruCache,
+            Some("functools.cache") if args.is_none() => Keeper::Cache,
             _ if crate::decorators::is(d, module, |k| k.beside_cache) => continue,
             _ => return None,
         };

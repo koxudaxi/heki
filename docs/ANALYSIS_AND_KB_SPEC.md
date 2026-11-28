@@ -1296,12 +1296,12 @@ EffectSummary(f) = {
                                                            // is on a call cycle), or On (itself)
 
     // Metadata
-    is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
+    is_async, is_generator, is_cached_property, result_cache, owner_class_qualname, decorators,
 }
 ```
 
-`is_cached_property`, `is_lru_cache`, and `FunctionDecl::is_property` know a decorator by what
-its head is bound to at module scope (`ModuleDecls::decorator_is`): an import by the imported
+`is_cached_property`, `result_cache` (a `functools` cache), and `FunctionDecl::is_property` know
+a decorator by what its head is bound to at module scope (`ModuleDecls::decorator_is`): an import by the imported
 symbol's last name (aliases included), a function or class of the module itself never, an
 unbound name by its spelling.
 
@@ -2322,11 +2322,25 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      parameter position the callee changes (`mutated_param_paths` minus `memo_param_paths`; for a
      shallow copy, below the attributes `changed_param_attrs` names; for a producer that is not
      deep, not below its items), is reported as **`MUT202`**
-     with the call hop, or as **`MUT114`** when the value comes from an `@lru_cache` / `@cache`
-     function rather than a declared producer. A `MUT114` report is exact when the cached
-     function carries a `CachedResult` (a `functools` cache resolved by import, with a `maxsize`
-     other than `0`, a parameter besides `self` / `cls`, and a builtin list, dict, or set on every
-     live return, by its return annotation or by construction), the changed value is that one
+     with the call hop, or as **`MUT114`** when the value comes from a cached function rather
+     than a declared producer (`EffectSummary::result_cache`: an `@lru_cache` / `@cache`
+     decorator, which goes before a declared producer, or a memo the function fills itself, which
+     goes after one). A function keeps a memo (`cache_flow::hand_memo`, from its own body) when
+     a value it returns (`readonly::returned_values`, so copies are seen) is `c[k]`, `c.get(k)`,
+     or `c.setdefault(k, v)` on a container that outlives the call (an attribute of the
+     receiver, of a module global, or a module global), `k` derived from the parameters besides
+     the receiver (one walk over their readers), the function stores into `c` under the same key
+     (`cache_flow::same_key`) a value computed from them that is no parameter itself, and the
+     read runs on a path from the entry that passes no such store (one walk over the blocks); a
+     container the function rebinds other than lazily, a store of a new object built from none of
+     the arguments, a copy on every such return, and a decorator that may replace the result
+     make no memo. A `MUT114` report is exact when the cached function carries a `CachedResult`
+     (a `functools` cache resolved by import, with a `maxsize` other than `0`, a parameter
+     besides `self` / `cls`, and a builtin list, dict, or set on every live return, by its return
+     annotation or by construction; or a memo named as a cache or memo whose every live return
+     hands out, through copies and phis, a value read from or stored into it under one key, with
+     a return annotation naming the kind and only the decorators a cache may stand beside), the
+     changed value is that one
      function's result on every path (`MustResult`, an optimistic fixpoint over copies and phis:
      a value starts unset and moves only down, to one cached function, then to anything else),
      each call it is the result of has that function as every implementation it can run

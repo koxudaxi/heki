@@ -13,9 +13,10 @@ use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AccessKind, ArgOrigin, AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite,
     CallTarget, Callee, Construction, ContractClass, ContractSharing, Delivery, ELEMENTS_PATH,
-    EffectSummary, Facts, FuncKey, ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared,
-    SiteRole, TypeCtx, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, Val, WriteKind,
-    attr_writes, container_mutator, initializes_own_self, is_initializer, self_attr_writes,
+    EffectSummary, Facts, FuncKey, ProjectDecls, ProjectIndex, ResultCache, ReturnStep,
+    SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    Val, WriteKind, attr_writes, container_mutator, initializes_own_self, is_initializer,
+    self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -3709,7 +3710,7 @@ impl ReadOnlyReturns {
             .flat_map(|f| &f.functions)
             .filter(|(k, s)| {
                 s.returns_protected.is_some()
-                    || s.is_lru_cache
+                    || s.result_cache.is_some()
                     || producers.names(&k.fqn(), &k.qualname) && property(k, s)
             })
             .map(|(k, _)| {
@@ -4353,12 +4354,21 @@ impl<'a> Mut202Fn<'a> {
             Callee::Project(keys, _) => keys.iter().find_map(|k| {
                 let fqn = k.fqn();
                 let summary = self.cx.index.summary(k);
-                if summary.is_some_and(|s| s.is_lru_cache) {
+                let cache = summary.and_then(|s| s.result_cache.as_ref());
+                let kept_by = |cache: &ResultCache| {
                     let cached = ContractSharing::default();
-                    return Ro::new(fqn, false, Shared::produced(true), cached, vec![]);
+                    Ro::new(fqn.clone(), false, cache.shared(), cached, vec![])
+                };
+                // The order of `callgraph`'s return flow: a `functools` cache, a declared
+                // producer, a memo the function fills itself, a wrapper.
+                if let Some(cache @ ResultCache::Decorator) = cache {
+                    return kept_by(cache);
                 }
                 if let Some(c) = self.returns.producers.protecting(&fqn, &k.qualname) {
                     return Ro::produced(fqn, c, vec![]);
+                }
+                if let Some(memo) = cache {
+                    return kept_by(memo);
                 }
                 let r = summary?.returns_protected.as_ref()?;
                 let mut via = vec![CallHop {
@@ -4588,11 +4598,11 @@ impl<'a> Mut202Fn<'a> {
         let (message, help) = match exact {
             Some((key, cached)) => (
                 format!(
-                    "`{}` changes in place the {kind} that `{}` returned; `{}` is cached by `{}`",
+                    "`{}` changes in place the {kind} that `{}` returned; `{}` {}",
                     self.key.qualname,
                     key.qualname,
                     key.qualname,
-                    cached.decorator.fqn(),
+                    self.kept_by(key, cached.keeper),
                     kind = cached.kind.as_str(),
                 ),
                 format!("change a copy (`{}(...)`) instead", cached.kind.as_str()),
@@ -4628,6 +4638,24 @@ impl<'a> Mut202Fn<'a> {
             });
             debug_assert!(!open.is_empty(), "a heuristic MUT114 report records why");
             d.open_records = open.into_iter().map(OpenRecord::from).collect();
+        }
+    }
+
+    /// What keeps the results of the cached function `key` in an exact report's message: "is
+    /// cached by `functools.lru_cache`", or "keeps it in `self._cache`".
+    fn kept_by(&self, key: &FuncKey, keeper: heki_effect::Keeper) -> String {
+        let memo = match self
+            .cx
+            .index
+            .summary(key)
+            .and_then(|s| s.result_cache.as_ref())
+        {
+            Some(ResultCache::Memo(memo)) => memo.container.as_str(),
+            _ => "",
+        };
+        match keeper.decorator() {
+            Some(decorator) => format!("is cached by `{decorator}`"),
+            None => format!("keeps it in `{memo}`"),
         }
     }
 

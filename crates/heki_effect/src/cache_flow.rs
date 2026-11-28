@@ -7,11 +7,11 @@
 //! decided from these facts and the summaries alone, also for a method of a file that is not
 //! checked (the language server checks one file).
 
-use crate::readonly::ContainerKind;
+use crate::readonly::{ContainerKind, ReturnStep, Shared};
 use crate::resolver::namespace_load;
 use crate::{CallSite, FuncKey, TypeCtx, Val, aliases_of, container_mutator, guards, self_aliases};
 use heki_ast::Span;
-use heki_ir::walk::{self, Answer, Budget, FnShape, Visit};
+use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use, Visit};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, InstKind, IrFunction, Terminator, VarId,
 };
@@ -165,13 +165,20 @@ impl SelfAttrWrite {
 }
 
 /// Memo / cache dictionaries by name: a word of the attribute's name is `cache...` or `memo...`
-/// (`self._cache`, `self.memo`, `self._resultCache`, `self.memoized`), not `memory`.
+/// (`self._cache`, `self.memo`, `self._resultCache`, `self.memoized`, `_CACHE`,
+/// `HTTPCache`), not `memory`. A capital starts a word after a small letter, and after a
+/// capital when a small letter follows it: a run of capitals is one word.
 pub fn is_memo_name(attr: &str) -> bool {
     let mut words: Vec<String> = Vec::new();
     for part in attr.split('_') {
+        let chars: Vec<char> = part.chars().collect();
         let mut word = String::new();
-        for c in part.chars() {
-            if c.is_ascii_uppercase() && !word.is_empty() {
+        for (i, c) in chars.iter().enumerate() {
+            let after_small = i > 0 && chars[i - 1].is_ascii_lowercase();
+            let ends_capitals = i > 0
+                && chars[i - 1].is_ascii_uppercase()
+                && chars.get(i + 1).is_some_and(char::is_ascii_lowercase);
+            if c.is_ascii_uppercase() && (after_small || ends_capitals) {
                 words.push(std::mem::take(&mut word));
             }
             word.push(c.to_ascii_lowercase());
@@ -181,6 +188,359 @@ pub fn is_memo_name(attr: &str) -> bool {
     words
         .iter()
         .any(|w| w.starts_with("cache") || w.starts_with("memo") && !w.starts_with("memor"))
+}
+
+/// A container a function fills with results computed from its arguments and hands them out
+/// from again, as `functools.cache` keeps them ([`hand_memo`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandMemo {
+    /// The container as the function names it: `self._cache`, `cls._cache`, `Configs._cache`,
+    /// `_CACHE`.
+    pub container: String,
+    /// What a returned value shares with a kept one, joined over the returns that hand one out.
+    pub shared: Shared,
+}
+
+/// A [`HandMemo`], and whether the memo keeps every result of its function.
+pub(crate) struct MemoFound {
+    pub memo: HandMemo,
+    /// Every return a run can reach hands out, through copies and phis, the object the memo
+    /// keeps under one key (the value it reads or the value it stores there), and the
+    /// container's name says cache or memo ([`is_memo_name`]): a container of state the callers
+    /// share on purpose is rarely named so.
+    pub exact: bool,
+}
+
+/// The holder number of a module global that is itself a memo container ([`hand_memo`]).
+const GLOBAL_CONTAINER: u32 = u32::MAX;
+/// The holder number of a method's receiver (`self`, `cls`) ([`hand_memo`]).
+const RECEIVER: u32 = 0;
+
+/// How a returned value reads a container under a key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    /// `c[k]`.
+    Item,
+    /// `c.get(k)`.
+    Get,
+    /// `c.get(k, default)`: the default is no kept object.
+    GetOr,
+    /// `c.setdefault(k, v)`: the kept value, after storing `v` when `k` was missing.
+    SetDefault,
+}
+
+/// Where a value is read from a container under a key: the instruction's block and index, the
+/// container, the key, and the lookup ([`container_read`]).
+type ContainerRead = ((BlockId, u32), VarId, VarId, Lookup);
+
+/// A value the function returns that reads a container that outlives the call under a key.
+struct MemoRead<'f> {
+    value: VarId,
+    /// The block and index of the instruction reading it.
+    at: (BlockId, u32),
+    held: Held<'f>,
+    key: VarId,
+    lookup: Lookup,
+}
+
+/// A store of a computed value into a container under a key derived from the arguments.
+struct MemoFill<'f> {
+    held: Held<'f>,
+    key: VarId,
+    value: VarId,
+    at: (BlockId, u32),
+}
+
+/// The memo `f` keeps its results in, when it is a cache by hand: what it returns on some path
+/// is read from a container that outlives the call (an attribute of the method's receiver, an
+/// attribute of a module global such as a class, or a module global), under a key derived from
+/// its arguments, where the function also stores into that container, under the same key, a
+/// value computed from them, and the read runs on some path that passes no such store, so a
+/// later call with the same arguments gets the kept object.
+///
+/// Not a memo: a container the function only reads (a cache object's accessor), one it fills
+/// with a new object built from none of its arguments or with an argument as it is (a registry
+/// of state the callers share on purpose), one it rebinds other than lazily (a container made
+/// per call), a key derived from none of the arguments, and returns that only copy the kept
+/// value. `receiver` says whether the first parameter is the method's `self` / `cls`;
+/// `returned` is [`crate::readonly::returned_values`]. Past the function's budget, none.
+pub(crate) fn hand_memo(
+    shape: &FnShape<'_>,
+    live: &crate::ownership::Live,
+    receiver: bool,
+    returned: &FxHashMap<VarId, ReturnStep>,
+) -> Option<MemoFound> {
+    let f = shape.f;
+    // Most functions return no item of a container.
+    let mut reads: Vec<(VarId, ContainerRead)> = returned
+        .keys()
+        .filter_map(|v| Some((*v, container_read(shape, *v)?)))
+        .collect();
+    if reads.is_empty() {
+        return None;
+    }
+    reads.sort_by_key(|(v, _)| shape.inst(*v).map(|i| i.span));
+    let key_params: FxHashSet<VarId> = f
+        .params
+        .iter()
+        .skip(usize::from(receiver))
+        .map(|p| p.var)
+        .collect();
+    if key_params.is_empty() {
+        return None;
+    }
+    let mut objects: FxHashMap<VarId, u32> = FxHashMap::default();
+    if receiver {
+        objects.extend(self_vars(f).into_iter().map(|v| (v, RECEIVER)));
+    }
+    let mut globals: Vec<&str> = Vec::new();
+    let mut containers: Vec<(VarId, Held<'_>)> = Vec::new();
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        if let InstKind::LoadGlobal { dst, name, .. } = &inst.kind {
+            let n = globals.iter().position(|g| *g == name).unwrap_or_else(|| {
+                globals.push(name);
+                globals.len() - 1
+            });
+            objects.insert(*dst, u32::try_from(n + 1).unwrap_or(GLOBAL_CONTAINER - 1));
+            containers.push((*dst, (GLOBAL_CONTAINER, name.as_str())));
+        }
+    }
+    let alias = holders(shape, &objects, &containers);
+    let reads: Vec<MemoRead<'_>> = reads
+        .into_iter()
+        .filter_map(|(value, (at, container, key, lookup))| {
+            Some(MemoRead {
+                value,
+                at,
+                held: *alias.get(&container)?,
+                key,
+                lookup,
+            })
+        })
+        .collect();
+    if reads.is_empty() {
+        return None;
+    }
+    let budget = Budget::of_function("cache_flow::hand_memo", f);
+    let derived = derived_from(shape, &budget, &key_params)?;
+    // A result computed from the arguments (`Schema(raw)`, `{"name": key}`), not an argument as
+    // it is nor a new object built from none of them (`[]`, `State()`).
+    let computed =
+        |v: VarId| derived.contains(&v) && !matches!(shape.def(shape.copy_root(v)), Def::Param);
+    let mut fills: Vec<MemoFill<'_>> = Vec::new();
+    let mut rebound: FxHashSet<Held<'_>> = FxHashSet::default();
+    for (held, w, op, _) in write_ops(shape, &objects, &alias) {
+        let Some((_, method, _)) = op else {
+            if !w.lazy_init {
+                rebound.insert(held);
+            }
+            continue;
+        };
+        let (key, value) = match (method, &f.block(w.block).insts[w.index as usize].kind) {
+            ("__setitem__", InstKind::SubscriptStore { index, value, .. }) => (*index, *value),
+            ("setdefault", InstKind::MethodCall { args, .. }) if args.len() == 2 => {
+                (args[0], args[1])
+            }
+            _ => continue,
+        };
+        if derived.contains(&key) && computed(value) {
+            fills.push(MemoFill {
+                held,
+                key,
+                value,
+                at: (w.block, w.index),
+            });
+        }
+    }
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        if let InstKind::StoreGlobal { name, .. } = &inst.kind {
+            rebound.insert((GLOBAL_CONTAINER, name.as_str()));
+        }
+    }
+    let filled_under = |read: &MemoRead<'_>| {
+        fills
+            .iter()
+            .any(|w| w.held == read.held && same_key(shape, &budget, read.key, w.key))
+    };
+    let hits: Vec<(&MemoRead<'_>, Shared)> = reads
+        .iter()
+        .filter(|r| !rebound.contains(&r.held) && derived.contains(&r.key) && filled_under(r))
+        .filter(|r| {
+            r.lookup == Lookup::SetDefault || runs_before_fill(shape, live, &budget, &fills, r)
+        })
+        .filter_map(|r| {
+            let shared = returned.get(&r.value)?.apply(Shared::produced(true));
+            shared.object.then_some((r, shared))
+        })
+        .collect();
+    let (first, _) = hits.first()?;
+    let held = first.held;
+    let stored: Vec<&MemoFill<'_>> = fills.iter().filter(|w| w.held == held).collect();
+    let shared = (hits.iter().filter(|(r, _)| r.held == held).map(|(_, s)| *s))
+        .chain(
+            stored
+                .iter()
+                .filter_map(|w| Some(returned.get(&w.value)?.apply(Shared::produced(true)))),
+        )
+        .fold(Shared::default(), Shared::join);
+    // The objects kept under the first hit's key: the values read there and those stored there.
+    let one_key = |k: VarId| same_key(shape, &budget, first.key, k);
+    let kept: FxHashSet<VarId> = (hits.iter())
+        .filter(|(r, _)| r.held == held && r.lookup != Lookup::GetOr && one_key(r.key))
+        .map(|(r, _)| r.value)
+        .chain(stored.iter().filter(|w| one_key(w.key)).map(|w| w.value))
+        .map(|v| shape.copy_root(v))
+        .collect();
+    let (holder, name) = held;
+    let container = match holder {
+        GLOBAL_CONTAINER => name.to_owned(),
+        RECEIVER => format!("{}.{name}", f.params.first().map_or("self", |p| &p.name)),
+        n => format!("{}.{name}", globals[n as usize - 1]),
+    };
+    let exact = is_memo_name(name) && every_return_kept(shape, live, &budget, &kept);
+    Some(MemoFound {
+        memo: HandMemo { container, shared },
+        exact,
+    })
+}
+
+/// Where `v` is read from a container under a key.
+fn container_read(shape: &FnShape<'_>, v: VarId) -> Option<ContainerRead> {
+    let Def::Inst(block, index) = shape.def(v) else {
+        return None;
+    };
+    let at = (block, index);
+    match &shape.f.block(block).insts[index as usize].kind {
+        InstKind::SubscriptLoad {
+            obj,
+            index,
+            is_slice: false,
+            ..
+        } => Some((at, *obj, *index, Lookup::Item)),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if kwargs.is_empty() => match (method.as_str(), args.as_slice()) {
+            ("get", [k]) => Some((at, *recv, *k, Lookup::Get)),
+            ("get", [k, _]) => Some((at, *recv, *k, Lookup::GetOr)),
+            ("setdefault", [k, _]) => Some((at, *recv, *k, Lookup::SetDefault)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `read` runs on some path from the entry that passes no store of `fills` into its
+/// container: the call finds the key kept and returns what an earlier call stored. Blocks are
+/// visited once; a block with such a store leaves only through its exception edge.
+fn runs_before_fill(
+    shape: &FnShape<'_>,
+    live: &crate::ownership::Live,
+    budget: &Budget,
+    fills: &[MemoFill<'_>],
+    read: &MemoRead<'_>,
+) -> bool {
+    let f = shape.f;
+    let (block, index) = read.at;
+    let mut first_fill: FxHashMap<BlockId, u32> = FxHashMap::default();
+    for w in fills.iter().filter(|w| w.held == read.held) {
+        let at = first_fill.entry(w.at.0).or_insert(w.at.1);
+        *at = (*at).min(w.at.1);
+    }
+    let found = walk::reach(
+        budget,
+        f.blocks.first().map(|b| b.id),
+        |b, next| {
+            let bb = f.block(b);
+            if !first_fill.contains_key(&b) {
+                let succs = bb.terminator.successors();
+                next.extend(succs.into_iter().filter(|s| live.edge(b, *s)));
+            }
+            next.extend(bb.exc_target);
+        },
+        |b| {
+            let fill = first_fill.get(&b).copied().unwrap_or(u32::MAX);
+            if b == block && index < fill {
+                Visit::Stop(())
+            } else {
+                Visit::Expand
+            }
+        },
+    );
+    found == Answer::Known(Some(()))
+}
+
+/// Whether every return a run can reach hands out, through copies and phis (along the edges a
+/// run can take), one of the `kept` values (copy roots).
+fn every_return_kept(
+    shape: &FnShape<'_>,
+    live: &crate::ownership::Live,
+    budget: &Budget,
+    kept: &FxHashSet<VarId>,
+) -> bool {
+    let f = shape.f;
+    let mut returned = Vec::new();
+    for b in f.blocks.iter().filter(|b| live.block(b.id)) {
+        match b.terminator {
+            Terminator::Return(Some(v)) => returned.push(v),
+            Terminator::Return(None) => return false,
+            _ => {}
+        }
+    }
+    // The walk visits copy roots only: a copy hands out what its root holds.
+    let other = walk::reach(
+        budget,
+        returned.into_iter().map(|v| shape.copy_root(v)),
+        |v, next| {
+            if let Def::Phi(b, i) = shape.def(v) {
+                let phi = &f.block(b).phis[i as usize];
+                let live_in = phi.incoming.iter().filter(|(from, _)| live.edge(*from, b));
+                next.extend(live_in.map(|(_, v)| shape.copy_root(*v)));
+            }
+        },
+        |v| {
+            if kept.contains(&v) {
+                Visit::Prune
+            } else if matches!(shape.def(v), Def::Phi(..)) {
+                Visit::Expand
+            } else {
+                Visit::Stop(())
+            }
+        },
+    );
+    other == Answer::Known(None)
+}
+
+/// The values derived from `params`: they themselves, and every value an instruction or a phi
+/// computes from one (`id(raw)`, `(a, b)`, `name.lower()`), each reached once. Past `budget`,
+/// none.
+fn derived_from(
+    shape: &FnShape<'_>,
+    budget: &Budget,
+    params: &FxHashSet<VarId>,
+) -> Option<FxHashSet<VarId>> {
+    let f = shape.f;
+    let mut derived: FxHashSet<VarId> = FxHashSet::default();
+    let walked = walk::reach(
+        budget,
+        params.iter().copied(),
+        |v, next| {
+            next.extend(shape.readers(v).iter().filter_map(|u| match *u {
+                Use::Inst(b, i) => f.block(b).insts[i as usize].kind.dst(),
+                Use::Phi(b, i) => Some(f.block(b).phis[i as usize].dst),
+                Use::Terminator(_) => None,
+            }));
+        },
+        |v| {
+            derived.insert(v);
+            Visit::<()>::Expand
+        },
+    );
+    (!walked.is_open()).then_some(derived)
 }
 
 /// One block of a method: its normal control flow and the points that invalidate or read a

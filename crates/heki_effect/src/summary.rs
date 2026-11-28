@@ -29,7 +29,7 @@ use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::partial::Partial;
 use crate::readonly::{
-    self, ContainerKind, ContractSharing, Derivation, ProtectedReturn, ReturnStep,
+    self, ContainerKind, ContractSharing, Derivation, ProtectedReturn, ResultCache, ReturnStep,
     container_mutator,
 };
 use crate::resolver::stores::{self, AttrName};
@@ -1374,7 +1374,8 @@ impl<'a> Extractor<'a> {
                         ..KeptFacts::default()
                     })
                 }),
-            is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
+            result_cache: decorated_as(cx.module, f, &["lru_cache", "cache"])
+                .then_some(ResultCache::Decorator),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
             decorator_may_replace: !keeps_returned_value(&f.decorators, cx.module),
@@ -1502,7 +1503,7 @@ impl<'a> Extractor<'a> {
             Some(Val::Inst(class, _)) => Some(class.as_str()),
             _ => None,
         };
-        if ex.summary.is_lru_cache {
+        if ex.summary.result_cache.is_some() {
             let module = ex.cx.module;
             ex.summary.cached_result =
                 readonly::cached_result(f, module, &ex.defs, &ex.live, class_of);
@@ -1515,11 +1516,37 @@ impl<'a> Extractor<'a> {
             class_of,
         );
         ex.returned = returned;
+        ex.find_hand_memo();
         ex.summary.typed_params = (0..64u32)
             .zip(&f.params)
             .filter(|(_, p)| ex.project_class(p.var).is_some())
             .fold(0, |acc, (i, _)| acc | 1u64 << i);
         ex
+    }
+
+    /// The memo a function fills and reads its results back from ([`cache_flow::hand_memo`]),
+    /// as [`EffectSummary::result_cache`], and its exact [`EffectSummary::cached_result`]. A
+    /// decorator that may not run the body or may hand out another object leaves the body
+    /// telling nothing of what a call returns.
+    fn find_hand_memo(&mut self) {
+        let f = self.f;
+        if self.summary.result_cache.is_some()
+            || self.summary.decorator_may_replace
+            || self.summary.is_generator
+            || f.kind != FunctionKind::Sync
+            || f.is_module_body
+        {
+            return;
+        }
+        let receiver = f.owner_class_qualname.is_some() && !f.has_decorator(&["staticmethod"]);
+        let Some(found) = cache_flow::hand_memo(self.shape, &self.live, receiver, &self.returned)
+        else {
+            return;
+        };
+        if found.exact {
+            self.summary.cached_result = readonly::memo_cached_result(f, self.cx.module);
+        }
+        self.summary.result_cache = Some(ResultCache::Memo(Box::new(found.memo)));
     }
 
     fn guard_inputs(&self) -> GuardInputs<'_, 'a> {
@@ -4784,7 +4811,7 @@ impl<'a> Extractor<'a> {
         if f.kind != FunctionKind::Sync || f.is_module_body {
             return;
         }
-        if self.summary.is_lru_cache {
+        if matches!(self.summary.result_cache, Some(ResultCache::Decorator)) {
             self.summary.return_origins = Some(Box::new(ReturnOrigins {
                 returned: LocalOrigins {
                     known: Origins {
