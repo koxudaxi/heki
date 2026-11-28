@@ -2407,6 +2407,11 @@ pub struct ArgOrigin {
     pub self_attr: Option<String>,
     /// `obj.<attr>` where `obj` has project class type: `(class_fqn, attr)`.
     pub typed_field: Option<(String, String)>,
+    /// The project class holding items ([`ITEMS_ATTR`]) the argument is an instance of: a callee
+    /// changing the argument in place changes its items (`fill(imports)`), also when the
+    /// argument is the attribute [`Self::typed_field`] (`fill(model.imports)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_items: Option<String>,
     /// An instance of project class `class_fqn`.
     pub typed_instance: Option<String>,
     /// When `typed_instance` is a project protocol: the classes implementing it, which the
@@ -2469,6 +2474,14 @@ pub struct ArgTargets {
 impl ArgOrigin {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The fields the argument is, as `(class_fqn, attr)`: the attribute [`Self::typed_field`],
+    /// and the items of [`Self::typed_items`].
+    pub fn fields(&self) -> impl Iterator<Item = (&str, &str)> {
+        let attr = (self.typed_field.as_ref()).map(|(class, attr)| (class.as_str(), attr.as_str()));
+        let items = (self.typed_items.as_deref()).map(|class| (class, ITEMS_ATTR));
+        attr.into_iter().chain(items)
     }
 
     /// The project classes the ownership rules tie the argument to: `typed_instance`, and the

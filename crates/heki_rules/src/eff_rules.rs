@@ -2412,13 +2412,7 @@ impl<'a> Reach<'a> {
             }
             let mut named = (b.write_targets.iter().filter(|_| b.writes_targets))
                 .chain(&b.write_universe)
-                .filter(|t| match &w.what {
-                    Unresolved::Receiver(attr) => t.matches_attr(attr),
-                    Unresolved::Name(class) | Unresolved::Existing(class) => {
-                        t.classes.contains(class)
-                    }
-                    Unresolved::Anything => true,
-                })
+                .filter(|t| t.may_write_unresolved(&w.what))
                 .peekable();
             // A class's own initialization (constructing a fresh object) is not a write, as in
             // `collect_writes`, also through the helpers it hands `self` to. Which target the

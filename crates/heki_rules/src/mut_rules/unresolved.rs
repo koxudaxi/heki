@@ -57,16 +57,8 @@ pub(super) fn mut205(
                 {
                     continue;
                 }
-                let hits: Vec<_> = rule
-                    .targets
-                    .iter()
-                    .filter(|t| match &w.what {
-                        Unresolved::Receiver(attr) => t.matches_attr(attr),
-                        Unresolved::Name(class) | Unresolved::Existing(class) => {
-                            t.classes.contains(class)
-                        }
-                        Unresolved::Anything => true,
-                    })
+                let hits: Vec<_> = (rule.targets.iter())
+                    .filter(|t| t.may_write_unresolved(&w.what))
                     .collect();
                 let unlisted = match &w.what {
                     Unresolved::Receiver(attr)

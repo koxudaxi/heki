@@ -12,7 +12,7 @@ Some rules belong to your project, not to Python: only `app.store` may append to
 
 | You want | Contract | Rules | Tier |
 | --- | --- | --- | --- |
-| Only some functions change an attribute or container | `write-owners` | [`MUT201`](rules/write-owner-violation.md), [`MUT205`](rules/unresolved-guarded-write.md) | heuristic, contract |
+| Only some functions change an attribute, a container, or the items of a container class | `write-owners` | [`MUT201`](rules/write-owner-violation.md), [`MUT205`](rules/unresolved-guarded-write.md) | heuristic, contract |
 | Only some functions read an attribute | `read-owners` | [`MUT203`](rules/read-owner-violation.md), [`MUT206`](rules/unresolved-guarded-read.md) | heuristic, contract |
 | Only some functions call a function, method, or class | `call-owners` | [`MUT204`](rules/call-owner-violation.md), [`MUT207`](rules/unresolved-guarded-call.md) | heuristic, contract |
 | Nobody changes a shared value that a producer returns | `readonly-returns` | [`MUT202`](rules/readonly-return-mutation.md) | heuristic, contract |
@@ -49,6 +49,8 @@ Found 1 diagnostic(s) in 4 file(s).
 ```
 
 The run exits with code 1. `read-owners` and `call-owners` take the same shape with `allowed-readers` and `allowed-callers`. A target covers the subclasses of its class too, and a read or call through a value typed with a project `Protocol` that only the class and its subclasses implement: with `Order` the one class implementing `HasItems`, `cart.items` with `cart: HasItems` reads `Order.items` ([`read-owners`](configuration.md#read-owners)).
+
+A `write-owners` target can also name the items of a project class that derives from a builtin `dict`, `list`, or `set`: `Imports[*]` names every item of its instances and `Imports["typing"]` one entry. An item store or deletion, a mutating method the class inherits, and a change in place of an item are writes of them, also through an attribute that holds the instance and through a helper it is handed to ([Items of a container class](configuration.md#items-of-a-container-class); `MUT201`, heuristic, contract). With `unlisted-attributes = "report"`, the contract also reports a write of an attribute that no `write-owners` target names on an object of a class its targets cover, under the same allowed writers, and with `unresolved = "report"` such an attribute written on an object of unknown class (`MUT205`, heuristic, contract).
 
 ### Every change must be announced
 

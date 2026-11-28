@@ -30,10 +30,11 @@ enum EntryFact {
     Unnamed,
 }
 
-/// The most times an [`EntryFact`] grows: its key once, the objects' parameters and the
-/// parameters they are reached from a bit at a time, the other parts of [`ItemOf`] once each,
+/// The most times an [`EntryFact`] grows: its key once, the parameters of the object holding
+/// the container and of the instance holding items (`ItemOf::items`) and the parameters each
+/// is reached from a bit at a time, the other parts of [`ItemOf`] and of its items once each,
 /// and [`EntryFact::Unnamed`] last.
-const ENTRY_FACT_HEIGHT: usize = 2 * 64 + 6;
+const ENTRY_FACT_HEIGHT: usize = 4 * 64 + 10;
 
 impl Join for EntryFact {
     fn join(&mut self, other: &Self) -> bool {
@@ -310,9 +311,9 @@ impl<'a> Extractor<'a> {
         match fact {
             Read::Fact(EntryFact::Entry(outer)) => EntryFact::Entry(outer.clone()),
             _ => match self.obj_attr_alias.get(&container) {
-                Some(a) => EntryFact::Entry(entry_of_attr(a, key(), container)),
+                Some(a) => EntryFact::Entry(entry_of_attr(a, key(), self.items_of(container))),
                 None => match self.items_of(container) {
-                    Some(items) => EntryFact::Entry(entry_of_attr(&items, key(), container)),
+                    Some(items) => EntryFact::Entry(entry_of_attr(&items, key(), None)),
                     None => EntryFact::Unnamed,
                 },
             },
@@ -337,8 +338,9 @@ impl Read<'_> {
     }
 }
 
-/// An entry under `key` of `container`, the container the attribute load `a` gives.
-fn entry_of_attr(a: &ObjAttr, key: Option<String>, container: VarId) -> ItemOf {
+/// An entry under `key` of the container the attribute load `a` gives (the instance itself for
+/// its items), whose `items` the container holds when it is an instance holding items.
+fn entry_of_attr(a: &ObjAttr, key: Option<String>, items: Option<ObjAttr>) -> ItemOf {
     ItemOf {
         classes: a.classes.clone(),
         attr: a.attr.clone(),
@@ -347,6 +349,6 @@ fn entry_of_attr(a: &ObjAttr, key: Option<String>, container: VarId) -> ItemOf {
         fresh: a.fresh,
         reach: a.reach,
         holder: a.holder,
-        container: Some(container),
+        items: items.map(Box::new),
     }
 }

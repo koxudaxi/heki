@@ -4038,6 +4038,34 @@ fn unlisted_attributes_reports_the_attributes_no_target_names() {
     );
 }
 
+/// A target naming an attribute of one class leaves that attribute unlisted on another class:
+/// a helper that never sees the class writing it on an instance of the other class is that
+/// class's unlisted attribute, reported at the caller handing the instance over (`MUT201`), and
+/// `MUT205` leaves the write it can tie to the caller's class to that report.
+#[test]
+fn an_attribute_listed_for_one_class_stays_unlisted_for_another_through_a_helper() {
+    let p = Project::new("unlisted_attrs_other_class");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"fields\"\n\
+         targets = [\"pkg.model.Field.name\", \"pkg.model.Other.alias\"]\n\
+         allowed-writers = [\"pkg.store.*\"]\nunlisted-attributes = \"report\"\nunresolved = \"report\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", UNLISTED_ATTRS_MODEL)
+    .write(
+        "pkg/use.py",
+        "from pkg.model import Field\n\n\ndef helper(obj) -> None:\n    obj.alias = \"h\"\n\n\n\
+         def change(field: Field) -> None:\n    helper(field)\n",
+    );
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d(u, 9, "MUT201", "change", "Field.alias")]
+    );
+}
+
 const LISTED_ELSEWHERE_MODEL: &str = r#"from __future__ import annotations
 
 CACHE_KEY = "_cache_key"

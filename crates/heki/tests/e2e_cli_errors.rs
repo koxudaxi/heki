@@ -374,7 +374,7 @@ fn contract_errors_point_at_the_value() {
             "[[tool.heki.read-owners]]\nname = \"r\"\ntargets = ['M.attr[\"k\"]']\n".to_owned(),
             vec![
                 "error: pyproject.toml:6:12: invalid read-owners target `M.attr[\"k\"]`: a container entry (`Class.attr[\"key\"]`) or the items of a class (`Class[*]`) is a write target only; reads are of `Class.attr`",
-                "  = help: a read target is `Class.attr`: drop the `[\"key\"]` or `[*]`, or make the entry a `write-owners` target",
+                "  = help: a read target is `Class.attr`: drop the `[\"key\"]`, or make the entry a `write-owners` target",
             ],
             "configuration/#read-owners",
         ),

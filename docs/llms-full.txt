@@ -569,7 +569,7 @@ Some rules belong to your project, not to Python: only `app.store` may append to
 
 | You want | Contract | Rules | Tier |
 | --- | --- | --- | --- |
-| Only some functions change an attribute or container | `write-owners` | [`MUT201`](https://heki.koxudaxi.dev/rules/write-owner-violation/), [`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/) | heuristic, contract |
+| Only some functions change an attribute, a container, or the items of a container class | `write-owners` | [`MUT201`](https://heki.koxudaxi.dev/rules/write-owner-violation/), [`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/) | heuristic, contract |
 | Only some functions read an attribute | `read-owners` | [`MUT203`](https://heki.koxudaxi.dev/rules/read-owner-violation/), [`MUT206`](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/) | heuristic, contract |
 | Only some functions call a function, method, or class | `call-owners` | [`MUT204`](https://heki.koxudaxi.dev/rules/call-owner-violation/), [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/) | heuristic, contract |
 | Nobody changes a shared value that a producer returns | `readonly-returns` | [`MUT202`](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | heuristic, contract |
@@ -606,6 +606,8 @@ Found 1 diagnostic(s) in 4 file(s).
 ```
 
 The run exits with code 1. `read-owners` and `call-owners` take the same shape with `allowed-readers` and `allowed-callers`. A target covers the subclasses of its class too, and a read or call through a value typed with a project `Protocol` that only the class and its subclasses implement: with `Order` the one class implementing `HasItems`, `cart.items` with `cart: HasItems` reads `Order.items` ([`read-owners`](https://heki.koxudaxi.dev/configuration/#read-owners)).
+
+A `write-owners` target can also name the items of a project class that derives from a builtin `dict`, `list`, or `set`: `Imports[*]` names every item of its instances and `Imports["typing"]` one entry. An item store or deletion, a mutating method the class inherits, and a change in place of an item are writes of them, also through an attribute that holds the instance and through a helper it is handed to ([Items of a container class](https://heki.koxudaxi.dev/configuration/#items-of-a-container-class); `MUT201`, heuristic, contract). With `unlisted-attributes = "report"`, the contract also reports a write of an attribute that no `write-owners` target names on an object of a class its targets cover, under the same allowed writers, and with `unresolved = "report"` such an attribute written on an object of unknown class (`MUT205`, heuristic, contract).
 
 ### Every change must be announced
 
@@ -1110,6 +1112,8 @@ Found 1 diagnostic(s) in 3 file(s).
 ```
 
 The run exits with code 1. `forbid` takes tokens such as `blocking`, `blocking-net`, `blocking-db`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, and `reads-environment`. [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) lists them all with their extra keys.
+
+`write-targets`, `write-universe`, and `allow-writes` take the targets `write-owners` takes, also the items of a project class that derives from a builtin `dict`, `list`, or `set` (`Imports[*]`, `Imports["typing"]`). An attribute pattern such as `Model.*` never names the items, so a boundary that guards them lists them on their own.
 
 A `scopes` or `allowed-callees` entry naming a method (`Class.method`) names that method only. With `include-overrides = true` in the boundary (or in its [defaults table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind)) it also names the overrides in the project subclasses of `Class`, nested scopes included, so a subclass written later is in scope or allowed with no change of the configuration. The key is off by default for that reason.
 
@@ -3180,13 +3184,17 @@ method the class inherits (`imports.setdefault("os", set())`, `pop`, `update`, `
 `append`, ...), and a change in place of an item (`imports["typing"].add("Any")`, also of the
 entry `setdefault` returns), as for the entries of an attribute's container. An instance an
 attribute holds counts too: `model.imports["k"] = v` writes `Model.imports` and the items of
-`Imports`. A helper handed the instance writes them at the call. The class's own methods are
-writers like any other. When a project `__setitem__` or `__delitem__` along the class's MRO
+`Imports`. A helper handed the instance writes them at the call, also when it is handed the
+attribute (`fill(model.imports)` writes `Model.imports` and the items). The class's own methods
+are writers like any other. When a project `__setitem__` or `__delitem__` along the class's MRO
 replaces the store or the deletion, the caller's `imports["k"] = v` runs that method, whose own
-writes (`super().__setitem__(key, value)`) are judged in it. A `__missing__` the class defines is
-a method like the others, and reading an item is no write. A change through a value heki cannot
-type is not tied to the items (`MUT205` and the boundaries' `unresolved` name attributes), and an
-in-place operator on the instance (`imports |= other`) is not followed.
+writes (`super().__setitem__(key, value)`) are judged in it. Reading an item is no write, also
+when the read of a missing key inserts one (the default of a `defaultdict`): a `__missing__` the
+class defines is a method like the others, so the stores in its body are judged in it. A change
+through a value heki cannot type is not tied to the items (`MUT205` and the boundaries'
+`unresolved` name attributes), and an in-place operator on the instance (`imports |= other`) and
+a change of an item a loop over the instance itself steps to (`for row in rows: row.append(x)`)
+are not followed.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
@@ -3328,7 +3336,8 @@ With `unresolved = "report"`, `MUT205` reports:
 - an attribute named like a target, written on an object of unknown class;
 - a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
   `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
-  of unknown class, where it may be any target;
+  of unknown class, where it may be any target naming an attribute (writing an attribute stores
+  no item, so no `Class[*]` target);
 - with `unlisted-dict-keys = "report"`, a constant `__dict__` key that no target names for some
   class the contract's targets cover, written on an object of unknown class, where it may be a
   new key of that class. A helper whose callers hand it only objects of classes no target covers
@@ -15041,7 +15050,9 @@ write:
   `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
   the class body (`Model.KEY = "x"`);
 - an attribute name computed at run time written on an object of unknown class (an unannotated
-  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target;
+  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target
+  naming an attribute. Writing an attribute stores no item, so neither computed name is a write
+  of the items of a class (`Class[*]`);
 - with `unlisted-dict-keys = "report"`, a constant `__dict__` key written on an object of unknown
   class (`field.__dict__["_name_cache"] = v`, `field.__dict__.setdefault(KEY, v)`, `del
   vars(field)["k"]`) that no target of any `write-owners` contract names for some class this
@@ -15488,11 +15499,13 @@ as `Class.attr["key"]` does. They match item stores and deletions (`imports["k"]
 `del imports["k"]`), the mutating methods the class inherits (`setdefault`, `pop`, `update`,
 `clear`, `add`, `append`, ...), and changes in place of an item (`imports["k"].add(v)`), also of
 an instance an attribute holds (`model.imports["k"] = v` writes `Model.imports` and the items) and
-through a helper handed the instance, reported at the call. The class's own methods are writers
+through a helper handed the instance or that attribute (`fill(model.imports)`), reported at the
+call. The class's own methods are writers
 like any other; a class whose MRO has a project `__setitem__` or `__delitem__` runs that method
 for the store or the deletion, which is its write (`super().__setitem__(key, value)`). A change
-through a value of unknown class is not tied to such a target, and an in-place operator
-(`imports |= other`) is not followed.
+through a value of unknown class is not tied to such a target, and neither an in-place operator
+(`imports |= other`) nor a change of an item a loop over the instance itself steps to
+(`for row in rows: row.append(x)`) is followed.
 
 The written object's class is the one heki infers for it, with annotations as hints: a
 parameter, local, attribute, or return annotation, including the items of `list[...]`,

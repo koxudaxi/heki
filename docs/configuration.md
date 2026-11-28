@@ -583,13 +583,17 @@ method the class inherits (`imports.setdefault("os", set())`, `pop`, `update`, `
 `append`, ...), and a change in place of an item (`imports["typing"].add("Any")`, also of the
 entry `setdefault` returns), as for the entries of an attribute's container. An instance an
 attribute holds counts too: `model.imports["k"] = v` writes `Model.imports` and the items of
-`Imports`. A helper handed the instance writes them at the call. The class's own methods are
-writers like any other. When a project `__setitem__` or `__delitem__` along the class's MRO
+`Imports`. A helper handed the instance writes them at the call, also when it is handed the
+attribute (`fill(model.imports)` writes `Model.imports` and the items). The class's own methods
+are writers like any other. When a project `__setitem__` or `__delitem__` along the class's MRO
 replaces the store or the deletion, the caller's `imports["k"] = v` runs that method, whose own
-writes (`super().__setitem__(key, value)`) are judged in it. A `__missing__` the class defines is
-a method like the others, and reading an item is no write. A change through a value heki cannot
-type is not tied to the items (`MUT205` and the boundaries' `unresolved` name attributes), and an
-in-place operator on the instance (`imports |= other`) is not followed.
+writes (`super().__setitem__(key, value)`) are judged in it. Reading an item is no write, also
+when the read of a missing key inserts one (the default of a `defaultdict`): a `__missing__` the
+class defines is a method like the others, so the stores in its body are judged in it. A change
+through a value heki cannot type is not tied to the items (`MUT205` and the boundaries'
+`unresolved` name attributes), and an in-place operator on the instance (`imports |= other`) and
+a change of an item a loop over the instance itself steps to (`for row in rows: row.append(x)`)
+are not followed.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
@@ -731,7 +735,8 @@ With `unresolved = "report"`, `MUT205` reports:
 - an attribute named like a target, written on an object of unknown class;
 - a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
   `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
-  of unknown class, where it may be any target;
+  of unknown class, where it may be any target naming an attribute (writing an attribute stores
+  no item, so no `Class[*]` target);
 - with `unlisted-dict-keys = "report"`, a constant `__dict__` key that no target names for some
   class the contract's targets cover, written on an object of unknown class, where it may be a
   new key of that class. A helper whose callers hand it only objects of classes no target covers

@@ -236,6 +236,8 @@ Found 1 diagnostic(s) in 3 file(s).
 
 The run exits with code 1. `forbid` takes tokens such as `blocking`, `blocking-net`, `blocking-db`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, and `reads-environment`. [`effect-boundaries`](configuration.md#effect-boundaries) lists them all with their extra keys.
 
+`write-targets`, `write-universe`, and `allow-writes` take the targets `write-owners` takes, also the items of a project class that derives from a builtin `dict`, `list`, or `set` (`Imports[*]`, `Imports["typing"]`). An attribute pattern such as `Model.*` never names the items, so a boundary that guards them lists them on their own.
+
 A `scopes` or `allowed-callees` entry naming a method (`Class.method`) names that method only. With `include-overrides = true` in the boundary (or in its [defaults table](configuration.md#defaults-for-the-tables-of-a-kind)) it also names the overrides in the project subclasses of `Class`, nested scopes included, so a subclass written later is in scope or allowed with no change of the configuration. The key is off by default for that reason.
 
 ## 📸 Public API effect changes across pull requests

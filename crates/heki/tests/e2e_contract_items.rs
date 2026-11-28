@@ -135,6 +135,45 @@ def computed(imports: Imports) -> None:
     imports[str(len(imports))] = set()
 "#;
 
+const HAND: &str = r#"from pkg.containers import Imports
+from pkg.model import Model
+from pkg.run import fill
+
+
+def hand_attribute(model: Model) -> None:
+    fill(model.imports)
+
+
+def build() -> Imports:
+    imports = Imports(set)
+    fill(imports)
+    return imports
+
+
+def build_directly() -> Imports:
+    imports = Imports(set)
+    imports["k"] = {"v"}
+    return imports
+
+
+def either_entry(model: Model, flag: bool) -> None:
+    names = model.imports["typing"] if flag else model.imports["os"]
+    names.add("x")
+
+
+def named_at_run_time(model: Model, name: str) -> None:
+    setattr(model.imports, name, set())
+
+
+def outer(model: Model) -> None:
+    names = model.imports["typing"]
+
+    def add() -> None:
+        names.add("x")
+
+    add()
+"#;
+
 fn items_project(name: &str, contracts: &str) -> Project {
     let p = Project::new(name);
     p.write(
@@ -216,6 +255,64 @@ fn an_entry_target_names_one_item_and_own_methods_are_writers() {
     assert!(
         message_at(&diags, r, 6).starts_with("`run` writes `pkg.containers.Imports[\"typing\"]`"),
         "{diags:#?}"
+    );
+}
+
+/// A helper that never sees the class changes the items of the instance it is handed, also of
+/// one an attribute holds (`fill(model.imports)`, a change of the attribute too), reported at
+/// the call; a new instance the caller hands over and the helper does not keep is under
+/// construction, as for a store of the caller's own (`fresh-objects = "allow"`). An entry read
+/// through either of two loads of the attribute, or through a closure cell, is one of the
+/// items, and an attribute named at run time is no item, so `MUT205` cannot mistake it for
+/// one. The items are no `invalidation` target: the helper call writes the attribute only.
+#[test]
+fn helpers_merged_entries_and_computed_names_of_an_instance_holding_items() {
+    let p = items_project("items_helpers", "");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\n\
+         select = [\"MUT201\", \"MUT205\", \"MUT208\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"imports\"\n\
+         targets = [\"pkg.containers.Imports[*]\"]\nallowed-writers = [\"pkg.containers.*\"]\n\
+         fresh-objects = \"allow\"\nunresolved = \"report\"\n\n\
+         [[tool.heki.invalidation]]\nname = \"model\"\ntargets = [\"pkg.model.Model.imports\"]\n\
+         invalidators = [\"pkg.run.read\"]\n",
+    )
+    .write("pkg/hand.py", HAND);
+    let diags = diagnostics(&p);
+    let (h, imports) = ("pkg/hand.py", "pkg.containers.Imports[*]");
+    let in_hand = |code: &str| -> Vec<_> {
+        (found(&diags).into_iter())
+            .filter(|(path, _, c, ..)| path == h && c == code)
+            .collect()
+    };
+    assert_eq!(
+        in_hand("MUT201"),
+        vec![
+            d(h, 7, "MUT201", "hand_attribute", imports),
+            d(h, 24, "MUT201", "either_entry", imports),
+            d(h, 35, "MUT201", "outer.<locals>.add", imports),
+        ]
+    );
+    assert!(in_hand("MUT205").is_empty(), "{diags:#?}");
+    let at_call: Vec<_> = (diags.iter())
+        .filter(|x| x["path"] == h && x["line"] == 7 && x["rule_code"] == "MUT208")
+        .map(|x| x["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(at_call.len(), 1, "{diags:#?}");
+    assert!(
+        at_call[0].contains("`pkg.model.Model.imports`"),
+        "{at_call:?}"
+    );
+    let helper_write = diags
+        .iter()
+        .find(|x| x["path"] == h && x["line"] == 7 && x["rule_code"] == "MUT201")
+        .unwrap()["message"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        helper_write,
+        "`hand_attribute` writes `pkg.containers.Imports[*]` (through a helper) via `pkg.run.fill` outside the write owners of `imports`"
     );
 }
 
@@ -314,6 +411,12 @@ fn items_entries_are_judged_and_write_targets_only() {
     assert!(
         stderr.contains(
             "invalid read-owners target `pkg.containers.Imports[*]`: a container entry (`Class.attr[\"key\"]`) or the items of a class (`Class[*]`) is a write target only"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "= help: a read target is `Class.attr`: name an attribute of the class, or make the entry a `write-owners` target"
         ),
         "{stderr}"
     );

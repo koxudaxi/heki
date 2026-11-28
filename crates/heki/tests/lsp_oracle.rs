@@ -10393,13 +10393,18 @@ allowed-writers = ["pkg.model:*"]
 "#;
 
 const ITEMS_BASE: &str = "class Base(dict[str, int]):\n    pass\n";
-const ITEMS_MODEL: &str = "from pkg.base import Base\n\n\nclass Table(Base):\n    pass\n";
+const ITEMS_MODEL: &str = "from pkg.base import Base\n\n\nclass Table(Base):\n    pass\n\n\n\
+                           class Holder:\n    def __init__(self) -> None:\n        self.table: Table = Table()\n";
 const ITEMS_USE: &str =
     "from pkg.model import Table\n\n\ndef fill(table: Table) -> None:\n    table[\"k\"] = 1\n";
+const ITEMS_HELPER: &str = "def store(target) -> None:\n    target[\"k\"] = 1\n";
+const ITEMS_HAND: &str = "from pkg.helper import store\nfrom pkg.model import Holder\n\n\n\
+                          def hand(holder: Holder) -> None:\n    store(holder.table)\n";
 
 /// An items target (`Table[*]`) whose class holds items through a base in another module: the
 /// item store is a write of the target while the base derives from `dict`, and none once it
-/// derives from `object`.
+/// derives from `object`; so is the store of a helper in a third module handed an attribute
+/// holding an instance, while the helper stores.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_for_the_items_of_a_container_subclass() {
     let files = vec![
@@ -10407,9 +10412,12 @@ fn lsp_diagnostics_equal_a_full_check_for_the_items_of_a_container_subclass() {
         ("pkg/base.py", ITEMS_BASE.to_owned()),
         ("pkg/model.py", ITEMS_MODEL.to_owned()),
         ("pkg/use.py", ITEMS_USE.to_owned()),
+        ("pkg/helper.py", ITEMS_HELPER.to_owned()),
+        ("pkg/hand.py", ITEMS_HAND.to_owned()),
     ];
     let mut s = Session::start_with("lsp_oracle_items", ITEMS_CONFIG, files, false);
-    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT201")];
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT201"), ("pkg/hand.py", "MUT201")];
+    let handed: &[(&str, &str)] = &[("pkg/hand.py", "MUT201")];
     let steps = [
         Step::new("initial index", Vec::new()).present(reported),
         Step::new(
@@ -10422,6 +10430,19 @@ fn lsp_diagnostics_equal_a_full_check_for_the_items_of_a_container_subclass() {
             vec![save("pkg/base.py", ITEMS_BASE)],
         )
         .present(reported),
+        Step::new(
+            "the helper stops storing an item",
+            vec![save(
+                "pkg/helper.py",
+                "def store(target) -> None:\n    pass\n",
+            )],
+        )
+        .absent(handed),
+        Step::new(
+            "the helper stores an item again",
+            vec![save("pkg/helper.py", ITEMS_HELPER)],
+        )
+        .present(handed),
     ];
     let mut failures = Vec::new();
     for step in &steps {

@@ -907,6 +907,20 @@ impl ContractTarget {
         self.attr.is_none()
     }
 
+    /// Whether a write heki cannot tie to a class may write the target (`MUT205`, an effect
+    /// boundary's `unresolved-writes`): an attribute named like it on an object of unknown
+    /// class, or an attribute named at run time on an instance of its class family or on any
+    /// object. Writing an attribute never stores an item, so none of these writes the items.
+    pub(crate) fn may_write_unresolved(&self, what: &Unresolved) -> bool {
+        match what {
+            Unresolved::Receiver(attr) => self.matches_attr(attr),
+            Unresolved::Name(class) | Unresolved::Existing(class) => {
+                !self.names_items() && self.classes.contains(class)
+            }
+            Unresolved::Anything => !self.names_items(),
+        }
+    }
+
     /// Whether `read` reads the target: its class and attribute, or, through a value typed with
     /// a project protocol declaring the attribute, the attribute of the classes implementing the
     /// protocol when all of them are of the target's class family ([`implemented_within`]).
@@ -1336,6 +1350,7 @@ pub(crate) fn parse_read_targets(
         return Err(RuleConfigError::ItemTarget {
             section,
             target: t.text.clone(),
+            items: t.names_items(),
         });
     }
     Ok(out)
@@ -2376,9 +2391,8 @@ pub(crate) fn helper_changes_field<'s>(
 ) -> bool {
     bc.params.iter().enumerate().any(|(k, o)| {
         let want = if o
-            .typed_field
-            .as_ref()
-            .is_some_and(|(class, attr)| *class == w.class_qualname && *attr == w.attr)
+            .fields()
+            .any(|(class, attr)| class == w.class_qualname && attr == w.attr)
         {
             if w.kind == WriteKind::IndirectItemMut {
                 ParamChange::Entries

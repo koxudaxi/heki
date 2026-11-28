@@ -736,7 +736,7 @@ impl Adds<'_> {
 }
 
 /// `obj.<attr>` with project-class `obj` (or `obj["key"]` with a `TypedDict` `obj`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ObjAttr {
     /// The project classes `obj` may be an instance of.
     classes: Vec<String>,
@@ -767,9 +767,10 @@ struct ItemOf {
     fresh: bool,
     reach: Reach,
     holder: Option<VarId>,
-    /// The container itself (`obj.attr`), unless phi inputs read different ones: an instance
-    /// holding items ([`Extractor::items_of`]) has the entry among its items too.
-    container: Option<VarId>,
+    /// The items of the container (`obj.attr`) when it is an instance holding items
+    /// ([`Extractor::items_of`]): the entry is one of them too. Phi inputs may read the
+    /// container through loads of their own, so a join keeps these facts, not the load.
+    items: Option<Box<ObjAttr>>,
 }
 
 /// What every value a function binds to one of its closure cells is, as its alias maps join
@@ -2992,12 +2993,16 @@ impl<'a> Extractor<'a> {
 
     fn origin(&self, var: VarId) -> ArgOrigin {
         let (class, exact) = self.class_line(var);
-        // A helper handed an instance holding items changes them (`fill(imports)`).
-        let items = || self.items_of(var);
-        let field = (self.obj_attr_alias.get(&var).cloned()).or_else(items);
-        let typed_field = (field.as_ref())
+        let field = self.obj_attr_alias.get(&var);
+        // A helper handed an instance holding items changes them (`fill(imports)`), also one an
+        // attribute holds (`fill(model.imports)`), which changes the attribute too.
+        let items = self.items_of(var);
+        let typed_field = field
             .filter(|a| a.classes.len() == 1)
             .map(|a| (a.classes[0].clone(), a.attr.clone()));
+        let typed_items = (items.as_ref())
+            .filter(|a| a.classes.len() == 1)
+            .map(|a| a.classes[0].clone());
         let typed_instance = self.project_class(var);
         let implementers = typed_instance
             .as_deref()
@@ -3018,11 +3023,12 @@ impl<'a> Extractor<'a> {
             self_attr: self.self_attr_alias.get(&var).cloned(),
             targets: None,
             typed_field,
+            typed_items,
             typed_instance,
             implementers,
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             retyped: self.retyped.contains(&var),
-            fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
+            fresh: self.is_fresh(var) || field.or(items.as_ref()).is_some_and(|a| a.fresh),
             class,
             exact,
             reach: self.reach_of(var),
@@ -4109,7 +4115,14 @@ impl<'a> Extractor<'a> {
                 obj_params: 0,
                 fresh: false,
                 holder: None,
-                container: None,
+                items: i.items.map(|a| {
+                    Box::new(ObjAttr {
+                        obj_params: 0,
+                        fresh: false,
+                        holder: None,
+                        ..*a
+                    })
+                }),
                 ..i
             });
             let dict = joined_owner(vars.iter().map(|v| self.dict_of.get(v)));
@@ -7119,13 +7132,10 @@ impl<'a> Extractor<'a> {
                 self.typed_site(class, &a.attr, item_key.clone(), kind, span, written);
             }
         } else if let Some(i) = self.item_alias.get(&var).cloned() {
-            // `obj.attr["k"][name] = v`: an entry of an entry of the attribute's container.
+            // `obj.attr["k"][name] = v`: an entry of an entry of the attribute's container, and
+            // one of the items of an instance the attribute holds.
             let written = i.written();
             let key = (i.key.clone(), EntryKey::Written);
-            // An instance holding items in the attribute has the entry among them too.
-            let container_items = (i.container)
-                .filter(|_| i.attr != crate::ITEMS_ATTR)
-                .and_then(|c| self.items_of(c));
             for class in i.classes {
                 self.typed_site(
                     class,
@@ -7136,7 +7146,7 @@ impl<'a> Extractor<'a> {
                     written,
                 );
             }
-            if let Some(a) = container_items {
+            if let Some(a) = i.items {
                 let written = a.written();
                 for class in a.classes {
                     let attr = crate::ITEMS_ATTR;
@@ -10255,9 +10265,7 @@ fn joined_item<'m>(inputs: impl IntoIterator<Item = Option<&'m ItemOf>>) -> Opti
                 if f.holder != a.holder {
                     f.holder = None;
                 }
-                if f.container != a.container {
-                    f.container = None;
-                }
+                f.items = joined_obj_attr([f.items.as_deref(), a.items.as_deref()]).map(Box::new);
             }
         }
     }

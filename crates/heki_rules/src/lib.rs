@@ -987,6 +987,9 @@ pub enum RuleConfigError {
     ItemTarget {
         section: &'static str,
         target: String,
+        /// The target names the items of a class (`Class[*]`, `Class["key"]`), not an entry of
+        /// an attribute's container.
+        items: bool,
     },
     #[error(
         "unknown `forbid` token `{token}` in effect-boundaries `{boundary}` (expected {expected})"
@@ -1123,8 +1126,12 @@ impl Explain for RuleConfigError {
                 problem.help("write a target as a class and its attribute: `\"pkg.model.DataModel.fields\"`, `\"DataModel.*\"`"),
                 in_table(section, "", None, Some(target)),
             ),
-            Self::ItemTarget { section, target } => (
-                problem.help("a read target is `Class.attr`: drop the `[\"key\"]` or `[*]`, or make the entry a `write-owners` target"),
+            Self::ItemTarget { section, target, items } => (
+                problem.help(if *items {
+                    "a read target is `Class.attr`: name an attribute of the class, or make the entry a `write-owners` target"
+                } else {
+                    "a read target is `Class.attr`: drop the `[\"key\"]`, or make the entry a `write-owners` target"
+                }),
                 in_table(section, "", None, Some(target)),
             ),
             Self::UnknownForbid { boundary: name, token, values, .. } => (

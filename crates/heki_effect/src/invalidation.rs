@@ -937,6 +937,8 @@ pub(crate) fn propagate_facts(
                         .iter()
                         .find(|line| line[0].fqn == w.class)
                         .map_or(0, |line| contracts.target_of(line, w.attr)),
+                    // No `invalidation` target names the items of an instance.
+                    Through::Items => 0,
                 };
                 let reach = w.origin.reach;
                 if mask == 0 || builds_written_object(initializer, reach, w.obj_params) {

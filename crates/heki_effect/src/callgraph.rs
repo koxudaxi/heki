@@ -1870,9 +1870,11 @@ fn transfer_typed_writes(
     let origin = |k: usize| bc.params.get(k);
     for w in indirect_writes(index, site, bc, callee, facts, lead) {
         // A new object the caller hands over and the helper does not keep is under
-        // construction.
+        // construction: its attributes and its items, which the argument itself holds.
         let construction = match (w.through, here) {
-            (Through::Instance, Some(r)) if !may_keep_at_call(facts, w.param, site, bc) => {
+            (Through::Instance | Through::Items, Some(r))
+                if !may_keep_at_call(facts, w.param, site, bc) =>
+            {
                 r.through_arg(Some(w.origin), true)
             }
             _ => Construction::No,
@@ -2148,6 +2150,9 @@ pub(crate) enum Through {
     Field,
     /// `helper(obj)` writing attributes of a parameter the helper does not type.
     Instance,
+    /// `helper(imports)` changing the items of the instance of a project class holding items it
+    /// is handed, also one an attribute holds (`helper(obj.imports)`).
+    Items,
 }
 
 /// A typed field write a call makes through one of its arguments, which the callee cannot tie
@@ -2234,11 +2239,17 @@ pub(crate) fn indirect_writes<'a>(
         // `EffectSummary::entry_change_params`), each its own write: a helper may leave one to
         // an allowed callee and make the other itself. A helper writing the value's own
         // attributes writes those, as `obj.attr.x = v` does.
-        if let Some((class, attr)) = &origin.typed_field {
-            // The object holding the attribute, or the instance holding the items.
-            let obj_params = match &origin.param {
-                Some((p, Some(path))) if path == attr => 1u64 << p,
-                Some((p, None)) if attr == crate::ITEMS_ATTR => 1u64 << p,
+        for (class, attr) in origin.fields() {
+            let through = if attr == crate::ITEMS_ATTR {
+                Through::Items
+            } else {
+                Through::Field
+            };
+            // The object holding the attribute, or the instance holding the items: the argument
+            // itself.
+            let obj_params = match (&origin.param, through) {
+                (Some((p, Some(path))), Through::Field) if path == attr => 1u64 << p,
+                (Some((p, None)), Through::Items) => 1u64 << p,
                 _ => 0,
             };
             // The method's body runs at the call itself (no function iterating its generator
@@ -2261,7 +2272,7 @@ pub(crate) fn indirect_writes<'a>(
                     out.push(IndirectWrite {
                         param,
                         origin,
-                        through: Through::Field,
+                        through,
                         class,
                         attr,
                         obj_params,

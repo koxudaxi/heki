@@ -24,8 +24,8 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::ContainerKind;
 use heki_effect::{
     AnnotationFacts, AnnotationReads, CallSite, DeclPasses, EffectSummary, FactChange, FuncKey,
-    ITEMS_ATTR, LiteralAnnotation, ModuleDecls, OffsetMap, ParamAnnotation, ProjectDecls,
-    ReadOverride, Restated,
+    LiteralAnnotation, ModuleDecls, OffsetMap, ParamAnnotation, ProjectDecls, ReadOverride,
+    Restated,
 };
 use heki_ir::InstKind;
 use heki_semantic::{ScopeId, ScopeKind};
@@ -1248,8 +1248,7 @@ impl<'a> Calls<'a> {
             .filter_map(|(site, b)| site.project_callees()[*b].params.get(usize::from(param)));
         for arg in bound {
             out.0 += 1;
-            let attribute = (arg.typed_field.as_ref()).is_some_and(|(_, attr)| attr != ITEMS_ATTR);
-            out.1 += usize::from(arg.self_attr.is_some() || attribute);
+            out.1 += usize::from(arg.self_attr.is_some() || arg.typed_field.is_some());
         }
         out
     }
