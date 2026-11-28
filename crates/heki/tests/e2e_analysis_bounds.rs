@@ -9110,13 +9110,15 @@ fn forwarding_fan_out(branches: usize) -> String {
 }
 
 /// Every visit of a function is charged its calls, so a fan-out of forwarding calls past the
-/// module's budget answers open instead of reading the calls once per resolving callee.
+/// module's budget answers open instead of reading the calls once per resolving callee; the
+/// calls hand the parameter on too, and the same holds for what the functions call of it.
 #[test]
 fn a_fan_out_of_forwarding_calls_is_charged_for_each_visit() {
     check_past_budgets(
         3000,
         &[
             "heki_effect::resolver::forwarded",
+            "heki_effect::resolver::handed",
             "heki_effect::summary::Extractor::path_facts",
         ],
         |n| {
