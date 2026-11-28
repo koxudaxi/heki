@@ -51,13 +51,13 @@ pub(super) fn record(
     }
     // The definitions of one qualname share a declaration: it calls what any of them calls.
     for (qualname, own) in found {
-        if let Some(decl) = decls.functions.get_mut(qualname) {
-            decl.calls_params |= own.calls;
-            decl.awaits_params |= own.awaits;
-            let mut handing = decl.handing.take().map(Vec::from).unwrap_or_default();
-            handing.extend(own.handing);
-            decl.handing = (!handing.is_empty()).then(|| handing.into_boxed_slice());
-        }
+        let decl =
+            (decls.functions.get_mut(qualname)).expect("pass 1 declares every summarized function");
+        decl.calls_params |= own.calls;
+        decl.awaits_params |= own.awaits;
+        let mut handing = decl.handing.take().map(Vec::from).unwrap_or_default();
+        handing.extend(own.handing);
+        decl.handing = (!handing.is_empty()).then(|| handing.into_boxed_slice());
     }
 }
 
