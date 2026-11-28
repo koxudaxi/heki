@@ -4,11 +4,13 @@
 //! (`heki_kb::EcosystemEntry::effect_methods`: a model's `save`, which `QuerySet.create` runs).
 //! Such an override still runs the library's method each time it returns.
 
-use super::init_containers::Paths;
-use super::{LocalNames, ModuleDecls, NameBinding, is_summarized_function, self_aliases};
+use super::{LocalNames, ModuleDecls, NameBinding, is_summarized_function};
 use crate::ModuleInput;
-use heki_ir::walk::{Budget, FnShape};
-use heki_ir::{FunctionKind, InstKind, IrFunction, VarId};
+use heki_ir::walk::{Answer, Budget, Def, FnShape, Visit, reach};
+use heki_ir::{
+    FnIndex, FunctionKind, InstKind, IrFunction, ModuleConstants, PathReader, Paths, Progress,
+    VarId,
+};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::FxHashMap;
 
@@ -58,7 +60,7 @@ pub(super) fn chained_methods(
         {
             continue;
         }
-        if calls_next_on_every_return(f, this.var, owner)
+        if calls_next_on_every_return(f, &input.ir.constants, this.var, owner)
             && let Some(class) = decls.classes.get_mut(owner)
         {
             class.chains_to_next.insert(f.name.clone());
@@ -66,12 +68,19 @@ pub(super) fn chained_methods(
     }
 }
 
-/// Whether every path from the entry of the method `f` of the class `owner` to a `return` calls
-/// the method of its own name on `super()`, or on `super(Owner, self)` with `this` the
-/// instance. Past the budget, it is not known to.
-fn calls_next_on_every_return(f: &IrFunction, this: VarId, owner: &str) -> bool {
-    let shape = FnShape::new(f);
-    let selfs = self_aliases(f, this);
+/// Whether every path from the entry of the method `f` of the class `owner` to a normal return
+/// passes a call, which returned, of the method of its own name on `super()`, or on
+/// `super(Owner, self)` with `this` the instance: one call need not be on every path (a
+/// `return super().save(...)` on each side of a branch). Past the budget, it is not known to.
+fn calls_next_on_every_return(
+    f: &IrFunction,
+    constants: &ModuleConstants,
+    this: VarId,
+    owner: &str,
+) -> bool {
+    let ix = FnIndex::new(f, constants);
+    let shape = &ix.shape;
+    let budget = Budget::of_function("resolver::chained_methods", f);
     let names_owner = |v: VarId| matches!(shape.inst(v).map(|i| &i.kind), Some(InstKind::LoadGlobal { name, .. }) if name == owner);
     let next_of_self = |recv: VarId| {
         matches!(
@@ -90,7 +99,8 @@ fn calls_next_on_every_return(f: &IrFunction, this: VarId, owner: &str) -> bool 
                     Some(InstKind::LoadGlobal { name, .. }) if name == "super"
                 )
                 && (args.is_empty()
-                    || matches!(args[..], [class, instance] if names_owner(class) && selfs.contains(&instance)))
+                    || matches!(args[..], [class, instance] if names_owner(class)
+                        && holds_only(shape, &budget, instance, this).open_means(false)))
         )
     };
     let calls: Vec<(heki_ir::BlockId, usize)> = (f.blocks.iter())
@@ -100,8 +110,33 @@ fn calls_next_on_every_return(f: &IrFunction, this: VarId, owner: &str) -> bool 
         })
         .map(|(b, i, _)| (b, i))
         .collect();
-    let budget = Budget::of_function("resolver::chained_methods", f);
-    Paths::of(&shape, &budget)
-        .map(|paths| calls.iter().any(|at| paths.on_every_return(*at)))
-        .open_means(false)
+    // An override that never calls the next definition runs none of the library's method.
+    !calls.is_empty()
+        && Paths::new(&ix, &PathReader::ir(), &budget)
+            .on_every_return_passes_one_of(&calls, Progress::Returned)
+            .open_means(false)
+}
+
+/// Whether `v` holds the value `this` whenever it is read: every value it copies, or a phi of it
+/// joins, back to where it is made, is `this`. Open past the budget.
+fn holds_only(shape: &FnShape<'_>, budget: &Budget, v: VarId, this: VarId) -> Answer<bool> {
+    let f = shape.f;
+    let sources = |x: VarId, out: &mut Vec<VarId>| match shape.def(x) {
+        Def::Phi(b, i) => {
+            out.extend(f.block(b).phis[i as usize].incoming.iter().map(|(_, s)| *s));
+        }
+        _ => out.push(shape.copy_root(x)),
+    };
+    let other = reach(budget, [v], sources, |x| {
+        let passes_on = matches!(shape.def(x), Def::Phi(..))
+            || matches!(shape.inst(x).map(|i| &i.kind), Some(InstKind::Copy { .. }));
+        if x == this {
+            Visit::Prune
+        } else if passes_on {
+            Visit::Expand
+        } else {
+            Visit::Stop(())
+        }
+    });
+    other.map(|made_elsewhere| made_elsewhere.is_none())
 }

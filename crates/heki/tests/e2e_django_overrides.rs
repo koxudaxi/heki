@@ -207,6 +207,14 @@ class OldStyle(models.Model):
         return super(OldStyle, self).save(*args, **kwargs)
 
 
+class Branching(models.Model):
+    def save(self, *args, **kwargs):
+        if self.pk:
+            return super().save(*args, **kwargs)
+        self.created = True
+        return super().save(*args, **kwargs)
+
+
 def tp_create(groups: list[int]) -> None:
     for g in groups:
         Stamped.objects.create(group=g)
@@ -215,10 +223,16 @@ def tp_create(groups: list[int]) -> None:
 def tp_queryset_create(groups: list[int]) -> None:
     for g in groups:
         OldStyle.objects.filter(group=g).create(group=g)
+
+
+def tp_branching_create(groups: list[int]) -> None:
+    for g in groups:
+        Branching.objects.create(group=g)
 "#;
 
 /// A model's `save` that calls `super().save(...)` (or `super(Model, self).save(...)`) on every
-/// path still inserts the row: `create` stays exact.
+/// path still inserts the row, also with one call on each side of a branch: `create` stays
+/// exact.
 #[test]
 fn saves_calling_super_on_every_path_keep_create() {
     assert_eq!(
@@ -229,9 +243,48 @@ fn saves_calling_super_on_every_path_keep_create() {
             "EFF103"
         ),
         vec![
-            d(19, "EFF103", "tp_create", "django.db.models.Manager.create"),
-            d(24, "EFF103", "tp_queryset_create", &format!("{QS}.create")),
+            d(27, "EFF103", "tp_create", "django.db.models.Manager.create"),
+            d(32, "EFF103", "tp_queryset_create", &format!("{QS}.create")),
+            d(
+                37,
+                "EFF103",
+                "tp_branching_create",
+                "django.db.models.Manager.create"
+            ),
         ]
+    );
+}
+
+const OTHER_INSTANCE_SAVE: &str = r#"from django.db import models
+
+
+class Mirror(models.Model):
+    def save(self, *args, **kwargs):
+        return super(Mirror, self.mirrored).save(*args, **kwargs)
+
+
+def tp_create(groups: list[int]) -> None:
+    for g in groups:
+        Mirror.objects.create(group=g)
+"#;
+
+/// A `save` handing `super(Model, ...)` another object than its own instance saves that
+/// object, not the new one: `create` is heuristic.
+#[test]
+fn a_save_handing_super_another_instance_opens_create() {
+    assert_eq!(
+        check(
+            "django_save_other_instance",
+            "app/models.py",
+            OTHER_INSTANCE_SAVE,
+            "EFF103"
+        ),
+        vec![d(
+            11,
+            "EFF103 [heuristic]",
+            "tp_create",
+            "django.db.models.Manager.create"
+        )]
     );
 }
 

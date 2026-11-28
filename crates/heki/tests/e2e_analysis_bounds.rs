@@ -17,7 +17,8 @@
 //! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
 //! for many parameters, or from many implementations of one call, and the type expressions aliases
 //! and casts spell, the names a module `__getattr__` serves, and the parameters functions return
-//! through calls of each other, down a long chain, around a cycle, or across many modules.
+//! through calls of each other, down a long chain, around a cycle, or across many modules, and
+//! the instance a model's `save` hands `super()` through the copies a loop carries.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -9409,4 +9410,55 @@ fn exit_statuses_behind_copy_chains_are_read_from_a_table() {
         )
     };
     assert!(past_budgets(800, &[], shape, counted).is_empty());
+}
+
+/// A Django model whose `save` hands `super(Chained, v0)` an instance passed back through `links`
+/// copies a loop carries, one loop phi per link, and a function creating models in a loop.
+fn save_through_loop_copies(links: usize) -> String {
+    let mut out = vec![
+        "from django.db import models".to_owned(),
+        String::new(),
+        String::new(),
+        "class Chained(models.Model):".to_owned(),
+        "    def save(self, *args, **kwargs):".to_owned(),
+    ];
+    for k in 0..=links {
+        out.push(format!("        v{k} = self"));
+    }
+    out.push("        for _ in args:".to_owned());
+    for k in 0..links {
+        out.push(format!("            v{k} = v{}", k + 1));
+    }
+    out.push(format!("            v{links} = self"));
+    out.push("        return super(Chained, v0).save(*args, **kwargs)".to_owned());
+    out.extend(
+        [
+            "",
+            "",
+            "def create_all(groups):",
+            "    for g in groups:",
+            "        Chained.objects.create(group=g)",
+        ]
+        .map(str::to_owned),
+    );
+    out.join("\n") + "\n"
+}
+
+/// Whether the instance a `save` override hands `super(Model, v)` is its own is a walk back
+/// through the copies and phis of `v`, in steps linear in the chain: the override still saves
+/// the row, so `create` in a loop stays an exact `EFF103`.
+#[test]
+fn a_save_handing_super_an_instance_through_loop_copies_takes_linear_steps() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_save_copies_{links}"));
+        p.write("app/models.py", &save_through_loop_copies(links));
+        p
+    };
+    let exact_creates = |found: Vec<Value>| {
+        (found.iter())
+            .filter(|d| d["rule_code"] == "EFF103" && d["certainty"] != "heuristic")
+            .count()
+    };
+    assert_eq!(exact_creates(check(&shape(4))), 1);
+    assert_eq!(exact_creates(check_linear(1600, shape)), 1);
 }

@@ -1475,6 +1475,9 @@ struct Step {
     present: &'static [(&'static str, &'static str)],
     /// `(file, code)` the CLI does not report after the step.
     absent: &'static [(&'static str, &'static str)],
+    /// `(file, [(line, code)])`: every diagnostic the CLI reports in the file after the step, by
+    /// its 1-based line and its code with the tier.
+    reported: Option<(&'static str, Reported)>,
     /// Early Cutoff: no other file is re-analyzed or re-published.
     cutoff: bool,
     /// The edit changes a fact callers read, though no diagnostic shows it: the server
@@ -1493,6 +1496,8 @@ struct Step {
 
 type Registered = &'static [(&'static str, &'static [&'static str])];
 
+type Reported = &'static [(u64, &'static str)];
+
 impl Step {
     fn new(name: &'static str, actions: Vec<Action>) -> Self {
         Self {
@@ -1500,6 +1505,7 @@ impl Step {
             actions,
             present: &[],
             absent: &[],
+            reported: None,
             cutoff: false,
             propagates: false,
             only_reads: None,
@@ -1520,6 +1526,11 @@ impl Step {
 
     fn absent(mut self, codes: &'static [(&'static str, &'static str)]) -> Self {
         self.absent = codes;
+        self
+    }
+
+    fn reported(mut self, file: &'static str, at: Reported) -> Self {
+        self.reported = Some((file, at));
         self
     }
 
@@ -8234,6 +8245,19 @@ impl Session {
                 step.name
             );
         }
+        if let Some((file, expected)) = step.reported {
+            let mut found: Vec<(u64, &str)> = (reference.get(file).into_iter().flatten())
+                .map(|d| (d.range.1.0 + 1, d.tiered_code()))
+                .collect();
+            found.sort_unstable();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(
+                found, expected,
+                "step `{}`: the CLI's diagnostics in {file}",
+                step.name
+            );
+        }
         let mut out: Vec<String> = differences(&published(&self.lsp, &self.root), &reference)
             .into_iter()
             .map(|d| format!("step `{}`: {d}", step.name))
@@ -10968,16 +10992,10 @@ fn lsp_diagnostics_equal_a_full_check_for_django_overrides_across_modules() {
         ("pkg/use.py", OVERRIDE_USE.to_owned()),
     ];
     let mut s = Session::start_with("lsp_oracle_django_overrides", MANAGER_CONFIG, files, false);
-    let queries: &[(&str, &str)] = &[("pkg/use.py", "EFF103")];
-    let guessed: &[(&str, &str)] = &[("pkg/use.py", "EFF103 [heuristic]")];
-    let both: &[(&str, &str)] = &[
-        ("pkg/use.py", "EFF103"),
-        ("pkg/use.py", "EFF103 [heuristic]"),
-    ];
+    // `add()` creates on line 6, `fetch()` looks up on line 11.
+    let exact: Reported = &[(6, "EFF103"), (11, "EFF103")];
     let steps = [
-        Step::new("initial index", Vec::new())
-            .present(queries)
-            .absent(guessed),
+        Step::new("initial index", Vec::new()).reported("pkg/use.py", exact),
         Step::new(
             "`save` returns early on one path",
             vec![save(
@@ -10988,13 +11006,12 @@ fn lsp_diagnostics_equal_a_full_check_for_django_overrides_across_modules() {
                 ),
             )],
         )
-        .present(both),
+        .reported("pkg/use.py", &[(6, "EFF103 [heuristic]"), (11, "EFF103")]),
         Step::new(
             "it calls `super().save()` on every path again",
             vec![save("pkg/models.py", OVERRIDE_MODELS)],
         )
-        .present(queries)
-        .absent(guessed),
+        .reported("pkg/use.py", exact),
         Step::new(
             "the queryset binds `_fetch_all`",
             vec![save(
@@ -11002,13 +11019,12 @@ fn lsp_diagnostics_equal_a_full_check_for_django_overrides_across_modules() {
                 &OVERRIDE_QUERYSETS.replace("    def live(self):", "    def _fetch_all(self):"),
             )],
         )
-        .present(both),
+        .reported("pkg/use.py", &[(6, "EFF103"), (11, "EFF103 [heuristic]")]),
         Step::new(
             "it only adds a method again",
             vec![save("pkg/querysets.py", OVERRIDE_QUERYSETS)],
         )
-        .present(queries)
-        .absent(guessed),
+        .reported("pkg/use.py", exact),
     ];
     let mut failures = Vec::new();
     for step in &steps {
