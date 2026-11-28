@@ -189,6 +189,9 @@ Contract reports are heuristic, so they are warnings until the table sets `fail 
 See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key. A coding agent
 can miss a rule written in its instructions, but not a contract that `heki check` enforces:
 
+- [`heki init`](https://heki.koxudaxi.dev/getting-started/#set-up-a-repository-heki-init-experimental)
+  (experimental) writes the configuration, a Ratchet baseline of today's reports, and the Agent
+  Skill and an `AGENTS.md` section in one run.
 - List `heki.toml` and `heki-baseline.toml` in `CODEOWNERS`: moving a wall takes a review.
 - A contract's `message` starts the help line of its reports, so the agent reads it as the fix.
 - A [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code) sends a

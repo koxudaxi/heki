@@ -245,11 +245,13 @@ fn write(plan: &Plan, dry_run: bool) -> Result<()> {
         }
         return Ok(());
     }
-    for f in &plan.texts {
-        write_text(&f.path, &f.new)?;
-    }
+    // The baseline goes first: the configuration names it, and `heki check` fails on a named
+    // baseline it cannot load.
     if let Some(baseline) = &plan.baseline {
         write_text(&baseline.path, &baseline.text)?;
+    }
+    for f in &plan.texts {
+        write_text(&f.path, &f.new)?;
     }
     for destination in &plan.skills {
         skill::write(destination).map_err(|e| {

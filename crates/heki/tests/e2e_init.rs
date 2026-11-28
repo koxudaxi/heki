@@ -633,6 +633,17 @@ fn files_that_cannot_be_read_or_written_stop_the_run() {
         stderr.starts_with("error: heki.toml: cannot write the file: "),
         "{stderr}"
     );
+    // A directory where the baseline goes: the configuration that names it is not written.
+    let p = Project::new("init_unwritable_baseline");
+    p.write("app.py", BLOCKING);
+    std::fs::create_dir_all(p.dir.join("heki-baseline.toml")).unwrap();
+    let (code, _, stderr) = p.heki(&["init", "--yes", "--no-recommend", "--force"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.starts_with("error: heki-baseline.toml: cannot write the file: "),
+        "{stderr}"
+    );
+    assert!(!p.dir.join("heki.toml").exists());
     // A `pyproject.toml` that is not TOML, or not text, stops the run before any question.
     let p = Project::new("init_bad_pyproject");
     p.write("pyproject.toml", "[project\n");
