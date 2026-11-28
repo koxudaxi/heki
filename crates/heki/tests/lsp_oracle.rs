@@ -3185,6 +3185,69 @@ fn steps_module_members() -> Vec<Step> {
     ]
 }
 
+/// The facts of a project enumeration that callers in other modules read: its members, the data
+/// type it mixes in (the class of `value`), and a `__new__` that may give the value another
+/// class. A call on `Version.B.value` is unresolved while the enumeration has no member `B`, and
+/// both calls are while it mixes in no `str` or binds `__new__`; the unresolved calls of the
+/// boundary are what the step compares between the server and `heki check`.
+fn steps_enum_facts() -> Vec<Step> {
+    const KINDS: &str = "from enum import Enum\n\n\nclass Version(str, Enum):\n    A = \"3.12\"\n";
+    const USE: &str = "from pkg.enum_kinds import Version\n\n\ndef first():\n    return Version.A.value.split(\".\")\n\n\ndef second():\n    return Version.B.value.split(\".\")\n";
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"enum-calls\"\nscopes = [\"pkg.enum_use.*\"]\nforbid = [\"writes-targets\"]\nwrite-targets = [\"Ledger.rows\"]\nunresolved = \"report\"\n"
+    );
+    let with_member = KINDS.replace("\"3.12\"\n", "\"3.12\"\n    B = \"3.13\"\n");
+    let without_mixin = with_member.replace("(str, Enum)", "(Enum)");
+    let with_new = format!(
+        "{with_member}\n    def __new__(cls, value):\n        member = str.__new__(cls, value)\n        member._value_ = len(value)\n        return member\n"
+    );
+    let both: Reported = &[(5, "EFF201"), (9, "EFF201")];
+    vec![
+        Step::new(
+            "a function calls a method on the value of a member the enumeration lacks",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/enum_kinds.py", KINDS.to_owned()),
+                Action::Create("pkg/enum_use.py", USE.to_owned()),
+            ],
+        )
+        .reported("pkg/enum_use.py", &[(9, "EFF201")]),
+        Step::new(
+            "the enumeration gains the member",
+            vec![save("pkg/enum_kinds.py", &with_member)],
+        )
+        .reported("pkg/enum_use.py", &[]),
+        Step::new(
+            "it mixes in no data type",
+            vec![save("pkg/enum_kinds.py", &without_mixin)],
+        )
+        .reported("pkg/enum_use.py", both),
+        Step::new(
+            "it mixes in `str` again",
+            vec![save("pkg/enum_kinds.py", &with_member)],
+        )
+        .reported("pkg/enum_use.py", &[]),
+        Step::new(
+            "it binds `__new__`",
+            vec![save("pkg/enum_kinds.py", &with_new)],
+        )
+        .reported("pkg/enum_use.py", both),
+        Step::new(
+            "it binds no `__new__` again",
+            vec![save("pkg/enum_kinds.py", &with_member)],
+        )
+        .reported("pkg/enum_use.py", &[]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/enum_use.py"),
+                Action::Delete("pkg/enum_kinds.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
 /// comes from a decorator in another module, and the in-place change from a helper in a third.
 /// The helper then moves the change of the field to a function of its own and back while its
@@ -8577,6 +8640,7 @@ sessions!(editing, Session::start, {
     callee_globs: steps_callee_globs,
     unbound_helpers: steps_unbound_helpers,
     module_members: steps_module_members,
+    enum_facts: steps_enum_facts,
     environment: steps_environment,
     outside_targets: steps_outside_targets,
     glob_members: steps_glob_members,

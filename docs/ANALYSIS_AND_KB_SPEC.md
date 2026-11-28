@@ -3552,6 +3552,32 @@ The entries follow the public API of each package, with three conventions:
 Lookups are exact, without inheritance or aliases (an entry names the class that a `return_type`,
 an annotation, or a constructor call produces), and the `heki_kb` unit tests pin every entry.
 
+#### Declared results of library calls (`kb/ecosystem/typeshed_stdlib.tsv`)
+
+The type a builtin or standard-library call returns, and the type of an attribute or property of
+a standard-library instance, come from typeshed's stubs. `scripts/build_typeshed_kb.py` reads the
+`stdlib/` stubs at the revision it pins and writes the table, which is checked in: heki has no
+run-time dependency on typeshed, and CI runs the script with `--check`. The rows (`C` MRO, `A`
+spelling, `F` call result, `R` read) and their type text are described in the script's
+docstring. Every `sys.version_info` and `sys.platform` branch is read and joined, so a row holds
+on every Python and platform; a class defined in a private module is spelled by its public
+re-export (`io.TextIOWrapper`).
+
+The Advisory lane reads the table (`heki_kb::StubTable`, reached only through
+`EffectiveEcosystemKb::stubs`; `heki_soundness` never sees it) after the hand catalog, whose
+`return_type`, argument cases and `[[attributes]]` rows answer first. `Self` binds the receiver
+and `~N` the receiver's N-th type argument, tracked for the generic containers as for an
+annotation (`dict[K, V].get`, `deque[T].popleft`). An overload of `__getitem__` is chosen by
+whether the index is a slice; otherwise the result is the join of the overloads' results, of no
+type when one of them is `Any`, `object` or a function's own type variable, or past
+`MAX_UNION` classes. `None` drops from a union as in an annotation. An attribute read on an
+instance of a project class keeps the project's facts; only instances of library classes read
+the table. Two facts sit beside it: a member of a project enumeration read on the class is an
+instance of it, and its `value` has the class of the data type the enumeration mixes in
+(`class Version(str, Enum)`, `IntEnum`), unless a project class along the MRO binds `__new__`;
+and a `match` class pattern narrows its subject as `isinstance` does
+(`IrFunction::class_patterns`).
+
 ### 4.3 Line-number-independent Ratchet baseline (`heki_diagnostics`)
 - **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`
   sites, `heuristic` of them heuristic (`Tally`). Without line numbers, unrelated edits and

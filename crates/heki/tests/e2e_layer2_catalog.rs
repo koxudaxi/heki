@@ -1487,9 +1487,11 @@ def unknown_objects(x):
 
 /// The calls on what these standard library functions return are resolved, by the class of
 /// their result: a path function's follows the kind of path it is given, and `urlparse`'s the
-/// kind of URL. An argument heki knows nothing of gives no class (a destination path object
-/// may give a `str` or itself to `shutil.copy`), and a module `import_module` returns says
-/// nothing of the names it binds.
+/// kind of URL. An argument heki knows nothing of gives the join of the declared results of
+/// the overloads: none for a path function's, of a type variable (a destination path object
+/// may give a `str` or itself to `shutil.copy`), and both result classes for `urlparse`'s, of
+/// which the catalog lists `geturl` only for `ParseResult`. A module `import_module` returns
+/// says nothing of the names it binds.
 #[test]
 fn calls_on_standard_library_results_are_resolved() {
     let p = Project::new("cat_stdlib_results");
@@ -1519,8 +1521,7 @@ fn calls_on_standard_library_results_are_resolved() {
     assert_eq!(
         unresolved,
         vec![
-            at("unknown_objects", "call-result", &["geturl"]),
-            at("unknown_objects", "unknown-member", &["run"]),
+            at("unknown_objects", "unknown-member", &["geturl", "run"]),
             at("unknown_paths", "call-result", &["upper"]),
         ]
     );

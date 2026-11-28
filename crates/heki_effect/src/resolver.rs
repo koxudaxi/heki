@@ -18,7 +18,7 @@ use crate::decorators;
 use crate::only_read::{LiteralAnnotation, ParamAnnotation};
 use crate::ownership;
 use crate::readonly::{ContainerFamily, ContainerKind, FamilyLevel, FamilyRole};
-use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
+use crate::types::{Added, Args, Elem, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
@@ -129,6 +129,28 @@ const IMPLICIT_MEMBERS: &[&str] = &[
     "__qualname__",
     "__slots__",
     "__static_attributes__",
+];
+
+/// The enumeration classes of the standard library.
+const ENUMS: &[&str] = &[
+    "enum.Enum",
+    "enum.IntEnum",
+    "enum.StrEnum",
+    "enum.Flag",
+    "enum.IntFlag",
+    "enum.ReprEnum",
+];
+
+/// The data types an enumeration's members' values may be instances of, by a class along its
+/// MRO that mixes it in: the builtin type itself, or a standard enumeration deriving from it.
+const ENUM_MIXINS: &[(&str, &str)] = &[
+    ("builtins.str", "builtins.str"),
+    ("builtins.int", "builtins.int"),
+    ("builtins.float", "builtins.float"),
+    ("builtins.bytes", "builtins.bytes"),
+    ("enum.StrEnum", "builtins.str"),
+    ("enum.IntEnum", "builtins.int"),
+    ("enum.IntFlag", "builtins.int"),
 ];
 
 /// CHA fan-out limit: more candidates than this leave the call unresolved (`unknown_calls`).
@@ -1957,12 +1979,6 @@ impl ModuleDecls {
             return None;
         }
         let args = split_top_level(inner, ',');
-        let elem = |i: usize| {
-            Elem::of(
-                args.get(i)
-                    .and_then(|a| self.resolve_annotation_ty_in(a, locals)),
-            )
-        };
         let args = match generic(&class) {
             // Whether the class is a project class with type parameters is decided across the
             // project (`ProjectDecls::declared_ty`).
@@ -1974,28 +1990,17 @@ impl ModuleDecls {
                     })
                     .collect(),
             ),
-            Some(Generic::Items) => Args::items(elem(0)),
-            Some(Generic::Map) => Args::map(elem(0), elem(1)),
-            Some(Generic::Pairs) => Args::items(Elem::Of(Ty::container(
-                "builtins.tuple",
-                Args::Tuple(vec![elem(0), elem(1)]),
-            ))),
-            Some(Generic::Counter) => Args::map(elem(0), Elem::Of(Ty::inst("builtins.int"))),
-            // `tuple[()]` is the empty tuple, `tuple[T, ...]` a tuple of any length.
-            Some(Generic::Tuple) => match args.as_slice() {
-                ["()"] => Args::Tuple(Vec::new()),
-                [_, "..."] => Args::items(elem(0)),
-                _ => Args::Tuple((0..args.len()).map(elem).collect()),
-            },
-            Some(Generic::Held) => Args::result(elem(0)),
-            // `Callable[[A, B], T]`, `Callable[..., T]`: a result that may be `None` is no
-            // instance of a class, though the annotation reads `T | None` as `T`.
-            Some(Generic::Returns) => match args.as_slice() {
-                [_, result] if !self.admits_none_in(result, locals) => {
-                    Args::returns(self.resolve_annotation_ty_in(result, locals))
-                }
-                _ => Args::None,
-            },
+            Some(kind) => crate::types::generic_args(
+                kind,
+                &args,
+                |a| Elem::of(self.resolve_annotation_ty_in(a, locals)),
+                // A result that may be `None` is no instance of a class, though the annotation
+                // reads `T | None` as `T`.
+                |result| match self.admits_none_in(result, locals) {
+                    true => Args::None,
+                    false => Args::returns(self.resolve_annotation_ty_in(result, locals)),
+                },
+            ),
         };
         Some(Ty::container(&class, args))
     }
@@ -2130,7 +2135,7 @@ fn special_form(class: &str) -> bool {
 }
 
 /// Split at `sep` outside brackets / parentheses, trimming parts.
-fn split_top_level(text: &str, sep: char) -> Vec<&str> {
+pub(crate) fn split_top_level(text: &str, sep: char) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
@@ -2174,7 +2179,7 @@ fn annotation_allows_none(text: &str) -> bool {
 }
 
 /// `Head[inner]` -> `(Head, inner)`.
-fn subscript(text: &str) -> Option<(&str, &str)> {
+pub(crate) fn subscript(text: &str) -> Option<(&str, &str)> {
     let open = text.find('[')?;
     let inner = text.strip_suffix(']')?.get(open + 1..)?;
     Some((text[..open].trim(), inner))
@@ -6125,14 +6130,6 @@ impl ProjectDecls {
     /// decorator's or an `__init_subclass__`'s store on the class it is handed), or it is an
     /// enumeration (`Color("red")` returns a member).
     pub fn may_reuse_instances(&self, class: &str) -> bool {
-        const ENUMS: &[&str] = &[
-            "enum.Enum",
-            "enum.IntEnum",
-            "enum.StrEnum",
-            "enum.Flag",
-            "enum.IntFlag",
-            "enum.ReprEnum",
-        ];
         let mro = self.mro(class);
         mro.iter().any(|c| {
             self.read(|k| note(&mut k.class_facts, c));
@@ -6141,6 +6138,43 @@ impl ProjectDecls {
                 || (self.class(c)).is_some_and(|decl| decl.members.contains("__new__"))
         }) || self.lookup_rebound(&mro, "__new__")
             || self.bound_after_body(&["__new__"])
+    }
+
+    /// The class of the value of a member of the project enumeration `class` (`value`,
+    /// `_value_`): the data type the enumeration mixes in (`class Version(str, Enum)`, an
+    /// `IntEnum`), which the members' values are instances of. `None` without such a mixin, and
+    /// when a project class along the MRO binds `__new__`, which may give the value another
+    /// class.
+    pub(crate) fn enum_value_class(&self, class: &str) -> Option<&'static str> {
+        let mro = self.mro(class);
+        let mut is_enum = false;
+        let mut mixin = None;
+        for c in &mro {
+            self.read(|k| note(&mut k.class_facts, c));
+            if (self.class(c)).is_some_and(|decl| decl.members.contains("__new__")) {
+                return None;
+            }
+            is_enum |= ENUMS.contains(&c.as_str());
+            mixin = mixin.or_else(|| ENUM_MIXINS.iter().find(|(m, _)| m == c).map(|(_, t)| *t));
+        }
+        is_enum.then_some(mixin).flatten()
+    }
+
+    /// Whether reading `attr` on the class object of the project enumeration `class` gives one
+    /// of its members, an instance of `class`: its own body binds the name to a value, not to a
+    /// function, a nested class, or a `__dunder__` or `_sunder_` name, which stay what they are.
+    pub(crate) fn enum_member(&self, class: &str, attr: &str) -> bool {
+        let reserved = attr.starts_with('_') && attr.ends_with('_');
+        if reserved || !(self.class(class)).is_some_and(|decl| decl.members.contains(attr)) {
+            return false;
+        }
+        let mro = self.mro(class);
+        for c in &mro {
+            self.read(|k| note(&mut k.class_facts, c));
+        }
+        mro.iter().any(|c| ENUMS.contains(&c.as_str()))
+            && self.own_method(class, attr).is_none()
+            && self.class(&format!("{class}.{attr}")).is_none()
     }
 
     /// The MRO of `class` as a [`crate::ClassLine`], one copy shared by every site and fact
@@ -11428,14 +11462,20 @@ impl<'a> TypeCtx<'a> {
             ));
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`,
-        // `boto3.client`, `open`).
-        let entry = self.catalog(fqn)?;
+        // `boto3.client`, `open`), else what the standard library's stubs declare.
+        let declared = || crate::stub_types::function_result(self.kb.stubs(), fqn);
+        let Some(entry) = self.catalog(fqn) else {
+            return declared();
+        };
         if let Some(rt) = entry.result_class(arg) {
             return Some(Ty::inst(rt));
         }
-        (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
-            && !entry.effects.contains(&ExecEffectKind::BlockingNet))
-        .then(|| Ty::inst(fqn))
+        if entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
+            && !entry.effects.contains(&ExecEffectKind::BlockingNet)
+        {
+            return Some(Ty::inst(fqn));
+        }
+        declared()
     }
 
     /// Resolve calling a value (`f(...)`).

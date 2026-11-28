@@ -338,7 +338,8 @@ def f(models: list[Model], by_name: dict[str, Model], fields: list[Field], neste
     assert_eq!(of(&t, "got_other"), one("m.Field | m.Model"));
     assert_eq!(of(&t, "c2"), one("m.Field | m.Model"));
     assert!(of(&t, "c4").is_empty());
-    assert!(of(&t, "other").is_empty());
+    // `list.index` returns the position its stub declares, no item.
+    assert_eq!(of(&t, "other"), one("builtins.int"));
     assert!(of(&t, "called").is_empty());
     assert!(of(&t, "bare").is_empty());
     for name in ["nothing", "fresh"] {

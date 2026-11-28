@@ -108,6 +108,15 @@ pub struct LoopCarriedInfo {
 /// of an unknown callable with every parameter, so nothing in it is modeled.
 pub const UNMODELED: &str = "unmodeled";
 
+/// A class pattern of a `match` statement (`case dict():`): `test` is the variable the IR
+/// branches on, true when `subject` is an instance of the class `class` holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassPattern {
+    pub test: VarId,
+    pub subject: VarId,
+    pub class: VarId,
+}
+
 /// A1 assumption hazard (disables `heki_soundness` on this function only; `heki_effect` continues).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct A1Hazard {
@@ -880,6 +889,11 @@ pub struct IrFunction {
     /// it builds and `ALTER TABLE ` of `f"ALTER TABLE {name}"`, in the order of the variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub str_heads: Vec<(VarId, String)>,
+    /// The class patterns of the function's `match` statements, by the test each lowers to:
+    /// the test is true when the subject is an instance of the class, as `isinstance` decides
+    /// it (PEP 634), in the order of the tests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub class_patterns: Vec<ClassPattern>,
     /// The text each f-string ends with when it is not empty (`heki_ast::fstring_tail`): the
     /// `dst` of the string it builds and `_changed` of `f"{name}_changed"`, in the order of the
     /// variables.
@@ -1032,6 +1046,16 @@ impl IrFunction {
             .binary_search_by_key(&var, |(v, _)| *v)
             .ok()?;
         Some(self.str_heads[i].1.as_str())
+    }
+
+    /// The subject and the class value of the class pattern whose test is `test`
+    /// ([`Self::class_patterns`]).
+    pub fn class_pattern(&self, test: VarId) -> Option<&ClassPattern> {
+        (self
+            .class_patterns
+            .binary_search_by_key(&test, |p| p.test)
+            .ok())
+        .map(|i| &self.class_patterns[i])
     }
 
     /// The text the f-string `var` holds ends with ([`Self::str_tails`]): `""` for one that
