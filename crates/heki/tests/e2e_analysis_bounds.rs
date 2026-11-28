@@ -1411,6 +1411,32 @@ fn branches_on_a_long_copy_chain_of_an_is_test_read_it_once() {
     });
 }
 
+/// A function storing a value new on one path and the caller's on another at each of the 64 keys
+/// of one dict it follows, over and over in branches, and changing the key after each store: the
+/// keys are a data flow over the blocks whose fact is a word per key. Each key is reported once.
+#[test]
+fn constant_keys_stored_in_many_branches_are_followed_linearly() {
+    let found = check_linear(1_024, |stores| {
+        let mut lines = vec![
+            "def build(flag, headers):".to_owned(),
+            "    kwargs = {}".to_owned(),
+        ];
+        for i in 0..stores {
+            let key = i % 64;
+            lines.push("    if flag:".to_owned());
+            lines.push(format!("        kwargs[\"k{key}\"] = headers or {{}}"));
+            lines.push(format!("    kwargs[\"k{key}\"][\"x\"] = {i}"));
+        }
+        lines.push("    return kwargs".to_owned());
+        let p = Project::new(&format!("bounds_constant_keys_{stores}"));
+        p.write("pyproject.toml", MUT112_CONFIG)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT112").count();
+    assert_eq!(reported, 64);
+}
+
 /// A function testing one value against `None` before each of many conditional expressions over
 /// the last of a long chain of its copies: each phi input finds the tests it is on a side of by
 /// the walk up the dominator tree from its edge, once per edge, and the value a copy copies

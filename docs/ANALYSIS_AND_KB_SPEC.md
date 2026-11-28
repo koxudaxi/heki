@@ -2009,7 +2009,18 @@ which module imports which.
    side, the parameter the value is on the failed side is *defaulted*, and the new objects from
    the other side are its replacements: the accumulator idiom. A test that selects no
    replacement (`if p is None: raise ...`) leaves the parameter borrowed. A new object the
-   function stores somewhere is part of where it is stored.
+   function stores somewhere is part of where it is stored. A load of a constant key (a string,
+   or an integer that is not negative) of a builtin `dict`, `list`, `defaultdict`,
+   `OrderedDict`, or `Counter` (`d["k"]`, `d.get("k")`) is the value the function stored there
+   (`d["k"] = v`, a display's `"k": v`) on the paths that reach it, as a variable is the value
+   bound to it, joined with the element the load reads where the container's earlier contents
+   may reach it (`ownership::Slots`, a `walk::fixpoint` over the blocks with the function's
+   budget, at most 64 keys per function: past the budget no load follows a key). A key is
+   opened, the earlier contents again, by a store with another key, a deletion, a changing
+   method, an in-place operator, an attribute read of the container, or a call it is handed to;
+   a container that others may hold (not made by the function, a phi's input, or one stored,
+   captured, yielded, or handed to a call) also by every call, `await`, `yield`, and `with`, and
+   by a store through any other container with the same key or an unknown one.
 4. **Reports**: a change of a container (an item stored or deleted, a container method, an
    in-place operator on a builtin container, a project callee changing the container it is
    handed, `mutated_param_paths` entry `""`) of a value that may be new and borrowed, once per
