@@ -7638,7 +7638,7 @@ impl<'a> Extractor<'a> {
                 if self.opt_in.unawaited_handoffs {
                     self.unawaited_handoff(symbol, call);
                 }
-                self.handed_callable(bb, symbol, call);
+                self.handed_callable(bb, Handing::Api(symbol), call);
                 None
             }
             Callee::Project(keys, binds_recv) => {
@@ -7812,7 +7812,7 @@ impl<'a> Extractor<'a> {
                         params.pop();
                     }
                     // The callables the callee calls of what it is handed run at the call, when
-                    // its body does (`Self::run_handed`).
+                    // its body does (`Self::handed_callable`).
                     let calls_handed = decl.calls_params | decl.awaits_params;
                     if calls_handed != 0
                         && !offloaded
@@ -7964,9 +7964,7 @@ impl<'a> Extractor<'a> {
                 let at = self.sites.len() - 1;
                 self.worker_site(bb, on_worker, call);
                 for (ci, slot, value, awaited) in run_handed {
-                    let handed = (value, &[][..]);
-                    let ran =
-                        self.run_handed(bb, call, handed, (Runner::Caller, "", None), awaited);
+                    let ran = self.handed_callable(bb, Handing::Param { value, awaited }, call);
                     if ran.is_some_and(|(_, complete)| complete)
                         && let Some(arg) =
                             (self.sites[at].project_callees_mut()).and_then(|callees| {
@@ -8122,72 +8120,62 @@ impl<'a> Extractor<'a> {
         });
     }
 
-    /// A callable a library API runs at the call, when it is a project function (or, but for an
-    /// offloading API, a `functools.partial` of one, which passes the arguments it holds
-    /// first): an offloading
-    /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`) on a worker
-    /// thread, with the positional arguments after it (keyword arguments are left unbound: some
-    /// APIs forward them, others take their own); a sync-facade API's
-    /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and
-    /// the arguments left unbound; and the one a builtin calls once per item (`map(f, xs)`,
-    /// `sorted(xs, key=f)`) on the caller's thread, with the items as its arguments
-    /// (`Self::passed_items`).
-    fn handed_callable(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
-        let facade = || {
-            let k = usize::from(self.cx.catalog(symbol)?.sync_facade_arg?);
-            if call.star_from.is_some_and(|s| usize::from(s) <= k) {
-                return None;
-            }
-            Some(*call.args.get(k)?)
-        };
-        let per_item_call = || {
-            crate::consumption::per_item_callable(symbol, call.args, call.kwargs, call.star_from)
-        };
-        let (callable, passed, runner, per_item) =
-            match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
-                Some((callable, first)) => (callable, &call.args[first..], Runner::Worker, None),
-                None => match facade() {
-                    Some(callable) => (callable, &[][..], Runner::SyncFacade, None),
-                    None => match per_item_call() {
-                        Some(p) => (p.callable, &[][..], Runner::PerItem, Some(p)),
-                        None => return,
-                    },
-                },
-            };
-        let position = call
-            .args
-            .iter()
-            .position(|a| *a == callable)
-            .and_then(|i| u8::try_from(i).ok());
-        let ran = self.run_handed(
-            bb,
-            call,
-            (callable, passed),
-            (runner, symbol, per_item),
-            false,
-        );
-        if let Some((site, _)) = ran {
-            self.sites[site].handed_callable = position;
-        }
-    }
-
-    /// The site of `callable`, a value `call` hands a callee that runs it at the call: an API
-    /// ([`Self::handed_callable`]) or a project function calling the parameter the value binds
-    /// (`Runner::Caller`, [`crate::resolver::FunctionDecl::calls_params`]). The value is a project
-    /// function, bound method, nested function or lambda of a name of its own, or (but for an
-    /// offloading API) a `functools.partial` of one, which passes the arguments it holds first;
-    /// the runner passes `passed` after them, and awaits an `async def` when `awaited`. A class
-    /// a builtin or a project function is handed constructs objects there, which is not
-    /// modeled. Returns the site and whether it names every function the value can be.
-    #[allow(clippy::type_complexity)]
-    fn run_handed(
+    /// A callable the callees of `call` run at the call ([`Handing`]), when it is a project
+    /// function, a bound method, a nested function or lambda of a name of its own, or (but for an
+    /// offloading API) a `functools.partial` of one, which passes the arguments it holds first:
+    /// an offloading API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f,
+    /// *args)`) on a worker thread, with the positional arguments after it (keyword arguments
+    /// are left unbound: some APIs forward them, others take their own); a sync-facade API's
+    /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and the
+    /// arguments left unbound; the one a builtin calls once per item (`map(f, xs)`, `sorted(xs,
+    /// key=f)`) on the caller's thread, with the items as its arguments (`Self::passed_items`);
+    /// and the one a project callee calls through the parameter it binds, on the caller's thread
+    /// with its arguments unknown, awaited when the callee awaits it. A class a builtin or a
+    /// project function is handed constructs objects there, which is not modeled. Returns the
+    /// site and whether it names every function the value can be.
+    fn handed_callable(
         &mut self,
         bb: BlockId,
+        handing: Handing<'_>,
         call: &Call<'_>,
-        (callable, passed): (VarId, &[VarId]),
-        (runner, api, per_item): (Runner, &str, Option<crate::consumption::PerItemCall>),
-        awaited: bool,
     ) -> Option<(usize, bool)> {
+        let (callable, passed, runner, per_item, api, awaited) = match handing {
+            Handing::Param { value, awaited } => {
+                (value, &[][..], Runner::Caller, None, "", awaited)
+            }
+            Handing::Api(symbol) => {
+                let facade = || {
+                    let k = usize::from(self.cx.catalog(symbol)?.sync_facade_arg?);
+                    if call.star_from.is_some_and(|s| usize::from(s) <= k) {
+                        return None;
+                    }
+                    Some(*call.args.get(k)?)
+                };
+                let per_item_call = || {
+                    let (args, kwargs) = (call.args, call.kwargs);
+                    crate::consumption::per_item_callable(symbol, args, kwargs, call.star_from)
+                };
+                let (callable, passed, runner, per_item) =
+                    match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
+                        Some((callable, first)) => {
+                            (callable, &call.args[first..], Runner::Worker, None)
+                        }
+                        None => match facade() {
+                            Some(callable) => (callable, &[][..], Runner::SyncFacade, None),
+                            None => {
+                                let p = per_item_call()?;
+                                (p.callable, &[][..], Runner::PerItem, Some(p))
+                            }
+                        },
+                    };
+                (callable, passed, runner, per_item, symbol, false)
+            }
+        };
+        // An API's callable is one of the call's arguments.
+        let position = (runner != Runner::Caller)
+            .then(|| call.args.iter().position(|a| *a == callable))
+            .flatten()
+            .and_then(|i| u8::try_from(i).ok());
         // A worker's site is matched again to the call's own arguments after the callable
         // (`MUT202`, `heki_rules::mut_rules::site_call`), which the arguments a partial object
         // holds would shift: a partial is followed for the other APIs only.
@@ -8275,6 +8263,7 @@ impl<'a> Extractor<'a> {
         });
         let (site, _) = self.call(bb, &callee, &handed)?;
         self.sites[site].runner = runner;
+        self.sites[site].handed_callable = position;
         self.sites[site].per_item = per_item;
         Some((site, complete))
     }
@@ -10473,4 +10462,12 @@ fn or_bits(map: &mut FxHashMap<VarId, u64>, var: VarId, bits: u64) -> bool {
     let grown = *slot | bits != *slot;
     *slot |= bits;
     grown
+}
+
+/// What hands a callable to the callees of a call ([`Extractor::handed_callable`]).
+enum Handing<'s> {
+    /// A library API (its symbol) that runs one of the call's arguments.
+    Api(&'s str),
+    /// A project callee calling the parameter the call binds to `value` (and awaiting it).
+    Param { value: VarId, awaited: bool },
 }

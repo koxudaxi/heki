@@ -2337,50 +2337,64 @@ impl<'a> Reach<'a> {
 
     /// By node: the parameters of its function that every followed call into it binds to
     /// functions all known (`ArgOrigin::handed`, whose sites the reach follows), to `None`
-    /// (calling it runs nothing), or to a parameter of the caller bound so itself (a cell of one, for a nested function). A
-    /// greatest fixpoint over the followed calls, each pass clearing bits: at most one pass per
-    /// node and parameter. The scope function's callers are outside the reach.
+    /// (calling it runs nothing), or to a parameter of the caller bound so itself (a cell of one,
+    /// for a nested function). The complement of what reaches the node unbound: every parameter
+    /// of the scope function (its callers are outside the reach), and what a call binds to
+    /// anything else, handed on down the calls passing the caller's parameter; one visit per node
+    /// and parameter.
     fn bound_callables(&self, cx: &CheckContext<'_>) -> Vec<u64> {
-        let mut bound = vec![0u64; self.nodes.len()];
-        for e in &self.edges {
-            bound[e.to] = u64::MAX;
-        }
-        bound[0] = 0;
-        // Where each callee's cells of enclosing parameters start ([`heki_effect::CapturedParams`]).
-        let captured: Vec<usize> = (self.edges.iter())
+        // By edge: the caller's parameter each callee parameter the call binds holds, or `None`
+        // for a binding to known functions or `None`; the others are unbound.
+        let bindings: Vec<FxHashMap<u8, Option<u8>>> = (self.edges.iter())
             .map(|e| {
                 let decl = cx.decls.function_decl(&e.bc.callee);
                 let first = decl
                     .and_then(|d| d.captured_params.as_deref())
                     .map(|c| c.first);
-                first.map_or(usize::MAX, usize::from)
+                let first = first.map_or(usize::MAX, usize::from);
+                (e.bc.params.iter().enumerate().take(64))
+                    .filter_map(|(k, arg)| {
+                        let caller = match arg.param {
+                            Some((q, None)) => Some(q),
+                            None if k >= first && arg.may_params.count_ones() == 1 => {
+                                u8::try_from(arg.may_params.trailing_zeros()).ok()
+                            }
+                            _ => None,
+                        };
+                        let known = arg.handed || arg.is_none();
+                        let k = u8::try_from(k).ok()?;
+                        (known || caller.is_some()).then_some((k, caller.filter(|_| !known)))
+                    })
+                    .collect()
             })
             .collect();
-        loop {
-            let mut changed = false;
-            for (e, &first) in self.edges.iter().zip(&captured) {
-                let mut binds = 0u64;
-                for (k, arg) in e.bc.params.iter().enumerate().take(64) {
-                    let caller = match arg.param {
-                        Some((q, None)) if q < 64 => 1u64 << q,
-                        None if k >= first => arg.may_params,
-                        _ => 0,
-                    };
-                    if arg.handed || arg.is_none() || (caller != 0 && caller & !bound[e.from] == 0)
-                    {
-                        binds |= 1u64 << k;
-                    }
-                }
-                let kept = bound[e.to] & binds;
-                if kept != bound[e.to] {
-                    bound[e.to] = kept;
-                    changed = true;
-                }
-            }
-            if !changed {
-                return bound;
-            }
+        let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        for (e, edge) in self.edges.iter().enumerate() {
+            out_edges[edge.from].push(e);
         }
+        let mut unbound: Vec<(usize, u8)> = (0..64).map(|k| (0, k)).collect();
+        for (e, edge) in self.edges.iter().enumerate() {
+            unbound.extend(
+                (0..64u8)
+                    .filter(|k| !bindings[e].contains_key(k))
+                    .map(|k| (edge.to, k)),
+            );
+        }
+        let handed_on = |(i, q): (usize, u8), out: &mut Vec<(usize, u8)>| {
+            for &e in &out_edges[i] {
+                let passed = bindings[e].iter().filter(|(_, caller)| **caller == Some(q));
+                out.extend(passed.map(|(k, _)| (self.edges[e].to, *k)));
+            }
+        };
+        let mut bound = vec![u64::MAX; self.nodes.len()];
+        // The budget is unmetered: one visit per node and parameter.
+        let budget = Budget::unmetered("eff_rules::Reach::bound_callables");
+        let _ = walk::reach(&budget, unbound, handed_on, |(i, k)| {
+            bound[i] &= !(1u64 << k);
+            walk::Visit::<()>::Expand
+        })
+        .open_means(None);
+        bound
     }
 
     /// The calls the boundary cannot judge in node `i`'s own body (`unresolved = "report"`):

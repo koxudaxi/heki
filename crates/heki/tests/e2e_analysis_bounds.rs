@@ -9243,6 +9243,7 @@ fn a_module_reading_calls_past_its_budget_stops_reading_them() {
         3000,
         &[
             "heki_effect::resolver::forwarded",
+            "heki_effect::resolver::handed",
             "heki_effect::summary::Extractor::path_facts",
         ],
         forwarding_fan_outs,
@@ -9289,9 +9290,10 @@ fn many_returns_of_one_attribute_read_share_one_walk() {
     );
 }
 
-/// A chain of modules, each function returning what the one of the module before returns: each
-/// module's completion walks the rest of the chain, within a budget proportional to the module,
-/// past which it decides nothing. A chain a size smaller is decided.
+/// A chain of modules, each function returning what the one of the module before returns, and
+/// so handing its parameter on: each module's completion of both facts walks the rest of the
+/// chain, within a budget proportional to the module, past which it decides nothing. A chain a
+/// size smaller is decided.
 fn forwarding_modules(n: usize) -> Project {
     let p = Project::new(&format!("bounds_forwarding_modules_{n}"));
     p.write("c/__init__.py", "")
@@ -9317,9 +9319,12 @@ fn forwarding_modules(n: usize) -> Project {
 
 #[test]
 fn a_parameter_returned_across_a_long_chain_of_modules_stays_within_the_budgets() {
-    let owner = "heki_effect::resolver::forwarded";
+    let owners = [
+        "heki_effect::resolver::forwarded",
+        "heki_effect::resolver::handed",
+    ];
     let n = 2000;
-    let found = check_past_budgets(n, &[owner], forwarding_modules);
+    let found = check_past_budgets(n, &owners, forwarding_modules);
     assert_eq!(mut110_callers(&found), []);
     assert_eq!(
         mut110_callers(&check(&forwarding_modules(n / SCALE))),

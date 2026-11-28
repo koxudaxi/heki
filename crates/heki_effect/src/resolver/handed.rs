@@ -10,9 +10,9 @@ use super::forwarded::{self, ForwardingCall};
 use super::{CapturedParams, FunctionDecl, ModuleDecls, ProjectDecls};
 use super::{func_qualname, is_summarized_function};
 use crate::{FuncKey, ModuleInput};
-use heki_ir::walk::Budget;
+use heki_ir::walk::{Answer, Budget, Facts, Or, Sparse, Visit, fixpoint, reach};
 use heki_ir::{BlockId, InstKind, IrFunction, ModuleIr, VarId};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 /// The owner of the budget of a module's [`complete`].
@@ -186,33 +186,41 @@ struct Values<'a> {
 
 impl Values<'_> {
     /// The parameters (bit `i`; a cell of an enclosing function's parameter at its captured
-    /// position) `var` may hold as itself, through copies and choices: a parameter rebound
+    /// position) `var` may hold as itself, through copies and one choice: a parameter rebound
     /// before is another value, and `*args` / `**kwargs` hold no one callable.
     fn params(&self, var: VarId) -> u64 {
-        let mut mask = 0;
-        let mut seen: FxHashSet<VarId> = FxHashSet::default();
-        let mut stack = vec![var];
-        while let Some(v) = stack.pop() {
-            if !seen.insert(v) {
-                continue;
+        let root = self.copied(var);
+        match self.phis.get(&root) {
+            Some(incoming) => {
+                (incoming.iter()).fold(0, |m, (_, v)| m | self.param_bit(self.copied(*v)))
             }
-            if let Some(i) = (self.f.params.iter())
-                .position(|p| p.var == v && !p.is_vararg && !p.is_kwarg)
-                .filter(|i| *i < 64)
-            {
-                mask |= 1u64 << i;
-                continue;
-            }
-            match self.defs.get(&v) {
-                Some(InstKind::Copy { src, .. }) => stack.push(*src),
-                Some(InstKind::LoadDeref { name, .. }) => mask |= self.captured_bit(name),
-                _ => {}
-            }
-            if let Some(incoming) = self.phis.get(&v) {
-                stack.extend(incoming.iter().map(|(_, v)| *v));
+            None => self.param_bit(root),
+        }
+    }
+
+    /// The parameter `var` is, as a mask: one of the function's own, or a cell of one.
+    fn param_bit(&self, var: VarId) -> u64 {
+        let own = (self.f.params.iter())
+            .position(|p| p.var == var && !p.is_vararg && !p.is_kwarg)
+            .filter(|i| *i < 64);
+        match (own, self.defs.get(&var)) {
+            (Some(i), _) => 1u64 << i,
+            (None, Some(InstKind::LoadDeref { name, .. })) => self.captured_bit(name),
+            _ => 0,
+        }
+    }
+
+    /// The value `var` copies, through any number of copies.
+    fn copied(&self, var: VarId) -> VarId {
+        let mut cur = var;
+        // Copies in dead code can close a cycle: at most one step per instruction.
+        for _ in 0..self.defs.len() {
+            match self.defs.get(&cur) {
+                Some(InstKind::Copy { src, .. }) => cur = *src,
+                _ => break,
             }
         }
-        mask
+        cur
     }
 
     /// The captured position of the enclosing function's parameter the cell `name` holds.
@@ -225,15 +233,7 @@ impl Values<'_> {
 
     /// The qualname of the function nested in this one that `var` holds, through copies.
     fn nested(&self, var: VarId) -> Option<&str> {
-        let mut cur = var;
-        // Copies in dead code can close a cycle: at most one step per instruction.
-        for _ in 0..self.defs.len() {
-            match self.defs.get(&cur) {
-                Some(InstKind::Copy { src, .. }) => cur = *src,
-                _ => break,
-            }
-        }
-        match self.defs.get(&cur)? {
+        match self.defs.get(&self.copied(var))? {
             InstKind::MakeClosure {
                 func_id: Some(id), ..
             } => {
@@ -261,102 +261,97 @@ pub(super) fn complete(input: &ModuleInput<'_>, decls: &mut ModuleDecls, project
     }
 }
 
-/// A function of [`complete`]'s fixpoint.
-struct Node<'d> {
-    key: FuncKey,
-    decl: &'d FunctionDecl,
-    /// Its calls that run a function of the fixpoint, with that node.
-    callees: Vec<(usize, &'d HandingCall)>,
-    callers: Vec<usize>,
-    calls: u64,
-    awaits: u64,
-}
+/// The parameters a function of [`complete`]'s fixpoint calls, and those it awaits.
+type Called = (Or, Or);
 
+/// What [`complete`] decides of the module's functions, by qualname: nothing past the budget.
 fn decided(
     input: &ModuleInput<'_>,
     decls: &ModuleDecls,
     project: &ProjectDecls,
 ) -> Vec<(String, (u64, u64))> {
-    let mut nodes: Vec<Node<'_>> = Vec::new();
-    let mut index: FxHashMap<FuncKey, usize> = FxHashMap::default();
-    for (qualname, decl) in &decls.functions {
-        if decl.handing.is_some() {
+    let mut keys: Vec<(FuncKey, &FunctionDecl)> = (decls.functions.iter())
+        .filter(|(_, d)| d.handing.is_some())
+        .map(|(qualname, d)| {
             let key = FuncKey {
                 module: decls.module_name.clone(),
                 qualname: qualname.clone(),
             };
-            index.insert(key.clone(), nodes.len());
-            nodes.push(Node::new(key, decl));
-        }
-    }
-    if nodes.is_empty() {
+            (key, d.as_ref())
+        })
+        .collect();
+    if keys.is_empty() {
         return Vec::new();
     }
+    let roots = keys.len();
     let budget = Budget::of_functions(OWNER, &input.ir.functions);
-    // The functions the handing calls run, breadth first.
-    let mut i = 0;
-    while i < nodes.len() {
-        let handing = nodes[i].decl.handing.as_deref().unwrap_or_default();
+    let mut index: FxHashMap<FuncKey, usize> = (keys.iter().enumerate())
+        .map(|(i, (key, _))| (key.clone(), i))
+        .collect();
+    // By node: its calls that run a function of the fixpoint, with that node.
+    let mut calls: Vec<Vec<(usize, &HandingCall)>> = vec![Vec::new(); roots];
+    let expand = |i: usize, out: &mut Vec<usize>| {
+        let (caller, decl) = (keys[i].0.clone(), keys[i].1);
+        let handing = decl.handing.as_deref().unwrap_or_default();
+        // Past the budget the node is not read, and nothing is decided without it.
         if !budget.take(handing.len()) {
-            break;
+            return;
         }
         for h in handing {
-            let Some((key, callee)) = run_callee(decls, project, &nodes[i].key, h) else {
+            let Some((key, callee)) = run_callee(decls, project, &caller, h).filter(|(_, d)| {
+                d.calls_params != 0 || d.awaits_params != 0 || d.handing.is_some()
+            }) else {
                 continue;
             };
-            if callee.calls_params == 0 && callee.awaits_params == 0 && callee.handing.is_none() {
-                continue;
-            }
             let j = *index.entry(key.clone()).or_insert_with(|| {
-                nodes.push(Node::new(key, callee));
-                nodes.len() - 1
+                keys.push((key, callee));
+                calls.push(Vec::new());
+                keys.len() - 1
             });
-            nodes[i].callees.push((j, h));
-            nodes[j].callers.push(i);
+            calls[i].push((j, h));
+            out.push(j);
         }
-        i += 1;
+    };
+    if reach(&budget, 0..roots, expand, |_| Visit::<()>::Expand).is_open() {
+        return Vec::new();
     }
-    let mut queue: Vec<usize> = (0..nodes.len()).rev().collect();
-    let mut queued: Vec<bool> = vec![true; nodes.len()];
-    while let Some(i) = queue.pop() {
-        queued[i] = false;
-        if !budget.take(nodes[i].callees.len()) {
-            break;
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); keys.len()];
+    for (i, node) in calls.iter().enumerate() {
+        for &(j, _) in node {
+            readers[j].push(i);
         }
-        let (mut calls, mut awaits) = (nodes[i].calls, nodes[i].awaits);
-        for &(j, h) in &nodes[i].callees {
-            let (caller, callee) = (&nodes[i], &nodes[j]);
-            calls |= handed_up(h, caller, callee, callee.calls);
-            awaits |= handed_up(h, caller, callee, callee.awaits);
-        }
-        if (calls, awaits) != (nodes[i].calls, nodes[i].awaits) {
-            nodes[i].calls = calls;
-            nodes[i].awaits = awaits;
-            for &p in &nodes[i].callers {
-                if !queued[p] {
-                    queued[p] = true;
-                    queue.push(p);
-                }
+    }
+    // A fact holds one bit per parameter: a node is read again at most once per bit a callee
+    // gains.
+    let most_calls = calls.iter().map(Vec::len).max().unwrap_or(0);
+    let spec = Sparse {
+        nodes: keys.len(),
+        readers: &|i, out| out.extend_from_slice(&readers[i]),
+        max_visits: u32::try_from(1 + 128 * most_calls).unwrap_or(u32::MAX),
+    };
+    let own = |j: usize| (keys[j].1.calls_params, keys[j].1.awaits_params);
+    let walked = fixpoint(&budget, spec, |i, facts: &Facts<Called>| {
+        // Each visit inspects every call of the node, so it is charged them all.
+        budget.take(calls[i].len()).then(|| {
+            let (mut called, mut awaited) = own(i);
+            for &(j, h) in &calls[i] {
+                let (c, a) = facts.get(j).map_or(own(j), |(c, a)| (c.0, a.0));
+                let up = |mask| handed_up(h, (&keys[i].0.qualname, keys[i].1), keys[j].1, mask);
+                called |= up(c);
+                awaited |= up(a);
             }
-        }
-    }
-    (nodes.into_iter())
-        .filter(|n| n.key.module == decls.module_name)
-        .map(|n| (n.key.qualname, (n.calls, n.awaits)))
+            (Or(called), Or(awaited))
+        })
+    });
+    let Answer::Known(facts) = walked else {
+        return Vec::new();
+    };
+    (keys.iter().enumerate().take(roots))
+        .filter_map(|(i, (key, _))| {
+            let (c, a) = facts.get(i)?;
+            Some((key.qualname.clone(), (c.0, a.0)))
+        })
         .collect()
-}
-
-impl<'d> Node<'d> {
-    fn new(key: FuncKey, decl: &'d FunctionDecl) -> Self {
-        Self {
-            key,
-            decl,
-            callees: Vec::new(),
-            callers: Vec::new(),
-            calls: decl.calls_params,
-            awaits: decl.awaits_params,
-        }
-    }
 }
 
 /// The function `h`, a call in `caller`, runs the body of: a nested function of the caller or a
@@ -382,30 +377,32 @@ fn run_callee<'d>(
     (!decl.is_generator && (!decl.is_async || h.awaited)).then_some((key, decl))
 }
 
-/// The parameters of `caller` that the call `h` binds to the parameters of `callee` in `mask`:
-/// an argument that is a parameter of the caller, and a cell the nested callee reads of a
-/// parameter of the caller (or of a function enclosing both, at the caller's captured position).
-fn handed_up(h: &HandingCall, caller: &Node<'_>, callee: &Node<'_>, mask: u64) -> u64 {
+/// The parameters of `caller` (its qualname and declaration) that the call `h` binds to the
+/// parameters of `callee` in `mask`: an argument that is a parameter of the caller, and a cell
+/// the nested callee reads of a parameter of the caller (or of a function enclosing both, at the
+/// caller's captured position).
+fn handed_up(
+    h: &HandingCall,
+    (caller, decl): (&str, &FunctionDecl),
+    callee: &FunctionDecl,
+    mask: u64,
+) -> u64 {
     let mut out = 0u64;
-    let captured = callee.decl.captured_params.as_deref().filter(|_| h.nested);
+    let captured = callee.captured_params.as_deref().filter(|_| h.nested);
     for k in (0..64u8).filter(|k| mask & (1u64 << k) != 0) {
-        if let Some(p) = h.call.binds(callee.decl, k) {
+        if let Some(p) = h.call.binds(callee, k) {
             out |= 1u64 << p;
             continue;
         }
-        let Some(c) = captured else { continue };
-        let Some((owner, i)) = k
-            .checked_sub(c.first)
-            .and_then(|j| c.params.get(usize::from(j)))
-        else {
-            continue;
-        };
-        let own = caller.decl.captured_params.as_deref();
-        out |= if *owner == caller.key.qualname {
-            1u64 << i
-        } else {
-            own.map_or(0, |own| own.bit(owner, *i))
-        };
+        let cell = captured.and_then(|c| c.params.get(usize::from(k.checked_sub(c.first)?)));
+        let own = decl.captured_params.as_deref();
+        out |= cell.map_or(0, |(owner, i)| {
+            if owner == caller {
+                1u64 << i
+            } else {
+                own.map_or(0, |own| own.bit(owner, *i))
+            }
+        });
     }
     out
 }
