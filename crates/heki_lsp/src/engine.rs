@@ -626,7 +626,7 @@ impl Workspace {
             .is_enabled("EFF117")
             .then(|| heki_rules::GuardedView::of(&index, decls.completed(), &env.root));
         let stale_writes = if selection.is_enabled("MUT111") {
-            stale_writes_by_file(&index, decls.completed(), |_| true)
+            stale_writes_by_file(&index, decls.completed(), &env.kb, |_| true)
         } else {
             FxHashMap::default()
         };
@@ -987,9 +987,11 @@ impl Workspace {
         if !self.selection.is_enabled("MUT111") {
             return Vec::new();
         }
-        let now = stale_writes_by_file(&self.index, self.decls.completed(), |p| p == path)
-            .remove(path)
-            .unwrap_or_default();
+        let now = stale_writes_by_file(&self.index, self.decls.completed(), &self.env.kb, |p| {
+            p == path
+        })
+        .remove(path)
+        .unwrap_or_default();
         let before = if now.is_empty() {
             self.stale_writes.remove(path)
         } else {

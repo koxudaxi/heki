@@ -907,6 +907,10 @@ pub struct NamedAttr {
     /// wrapped in `staticmethod`): `body` is then `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_partial: Option<Box<PartialAttr>>,
+    /// The class body binds the attribute last, on every path, to what a call of this name gives
+    /// (`objects = StreamManager()`): `body` is then `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_call: Option<String>,
     /// The class body annotates the attribute outside `ClassVar` and `InitVar`: a field, where
     /// a base the project does not define may build an `__init__` that stores the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2839,6 +2843,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
+    /// The answers of [`Self::class_object_attribute`] so far, by class, name, and whether a
+    /// subclass may be read; cleared with the indexes.
+    class_object_attributes: SharedMemo<(String, String, bool), Option<String>, DeclKeys>,
     /// The answers of [`Self::object_attr_read_runs_no_code`] so far, by class and name;
     /// cleared with the indexes.
     object_attr_reads: SharedMemo<(String, String), bool, DeclKeys>,
@@ -3207,6 +3214,7 @@ impl ProjectDecls {
         self.star_bindings.clear();
         self.star_rebinds.clear();
         self.catalog_attributes.clear();
+        self.class_object_attributes.clear();
         self.object_attr_reads.clear();
         // What other modules change, which deciding what a module's `__getattr__` serves reads
         // (`Self::getattr_open`) while the indexes are built: as for new declarations, nothing
@@ -5341,6 +5349,23 @@ impl ProjectDecls {
     /// call in its body or defines `__getattr__` or `__getattribute__`, every base is a project
     /// class (or `object`, `NamedTuple`, `Generic`), and no metaclass heki does not know creates
     /// the class.
+    /// Whether a store of `attr` on a value of the class `class` stores it in the instance as far
+    /// as the bases go: every class along the MRO of every class the value may be
+    /// ([`Self::value_classes`]) is a project class, a plain base, or a library base the
+    /// catalog says keeps what its subclasses' code stores in the instance and binds no data
+    /// descriptor of the name (`heki_kb::EcosystemEntry::plain_attributes_except`, R3:
+    /// `django.db.models.Model`).
+    pub fn bases_store_plainly(&self, class: &str, attr: &str, kb: &EffectiveEcosystemKb) -> bool {
+        let plain = |c: &String| {
+            self.is_project_class(c)
+                || PLAIN_BASES.contains(&c.as_str())
+                || kb.stores_plainly(c, attr)
+        };
+        self.value_classes(class)
+            .iter()
+            .all(|c| self.mro(c).iter().all(plain))
+    }
+
     pub fn plain_attr(&self, class: &str, attr: &str) -> bool {
         let read = self.attr_read(class, attr);
         read.bases_known && read.declared && !read.runs_hook(true) && read.code_binders.is_empty()
@@ -6449,6 +6474,116 @@ impl ProjectDecls {
             })
     }
 
+    /// The class of what reading `attr` on the class object of the project class `class` gives
+    /// (with `subclasses`, on one of its project subclasses too: `cls`, `type(self)`), from the
+    /// `[[class_attributes]]` rows of the first base outside the project along each class's MRO
+    /// (`heki_kb::ClassAttribute`, R3): where the first class along the MRO binding `attr` binds
+    /// it in its body to a call of a class deriving from a row's `type`
+    /// (`objects = StreamManager()`), that class; where none binds it, the `type` of the row of
+    /// `attr`, unless a class body along the MRO may bind an instance of a row's `type` under
+    /// another name ([`Self::may_bind_instance_of`]: the base then gives no such attribute).
+    /// `None` when a class on the way binds the name otherwise or stores it outside its body,
+    /// in its module or another ([`Self::lookup_rebound`]), has a metaclass heki does not know,
+    /// a project class follows the base, or no row applies.
+    ///
+    /// The answer is kept per class and name for the life of the indexes, as
+    /// [`Self::catalog_attribute`]'s.
+    pub(crate) fn class_object_attribute(
+        &self,
+        class: &str,
+        attr: &str,
+        subclasses: bool,
+        kb: &EffectiveEcosystemKb,
+    ) -> Option<String> {
+        let class = self.canonical(class);
+        if !self.is_project_class(&class) {
+            return None;
+        }
+        let mro = self.mro(&class);
+        let base = mro.iter().find(|c| !self.is_project_class(c))?;
+        kb.class_attributes_of(base).next()?;
+        self.class_object_attributes
+            .ask(self, (class.clone(), attr.to_owned(), subclasses), || {
+                let along = |mro: &[String]| self.class_row_along(mro, attr, kb);
+                match subclasses {
+                    true => self.row_of_every_value(&class, along).map(str::to_owned),
+                    false => along(&mro).map(str::to_owned),
+                }
+            })
+    }
+
+    /// [`Self::class_object_attribute`] along the MRO `mro` of one class.
+    fn class_row_along<'s>(
+        &'s self,
+        mro: &[String],
+        attr: &str,
+        kb: &'s EffectiveEcosystemKb,
+    ) -> Option<&'s str> {
+        let at = mro.iter().position(|c| !self.is_project_class(c))?;
+        let base = &mro[at];
+        // A store of the name on a class along the MRO, in any module, replaces the manager.
+        if mro[at..].iter().any(|c| self.is_project_class(c)) || self.lookup_rebound(mro, attr) {
+            return None;
+        }
+        let kept: Vec<&str> = kb
+            .class_attributes_of(base)
+            .map(|r| r.class.as_str())
+            .collect();
+        let mut may_bind = false;
+        for c in &mro[..at] {
+            self.read(|k| note(&mut k.class_facts, c));
+            let d = self.class(c)?;
+            if d.custom_metaclass {
+                return None;
+            }
+            if d.members.contains(attr) {
+                let callee = d.named_attrs.get(attr)?.body_call.as_deref()?;
+                return (kept.iter().any(|t| self.derives_from(callee, t))).then_some(callee);
+            }
+            may_bind |= self.may_bind_instance_of(c, d, &kept);
+        }
+        if may_bind {
+            return None;
+        }
+        (kb.class_attributes_of(base))
+            .find(|r| r.attribute == attr)
+            .map(|r| r.class.as_str())
+    }
+
+    /// Whether the body of the project class `class` (`decl`) may bind a name to an instance of
+    /// one of the library classes `kept` or of a subclass: to a call of one of them or of a
+    /// project class deriving from one, to what a call of a project function or method returns
+    /// (`QuerySet.as_manager()`), or to a value heki cannot name. Methods, properties, nested
+    /// classes, and calls of other library names (fields) bind none.
+    fn may_bind_instance_of(&self, class: &str, decl: &ClassDecl, kept: &[&str]) -> bool {
+        let bound = decl
+            .code_attrs
+            .iter()
+            .filter(|name| decl.members.contains(*name));
+        bound.into_iter().any(|name| {
+            match decl
+                .named_attrs
+                .get(name)
+                .and_then(|n| n.body_call.as_deref())
+            {
+                Some(callee) => {
+                    let callee = self.canonical(callee);
+                    match self.symbol(&callee) {
+                        Symbol::Class(_) | Symbol::External => {
+                            kept.iter().any(|t| self.derives_from(&callee, t))
+                        }
+                        _ => true,
+                    }
+                }
+                None => {
+                    !decl.properties.contains(name)
+                        && self.own_method(class, name).is_none()
+                        && self.class(&format!("{class}.{name}")).is_none()
+                }
+            }
+        })
+    }
+
     /// [`Self::catalog_attribute`] of the canonical `class`, decided
     /// ([`Self::row_of_every_value`]).
     fn find_catalog_attribute<'k>(
@@ -6876,8 +7011,10 @@ impl ProjectDecls {
 
     /// Whether an instance of exactly `class` calling `method` runs one of `callee`: the
     /// definition its MRO finds is a target (a library one, [`Self::inherited_external`], only
-    /// as the call's single target), or it has none and the call raises. A protocol has
-    /// implementations no class names, and a base heki knows nothing of may define the method.
+    /// as the call's single target, and only when the class binds none of the names the library
+    /// method looks up on the instance, [`Self::replaces_delegate`]), or it has none and the call
+    /// raises. A protocol has implementations no class names, and a base heki knows nothing of
+    /// may define the method.
     fn runs_a_target(
         &self,
         class: &str,
@@ -6902,10 +7039,37 @@ impl ProjectDecls {
                 Inherited::Absent => true,
                 other => matches!(
                     (other, callee),
-                    (Inherited::External(external), Callee::External(s)) if *s == external
+                    (Inherited::External(external), Callee::External(s))
+                        if *s == external && !self.replaces_delegate(&mro, &external, kb)
                 ),
             },
         }
+    }
+
+    /// Whether a project class before the library class of the method `symbol` along `mro`
+    /// binds a name the catalog says the library's methods look up on the instance
+    /// (`heki_kb::EcosystemEntry::delegates_to`, R3: Django's `Manager.get_queryset`), in its
+    /// body or methods or by a store elsewhere: the call then runs that binding, which the
+    /// method's row does not describe.
+    pub(crate) fn replaces_delegate(
+        &self,
+        mro: &[String],
+        symbol: &str,
+        kb: &EffectiveEcosystemKb,
+    ) -> bool {
+        let library = symbol.rsplit_once('.').map_or(symbol, |(class, _)| class);
+        let names = kb.delegates_of(library);
+        if names.is_empty() {
+            return false;
+        }
+        let before = &mro[..mro.iter().position(|c| c == library).unwrap_or(mro.len())];
+        let own = before.iter().filter(|c| self.is_project_class(c));
+        let binds = |c: &String| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c)
+                .is_some_and(|d| names.iter().any(|n| d.members.contains(n)))
+        };
+        own.into_iter().any(binds) || names.iter().any(|n| self.lookup_rebound(before, n))
     }
 
     /// Resolve `class.method` on an object that is exactly `class`: the class object itself
@@ -11152,11 +11316,22 @@ impl<'a> TypeCtx<'a> {
             Recv::Ref(owner) => !self
                 .project
                 .call_rebound(&self.project.object_named(&format!("{owner}.{method}"))),
+            // The library method `super()` finds looks names up on the instance, of any class
+            // the value may be (R2).
             Recv::Super(owner) => {
                 let owner = self.project.canonical(owner);
                 let mro = self.project.mro(&owner);
                 let after = mro.iter().position(|c| *c == owner).map_or(0, |i| i + 1);
+                let replaced = |symbol: &str| {
+                    let library = symbol.rsplit_once('.').map_or(symbol, |(c, _)| c);
+                    !self.kb.delegates_of(library).is_empty()
+                        && (self.project.value_classes(&owner).iter()).any(|c| {
+                            let mro = self.project.mro(c);
+                            self.project.replaces_delegate(&mro, symbol, self.kb)
+                        })
+                };
                 !self.project.lookup_rebound(&mro[after..], method)
+                    && !matches!(callee, Callee::External(symbol) if replaced(symbol))
             }
         }
     }

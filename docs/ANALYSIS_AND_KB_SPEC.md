@@ -3332,6 +3332,29 @@ for them. A call of a catalogued library without such an entry runs code of the 
 when it is handed a value not established as an instance of a library class that is not
 callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
 
+A table `[[class_attributes]]` (`heki_kb::ClassAttribute`) gives what reading an attribute on a
+class object deriving from a library base gives (`base = "django.db.models.Model"`, `attribute =
+"objects"`, `type = "django.db.models.Manager"`): the base keeps instances of `type` as class
+attributes of its subclasses. Where no class along a project class's MRO binds `attribute` (in
+its body, or by a store in any module: `ProjectDecls::lookup_rebound`), nor may bind an instance
+of `type` under another name in its body (a call of a project subclass of `type`, of a project
+function or method, or a value heki cannot name), the read gives a `type`; a name a body binds
+to a call of a project subclass of `type` gives that class
+(`ProjectDecls::class_object_attribute`, from `NamedAttr::body_call`). An instance read is not
+typed. An entry's `plain_attributes_except` says that a base keeps what its subclasses' code
+stores in the instance: neither it nor its metaclass defines `__setattr__`, `__delattr__`,
+`__getattribute__`, or `__getattr__`, and it binds no data descriptor but the names listed
+(`django.db.models.Model`: `pk`). A store of another name the project's classes do not bind in
+their bodies is a plain one (`ProjectDecls::bases_store_plainly`, the `MUT101` **Plain write**
+premise, and `invokes::attribute_access_runs_project_code`). An entry's `delegates_to` lists the
+names of an instance that the class's catalogued methods look up on it
+(`django.db.models.Manager`: `get_queryset`, `_queryset_class`, `__init__`, `model`, `_db`,
+`_hints`). A method's row describes a call on an instance of a project subclass only when no
+project class before the library class along its MRO binds one of them
+(`ProjectDecls::replaces_delegate`): otherwise the call's targets are not every implementation
+it runs (the **Every implementation** premise), and through `super()` the same holds for every
+class the instance may be.
+
 A fourth table, `[[attributes]]` (`heki_kb::AttributeType`), gives the class of what reading an
 attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat"`,
 `type = "openai.resources.chat.Chat"`), read as section 2.1 says. A row states that in every

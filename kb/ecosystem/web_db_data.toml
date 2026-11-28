@@ -3696,7 +3696,7 @@ opaque_to_layer3 = true
 # --- DB: Django ---
 # `connection.cursor()` opens the connection when needed. QuerySet methods that only build
 # another QuerySet are lazy (no effect); the ones that run the query block, and their `a*`
-# variants are coroutines. Model managers (`Model.objects`) are not resolved. The bulk APIs
+# variants are coroutines. The bulk APIs
 # (`bulk_create`, `in_bulk`) write or read many rows in one statement: they block, but a loop
 # over batches of them is no N+1, so they are no `db_query`.
 
@@ -3889,6 +3889,196 @@ opaque_to_layer3 = true
 symbol = "django.db.models.query.QuerySet.aaggregate"
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+# A model's managers (`Model.objects`, and those a model's body declares) are instances of
+# `BaseManager.from_queryset(QuerySet)`: it copies every public QuerySet method but the
+# `queryset_only` ones (`delete`, `adelete`, `as_manager`), each calling the method of the same
+# name on `self.get_queryset()`, a new QuerySet with no results loaded, so `first()`, `count()`
+# and the like query on every call; `all()` returns that QuerySet. The rows name the class as
+# `models.Manager` names it, which the `[[class_attributes]]` row gives `objects` (checked in
+# Django 3.2.25, 4.2.20, 5.2.8, 6.0: `db/models/manager.py`, `db/models/query.py`).
+
+[[entries]]
+symbol = "django.db.models.Manager.filter"
+return_type = "django.db.models.query.QuerySet"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.exclude"
+return_type = "django.db.models.query.QuerySet"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.all"
+return_type = "django.db.models.query.QuerySet"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.order_by"
+return_type = "django.db.models.query.QuerySet"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.get"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.first"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.last"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.exists"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.count"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.create"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.update"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.get_or_create"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.update_or_create"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.bulk_create"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.in_bulk"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.aggregate"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.aget"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.afirst"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.alast"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.aexists"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.acount"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.acreate"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.aupdate"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.aget_or_create"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.aupdate_or_create"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.abulk_create"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.ain_bulk"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.Manager.aaggregate"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+# The query methods run what `self.get_queryset()` gives, which `BaseManager.get_queryset`
+# builds as `self._queryset_class(model=self.model, using=self._db, hints=self._hints)` from
+# what `BaseManager.__init__` and `contribute_to_class` set. A project manager that binds one
+# of these names (a `get_queryset` returning an evaluated or a custom QuerySet, a
+# `_queryset_class`, an `__init__`) runs its own code under the rows above, so they describe
+# only managers that bind none of them (checked in Django 3.2.25, 4.2.20, 5.2.8, 6.0:
+# `db/models/manager.py`).
+[[entries]]
+symbol = "django.db.models.Manager"
+delegates_to = ["__init__", "get_queryset", "_queryset_class", "model", "_db", "_hints"]
+opaque_to_layer3 = true
+
+# Reading `objects` on a model class gives the `Manager` `ModelBase._prepare` adds to a model
+# that declares no manager, along its MRO (`Options.managers`), and a name a model's body binds
+# to a manager gives, on the class, a copy of that manager (`ManagerDescriptor.__get__`), of its
+# class; on an instance it raises.
+[[class_attributes]]
+base = "django.db.models.Model"
+attribute = "objects"
+type = "django.db.models.Manager"
+versions = "Django 3.2.25, 4.2.20, 5.2.8, 6.0"
+
+# Neither `Model` nor `ModelBase` defines `__setattr__`, `__delattr__`, `__getattribute__` or
+# `__getattr__`; `ModelBase.__new__` hands a class-body object with a `contribute_to_class`
+# (a field, a manager) to it, which installs the field's descriptor, and keeps any other as it
+# is. `pk` is the one property of `Model` (checked in Django 3.2.25, 4.2.20, 5.2.8, 6.0:
+# `db/models/base.py`).
+[[entries]]
+symbol = "django.db.models.Model"
+plain_attributes_except = ["pk"]
 opaque_to_layer3 = true
 
 # --- Key-value: redis (sync) ---

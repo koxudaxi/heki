@@ -10862,3 +10862,91 @@ fn lsp_diagnostics_equal_a_full_check_for_class_object_attributes_across_modules
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);
 }
+
+const MANAGER_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF103\"]\n";
+const MANAGER_MODELS: &str = "from django.db import models\n\nfrom pkg.managers import StreamManager\n\n\nclass Stream(models.Model):\n    objects = StreamManager()\n";
+const MANAGER_CLASS: &str =
+    "from django.db import models\n\n\nclass StreamManager(models.Manager):\n    pass\n";
+const MANAGER_USE: &str = "from pkg.models import Stream\n\n\ndef fetch(ids: list[int]) -> None:\n    for i in ids:\n        Stream.objects.get(id=i)\n";
+
+/// A model's manager is the class its body binds, which another module declares: the query per
+/// item through it goes when the manager class stops deriving from `models.Manager`, and when
+/// the model binds another value or another module stores one as its `objects`, is heuristic
+/// while the manager binds `get_queryset`, and comes back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_model_managers_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/managers.py", MANAGER_CLASS.to_owned()),
+        ("pkg/models.py", MANAGER_MODELS.to_owned()),
+        ("pkg/use.py", MANAGER_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_model_managers", MANAGER_CONFIG, files, false);
+    let queries: &[(&str, &str)] = &[("pkg/use.py", "EFF103")];
+    let guessed: &[(&str, &str)] = &[("pkg/use.py", "EFF103 [heuristic]")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(queries),
+        Step::new(
+            "the manager class derives from no manager",
+            vec![save(
+                "pkg/managers.py",
+                &MANAGER_CLASS.replace("(models.Manager)", ""),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "it derives from `models.Manager` again",
+            vec![save("pkg/managers.py", MANAGER_CLASS)],
+        )
+        .present(queries),
+        Step::new(
+            "the manager binds `get_queryset`, which its query methods call",
+            vec![save(
+                "pkg/managers.py",
+                &MANAGER_CLASS.replace(
+                    "    pass\n",
+                    "    def get_queryset(self):\n        return super().get_queryset()\n",
+                ),
+            )],
+        )
+        .present(guessed)
+        .absent(queries),
+        Step::new(
+            "it binds none again",
+            vec![save("pkg/managers.py", MANAGER_CLASS)],
+        )
+        .present(queries),
+        Step::new(
+            "the model binds another value",
+            vec![save(
+                "pkg/models.py",
+                &MANAGER_MODELS.replace("StreamManager()", "None"),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "it binds the manager again",
+            vec![save("pkg/models.py", MANAGER_MODELS)],
+        )
+        .present(queries),
+        Step::new(
+            "another module stores another object as the model's `objects`",
+            vec![Action::Create(
+                "pkg/patch.py",
+                "from pkg.models import Stream\n\nStream.objects = None\n".to_owned(),
+            )],
+        )
+        .absent(queries),
+        Step::new(
+            "that module is deleted",
+            vec![Action::Delete("pkg/patch.py")],
+        )
+        .present(queries),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}

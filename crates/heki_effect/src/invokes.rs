@@ -403,10 +403,12 @@ pub(crate) fn attribute_access_runs_project_code(
     }
     // A base outside the project whose `__setattr__` the catalog says stores on the instance
     // (R3: `pydantic.BaseModel`), which defines no `__getattribute__` and keeps the instance's
-    // attributes in its own `__dict__`.
+    // attributes in its own `__dict__`, or one defining no attribute hooks and no data
+    // descriptor of the name (`django.db.models.Model`).
     let catalog_stores = |base: &str| {
         kb.lookup(&format!("{base}.__setattr__"))
             .is_some_and(|e| e.stores_on_instance)
+            || kb.stores_plainly(base, attr)
     };
     let reads_plainly = |class: &str| {
         if OBJECT_ATTRS.contains(&attr) {
