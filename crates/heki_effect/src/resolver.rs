@@ -2950,6 +2950,17 @@ pub(crate) enum NameHolds {
     Unknown,
 }
 
+/// How a call reaches the object it calls ([`TypeCtx::call_result`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CalledThrough {
+    /// A read of the object's name (`Base()`, `make = lib.build` then `make()`), which may hold
+    /// another object than the definition ([`ProjectDecls::name_holds`]).
+    Name,
+    /// A class object a value holds by its type (`cls` in a class method, a parameter of
+    /// `type[Base]`): the class or a subclass, whatever the class's name holds.
+    ClassObject,
+}
+
 /// What binds a project name again past its definition ([`ProjectDecls::rebinding`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Rebinding {
@@ -11092,17 +11103,21 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Instance produced by calling the name `fqn`, if known; `arg` tells what the call passes
-    /// (for the catalog's argument cases). A project name that may hold another object than its
-    /// definition gives what calling either object gives, when heki names both
-    /// ([`ProjectDecls::name_holds`]): never an instance of the definition's class alone.
+    /// Instance produced by calling the object `fqn` as the call reaches it (`through`), if
+    /// known; `arg` tells what the call passes (for the catalog's argument cases). Through a
+    /// project name that may hold another object than its definition, the call gives what
+    /// calling either object gives, when heki names both ([`ProjectDecls::name_holds`]): never
+    /// an instance of the definition's class alone.
     pub(crate) fn call_result(
         &self,
         fqn: &str,
+        through: CalledThrough,
         mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
         let symbol = self.called_symbol(fqn);
-        if matches!(symbol, Symbol::Class(_) | Symbol::Function(..)) {
+        if through == CalledThrough::Name
+            && matches!(symbol, Symbol::Class(_) | Symbol::Function(..))
+        {
             match self.project.name_holds(fqn) {
                 NameHolds::Definition => {}
                 NameHolds::Also(other) => {
@@ -11799,7 +11814,7 @@ impl<'a> TypeCtx<'a> {
                     .or_else(|| decl.declared_return(self.project))
                     .map(|t| decl.call_type(t))
             }
-            Callee::External(fqn) => self.call_result(fqn, arg),
+            Callee::External(fqn) => self.call_result(fqn, CalledThrough::Name, arg),
             _ => None,
         }
     }

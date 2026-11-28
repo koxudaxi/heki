@@ -912,7 +912,11 @@ either class, what either function declares it returns, no known value for an ob
 name, never an instance of the definition's class alone; the fields a call of a frozen dataclass
 or a `NamedTuple` binds, an exact instance, and what a member called on the class through its
 name returns (`Base.create()`) follow the same answer. A member called on an instance keeps the
-definition its MRO finds, as a type checker reads it.
+definition its MRO finds, as a type checker reads it. A class object a value holds by its type
+(`cls` in a class method, a parameter or an attribute declared `type[Base]`) reads no name:
+calling it constructs the class or a subclass, whatever the class's name holds
+(`CalledThrough::ClassObject`). A value joined from such a class object and a read of the name
+(`factory or Base`) is taken for the class object.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must

@@ -32,7 +32,9 @@ use crate::invokes;
 use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
-use crate::resolver::{self, BoundArg, Callee, CopyMade, LocalNames, ProjectDecls, TypeCtx, Val};
+use crate::resolver::{
+    self, BoundArg, CalledThrough, Callee, CopyMade, LocalNames, ProjectDecls, TypeCtx, Val,
+};
 use crate::types::{Added, Args, Change, Container, Elem, Held, Obj, Operands, Ty};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, Sparse, fixpoint};
@@ -2728,10 +2730,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                 };
                 break;
             };
-            let holder = match self
-                .cx
-                .call_result(&symbol, |i, k| self.passed(passed, i, k))
-            {
+            let arg = |i, k: Option<&str>| self.passed(passed, i, k);
+            let holder = match self.cx.call_result(&symbol, CalledThrough::Name, arg) {
                 Some(Ty::Inst(future)) => Some(future.class),
                 _ => None,
             };
@@ -2817,10 +2817,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             Some(Ty::Ref(fqn)) if fqn == "builtins.super" && call.args.is_empty() => {
                 self.owner.clone().map(Ty::Super)
             }
-            Some(Ty::Ref(fqn)) => return self.call_named(fqn, call),
+            Some(Ty::Ref(fqn)) => return self.call_named(fqn, CalledThrough::Name, call),
             // `cls(...)` may construct a subclass, whose constructor binds other fields.
             Some(Ty::Class(fqn)) => {
-                return Ok(self.call_named(fqn, call)?.map(|t| t.without_fields()));
+                let result = self.call_named(fqn, CalledThrough::ClassObject, call)?;
+                return Ok(result.map(|t| t.without_fields()));
             }
             Some(callee) => self.called(callee, call),
             None => None,
@@ -2918,15 +2919,20 @@ impl<'e, 'a> Engine<'e, 'a> {
         crate::partial::parts(args, kwargs, *star_from)
     }
 
-    /// The result of calling the named object `fqn`: the builtins that wrap an iterable keep
-    /// its items, anything else returns what [`TypeCtx::call_result`] says. A container they
+    /// The result of calling the named object `fqn` as the call reaches it (`through`): the
+    /// builtins that wrap an iterable keep its items, anything else returns what
+    /// [`TypeCtx::call_result`] says. A container they
     /// build is one whatever it wraps, so an unset argument adds no items yet (as in a display):
     /// a loop rebinding `items = list(items)` keeps its type. An iterable that `*` or `**`
     /// unpacking may pass leaves the items unknown; `deque` and `enumerate` also take theirs by
     /// the keyword `iterable`, the others by position only (`list(iterable=xs)` raises
     /// `TypeError`, and a `**` mapping binds no positional-only parameter); `dict` also takes
     /// entries by keyword.
-    fn call_named(&self, fqn: &str, call: Passed<'_>) -> Step {
+    fn call_named(&self, fqn: &str, through: CalledThrough, call: Passed<'_>) -> Step {
+        let result = || {
+            self.cx
+                .call_result(fqn, through, |i, k| self.passed(call, i, k))
+        };
         let args = call.args;
         let items_at = |index: u8, keyword: Option<&str>| {
             bound_elem(call.bound(index, keyword), |a| self.items_of(a))
@@ -3040,7 +3046,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             // A library class that copies its argument (`collections.OrderedDict(pairs)`) makes
             // an instance of itself.
             "collections.OrderedDict" | "builtins.bytearray" => {
-                return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
+                return Ok(result());
             }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
             // type; given other values too (`replace(spec, run=f)`), not its fields'.
@@ -3063,7 +3069,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             _ if let Some(fields) = self.constructed_fields(fqn, call) => {
                 Ty::container(fqn, fields)
             }
-            _ => return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
+            _ => return Ok(result()),
         }))
     }
 
@@ -3102,7 +3108,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         let cx = self.cx;
         let r = self.need(recv)?;
         if let Some(member) = self.module_member(r, method) {
-            return self.call_named(&member, call);
+            return self.call_named(&member, CalledThrough::Name, call);
         }
         // `Model.__new__(Model)`, `super().__new__(cls)`: what `object.__new__` allocates.
         if method == "__new__"
@@ -3111,7 +3117,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .project
                 .new_is_object_new(class, matches!(r, Some(Ty::Super(_))), cx.kb)
         {
-            return self.call_named("builtins.object.__new__", call);
+            return self.call_named("builtins.object.__new__", CalledThrough::Name, call);
         }
         if let Some(o) = r.and_then(Ty::obj)
             && let Some(item) = self
@@ -3420,16 +3426,16 @@ impl<'e, 'a> Engine<'e, 'a> {
         if let Some(result) = callee.returned() {
             return Some(result.clone());
         }
+        let named = |fqn: &str, through| {
+            self.cx
+                .call_result(fqn, through, |i, k| self.passed(call, i, k))
+        };
         match callee {
-            Ty::Ref(fqn) | Ty::Class(fqn) => {
-                self.cx.call_result(fqn, |i, k| self.passed(call, i, k))
-            }
+            Ty::Ref(fqn) => named(fqn, CalledThrough::Name),
+            Ty::Class(fqn) => named(fqn, CalledThrough::ClassObject),
             // What the partial object binds shifts the arguments: they are not followed.
             Ty::Partial(inner, _) => self.called(inner, Passed::unknown()),
-            Ty::OneOf(fqns) => join_all(
-                fqns.iter()
-                    .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
-            ),
+            Ty::OneOf(fqns) => join_all(fqns.iter().map(|fqn| named(fqn, CalledThrough::Name))),
             other => {
                 let depth = self.call_depth.get();
                 if depth >= MAX_CALL_DEPTH {

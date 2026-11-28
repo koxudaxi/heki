@@ -18,7 +18,8 @@
 //! `typing.override` return the function or class they are handed, and any other decorator may
 //! return another object. A call through a name bound again gives what calling each object the
 //! name may hold gives, an instance of either class or no known value, so a method called on its
-//! result is no longer the definition's alone.
+//! result is no longer the definition's alone. A class object a value holds by its type (`cls`, a
+//! parameter of `type[Base]`) reads no name: calling it constructs the class or a subclass.
 //!
 //! Every fixture marks each line with the report it must get ([`MARKS`]).
 
@@ -1292,6 +1293,66 @@ fn a_call_of_a_name_bound_again_gives_what_each_binding_gives() {
             ("pkg/patches.py", REBOUND_CLASSES_PATCHES),
             ("pkg/swapped.py", REBOUND_CLASSES_SWAPPED),
             ("pkg/app.py", REBOUND_CLASS_CALLS),
+        ],
+    );
+}
+
+/// `Base`, which another module binds again (`model.Base = make()`), and the class objects of
+/// it that values hold by their types: `cls` in a class method and an attribute declared
+/// `type[Base]`.
+const REBOUND_CLASS_OBJECTS: &str = r#"import time
+
+
+class Base:
+    def method(self):
+        time.sleep(1)
+
+    @classmethod
+    async def spawn(cls):
+        cls().method()  # EFF101
+
+
+class Holder:
+    def __init__(self, factory: type[Base]) -> None:
+        self.factory = factory
+
+    async def run(self):
+        self.factory().method()  # EFF101
+"#;
+
+const REBOUND_CLASS_OBJECTS_PATCHES: &str = r#"from pkg import model
+
+
+def make():
+    return object
+
+
+model.Base = make()
+"#;
+
+const REBOUND_CLASS_OBJECT_CALLS: &str = r#"from pkg import model
+
+
+async def typed(factory: type[model.Base]):
+    factory().method()  # EFF101
+
+
+async def direct():
+    model.Base().method()
+"#;
+
+/// A call of a class object a value holds by its type (`cls()`, a parameter or an attribute
+/// declared `type[Base]`) reads no name, so what another module binds the class's name to
+/// leaves the instance it makes, an instance of the class or a subclass; a call through the
+/// name itself (`model.Base()`) gives what the name may hold.
+#[test]
+fn a_call_of_a_class_object_held_by_its_type_reads_no_name() {
+    check_marks(
+        "rebound_class_objects",
+        &[
+            ("pkg/model.py", REBOUND_CLASS_OBJECTS),
+            ("pkg/patches.py", REBOUND_CLASS_OBJECTS_PATCHES),
+            ("pkg/app.py", REBOUND_CLASS_OBJECT_CALLS),
         ],
     );
 }
