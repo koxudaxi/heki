@@ -852,6 +852,12 @@ const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import 
 const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
 const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
 const HELD_FACTORY: &str = "from pkg.held_defs import make_waiter\n\n\nasync def through_factory() -> None:\n    make_waiter()()\n";
+const JOINED_DEFS: &str = "import time\nfrom collections.abc import Callable\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\nclass _Store:\n    def __init__(self, hook: Callable[[], None]) -> None:\n        self.hook = hook\n\n    def fire(self) -> None:\n        self.hook()\n\n\nQUIET = _Store(rest)\n";
+const JOINED_USE: &str = "from pkg.joined_defs import _Store\n\n\nasync def through_store(store: _Store) -> None:\n    store.fire()\n";
+const JOINED_MAKE_QUIET: &str =
+    "from pkg.joined_defs import _Store, rest\n\nALSO_QUIET = _Store(rest)\n";
+const JOINED_MAKE: &str = "from pkg.joined_defs import _Store, nap\n\nWAITING = _Store(nap)\n";
+const JOINED_MAKE_REBINDS: &str = "from pkg.joined_defs import _Store, nap, rest\n\nWAITING = _Store(nap)\n\n\ndef rebind(target) -> None:\n    target.hook = rest\n";
 const HELD_FIELD: &str = "from pkg.held_defs import View, nap\n\n\nasync def through_field() -> None:\n    View(nap).run()\n";
 const HELD_PARTIAL: &str = "from pkg.held_defs import Holder\n\n\nasync def through_partial() -> None:\n    Holder().run()\n";
 const HELD_TABLE: &str = "from pkg.held_defs import TABLE\n\n\nasync def through_table(kind: str) -> None:\n    TABLE[kind]()\n";
@@ -1427,6 +1433,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/held_defs.py", HELD_DEFS),
         ("pkg/held_factory.py", HELD_FACTORY),
         ("pkg/held_field.py", HELD_FIELD),
+        ("pkg/joined_defs.py", JOINED_DEFS),
+        ("pkg/joined_use.py", JOINED_USE),
+        ("pkg/joined_make.py", JOINED_MAKE_QUIET),
         ("pkg/held_partial.py", HELD_PARTIAL),
         ("pkg/held_table.py", HELD_TABLE),
         ("pkg/st_client.py", ST_CLIENT),
@@ -2191,11 +2200,15 @@ fn steps_declared_types() -> Vec<Step> {
 /// that does not wait, a class that is no named tuple (whose attribute holds what a parameter
 /// declares), and a partial class attribute of a function that does not wait each take the wait
 /// away from their callers in other modules, and the definitions written back bring it back.
+/// An attribute of a private class holds what every construction passes: a construction in
+/// another module adds a function that waits, and a store there through a receiver of unknown
+/// class leaves the attribute unknown.
 fn steps_held_functions() -> Vec<Step> {
     const FACTORY: &[(&str, &str)] = &[("pkg/held_factory.py", "EFF101")];
     const FIELD: &[(&str, &str)] = &[("pkg/held_field.py", "EFF101 [heuristic]")];
     const PARTIAL: &[(&str, &str)] = &[("pkg/held_partial.py", "EFF101")];
     const TABLE: &[(&str, &str)] = &[("pkg/held_table.py", "EFF101")];
+    const JOINED: &[(&str, &str)] = &[("pkg/joined_use.py", "EFF101 [heuristic]")];
     const ALL: &[(&str, &str)] = &[
         ("pkg/held_factory.py", "EFF101"),
         ("pkg/held_field.py", "EFF101 [heuristic]"),
@@ -2234,6 +2247,16 @@ fn steps_held_functions() -> Vec<Step> {
             vec![save("pkg/held_defs.py", HELD_DEFS)],
         )
         .present(ALL),
+        Step::new(
+            "another module constructs the private class with a function that waits",
+            vec![save("pkg/joined_make.py", JOINED_MAKE)],
+        )
+        .present(JOINED),
+        Step::new(
+            "a store through a receiver of unknown class may bind the attribute",
+            vec![save("pkg/joined_make.py", JOINED_MAKE_REBINDS)],
+        )
+        .absent(JOINED),
         Step::new(
             "the partial object in the table holds a position",
             vec![save("pkg/held_defs.py", HELD_DEFS_POSITIONED_TABLE)],

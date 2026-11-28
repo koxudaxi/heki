@@ -232,16 +232,22 @@ impl<'a> Extractor<'a> {
         }))
     }
 
-    /// The project class whose instance a call of the library API `symbol` builds without its
-    /// `__init__`, and where the fields' values come from (`EcosystemEntry::builds_receiver`):
-    /// the class of the receiver, a class object or an instance. A call building one only from a
-    /// dict builds none from a value not established to be one.
+    /// The project class whose instance a call of the library API `symbol` builds without a
+    /// project `__init__`, and where the fields' values come from: the class of the receiver, a
+    /// class object or an instance (`EcosystemEntry::builds_receiver`), or the class of a
+    /// copy's first argument (`EcosystemEntry::copy_sanitizer`), whose fields hold the
+    /// original's values. A call building one only from a dict builds none from a value not
+    /// established to be one.
     pub(super) fn built_receiver(
         &self,
         symbol: &str,
         call: &Call<'_>,
-    ) -> Option<(String, &'a FieldValues)> {
-        let fields = self.cx.catalog(symbol)?.builds_receiver.as_ref()?;
+    ) -> Option<(String, Option<&'a FieldValues>)> {
+        let entry = self.cx.catalog(symbol)?;
+        let Some(fields) = entry.builds_receiver.as_ref() else {
+            let depth = entry.copy_sanitizer?;
+            return self.copied_class(call, depth).map(|class| (class, None));
+        };
         let class = match self.val(call.recv_var?)? {
             Val::Ref(class) | Val::Class(class) | Val::Inst(class, _) => class,
             Val::Super(_) | Val::Union(_) | Val::OneOf(_) => return None,
@@ -257,7 +263,23 @@ impl<'a> Extractor<'a> {
                 return None;
             }
         }
-        Some((class.clone(), fields))
+        Some((class.clone(), Some(fields)))
+    }
+
+    /// The project class of the object a copy `call` makes a new instance of: its first
+    /// argument's, when the copy protocol copies the attributes there
+    /// ([`resolver::ProjectDecls::copy_of`]). A hook of the project making the copy
+    /// (`__copy__`, `__deepcopy__`, `__reduce_ex__`, a `copyreg` registration) decides what it
+    /// returns, and an object of no class heki knows may be of any class: neither is a
+    /// construction here.
+    fn copied_class(&self, call: &Call<'_>, depth: heki_kb::CopyDepth) -> Option<String> {
+        let Val::Inst(class, _) = self.val(*call.args.first()?)? else {
+            return None;
+        };
+        let project = self.cx.project;
+        let copied = project.is_project_class(class)
+            && project.copy_of(class, depth, self.cx.kb) == resolver::CopyMade::Attributes;
+        copied.then(|| class.clone())
     }
 
     /// The mapping `call` passes where `fields` takes the fields' values from.
