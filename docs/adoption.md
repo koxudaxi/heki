@@ -458,6 +458,9 @@ the run now.
         sarif_file: heki.sarif
     ```
 
+Each annotation is one workflow command at the reported location: its body is the message followed by one
+`related: <path>:<line>:<col>: <message>` line per related location (the hops of a call chain, in order).
+
 Warnings and heuristic reports become annotations without failing the step (a heuristic report
 of an `error` rule is an `error` annotation); `fail-on = "warning"` in `[tool.heki.lint]` (or
 `--fail-on warning`) makes them fail it, as in pre-commit.
