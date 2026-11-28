@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use source::{
-    SourceEncoding, SourceError, decode_source, encode_source, read_source, source_encoding,
-    write_source,
+    SourceEncoding, SourceError, decode_source, encode_like, encode_source, read_source,
+    source_encoding, write_source,
 };
 
 pub use ruff_python_ast as raw_ast;

@@ -533,6 +533,50 @@ def touch_checked(s):
     }
 }
 
+/// A `with` block between the read of a parameter's attribute and the return calls the manager's
+/// `__enter__` and `__exit__`, which may store the attribute, as a call there may: the function
+/// may return what the attribute held before, so a change of its result changes no attribute
+/// of the argument. Without the block it is the attribute.
+#[test]
+fn a_with_block_after_the_read_of_a_returned_attribute_may_rebind_it() {
+    let p = project("same_object_attribute_across_a_with_block");
+    p.write(
+        "app/attrs.py",
+        "\
+def around_block(s, manager):
+    old = s.items
+    with manager:
+        pass
+    return old
+
+
+def no_block(s, manager):
+    old = s.items
+    return old
+
+
+def touch_around_block(s, manager):
+    around_block(s, manager).append(1)
+
+
+def touch_no_block(s, manager):
+    no_block(s, manager).append(1)
+",
+    );
+    let changed = |name: &str| -> Vec<(String, Value)> {
+        let (_, out, err) = p.heki(&["inspect", "--output-format", "json", name]);
+        let got: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {err}"));
+        (got["changes"]["params"].as_array().unwrap().iter())
+            .map(|c| (c["param"].as_str().unwrap().to_owned(), c["what"].clone()))
+            .collect()
+    };
+    assert_eq!(changed("app.attrs.touch_around_block"), []);
+    assert_eq!(
+        changed("app.attrs.touch_no_block"),
+        [("s".to_owned(), serde_json::json!(["items"]))]
+    );
+}
+
 /// A function a cast hands back is the function itself to `references = "calls"`: handing the
 /// cast's result on hands the function on. The type a cast names is only named.
 #[test]

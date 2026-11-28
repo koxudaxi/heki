@@ -105,6 +105,26 @@ pub struct Request<'a> {
     /// Show every block of contracts and every site keeping them at `unresolved = "ignore"`
     /// (up to [`MAX_LISTED`]), not the first few of each.
     pub all: bool,
+    /// The section printed in full, alone.
+    pub focus: Option<Focus>,
+    /// Also apply the exact suggestion groups to the files' text ([`Advice::edited`]).
+    pub diff: bool,
+}
+
+/// The section `heki recommend --focus` prints in full, alone. The analysis is the same: the
+/// JSON object keeps every field and its meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// "Types the code already keeps", with every exact group.
+    Types,
+}
+
+/// What [`recommend`] gives.
+#[derive(Debug, Clone)]
+pub struct Advice {
+    pub report: RecommendReport,
+    /// With [`Request::diff`], the files the exact suggestion groups edit, by path.
+    pub edited: Vec<types::EditedFile>,
 }
 
 /// The JSON object `heki recommend --output-format json` prints.
@@ -317,7 +337,7 @@ pub fn json_schema() -> serde_json::Value {
 }
 
 /// The report on `request`'s project.
-pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError> {
+pub fn recommend(request: Request<'_>) -> Result<Advice, RecommendError> {
     let Request {
         project,
         root,
@@ -330,7 +350,14 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         shown,
         errors,
         all,
+        focus,
+        diff,
     } = request;
+    let listing = match (all, focus) {
+        (true, _) => types::Listing::Every,
+        (false, Some(Focus::Types)) => types::Listing::Exact,
+        (false, None) => types::Listing::First,
+    };
     let env = &project.env;
     let snapshot_saved = env.root.join(crate::SNAPSHOT_FILE).is_file();
     // Without a configuration file, the keys go into a new `pyproject.toml`.
@@ -493,9 +520,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     };
     let block = block::render(&additions, &user, layout);
     let mut notes = Vec::new();
-    if left_out.python_files > 0 || left_out.truncated {
-        notes.push(left_out_note(&left_out));
-    }
+    notes.extend(left_out_note(&left_out));
     notes.extend(exit_notes(&reports_now, fail_on));
     notes.extend(blind_spots::notes(&blind_spots, &trial));
     notes.extend(section.notes());
@@ -534,7 +559,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         contracts: section.advice(),
         contracts_not_shown: section.not_shown,
         contract_blockers: section.blockers,
-        suggestions: suggestions.section(all),
+        suggestions: suggestions.section(listing),
         rejected_contracts: section.rejected,
         contracts_not_tried: section.not_tried,
         unmatched_entries,
@@ -547,11 +572,18 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         &report,
         TextOptions {
             all,
+            listing,
+            focus,
             snapshot_saved,
             ask_fail: fail_on == Severity::Error,
         },
     );
-    Ok(report)
+    let edited = if diff {
+        types::edited_files(&suggestions.groups, &project.files, shown)
+    } else {
+        Vec::new()
+    };
+    Ok(Advice { report, edited })
 }
 
 /// The selection of the discovery run: every rule by its code ([`selection_of`]). `MUT103`
@@ -776,39 +808,51 @@ fn left_out(
     Ok((left_out, found))
 }
 
-fn left_out_note(left_out: &LeftOut) -> String {
+/// The note on the Python files below the root the paths leave out, when there are any.
+fn left_out_note(left_out: &LeftOut) -> Option<String> {
+    if left_out.python_files == 0 && !left_out.truncated {
+        return None;
+    }
     if left_out.python_files == 0 {
-        return format!(
+        return Some(format!(
             "the count of the Python files below the project root stopped before the end (after \
              the first {MAX_CENSUS_ENTRIES} entries, or at an entry it could not read): heki \
              takes the analyzed files as the whole project, so what it says about callers, \
              readers, and writers holds for those files only."
-        );
+        ));
     }
     let mut examples = left_out.files[..left_out.files.len().min(MAX_EXAMPLES)].join(", ");
     if left_out.python_files > MAX_EXAMPLES || left_out.truncated {
         examples.push_str(", ...");
     }
     let at_least = if left_out.truncated { "at least " } else { "" };
-    format!(
+    Some(format!(
         "{at_least}{} Python file(s) below the project root were not analyzed ({examples}): heki \
          takes the analyzed files as the whole project, so what it says about callers, readers, \
          and writers holds for those files only.",
         left_out.python_files
-    )
+    ))
 }
 
 /// What the text shows beyond the JSON object.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct TextOptions {
-    /// `--all`: every suggestion group, as the object holds them, and every rule without
-    /// reports by name.
+    /// `--all`: every rule without reports by name.
     pub all: bool,
+    /// The suggestion groups shown, as the object holds them.
+    pub listing: types::Listing,
+    /// The section printed alone, without the others.
+    pub focus: Option<Focus>,
     /// Whether the project root holds a saved summary snapshot, which `MUT103` compares with.
     pub snapshot_saved: bool,
     /// Whether a contract's reports need `fail = true` to fail `heki check`: they do at
     /// `fail-on = "error"`, not at `"warning"`.
     pub ask_fail: bool,
+}
+
+/// `heki <subcommand>` with the paths and options that analyze and select as the run did.
+pub fn analysis_command(analyzed: &Analyzed, subcommand: &str) -> String {
+    rules::analysis_command(analyzed, subcommand)
 }
 
 /// The report as the text output prints it.
@@ -817,9 +861,18 @@ pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
     let analyzed = &report.analyzed;
     let _ = writeln!(
         out,
-        "heki recommend (experimental) on {}: {} file(s), {} function(s)\n",
+        "heki recommend (experimental) on {}: {} file(s), {} function(s)",
         report.root, analyzed.files, analyzed.functions
     );
+    if text.focus == Some(Focus::Types) {
+        types::render(&mut out, &report.suggestions, text.listing, analyzed);
+        // What the analysis takes as the whole project bounds every claim about callers.
+        if let Some(note) = left_out_note(&analyzed.left_out) {
+            let _ = write!(out, "\nNotes\n  - {note}\n");
+        }
+        return out;
+    }
+    out.push('\n');
     let takeaways = takeaways::lines(report, text);
     for (n, line) in takeaways.iter().enumerate() {
         let _ = writeln!(out, "{}. {line}", n + 1);
@@ -841,7 +894,7 @@ pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
             split.allowed, split.regressions
         );
     }
-    types::render(&mut out, &report.suggestions, text.all);
+    types::render(&mut out, &report.suggestions, text.listing, analyzed);
     rules::render(
         &mut out,
         &report.rules,

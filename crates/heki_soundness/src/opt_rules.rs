@@ -1834,6 +1834,67 @@ impl<'a, 'c> Rules<'a, 'c> {
         ))
     }
 
+    /// `v` is a `str` or an instance of a subclass of it, wherever its exact type is not known:
+    /// the result of `str(x)`, `repr(x)`, `ascii(x)`, or `format(x)` (they return what
+    /// `__str__` / `__repr__` / `__format__` return, which is a `str` or a subclass instance
+    /// or raises), an f-string field or conversion, a `BuildString`, or a concatenation of such
+    /// pieces and exact strings.
+    fn str_valued(&self, st: &FrameState, v: VarId) -> bool {
+        let cx = self.cx();
+        // Nested concatenations are looked into to a fixed depth; a deeper one is not a piece.
+        const DEPTH: usize = 5;
+        // The operands of each concatenation of one level, or `None` when a value of it is
+        // not a string piece.
+        let next = |level: &[VarId]| -> Option<Vec<VarId>> {
+            let mut operands = Vec::new();
+            for &x in level {
+                match &cx.shape.inst(x)?.kind {
+                    InstKind::Copy { src, .. } => operands.push(*src),
+                    InstKind::BinOp {
+                        op: BinOpKind::Add,
+                        lhs,
+                        rhs,
+                        ..
+                    } => operands.extend([*lhs, *rhs]),
+                    InstKind::Convert { .. }
+                    | InstKind::Format { .. }
+                    | InstKind::BuildString { .. }
+                    | InstKind::Const {
+                        literal: heki_ir::ConstLiteral::Str(_),
+                        ..
+                    } => {}
+                    InstKind::Call {
+                        callee_var,
+                        callee,
+                        args,
+                        kwargs,
+                        ..
+                    } if !(0..args.len()).any(|i| cx.f.is_starred(x, i))
+                        && kwargs.is_empty()
+                        && matches!(
+                            cx.builtin_callee(*callee_var, callee),
+                            Some("str" | "repr" | "ascii" | "format")
+                        ) => {}
+                    // `str.format` of an exact `str` template: a lone field returns its operand's
+                    // `__format__` result, a `str` or a subclass instance.
+                    InstKind::MethodCall { recv, method, .. }
+                        if method == "format" && st.exact_type(*recv) == Some(Str) => {}
+                    _ => return None,
+                }
+            }
+            Some(operands)
+        };
+        let mut level = vec![v];
+        for _ in 0..DEPTH {
+            match next(&level) {
+                Some(operands) if operands.is_empty() => return true,
+                Some(operands) => level = operands,
+                None => return false,
+            }
+        }
+        false
+    }
+
     fn attr_concat(
         &self,
         at: (BlockId, usize),
@@ -1847,8 +1908,21 @@ impl<'a, 'c> Rules<'a, 'c> {
         let binop = inst_at(f, at);
         let target = format!("{}.{attr}", self.var(obj));
         let mut obs = self.base();
-        // The attribute's own type is not tracked; the right operand shows what it holds.
-        obs.push(self.ck.exact_type(&target, &st, rhs, &[Str, Bytes, Tuple]));
+        // The attribute's own type is not tracked; the right operand shows what it holds. A piece
+        // that is only known to be a `str` or a subclass of it leaves the exact type open.
+        let str_piece = st.exact_type(rhs).is_none() && self.str_valued(&st, rhs);
+        obs.push(if str_piece {
+            self.ck.ob(
+                K::ExactType,
+                &target,
+                blocked(
+                    "the piece is a `str` or a subclass of it (a `str` subclass returned by \
+                     `__str__` / `__format__` may override `__radd__`)",
+                ),
+            )
+        } else {
+            self.ck.exact_type(&target, &st, rhs, &[Str, Bytes, Tuple])
+        });
         obs.push(self.ck.ob(
             K::Unique,
             &target,
@@ -1884,6 +1958,11 @@ impl<'a, 'c> Rules<'a, 'c> {
                     "`{target}` is assigned an exact `{}` and grows by concatenation",
                     k.name()
                 )
+            })
+            .or_else(|| {
+                (str_piece && held == Some(Str)).then(|| {
+                    format!("`{target}` is assigned an exact `str` and grows by concatenation")
+                })
             });
         Some(
             self.candidate(

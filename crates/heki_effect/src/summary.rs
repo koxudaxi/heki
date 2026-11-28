@@ -38,6 +38,7 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::types::{Held, Ty};
+use crate::witness;
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
     CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
@@ -442,9 +443,7 @@ fn absorb_class_body(
     into.direct_exec_effects.extend(body.direct_exec_effects);
     into.transitive_exec_effects
         .extend(body.transitive_exec_effects);
-    for (k, chain) in body.exec_chains {
-        into.exec_chains.entry(k).or_insert(chain);
-    }
+    into.add_ways_of(&body.exec_chains, body.witness_ways.as_deref());
     into.typed_field_write_sites
         .extend(body.typed_field_write_sites);
     into.typed_field_read_sites
@@ -583,9 +582,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
     into.direct_exec_effects.extend(other.direct_exec_effects);
     into.transitive_exec_effects
         .extend(other.transitive_exec_effects);
-    for (k, chain) in other.exec_chains {
-        into.exec_chains.entry(k).or_insert(chain);
-    }
+    into.add_ways_of(&other.exec_chains, other.witness_ways.as_deref());
     into.must_exec = Some(Box::new(MustExec::of_name_bound_twice()));
     into.mutates_params |= other.mutates_params;
     // Typed only where both definitions type it.
@@ -989,6 +986,8 @@ struct Extractor<'a> {
     returned: FxHashMap<VarId, ReturnStep>,
     /// Position (block, instruction index) of the instruction being visited.
     pos: (BlockId, usize),
+    /// The blocks the entry reaches without an exception edge (`Self::in_cleanup`).
+    normal_blocks: OnceCell<Vec<bool>>,
     /// The class line of the method's own class (`Self::own_line`).
     own_line: OnceCell<Option<SharedLine>>,
     /// How many lambdas the function makes (`Self::shares_its_name`).
@@ -1443,6 +1442,7 @@ impl<'a> Extractor<'a> {
             contracts,
             returned: FxHashMap::default(),
             pos: (BlockId(0), 0),
+            normal_blocks: OnceCell::new(),
             events: contracts
                 .filter(|c| c.invalidations() > 0)
                 .map(|_| Events::default()),
@@ -2934,10 +2934,18 @@ impl<'a> Extractor<'a> {
     }
 
     /// The class line of the class `var` is exactly an instance of ([`ArgOrigin::exact`]).
-    fn exact_line(&self, var: VarId) -> Option<SharedLine> {
-        match self.val(var)? {
-            Val::Inst(class, true) => Some(self.cx.project.lineage(class, false)),
-            _ => None,
+    /// The class `var` is an instance of, with whether it is exactly that class
+    /// ([`ArgOrigin::class`], [`ArgOrigin::exact`]).
+    ///
+    /// A parameter passed as itself has no class here: a test of it is its callers' to decide,
+    /// and the call sites stay those of the function whatever its annotations say.
+    fn class_line(&self, var: VarId) -> (Option<SharedLine>, bool) {
+        if matches!(self.param_alias.get(&var), Some((_, None))) {
+            return (None, false);
+        }
+        match self.val(var) {
+            Some(Val::Inst(class, exact)) => (Some(self.cx.project.lineage(class, false)), *exact),
+            _ => (None, false),
         }
     }
 
@@ -2955,6 +2963,7 @@ impl<'a> Extractor<'a> {
     }
 
     fn origin(&self, var: VarId) -> ArgOrigin {
+        let (class, exact) = self.class_line(var);
         let field = self.obj_attr_alias.get(&var);
         let typed_field = field
             .filter(|a| a.classes.len() == 1)
@@ -2984,7 +2993,8 @@ impl<'a> Extractor<'a> {
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             retyped: self.retyped.contains(&var),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
-            exact: self.exact_line(var),
+            class,
+            exact,
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
@@ -3689,16 +3699,12 @@ impl<'a> Extractor<'a> {
         {
             return any;
         }
-        // A comprehension's own scope is the one function it calls.
-        let child_scope = call.method.is_none() && call.callee_var.is_none();
         let span = self.f.block(at.0).insts.get(at.1).map(|i| i.span);
         let library = |symbol: &str, recv| {
             self.library_call_runs_project_code(symbol, span, recv, args, kwargs, call.star, false)
         };
         match self.callees.get(&at)? {
-            Callee::Project(..) => {
-                (!child_scope && !self.targets_complete_at(at)).then_some(KeptRemovalKind::Any)
-            }
+            Callee::Project(..) => (!self.targets_complete_at(at)).then_some(KeptRemovalKind::Any),
             Callee::External(symbol) => {
                 // Calling an instance runs its class's `__call__`: the instance is its receiver.
                 let recv = recv.or(call.callee_var.filter(|_| symbol.ends_with(".__call__")));
@@ -4139,8 +4145,18 @@ impl<'a> Extractor<'a> {
             }
             _ => None,
         };
+        // `allowed-protocols` allows a reference by the protocol the receiver is typed with; a
+        // reference keeps no declaration of it ([`Dispatch::declared`]).
+        let protocol = self.receiver_protocol(recv, &callees);
+        let dispatch = protocol.map(|(protocol, _)| {
+            Box::new(Dispatch {
+                protocol: Some(protocol.clone()),
+                ..Dispatch::default()
+            })
+        });
         Some(CallSite {
             module_member: member,
+            dispatch,
             ..self.handed_site(span, self.f.block_loop_depth(bb), callees, constructs)
         })
     }
@@ -4228,6 +4244,7 @@ impl<'a> Extractor<'a> {
             on_every_return: OnEveryReturn::default(),
             made_by: None,
             module_member: None,
+            cleanup: self.in_cleanup(self.pos.0, span),
         }
     }
 
@@ -5556,6 +5573,7 @@ impl<'a> Extractor<'a> {
                 self.sentinel_test(*rhs, *lhs, span);
             }
             InstKind::SubscriptLoad {
+                dst,
                 obj,
                 index,
                 key_const,
@@ -5576,6 +5594,14 @@ impl<'a> Extractor<'a> {
                     && !self.key_present(bb, index_in_block, *obj, *index)
                 {
                     self.container_change(*obj, ContainerChange::Resizes, span);
+                }
+                if let Some(symbol) = self.subscript_symbol(*obj) {
+                    let passed = Passed {
+                        args: std::slice::from_ref(index),
+                        ..Passed::NOTHING
+                    };
+                    self.external_call(bb, symbol.clone(), passed, false, span);
+                    self.note_returned_realloc(&symbol, Some(*dst), std::slice::from_ref(index));
                 }
             }
             // `obj.__dict__ |= other` updates the namespace in place, whatever the result is
@@ -6107,6 +6133,24 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The catalog's `__getitem__` entry of the object `obj` names or is an instance of, when it
+    /// carries effects: subscripting is the call (`numpy.r_[acc, x]` concatenates what the
+    /// subscript lists), with the index as its one argument. An entry that only types the
+    /// looked-up value is no call.
+    fn subscript_symbol(&self, obj: VarId) -> Option<String> {
+        let (Val::Ref(named) | Val::Inst(named, _)) = self.val(obj)? else {
+            return None;
+        };
+        if named.starts_with("builtins.") || self.cx.project.is_project_class(named) {
+            return None;
+        }
+        let symbol = format!("{named}.__getitem__");
+        self.cx
+            .catalog(&symbol)
+            .is_some_and(|entry| !entry.effects.is_empty())
+            .then_some(symbol)
+    }
+
     /// The origin of a receiver bound to a method's first parameter, and whether it is the
     /// calling method's own `self`: `super()` binds the calling method's `self` (parameter 0).
     /// The receiver binds the parameter exactly (`ArgOrigin::binding`) at a call in `bb`.
@@ -6274,16 +6318,16 @@ impl<'a> Extractor<'a> {
 
     /// A returned result of the quadratic reallocation `symbol` taking a parameter, as itself or
     /// in a display (`np.append(acc, x)`, `pd.concat([df, part])`): `reallocates_params`.
-    fn note_returned_realloc(&mut self, symbol: &str, call: &Call<'_>) {
+    fn note_returned_realloc(&mut self, symbol: &str, dst: Option<VarId>, args: &[VarId]) {
         let reallocates = self
             .cx
             .kb
             .lookup(symbol)
             .is_some_and(|e| e.effects.contains(&ExecEffectKind::QuadraticRealloc));
-        if !reallocates || !call.dst.is_some_and(|d| self.returned.contains_key(&d)) {
+        if !reallocates || !dst.is_some_and(|d| self.returned.contains_key(&d)) {
             return;
         }
-        for &arg in call.args {
+        for &arg in args {
             let held: Vec<VarId> = match self.defs.get(&arg).map(|i| &i.kind) {
                 Some(InstKind::AllocBuiltin { elems, .. }) => elems.clone(),
                 _ => vec![arg],
@@ -7139,6 +7183,31 @@ impl<'a> Extractor<'a> {
         self.container_mut(recv, method, true, None, item_key, span);
     }
 
+    /// Whether code in block `bb` at `span` is cleanup code: in an `except` handler (the block
+    /// is reached only through an exception edge) or in a `finally` body.
+    fn in_cleanup(&self, bb: BlockId, span: Span) -> bool {
+        let normal = self.normal_blocks.get_or_init(|| {
+            let mut seen = vec![false; self.f.blocks.len()];
+            let budget = Budget::of_function("summary::cleanup_blocks", self.f);
+            // One step per block: the function's budget holds them all.
+            let _ = heki_ir::walk::reach(
+                &budget,
+                [BlockId(0)],
+                |b, next| next.extend(self.f.block(b).terminator.successors()),
+                |b| {
+                    if let Some(slot) = seen.get_mut(b.0 as usize) {
+                        *slot = true;
+                    }
+                    heki_ir::walk::Visit::<()>::Expand
+                },
+            );
+            seen
+        });
+        !normal.get(bb.0 as usize).copied().unwrap_or(true)
+            || (self.f.finally_bodies.iter())
+                .any(|body| body.start <= span.start && span.end <= body.end)
+    }
+
     fn hop(&self, callee: String, span: Span) -> CallHop {
         CallHop {
             caller: self.key.clone(),
@@ -7492,7 +7561,7 @@ impl<'a> Extractor<'a> {
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
                     self.protocol_call(bb, iterable, iteration_protocol(false), false, call.span);
                 }
-                self.note_returned_realloc(symbol, call);
+                self.note_returned_realloc(symbol, call.dst, call.args);
                 // A project class without a project `__init__` (a dataclass, a pydantic model),
                 // and a library API building an instance of its receiver's class
                 // (`Model.model_construct(...)`): the construction is still a call site, with no
@@ -7537,6 +7606,7 @@ impl<'a> Extractor<'a> {
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
                         module_member: None,
+                        cleanup: self.in_cleanup(bb, call.span),
                     });
                 }
                 if self.opt_in.unawaited_handoffs {
@@ -7618,6 +7688,7 @@ impl<'a> Extractor<'a> {
                         let receiver = if decl.is_classmethod {
                             ArgOrigin::default()
                         } else if let Some(new) = new_recv {
+                            let made = call.dst.map_or((None, false), |made| self.class_line(made));
                             ArgOrigin {
                                 new_object: if new {
                                     NewArg::New {
@@ -7627,7 +7698,8 @@ impl<'a> Extractor<'a> {
                                 } else {
                                     NewArg::Old
                                 },
-                                exact: call.dst.and_then(|made| self.exact_line(made)),
+                                class: made.0,
+                                exact: made.1,
                                 ..ArgOrigin::default()
                             }
                         } else {
@@ -7867,26 +7939,38 @@ impl<'a> Extractor<'a> {
             .clone()
     }
 
-    /// [`Dispatch::declared`]: the definition of the called method in the project protocol the
-    /// receiver is typed with, when the protocol declares it.
-    fn declared_method(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<FuncKey> {
-        let Some(Val::Inst(protocol, _)) = self.val(call.recv_var?) else {
+    /// [`Dispatch::protocol`]: the project protocol the receiver `recv` is typed with, with the
+    /// name of the member the first of `callees` is, when the protocol declares it. The receiver
+    /// tells it whatever the callees bind: a static method binds no receiver, and a class method
+    /// binds the class.
+    fn receiver_protocol<'b>(
+        &self,
+        recv: Option<VarId>,
+        callees: &'b [BoundCallee],
+    ) -> Option<(&String, Cow<'b, str>)> {
+        let Some(Val::Inst(protocol, _)) = self.val(recv?) else {
             return None;
         };
         let name = heki_semantic::mangling::member_name(&callees.first()?.callee.qualname);
-        let project = self.cx.project;
-        project
+        self.cx
+            .project
             .protocol_declares(protocol, &name)
-            .then(|| project.mro_method(protocol, &name))?
+            .then_some((protocol, name))
     }
 
     /// What the receiver of `call` tells about the implementations `callees` run
     /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
     /// class, or the class a constructor call makes) when a callee is inherited from a proper
     /// base of it, and, on a parameter of the caller as itself (`self` too), the callees that
-    /// are overrides of subclasses.
+    /// are overrides of subclasses; for a receiver typed with a project protocol declaring the
+    /// method, the protocol and, unless the callees are the protocol's own methods, the method's
+    /// definition in it.
     fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
         let project = self.cx.project;
+        let through = self.receiver_protocol(call.recv_var, callees);
+        let protocol = through.as_ref().map(|(p, _)| (*p).clone());
+        // A receiver of no project class (`class` unknown, or the `self` of a method of a class
+        // heki keeps no line of) is typed with no project protocol either.
         let own;
         let class: &str = if call.recv_is_self {
             own = self.cx.owner_fqn(self.f)?;
@@ -7911,7 +7995,13 @@ impl<'a> Extractor<'a> {
                 .is_some_and(|r| r == owner)
         };
         if callees.iter().filter_map(class_of).all(|c| is(c, class)) {
-            return None;
+            // The protocol's own methods: no definition other than them to judge the call by.
+            return protocol.map(|protocol| {
+                Box::new(Dispatch {
+                    protocol: Some(protocol),
+                    ..Dispatch::default()
+                })
+            });
         }
         let line = if call.recv_is_self {
             self.own_line()?
@@ -7939,8 +8029,8 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        let declared = self.declared_method(call, callees);
-        (receiver.is_some() || !providers.is_empty() || declared.is_some()).then(|| {
+        let declared = through.and_then(|(p, name)| project.mro_method(p, &name));
+        (receiver.is_some() || !providers.is_empty() || protocol.is_some()).then(|| {
             Box::new(Dispatch {
                 receiver,
                 receiver_param: receiver_param
@@ -7948,6 +8038,7 @@ impl<'a> Extractor<'a> {
                     .unwrap_or(0),
                 providers,
                 declared,
+                protocol,
                 recv_params: 0,
             })
         })
@@ -8394,6 +8485,7 @@ impl<'a> Extractor<'a> {
             on_every_return,
             made_by: None,
             module_member: None,
+            cleanup: self.in_cleanup(bb, span),
         }
     }
 
@@ -9027,7 +9119,9 @@ impl<'a> Extractor<'a> {
             let had = !self.summary.direct_exec_effects.insert(*e);
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &guards);
             let chain = vec![Arc::new(self.hop(api.clone(), span))];
-            self.summary.exec_chains.insert(*e, chain);
+            let needs = witness::needs_of(&guards.inputs);
+            let cleanup = self.in_cleanup(bb, span);
+            self.summary.add_way(*e, needs, cleanup, chain, true);
         }
         for w in while_full.iter().filter(|_| own_param.is_none()) {
             for e in &w.effects {
@@ -9038,6 +9132,7 @@ impl<'a> Extractor<'a> {
                     },
                     guards: occurrence_of(e),
                     hop: self.hop(api.clone(), span),
+                    cleanup: self.in_cleanup(bb, span),
                 });
             }
         }
@@ -9234,7 +9329,7 @@ impl<'a> Extractor<'a> {
                 &crate::EffectGuards::default(),
             );
             let chain = vec![Arc::new(self.hop(fqn.clone(), self.f.span))];
-            self.summary.exec_chains.insert(e, chain);
+            self.summary.add_way(e, Vec::new(), false, chain, true);
         }
         if let Some(k) = entry.offloads_blocking_arg {
             let bound_first =
@@ -9696,6 +9791,7 @@ fn role_site(
     flags: Option<(bool, bool)>,
 ) -> CallSite {
     let (is_awaited, drives) = flags.unwrap_or((false, false));
+    let runs_bodies_here = matches!(role, SiteRole::Iterate | SiteRole::Call);
     CallSite {
         caller: site.caller.clone(),
         target: site.target.clone(),
@@ -9728,10 +9824,13 @@ fn role_site(
         state_tests: site.state_tests.clone(),
         locks: site.locks,
         shield: site.shield,
-        complete: false,
+        // An iterated generator or an awaited coroutine runs, there, the bodies of the call's
+        // targets: the call's targets are theirs.
+        complete: runs_bodies_here && site.complete,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
         module_member: None,
+        cleanup: site.cleanup,
     }
 }
 

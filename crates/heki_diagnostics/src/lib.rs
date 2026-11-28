@@ -212,7 +212,9 @@ pub struct Diagnostic {
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub sites: u32,
     /// What the report shares with others that output may fold into one: the blocking root cause
-    /// and effect of an `async def` boundary (`EFF101` / `EFF105`). Folding happens after
+    /// and effect of an `async def` boundary (`EFF101` / `EFF105`), with the blocking call a
+    /// helper on its chain makes, so that sites reaching the API through different helpers stay
+    /// apart (each is a fix of its own). Folding happens after
     /// suppressions and baselines, which see every report (`heki_rules::fold_root_causes`).
     #[serde(skip)]
     pub fold_key: Option<String>,

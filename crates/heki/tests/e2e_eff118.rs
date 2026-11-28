@@ -349,6 +349,62 @@ fn leaves_shielded_and_unreached_checkpoints() {
     assert_eq!(found(&diagnostics(&p, SELECT)), vec![]);
 }
 
+/// The shields by the module that defines them, as code importing them there (or AnyIO's own
+/// modules) spells them: the same shield as the public name, and a scope without `shield` is
+/// none.
+const DEFINING_PATHS: &str = r#"import anyio
+from anyio._core import _tasks
+from anyio._core._tasks import CancelScope, move_on_after
+
+
+async def shielded_class() -> None:
+    try:
+        await anyio.sleep(1)
+    finally:
+        with CancelScope(shield=True):
+            await anyio.sleep(1)
+
+
+async def shielded_deadline() -> None:
+    try:
+        await anyio.sleep(1)
+    finally:
+        with move_on_after(5, shield=True):
+            await anyio.sleep(1)
+
+
+async def shielded_through_the_module() -> None:
+    try:
+        await anyio.sleep(1)
+    finally:
+        with _tasks.CancelScope(shield=True):
+            await anyio.sleep(1)
+
+
+async def not_shielded() -> None:
+    try:
+        await anyio.sleep(1)
+    finally:
+        with CancelScope():
+            await anyio.sleep(1)
+"#;
+
+#[test]
+fn a_shield_named_by_its_defining_module_shields() {
+    let p = Project::new("eff118_defining_paths");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/paths.py", DEFINING_PATHS);
+    assert_eq!(
+        found(&diagnostics(&p, SELECT)),
+        vec![d(
+            "pkg/paths.py",
+            35,
+            "not_shielded",
+            "anyio.sleep->anyio.sleep"
+        )]
+    );
+}
+
 #[test]
 fn a_call_awaiting_the_function_unshielded_keeps_the_report() {
     let p = Project::new("eff118_callers");

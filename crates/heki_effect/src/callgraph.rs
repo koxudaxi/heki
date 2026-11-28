@@ -11,6 +11,7 @@ use crate::guards;
 use crate::guards::given_at_call;
 use crate::iterations;
 use crate::scc::tarjan_scc;
+use crate::witness;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
     CellChange, Construction, ContractSharing, Delivery, EffectSummary, EntryKey, Facts, FuncKey,
@@ -275,10 +276,13 @@ fn store_fresh_return(index: &mut ProjectIndex, func: &FuncKey, fact: Option<Fre
 }
 
 /// The propagation nodes on a call cycle ([`CallCycle`]): the members of the components, over
-/// the calls whose callee's body runs on the caller's stack ([`body_runs_on_stack`]), of more
-/// than one node or with a call of the node itself. A cycle lies within the region a
-/// propagation recomputes: the region holds every function sharing a cycle with an edited one,
-/// and every caller of a changed one, each member of its cycle included.
+/// the calls whose targets are every implementation they can run ([`CallSite::complete`]) and
+/// whose callee's body runs on the caller's stack ([`body_runs_on_stack`]), of more than one
+/// node or with a call of the node itself. A target taken from a name alone (a receiver typed by
+/// a protocol, a union member that does not resolve) closes no cycle: whether that function runs
+/// there is what heki does not know. A cycle lies within the region a propagation recomputes:
+/// the region holds every function sharing a cycle with an edited one, and every caller of a
+/// changed one, each member of its cycle included.
 fn on_call_cycles(
     index: &ProjectIndex,
     out: &OutSites,
@@ -293,7 +297,7 @@ fn on_call_cycles(
                 let runs = index
                     .summary(&c.callee)
                     .is_some_and(|callee| body_runs_on_stack(site, callee));
-                if let (true, Some(&j)) = (runs, pos.get(&c.callee)) {
+                if let (true, Some(&j)) = (runs && site.complete, pos.get(&c.callee)) {
                     succ[i].push(j);
                 }
             }
@@ -1652,16 +1656,18 @@ fn transfer(
         let new = t.transitive_exec_effects.insert(*e);
         let had = !new || t.direct_exec_effects.contains(e);
         guards::add_occurrence(&mut t.exec_guards, *e, had, &through.guards);
-        let chain = extend_chain(lead, tail, rewrite);
-        let kept = add_provided_effect(t, *e, had, &arrival, lead, rewrite);
-        let slot = t.exec_chains.entry(*e).or_default();
-        let replaces = match kept {
-            KeptChain::Replaced => true,
-            KeptChain::Shorter => slot.is_empty() || chain.len() < slot.len(),
-            KeptChain::Kept => false,
-        };
-        if replaces {
-            *slot = chain;
+        match add_provided_effect(t, *e, had, &arrival, lead, rewrite) {
+            KeptChain::Kept => {}
+            kept => {
+                if matches!(kept, KeptChain::Replaced) {
+                    t.exec_chains.remove(e);
+                    t.forget_ways(*e);
+                }
+                for w in witness::ways_at_call(facts, *e, site, bc, tail) {
+                    let chain = extend_chain(lead, w.tail, rewrite);
+                    t.add_way(*e, w.needs, w.cleanup, chain, false);
+                }
+            }
         }
     }
 
@@ -1970,7 +1976,7 @@ enum KeptChain {
     /// The first chain that runs whatever the parameters are replaces one through a subclass's
     /// implementation.
     Replaced,
-    /// The shorter of the two.
+    /// The better of the two ([`EffectSummary::add_way`]).
     Shorter,
     /// A chain through a subclass's implementation leaves one that runs whatever the parameters
     /// are.
@@ -2027,7 +2033,7 @@ pub(crate) fn arrival<'f>(
         None => Arrival::Always(tail),
     };
     let Some(ways) = facts.provided_effects.as_ref().and_then(|p| p.get(&e)) else {
-        return runs_with_callee(facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice));
+        return runs_with_callee(witness::chosen(facts, e, site, bc));
     };
     let receiver = site
         .receiver()
@@ -2038,7 +2044,7 @@ pub(crate) fn arrival<'f>(
         let mut needs: Vec<Need> = Vec::new();
         for need in &way.needs {
             let arg = bc.params.get(usize::from(need.param));
-            if let Some(exact) = arg.and_then(|a| a.exact.as_deref()) {
+            if let Some(exact) = arg.filter(|a| a.exact).and_then(|a| a.class.as_deref()) {
                 if !exact.derives_from(&need.provider) {
                     continue 'ways;
                 }

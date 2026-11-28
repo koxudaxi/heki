@@ -388,6 +388,8 @@ struct FnCheck<'a, 'u> {
     /// cell are made, and where they are stored: they are part of that state from then on, on
     /// every path.
     kept: FxHashMap<Span, Vec<Place<'a>>>,
+    /// The values the loads of constant keys read: what the function stored there.
+    slots: ownership::Slots,
 }
 
 impl<'a, 'u> FnCheck<'a, 'u> {
@@ -441,8 +443,17 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             callers: FxHashSet::default(),
             replacements: FxHashSet::default(),
             kept: FxHashMap::default(),
+            slots: ownership::Slots::default(),
         };
         check.identity_sides();
+        let class_of = |v: VarId| match check.types.get(&v) {
+            Some(Val::Inst(c, _)) => Some(c.as_str()),
+            _ => None,
+        };
+        let slots = ownership::Slots::in_function(f, &check.shape, &check.live, &class_of, &|v| {
+            check.made_here(v)
+        });
+        check.slots = slots;
         check
     }
 
@@ -627,12 +638,14 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     }
 
     fn source(&self, inst: &'a Inst) -> Source<'a> {
-        let made_here = |v: VarId| {
-            ownership::made_here(self.shape.copy_root(v), &self.defs, &|i, made_here| {
-                self.source_given(i, made_here)
-            })
-        };
-        self.source_given(inst, &made_here)
+        self.source_given(inst, &|v| self.made_here(v))
+    }
+
+    /// Whether the object `v` holds is one the function makes itself ([`ownership::made_here`]).
+    fn made_here(&self, v: VarId) -> bool {
+        ownership::made_here(self.shape.copy_root(v), &self.defs, &|i, made_here| {
+            self.source_given(i, made_here)
+        })
     }
 
     /// [`ownership::source`] of `inst`, where `made_here` tells the values that hold an object
@@ -753,6 +766,19 @@ impl<'a, 'u> FnCheck<'a, 'u> {
 
     fn derive(&self, inst: &'a Inst) -> Option<Own> {
         let own = |v: &VarId| self.own.get(v);
+        // A load of a key the function stored is the value stored there, as a variable is the
+        // value bound to it; the container's earlier contents are what the load's source says.
+        if let Some(read) = inst.kind.dst().and_then(|d| self.slots.read(d)) {
+            let stored = read.stored.iter().filter_map(own).cloned();
+            let earlier = read.earlier.then(|| self.derive_source(inst)).flatten();
+            return stored.chain(earlier).reduce(|a, b| a.join(&b));
+        }
+        self.derive_source(inst)
+    }
+
+    /// What the value `inst` defines holds by the instruction's [`ownership::source`].
+    fn derive_source(&self, inst: &'a Inst) -> Option<Own> {
+        let own = |v: &VarId| self.own.get(v);
         match self.source(inst) {
             Source::New => Some(Own::new_at(inst.span, starts_empty(&inst.kind))),
             // A shallow copy is new; its elements are what the copied values' elements are.
@@ -864,7 +890,9 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                         Place::Global(_) | Place::Cell(_) => None,
                     },
                 );
-                for read in inst.kind.operands().into_iter().chain(containers) {
+                let stored = self.slots.read(dst).into_iter().flat_map(|r| &r.stored);
+                let reads = inst.kind.operands().into_iter().chain(containers);
+                for read in reads.chain(stored.copied()) {
                     readers.entry(read).or_default().push(visits.len());
                 }
                 visits.push(Visit::Inst(inst, dst));
@@ -1173,6 +1201,14 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             }
             let what = match self.f.var_name(change.var) {
                 Some(n) if !n.starts_with('.') => format!("`{n}`"),
+                _ if self.slots.read(change.var).is_some() => {
+                    let span = self.defs[&change.var].span;
+                    let text = &self.u.unit.source[span.start as usize..span.end as usize];
+                    format!(
+                        "`{}`",
+                        text.split_whitespace().collect::<Vec<_>>().join(" ")
+                    )
+                }
                 _ => "a value".to_owned(),
             };
             self.u.cx.emit(

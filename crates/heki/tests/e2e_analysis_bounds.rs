@@ -17,7 +17,8 @@
 //! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
 //! for many parameters, or from many implementations of one call, and the type expressions aliases
 //! and casts spell, the names a module `__getattr__` serves, and the parameters functions return
-//! through calls of each other, down a long chain, around a cycle, or across many modules.
+//! through calls of each other, down a long chain, around a cycle, or across many modules, and
+//! the instance a model's `save` hands `super()` through the copies a loop carries.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -1409,6 +1410,32 @@ fn branches_on_a_long_copy_chain_of_an_is_test_read_it_once() {
             .write("m.py", &(lines.join("\n") + "\n"));
         p
     });
+}
+
+/// A function storing a value new on one path and the caller's on another at each of the 64 keys
+/// of one dict it follows, over and over in branches, and changing the key after each store: the
+/// keys are a data flow over the blocks whose fact is a word per key. Each key is reported once.
+#[test]
+fn constant_keys_stored_in_many_branches_are_followed_linearly() {
+    let found = check_linear(1_024, |stores| {
+        let mut lines = vec![
+            "def build(flag, headers):".to_owned(),
+            "    kwargs = {}".to_owned(),
+        ];
+        for i in 0..stores {
+            let key = i % 64;
+            lines.push("    if flag:".to_owned());
+            lines.push(format!("        kwargs[\"k{key}\"] = headers or {{}}"));
+            lines.push(format!("    kwargs[\"k{key}\"][\"x\"] = {i}"));
+        }
+        lines.push("    return kwargs".to_owned());
+        let p = Project::new(&format!("bounds_constant_keys_{stores}"));
+        p.write("pyproject.toml", MUT112_CONFIG)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT112").count();
+    assert_eq!(reported, 64);
 }
 
 /// A function testing one value against `None` before each of many conditional expressions over
@@ -9387,6 +9414,68 @@ fn subclass_needs_on_two_parameters_stay_bounded_down_a_long_chain() {
     );
 }
 
+/// The ways a witness is chosen among (`EffectSummary::witness_ways`): `n` helpers, each
+/// dispatching on `isinstance` of the parameter it hands on to the one below (four classes in
+/// turn), so the sets of tests the ways are behind grow past `WITNESS_LIMIT`, the most kept per
+/// effect, and a chain past the per-way length drops its tests.
+#[test]
+fn witness_ways_behind_isinstance_tests_stay_bounded_down_a_long_chain() {
+    let shape = |n: usize| {
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class A:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class B:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class C:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "class D:".to_owned(),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            "def h0(x):".to_owned(),
+            "    time.sleep(1)".to_owned(),
+        ];
+        for k in 1..n {
+            let class = ["A", "B", "C", "D"][k % 4];
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def h{k}(x):"),
+                format!("    if isinstance(x, {class}):"),
+                format!("        return h{}(x)", k - 1),
+                format!("    return h{}(x)", k - 1),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "async def top():".to_owned(),
+            format!("    h{}(A())", n - 1),
+        ]);
+        let p = Project::new(&format!("bounds_witness_ways_{n}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(2000, shape);
+    assert_eq!(
+        eff101_callers(&found),
+        [("top".to_owned(), "heuristic".to_owned())]
+    );
+}
+
 /// The values constructions bind to the read-only container fields of a frozen class
 /// (`ModuleDecls::field_values`): `n` functions, each making an instance of a frozen dataclass of
 /// eight fields with a read-only view in each, and replacing one; a function in another module
@@ -9726,4 +9815,55 @@ fn a_read_through_a_chain_of_merged_imports_reaches_each_module_once() {
         assert_eq!(reports.len(), 1, "{reports:#?}");
         assert_eq!(reports[0]["help"], help, "reading {attr}");
     }
+}
+
+/// A Django model whose `save` hands `super(Chained, v0)` an instance passed back through `links`
+/// copies a loop carries, one loop phi per link, and a function creating models in a loop.
+fn save_through_loop_copies(links: usize) -> String {
+    let mut out = vec![
+        "from django.db import models".to_owned(),
+        String::new(),
+        String::new(),
+        "class Chained(models.Model):".to_owned(),
+        "    def save(self, *args, **kwargs):".to_owned(),
+    ];
+    for k in 0..=links {
+        out.push(format!("        v{k} = self"));
+    }
+    out.push("        for _ in args:".to_owned());
+    for k in 0..links {
+        out.push(format!("            v{k} = v{}", k + 1));
+    }
+    out.push(format!("            v{links} = self"));
+    out.push("        return super(Chained, v0).save(*args, **kwargs)".to_owned());
+    out.extend(
+        [
+            "",
+            "",
+            "def create_all(groups):",
+            "    for g in groups:",
+            "        Chained.objects.create(group=g)",
+        ]
+        .map(str::to_owned),
+    );
+    out.join("\n") + "\n"
+}
+
+/// Whether the instance a `save` override hands `super(Model, v)` is its own is a walk back
+/// through the copies and phis of `v`, in steps linear in the chain: the override still saves
+/// the row, so `create` in a loop stays an exact `EFF103`.
+#[test]
+fn a_save_handing_super_an_instance_through_loop_copies_takes_linear_steps() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_save_copies_{links}"));
+        p.write("app/models.py", &save_through_loop_copies(links));
+        p
+    };
+    let exact_creates = |found: Vec<Value>| {
+        (found.iter())
+            .filter(|d| d["rule_code"] == "EFF103" && d["certainty"] != "heuristic")
+            .count()
+    };
+    assert_eq!(exact_creates(check(&shape(4))), 1);
+    assert_eq!(exact_creates(check_linear(1600, shape)), 1);
 }

@@ -399,6 +399,34 @@ pub struct EcosystemEntry {
     /// value stored may be a validated conversion, and validators of the project may run
     /// (`pydantic.BaseModel` with `validate_assignment`).
     pub stores_on_instance: bool,
+    /// The class is a base whose instances keep what their code stores in an attribute in their
+    /// own `__dict__`: neither the class nor its metaclass defines `__setattr__`,
+    /// `__delattr__`, `__getattribute__`, or `__getattr__`, the metaclass keeps a class-body
+    /// object of no class it knows as it is (a `cached_property` stays one), and the class binds
+    /// no data descriptor but the names listed (`django.db.models.Model`: its `pk` property).
+    /// `None` when the catalog does not say. A name a subclass's body binds is that class's own.
+    pub plain_attributes_except: Option<Vec<String>>,
+    /// The names of an instance that the methods the catalog lists for the class look up on
+    /// it, which a subclass may bind (Django's `Manager`: its query methods call
+    /// `self.get_queryset()`, which builds `self._queryset_class`); on a method's row, the names
+    /// that method looks up besides (`QuerySet.acount` calls `self.count`). A method's row
+    /// describes a call on an instance of a subclass only when no class before this one along
+    /// the subclass's MRO binds one of them; otherwise the call runs what the subclass binds.
+    pub delegates_to: Vec<String>,
+    /// Other names an import gives the class by (a re-export: `django.db.models.QuerySet` of
+    /// `django.db.models.query.QuerySet`): a project class deriving from one derives from this
+    /// class ([`EffectiveEcosystemKb::class_aliases`]).
+    pub aliases: Vec<String>,
+    /// The library base whose [`Self::effect_methods`] the call runs on an instance of a
+    /// subclass it makes, for what they do (Django's `QuerySet.create` saves a new instance of
+    /// the queryset's model): the row describes the call only while every project class
+    /// deriving from the base binds those names, if at all, as methods calling the next
+    /// definition along the MRO on every path to a return.
+    pub effect_through: Option<String>,
+    /// The methods of the class through which the rows naming it in [`Self::effect_through`]
+    /// have their effect, with the names those methods look up on the instance
+    /// (`django.db.models.Model`: `save`, `save_base`, `_save_table`, ...).
+    pub effect_methods: Vec<String>,
     /// An instance of this class built without a value for a field starts from the field's
     /// default itself when the default is hashable, and from a deep copy of an unhashable one
     /// (pydantic 2's `BaseModel`, through `pydantic-core`). A field that validates its default
@@ -1245,6 +1273,27 @@ pub struct AttributeType {
     pub class: String,
 }
 
+/// What reading an attribute on a class object deriving from a library base gives
+/// (`[[class_attributes]]`): the base keeps, for each of its subclasses, instances of the
+/// library class `type` as class attributes. Reading `attribute` on a subclass gives an instance
+/// of `type` when no class along its MRO binds the name, nor binds another name in its body to
+/// an instance of `type` or of a subclass of it (the base then makes none); a name a subclass's
+/// body binds to an instance of a project subclass of `type` gives, read on the class, an
+/// instance of that class (Django's `ModelBase` adds a `Manager` as `objects` to a model that
+/// declares no manager, and its `ManagerDescriptor` gives a copy of the manager a model
+/// declares). An instance of the subclass has no such attribute, so a read on one is not typed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassAttribute {
+    /// The library base, as an import names it (`django.db.models.Model`).
+    pub base: String,
+    pub attribute: String,
+    #[serde(rename = "type")]
+    pub class: String,
+    /// The versions whose source the row was checked against.
+    pub versions: String,
+}
+
 /// A distribution whose catalog rows were checked against its releases
 /// (`[[distributions]]`): every entry and attribute row under `packages` holds in each release
 /// `verified` admits, which `tests/sentinel/verify_ecosystem_kb.py` checks on the oldest, the
@@ -1275,6 +1324,8 @@ struct EcosystemKbFile {
     entries: Vec<EcosystemEntry>,
     #[serde(default)]
     attributes: Vec<AttributeType>,
+    #[serde(default)]
+    class_attributes: Vec<ClassAttribute>,
     #[serde(default)]
     invokes: Vec<Invokes>,
     #[serde(default)]
@@ -1317,6 +1368,10 @@ pub struct EffectiveEcosystemKb {
     /// `Class.attribute` -> the class of what reading it on an instance gives
     /// ([`AttributeType`]), the built-in rows and the users' `attribute-type`.
     pub attributes: BTreeMap<String, String>,
+    /// The attributes library bases give the class objects deriving from them
+    /// ([`ClassAttribute`]).
+    #[serde(default)]
+    pub class_attributes: Vec<ClassAttribute>,
     /// The releases each distribution's rows were checked against ([`Distribution`]); the
     /// analysis never reads them.
     pub distributions: Vec<Distribution>,
@@ -1334,6 +1389,12 @@ pub struct EffectiveEcosystemKb {
     /// Catalog class -> the library class whose methods it has, by the [`EcosystemEntry::api`]
     /// of its methods' entries ([`Self::api_class`]).
     pub api_classes: BTreeMap<String, String>,
+    /// Another import name of a catalog class -> the class ([`EcosystemEntry::aliases`]).
+    #[serde(default)]
+    pub class_aliases: BTreeMap<String, String>,
+    /// Every name some class's [`EcosystemEntry::effect_methods`] lists.
+    #[serde(default)]
+    pub effect_method_names: BTreeSet<String>,
     /// The classes and the flags some case tests an argument for ([`ArgCase::instance_of`],
     /// [`ArgCase::flag`]), with the catalog classes of [`Self::api_classes`]: what of an
     /// argument's class and flags can decide a case or a method ([`Self::decides_class`]).
@@ -1382,7 +1443,15 @@ impl EffectiveEcosystemKb {
             .chain(api_classes.keys().cloned())
             .collect();
         let case_flags = cases().flat_map(|c| c.flag.iter().cloned()).collect();
+        let class_aliases = (entries.values())
+            .flat_map(|e| (e.aliases.iter()).map(|alias| (alias.clone(), e.symbol.clone())))
+            .collect();
+        let effect_method_names = (entries.values())
+            .flat_map(|e| e.effect_methods.iter().cloned())
+            .collect();
         Self {
+            class_aliases,
+            effect_method_names,
             entries,
             opaque_packages,
             user_symbols: BTreeSet::new(),
@@ -1392,6 +1461,7 @@ impl EffectiveEcosystemKb {
             declared_fields: Vec::new(),
             annotation_readers: Vec::new(),
             attributes: BTreeMap::new(),
+            class_attributes: Vec::new(),
             distributions: Vec::new(),
             provides: Vec::new(),
             result_of_names,
@@ -1415,6 +1485,7 @@ impl EffectiveEcosystemKb {
         let mut declared_fields = Vec::new();
         let mut annotation_readers = Vec::new();
         let mut attributes = BTreeMap::new();
+        let mut class_attributes = Vec::new();
         let mut distributions = Vec::new();
         let mut provides = Vec::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
@@ -1423,6 +1494,7 @@ impl EffectiveEcosystemKb {
             provides.extend(parsed.provides);
             raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
             attributes.extend(parsed.attributes.into_iter().map(|a| (a.symbol, a.class)));
+            class_attributes.extend(parsed.class_attributes);
             opaque_packages.extend(parsed.opaque_packages);
             invokes.extend(parsed.invokes.into_iter().map(|i| (i.symbol.clone(), i)));
             cached_properties.extend(
@@ -1464,10 +1536,11 @@ impl EffectiveEcosystemKb {
         let fields = serde_json::to_string(&declared_fields).unwrap_or_default();
         let readers = serde_json::to_string(&annotation_readers).unwrap_or_default();
         let read = serde_json::to_string(&attributes).unwrap_or_default();
+        let class_read = serde_json::to_string(&class_attributes).unwrap_or_default();
         let provided = serde_json::to_string(&provides).unwrap_or_default();
         kb.digest = blake3::hash(
             format!(
-                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{provided}",
+                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{class_read}|{provided}",
                 kb.digest
             )
             .as_bytes(),
@@ -1480,6 +1553,7 @@ impl EffectiveEcosystemKb {
         kb.declared_fields = declared_fields;
         kb.annotation_readers = annotation_readers;
         kb.attributes = attributes;
+        kb.class_attributes = class_attributes;
         kb.distributions = distributions;
         kb.provides = provides;
         kb.user_symbols = overrides
@@ -1681,6 +1755,38 @@ impl EffectiveEcosystemKb {
         self.attributes
             .get(&format!("{class}.{attr}"))
             .map(String::as_str)
+    }
+
+    /// Whether storing `attr` on an instance of a subclass of the library base `base` stores
+    /// it in the instance as far as `base` goes ([`EcosystemEntry::plain_attributes_except`]).
+    pub fn stores_plainly(&self, base: &str, attr: &str) -> bool {
+        (self
+            .lookup(base)
+            .and_then(|e| e.plain_attributes_except.as_ref()))
+        .is_some_and(|except| !except.iter().any(|name| name == attr))
+    }
+
+    /// The names the catalogued method `symbol` of a library class looks up on the instance: its
+    /// class's and its own ([`EcosystemEntry::delegates_to`]).
+    pub fn delegates_of(&self, symbol: &str) -> impl Iterator<Item = &String> {
+        let class = symbol.rsplit_once('.').map_or(symbol, |(class, _)| class);
+        let names = |s: &str| {
+            self.lookup(s)
+                .map_or(&[][..], |e| e.delegates_to.as_slice())
+        };
+        names(class).iter().chain(names(symbol))
+    }
+
+    /// The library base whose methods the call of `symbol` runs on an instance it makes, and
+    /// those methods ([`EcosystemEntry::effect_through`], [`EcosystemEntry::effect_methods`]).
+    pub fn effect_through(&self, symbol: &str) -> Option<(&str, &[String])> {
+        let base = self.lookup(symbol)?.effect_through.as_deref()?;
+        Some((base, self.lookup(base)?.effect_methods.as_slice()))
+    }
+
+    /// The rows of `[[class_attributes]]` for the library base `base` ([`ClassAttribute`]).
+    pub fn class_attributes_of(&self, base: &str) -> impl Iterator<Item = &ClassAttribute> {
+        (self.class_attributes.iter()).filter(move |row| row.base == base)
     }
 }
 
@@ -2075,8 +2181,403 @@ mod tests {
         "update_or_create",
         "aggregate",
     ];
+    /// The names each Django `QuerySet` method looks up on the queryset besides
+    /// [`QUERYSET_READS`] (`EcosystemEntry::delegates_to`); an `a*` method looks up its
+    /// synchronous method and what that looks up.
+    const QUERYSET_DELEGATES: &[(&str, &[&str])] = &[
+        (
+            "aggregate",
+            &[
+                "_iterable_class",
+                "_query",
+                "_validate_values_are_expressions",
+                "db",
+                "query",
+            ],
+        ),
+        (
+            "all",
+            &[
+                "__init__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_mode",
+                "_fields",
+                "_iterable_class",
+                "_known_related_objects",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "query",
+            ],
+        ),
+        (
+            "bulk_create",
+            &[
+                "_batched_insert",
+                "_check_bulk_create_options",
+                "_handle_order_with_respect_to",
+                "_insert",
+                "_prepare_for_bulk_create",
+                "db",
+            ],
+        ),
+        (
+            "count",
+            &["_iterable_class", "_query", "_result_cache", "db", "query"],
+        ),
+        ("create", &["_fetch_mode", "db"]),
+        (
+            "delete",
+            &[
+                "__bool__",
+                "__getitem__",
+                "__init__",
+                "__iter__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_all",
+                "_fetch_mode",
+                "_fields",
+                "_iterable_class",
+                "_known_related_objects",
+                "_not_support_combined_queries",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_prefetch_related_objects",
+                "_query",
+                "_raw_delete",
+                "_result_cache",
+                "_sticky_filter",
+                "db",
+                "only",
+                "query",
+            ],
+        ),
+        (
+            "exclude",
+            &[
+                "__init__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_mode",
+                "_fields",
+                "_filter_or_exclude",
+                "_filter_or_exclude_inplace",
+                "_iterable_class",
+                "_known_related_objects",
+                "_not_support_combined_queries",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "query",
+            ],
+        ),
+        (
+            "exists",
+            &["_iterable_class", "_query", "_result_cache", "db", "query"],
+        ),
+        (
+            "filter",
+            &[
+                "__init__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_mode",
+                "_fields",
+                "_filter_or_exclude",
+                "_filter_or_exclude_inplace",
+                "_iterable_class",
+                "_known_related_objects",
+                "_not_support_combined_queries",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "query",
+            ],
+        ),
+        (
+            "first",
+            &[
+                "__getitem__",
+                "__init__",
+                "__iter__",
+                "_chain",
+                "_check_ordering_first_last_queryset_aggregation",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_all",
+                "_fetch_mode",
+                "_fields",
+                "_iterable_class",
+                "_known_related_objects",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_prefetch_related_objects",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "db",
+                "order_by",
+                "ordered",
+                "query",
+            ],
+        ),
+        (
+            "get",
+            &[
+                "__init__",
+                "__len__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_all",
+                "_fetch_mode",
+                "_fields",
+                "_filter_or_exclude",
+                "_filter_or_exclude_inplace",
+                "_iterable_class",
+                "_known_related_objects",
+                "_not_support_combined_queries",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_prefetch_related_objects",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "db",
+                "filter",
+                "order_by",
+                "query",
+            ],
+        ),
+        (
+            "get_or_create",
+            &[
+                "__init__",
+                "__len__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_extract_model_params",
+                "_fetch_all",
+                "_fetch_mode",
+                "_fields",
+                "_filter_or_exclude",
+                "_filter_or_exclude_inplace",
+                "_iterable_class",
+                "_known_related_objects",
+                "_not_support_combined_queries",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_prefetch_related_objects",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "create",
+                "db",
+                "filter",
+                "get",
+                "order_by",
+                "query",
+            ],
+        ),
+        (
+            "in_bulk",
+            &[
+                "__init__",
+                "__iter__",
+                "_annotate",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_all",
+                "_fetch_mode",
+                "_fields",
+                "_filter_or_exclude",
+                "_filter_or_exclude_inplace",
+                "_iterable_class",
+                "_known_related_objects",
+                "_not_support_combined_queries",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_prefetch_related_objects",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "_validate_values_are_expressions",
+                "_values",
+                "annotate",
+                "db",
+                "filter",
+                "order_by",
+                "query",
+                "values",
+                "values_list",
+            ],
+        ),
+        (
+            "last",
+            &[
+                "__getitem__",
+                "__init__",
+                "__iter__",
+                "_chain",
+                "_check_ordering_first_last_queryset_aggregation",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_all",
+                "_fetch_mode",
+                "_fields",
+                "_iterable_class",
+                "_known_related_objects",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_prefetch_related_objects",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "db",
+                "order_by",
+                "ordered",
+                "query",
+                "reverse",
+            ],
+        ),
+        (
+            "order_by",
+            &[
+                "__init__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_fetch_mode",
+                "_fields",
+                "_iterable_class",
+                "_known_related_objects",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "query",
+            ],
+        ),
+        (
+            "update",
+            &[
+                "_iterable_class",
+                "_not_support_combined_queries",
+                "_query",
+                "_result_cache",
+                "db",
+                "query",
+            ],
+        ),
+        (
+            "update_or_create",
+            &[
+                "__init__",
+                "__len__",
+                "_chain",
+                "_clone",
+                "_cloning_enabled",
+                "_defer_next_filter",
+                "_deferred_filter",
+                "_extract_model_params",
+                "_fetch_all",
+                "_fetch_mode",
+                "_fields",
+                "_filter_or_exclude",
+                "_filter_or_exclude_inplace",
+                "_iterable_class",
+                "_known_related_objects",
+                "_not_support_combined_queries",
+                "_prefetch_done",
+                "_prefetch_related_lookups",
+                "_prefetch_related_objects",
+                "_query",
+                "_result_cache",
+                "_sticky_filter",
+                "create",
+                "db",
+                "filter",
+                "get",
+                "get_or_create",
+                "order_by",
+                "query",
+                "select_for_update",
+            ],
+        ),
+    ];
+    /// What every Django `QuerySet` method reads of the queryset.
+    const QUERYSET_READS: &[&str] = &["_db", "_for_write", "_hints", "model"];
+    /// The `delegates_to` of the catalog row of `symbol` ([`QUERYSET_DELEGATES`]).
+    fn queryset_delegates(symbol: &str) -> Option<Vec<String>> {
+        let method = symbol.strip_prefix(&format!("{DJANGO_QUERYSET}."))?;
+        let find = |m: &str| QUERYSET_DELEGATES.iter().find(|(name, _)| *name == m);
+        let (sync, names) = match find(method) {
+            Some((_, names)) => (None, names),
+            None => {
+                let sync = method.strip_prefix('a')?;
+                (Some(sync), &find(sync)?.1)
+            }
+        };
+        let mut out: Vec<String> = names
+            .iter()
+            .copied()
+            .chain(sync)
+            .map(str::to_owned)
+            .collect();
+        out.sort();
+        Some(out)
+    }
+    /// The rows saving a new instance of the queryset's model (`EcosystemEntry::effect_through`).
+    const SAVES_THROUGH_MODEL: &[&str] = &[
+        "django.db.models.query.QuerySet.create",
+        "django.db.models.query.QuerySet.acreate",
+        "django.db.models.Manager.create",
+        "django.db.models.Manager.acreate",
+    ];
     /// Django `QuerySet` and pymongo `Collection` bulk APIs: many rows in one statement.
     const QUERYSET_BULK: &[&str] = &["bulk_create", "in_bulk"];
+    const DJANGO_MANAGER: &str = "django.db.models.Manager";
+    /// What a Django manager copies of [`QUERYSET_RUNS`]: all but the `queryset_only` `delete`.
+    fn manager_runs() -> Vec<&'static str> {
+        (QUERYSET_RUNS.iter().copied())
+            .filter(|m| *m != "delete")
+            .collect()
+    }
     const MONGO_BULK: &[&str] = &["insert_many", "bulk_write"];
     const REDIS_COMMANDS: &[&str] = &[
         "get",
@@ -2426,6 +2927,7 @@ mod tests {
             llm_requests(),
             file_process_and_network_rows(),
             cancellation_rows(),
+            sync_clients_recall(),
         ]
         .into_iter()
         .flatten()
@@ -2474,22 +2976,289 @@ mod tests {
                     .collect(),
                 async_safe(entry(&[])),
             ),
-            (s(&["anyio.CancelScope", "trio.CancelScope"]), scope(None)),
             (
-                with_prefix(
-                    "anyio",
+                s(&[
+                    "anyio.CancelScope",
+                    "anyio._core._tasks.CancelScope",
+                    "trio.CancelScope",
+                    "trio._core.CancelScope",
+                    "trio._core._run.CancelScope",
+                ]),
+                scope(None),
+            ),
+            (
+                with_prefix_all(
+                    &["anyio", "anyio._core._tasks"],
                     &["move_on_after", "fail_after", "move_on_at", "fail_at"],
                 ),
                 scope(Some(1)),
             ),
             (
-                with_prefix(
-                    "trio",
+                with_prefix_all(
+                    &["trio", "trio._timeouts"],
                     &["move_on_after", "fail_after", "move_on_at", "fail_at"],
                 ),
                 scope(None),
             ),
         ]
+    }
+
+    /// The synchronous clients of an Xinference server and of supabase-py / postgrest: every
+    /// listed call sends a request and waits; building a request waits for nothing.
+    fn sync_clients_recall() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const XINFERENCE_CLIENTS: &[&str] = &[
+            "xinference_client.RESTfulClient",
+            "xinference_client.client.restful.restful_client.Client",
+        ];
+        const XINFERENCE_MODULE: &str = "xinference_client.client.restful.restful_client";
+        const XINFERENCE_REQUESTS: &[&str] = &[
+            "vllm_models",
+            "login",
+            "list_models",
+            "launch_model",
+            "get_autostart_config",
+            "get_autostart_model_summary",
+            "upsert_autostart_model",
+            "remove_autostart_model",
+            "reload_model",
+            "get_model_runtime_info",
+            "get_model_reload_status",
+            "get_model_reload_config",
+            "terminate_model",
+            "add_model_replica",
+            "terminate_model_replica",
+            "get_launch_model_progress",
+            "cancel_launch_model",
+            "get_instance_info",
+            "describe_model",
+            "register_model",
+            "unregister_model",
+            "list_model_registrations",
+            "list_cached_models",
+            "list_deletable_models",
+            "confirm_and_remove_model",
+            "get_model_registration",
+            "query_engine_by_model_name",
+            "abort_request",
+            "get_workers_info",
+            "check_component_update",
+            "relaunch_api",
+            "get_api_relaunch",
+            "list_api_relaunches",
+            "relaunch_supervisor",
+            "get_supervisor_relaunch",
+            "list_supervisor_relaunches",
+            "relaunch_worker",
+            "get_worker_relaunch",
+            "list_worker_relaunches",
+            "get_supervisor_info",
+            "get_progress",
+            "abort_cluster",
+        ];
+        const XINFERENCE_HANDLES: &[(&str, &[&str])] = &[
+            (
+                "RESTfulEmbeddingModelHandle",
+                &["create_embedding", "convert_ids_to_tokens"],
+            ),
+            ("RESTfulRerankModelHandle", &["rerank"]),
+            (
+                "RESTfulImageModelHandle",
+                &[
+                    "text_to_image",
+                    "image_to_image",
+                    "image_edit",
+                    "inpainting",
+                    "ocr",
+                ],
+            ),
+            (
+                "RESTfulVideoModelHandle",
+                &["text_to_video", "image_to_video", "flf_to_video"],
+            ),
+            ("RESTfulWorldModelHandle", &["generate"]),
+            ("RESTfulGenerateModelHandle", &["generate"]),
+            ("RESTfulChatModelHandle", &["chat", "generate"]),
+            (
+                "RESTfulAudioModelHandle",
+                &[
+                    "create_embedding",
+                    "transcriptions",
+                    "translations",
+                    "speech",
+                ],
+            ),
+            ("RESTfulFlexibleModelHandle", &["infer"]),
+        ];
+        const SUPABASE_CLIENTS: &[&str] = &["supabase.Client", "supabase._sync.client.Client"];
+        const POSTGREST_CLIENTS: &[&str] = &[
+            "postgrest.SyncPostgrestClient",
+            "postgrest._sync.client.SyncPostgrestClient",
+        ];
+        const POSTGREST_CLIENT: &str = "postgrest._sync.client.SyncPostgrestClient";
+        const FILTERS: &[&str] = &[
+            "filter",
+            "eq",
+            "neq",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "is_",
+            "like",
+            "like_all_of",
+            "like_any_of",
+            "ilike_all_of",
+            "ilike_any_of",
+            "ilike",
+            "or_",
+            "fts",
+            "plfts",
+            "phfts",
+            "wfts",
+            "in_",
+            "cs",
+            "cd",
+            "contains",
+            "contained_by",
+            "ov",
+            "sl",
+            "sr",
+            "nxl",
+            "nxr",
+            "adj",
+            "range_gt",
+            "range_gte",
+            "range_lt",
+            "range_lte",
+            "range_adjacent",
+            "overlaps",
+            "match",
+            "max_affected",
+            "order",
+            "limit",
+            "offset",
+            "range",
+            "strip_nulls",
+            "select",
+        ];
+        let handle = format!("{XINFERENCE_MODULE}.RESTfulModelHandle");
+        let builder = |name: &str| format!("postgrest._sync.request_builder.{name}");
+        let (select, filter, query, single, maybe_single, rpc, table) = (
+            builder("SyncSelectRequestBuilder"),
+            builder("SyncFilterRequestBuilder"),
+            builder("SyncQueryRequestBuilder"),
+            builder("SyncSingleRequestBuilder"),
+            builder("SyncMaybeSingleRequestBuilder"),
+            builder("SyncRPCFilterRequestBuilder"),
+            builder("SyncRequestBuilder"),
+        );
+        let waits = || entry(&[BlockingNet]);
+        let mut handle_methods: Vec<&str> = Vec::new();
+        for (_, methods) in XINFERENCE_HANDLES {
+            for method in *methods {
+                if !handle_methods.contains(method) {
+                    handle_methods.push(method);
+                }
+            }
+        }
+        let mut rows = vec![
+            (
+                s(XINFERENCE_CLIENTS),
+                entry(&[BlockingNet, UnpooledClientAlloc]),
+            ),
+            (
+                with_prefix_all(XINFERENCE_CLIENTS, XINFERENCE_REQUESTS),
+                waits(),
+            ),
+            (
+                with_prefix_all(XINFERENCE_CLIENTS, &["get_model"]),
+                returning(&handle, waits()),
+            ),
+            (with_prefix(&handle, &handle_methods), waits()),
+            (
+                [SUPABASE_CLIENTS, POSTGREST_CLIENTS]
+                    .concat()
+                    .iter()
+                    .map(|c| (*c).to_owned())
+                    .collect(),
+                entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                s(&[
+                    "supabase.create_client",
+                    "supabase._sync.client.create_client",
+                ]),
+                returning("supabase.Client", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                with_prefix_all(SUPABASE_CLIENTS, &["table", "from_"]),
+                returning(&table, entry(&[])),
+            ),
+            (
+                [
+                    with_prefix_all(SUPABASE_CLIENTS, &["schema"]),
+                    with_prefix_all(POSTGREST_CLIENTS, &["schema"]),
+                ]
+                .concat(),
+                returning(POSTGREST_CLIENT, entry(&[])),
+            ),
+            (
+                [
+                    with_prefix_all(SUPABASE_CLIENTS, &["rpc"]),
+                    with_prefix_all(POSTGREST_CLIENTS, &["rpc"]),
+                ]
+                .concat(),
+                returning(&rpc, entry(&[])),
+            ),
+            (
+                with_prefix_all(POSTGREST_CLIENTS, &["table", "from_", "from_table"]),
+                returning(&table, entry(&[])),
+            ),
+            (
+                with_prefix(&table, &["select", "insert", "upsert", "update", "delete"]),
+                returning(&select, entry(&[])),
+            ),
+            (
+                [&select, &filter, &rpc]
+                    .iter()
+                    .flat_map(|class| with_prefix(class, FILTERS))
+                    .collect(),
+                returning(SELF_RETURN_TYPE, entry(&[])),
+            ),
+            (
+                vec![
+                    format!("{select}.text_search"),
+                    format!("{rpc}.single"),
+                    format!("{rpc}.csv"),
+                ],
+                returning(SELF_RETURN_TYPE, entry(&[])),
+            ),
+            (
+                vec![format!("{select}.single"), format!("{select}.csv")],
+                returning(&single, entry(&[])),
+            ),
+            (
+                vec![
+                    format!("{select}.maybe_single"),
+                    format!("{rpc}.maybe_single"),
+                ],
+                returning(&maybe_single, entry(&[])),
+            ),
+            (
+                [&select, &filter, &query, &single, &maybe_single, &rpc]
+                    .iter()
+                    .map(|class| format!("{class}.execute"))
+                    .collect(),
+                entry(&[BlockingNet, DbQuery]),
+            ),
+        ];
+        for (class, methods) in XINFERENCE_HANDLES {
+            rows.push((
+                with_prefix(&format!("{XINFERENCE_MODULE}.{class}"), methods),
+                waits(),
+            ));
+        }
+        rows
     }
 
     const FAST_ACQUIRE_LOCK: &str = "anyio.Lock(fast_acquire=True)";
@@ -3997,6 +4766,7 @@ mod tests {
                     with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
                     with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
                     with_prefix(DJANGO_QUERYSET, QUERYSET_RUNS),
+                    with_prefix(DJANGO_MANAGER, &manager_runs()),
                     s(&[
                         "redis.client.Pipeline.execute",
                         "redis.client.Pipeline.watch",
@@ -4020,6 +4790,7 @@ mod tests {
                     // A cursor loop or a bulk API by design: blocking, but no N+1 query.
                     s(&["redis.Redis.scan", "pandas.DataFrame.to_sql"]),
                     with_prefix(DJANGO_QUERYSET, QUERYSET_BULK),
+                    with_prefix(DJANGO_MANAGER, QUERYSET_BULK),
                     with_prefix("pymongo.collection.Collection", MONGO_BULK),
                 ]
                 .concat(),
@@ -4132,8 +4903,60 @@ mod tests {
             ),
             (
                 // Lazy: they only build another QuerySet.
-                with_prefix(DJANGO_QUERYSET, &["filter", "exclude", "all", "order_by"]),
+                with_prefix_all(
+                    &[DJANGO_QUERYSET, DJANGO_MANAGER],
+                    &["filter", "exclude", "all", "order_by"],
+                ),
                 returning(DJANGO_QUERYSET, entry(&[])),
+            ),
+            (
+                s(&["django.db.models.Model"]),
+                EcosystemEntry {
+                    plain_attributes_except: Some(vec!["pk".to_owned()]),
+                    effect_methods: [
+                        "save",
+                        "save_base",
+                        "_save_parents",
+                        "_save_table",
+                        "_do_insert",
+                        "_do_update",
+                        "_prepare_related_fields_for_save",
+                        "_get_pk_val",
+                        "_is_pk_set",
+                        "_assign_returned_values",
+                        "_parse_save_params",
+                        "_validate_force_insert",
+                        "get_deferred_fields",
+                    ]
+                    .map(str::to_owned)
+                    .to_vec(),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&[DJANGO_QUERYSET]),
+                EcosystemEntry {
+                    aliases: vec!["django.db.models.QuerySet".to_owned()],
+                    delegates_to: QUERYSET_READS.iter().map(|n| (*n).to_owned()).collect(),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&[DJANGO_MANAGER]),
+                EcosystemEntry {
+                    aliases: vec!["django.db.models.manager.Manager".to_owned()],
+                    delegates_to: [
+                        "__init__",
+                        "get_queryset",
+                        "_queryset_class",
+                        "model",
+                        "_db",
+                        "_hints",
+                    ]
+                    .map(str::to_owned)
+                    .to_vec(),
+                    ..entry(&[])
+                },
             ),
             (
                 s(&["redis.from_url", "redis.Redis.from_url"]),
@@ -4179,6 +5002,11 @@ mod tests {
         let async_queryset_runs: Vec<String> = QUERYSET_RUNS
             .iter()
             .map(|m| format!("{DJANGO_QUERYSET}.a{m}"))
+            .chain(
+                manager_runs()
+                    .iter()
+                    .map(|m| format!("{DJANGO_MANAGER}.a{m}")),
+            )
             .collect();
         vec![
             (
@@ -4206,9 +5034,9 @@ mod tests {
             ),
             (
                 [
-                    QUERYSET_BULK
+                    [DJANGO_QUERYSET, DJANGO_MANAGER]
                         .iter()
-                        .map(|m| format!("{DJANGO_QUERYSET}.a{m}"))
+                        .flat_map(|c| QUERYSET_BULK.iter().map(move |m| format!("{c}.a{m}")))
                         .collect(),
                     with_prefix(
                         "pymongo.asynchronous.collection.AsyncCollection",
@@ -4500,6 +5328,8 @@ mod tests {
             (
                 [
                     s(&["pandas.concat"]),
+                    // The subscript is the call.
+                    s(&["numpy.r_.__getitem__", "numpy.c_.__getitem__"]),
                     with_prefix(
                         "numpy",
                         &[
@@ -5538,8 +6368,14 @@ mod tests {
                             sorted_by_default: *sorted_by_default,
                         },
                     );
+                let delegates_to =
+                    queryset_delegates(&symbol).unwrap_or_else(|| expected.delegates_to.clone());
+                let effect_through = (SAVES_THROUGH_MODEL.contains(&symbol.as_str()))
+                    .then(|| "django.db.models.Model".to_owned());
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
+                    delegates_to,
+                    effect_through,
                     emits,
                     exit_suppresses,
                     items,

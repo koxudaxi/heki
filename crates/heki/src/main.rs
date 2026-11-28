@@ -365,8 +365,27 @@ struct RecommendArgs {
     /// first 3 exact ones), and every rule without reports by name.
     #[arg(long)]
     all: bool,
+    /// Print one section in full, alone: `types`, the suggestions with every exact group (with
+    /// `--all`, the heuristic ones too). The JSON object keeps every field.
+    #[arg(long, value_enum)]
+    focus: Option<RecommendFocus>,
+    /// With `--focus types`, print the exact suggestion groups as one unified diff that
+    /// `git apply` or `patch -p1` applies, in place of the report: annotations and the imports
+    /// they need, nothing else. Writes no file.
+    #[arg(
+        long,
+        requires = "focus",
+        conflicts_with_all = ["all", "output_format", "output_format_json_schema"]
+    )]
+    diff: bool,
     #[command(flatten)]
     analysis: AnalysisArgs,
+}
+
+/// The sections `heki recommend --focus` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RecommendFocus {
+    Types,
 }
 
 #[derive(Debug, Args)]
